@@ -1,0 +1,84 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Sample Tool API",
+    "version": "1.0.0"
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyQuery": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "api_key"
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyQuery": []
+    }
+  ],
+  "paths": {
+    "/echo/{message}": {
+      "post": {
+        "operationId": "echo_message",
+        "summary": "Echo a message through HTTP",
+        "tags": ["echo", "remote"],
+        "parameters": [
+          {
+            "name": "message",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uppercase",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Echo response"
+          }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "operationId": "search_docs",
+        "summary": "Search remote docs",
+        "tags": ["search", "remote"],
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search response"
+          }
+        }
+      }
+    }
+  }
+}

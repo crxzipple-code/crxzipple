@@ -1,0 +1,6 @@
+name: itick_market
+description: iTick market data APIs for stock and crypto quotes.
+spec_location: ../../specs/itick_market.openapi.json
+timeout_seconds: 10
+credentials:
+  TokenHeader: env:ITICK_API_TOKEN

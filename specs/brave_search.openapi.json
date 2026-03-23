@@ -1,0 +1,253 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Brave Search API",
+    "version": "1.0.0",
+    "description": "Selected Brave Search endpoints for web search, news search, and autosuggest."
+  },
+  "servers": [
+    {
+      "url": "https://api.search.brave.com"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "SubscriptionToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Subscription-Token"
+      }
+    }
+  },
+  "security": [
+    {
+      "SubscriptionToken": []
+    }
+  ],
+  "paths": {
+    "/res/v1/web/search": {
+      "get": {
+        "operationId": "web_search",
+        "summary": "Search the Brave web index",
+        "description": "Search Brave's web index with country, language, pagination, and filtering options.",
+        "tags": ["search", "web"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search query text.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Two-letter country code.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search_lang",
+            "in": "query",
+            "description": "ISO 639-1 language code for filtering content language.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ui_lang",
+            "in": "query",
+            "description": "Preferred language for response metadata.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Maximum number of results to return.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Zero-based result page offset.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "freshness",
+            "in": "query",
+            "description": "Freshness filter such as pd, pw, pm, py, or a custom date range.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "safesearch",
+            "in": "query",
+            "description": "Adult-content filtering mode.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "extra_snippets",
+            "in": "query",
+            "description": "Whether to include extra snippets for each result.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "spellcheck",
+            "in": "query",
+            "description": "Whether to enable spellcheck assistance.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "result_filter",
+            "in": "query",
+            "description": "Comma-separated result filters such as discussions or videos.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search response"
+          }
+        }
+      }
+    },
+    "/res/v1/news/search": {
+      "get": {
+        "operationId": "news_search",
+        "summary": "Search Brave news results",
+        "description": "Search Brave's news index with country, language, and freshness filters.",
+        "tags": ["search", "news"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search query text.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Two-letter country code.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search_lang",
+            "in": "query",
+            "description": "ISO 639-1 language code for filtering content language.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ui_lang",
+            "in": "query",
+            "description": "Preferred language for response metadata.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Maximum number of results to return.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "freshness",
+            "in": "query",
+            "description": "Freshness filter such as pd, pw, pm, py, or a custom date range.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "spellcheck",
+            "in": "query",
+            "description": "Whether to enable spellcheck assistance.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "News search response"
+          }
+        }
+      }
+    },
+    "/res/v1/suggest/search": {
+      "get": {
+        "operationId": "autosuggest",
+        "summary": "Fetch Brave autosuggest results",
+        "description": "Get search suggestions as the user types.",
+        "tags": ["search", "suggest"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Partial search query text.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Two-letter country code.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Maximum number of suggestions to return.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "rich",
+            "in": "query",
+            "description": "Whether to request richer suggestion metadata.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Autosuggest response"
+          }
+        }
+      }
+    }
+  }
+}

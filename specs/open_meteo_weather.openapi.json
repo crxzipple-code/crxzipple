@@ -1,0 +1,154 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Open-Meteo Forecast API",
+    "version": "1.0.0",
+    "description": "Selected Open-Meteo forecast endpoint for current, hourly, and daily weather data."
+  },
+  "servers": [
+    {
+      "url": "https://api.open-meteo.com"
+    }
+  ],
+  "paths": {
+    "/v1/forecast": {
+      "get": {
+        "operationId": "forecast_weather",
+        "summary": "Fetch weather forecast data",
+        "description": "Request current, hourly, and daily forecast data for a latitude and longitude.",
+        "tags": ["weather", "forecast"],
+        "parameters": [
+          {
+            "name": "latitude",
+            "in": "query",
+            "required": true,
+            "description": "Latitude in WGS84 coordinates.",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "longitude",
+            "in": "query",
+            "required": true,
+            "description": "Longitude in WGS84 coordinates.",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "current",
+            "in": "query",
+            "description": "Comma-separated current weather variables.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hourly",
+            "in": "query",
+            "description": "Comma-separated hourly weather variables.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "daily",
+            "in": "query",
+            "description": "Comma-separated daily weather variables.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "description": "Time zone name or auto.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "forecast_days",
+            "in": "query",
+            "description": "Number of forecast days to return.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "past_days",
+            "in": "query",
+            "description": "Number of past days to include.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Forecast start date in ISO 8601 format.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Forecast end date in ISO 8601 format.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "temperature_unit",
+            "in": "query",
+            "description": "Temperature unit such as celsius or fahrenheit.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "wind_speed_unit",
+            "in": "query",
+            "description": "Wind speed unit such as kmh, ms, mph, or kn.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "precipitation_unit",
+            "in": "query",
+            "description": "Precipitation unit such as mm or inch.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeformat",
+            "in": "query",
+            "description": "Time format such as iso8601 or unixtime.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "models",
+            "in": "query",
+            "description": "Comma-separated list of weather model identifiers.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Forecast response"
+          }
+        }
+      }
+    }
+  }
+}

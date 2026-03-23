@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crxzipple"
+version = "0.1.0"
+description = "DDD-oriented Python project skeleton"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.15,<1.16",
+    "fastapi>=0.135,<0.136",
+    "PyYAML>=6.0,<7.0",
+    "requests>=2.32,<2.33",
+    "sqlalchemy>=2.0,<2.1",
+    "typer>=0.17,<0.18",
+    "uvicorn>=0.34,<0.35",
+]
+
+[project.scripts]
+crxzipple = "crxzipple.main:main"
+crxzipple-api = "crxzipple.interfaces.http.app:run"
+crxzipple-tool-worker = "crxzipple.modules.tool.interfaces.worker_cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

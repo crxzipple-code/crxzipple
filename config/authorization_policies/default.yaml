@@ -1,0 +1,18 @@
+- id: allow_llm_invocation
+  description: Allow invoking and streaming configured llm profiles.
+  effect: allow
+  actions:
+    - llm.invoke
+    - llm.stream
+  resource:
+    kind: llm_profile
+
+- id: allow_safe_tool_execution
+  description: Allow executing non-mutating tools through the tool subsystem.
+  effect: allow
+  actions:
+    - tool.run
+  resource:
+    kind: tool
+    match:
+      mutates_state: false

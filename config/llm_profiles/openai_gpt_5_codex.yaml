@@ -1,0 +1,15 @@
+id: openai.gpt-5-codex
+provider: openai
+api_family: openai_responses
+model_name: gpt-5-codex
+model_family: codex
+capabilities:
+  - tool_calling
+  - structured_output
+  - reasoning
+default_params:
+  reasoning_effort: medium
+credential_binding: env:OPENAI_API_KEY
+timeout_seconds: 180
+source_kind: imported
+enabled: true

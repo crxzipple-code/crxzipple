@@ -1,0 +1,454 @@
+from __future__ import annotations
+
+import json
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from crxzipple.bootstrap import AppContainer
+from crxzipple.core.config import LlmProfileSettings
+from crxzipple.interfaces.authorization import authorize_llm_action
+from crxzipple.interfaces.http.dependencies import get_container
+from crxzipple.modules.llm.application import (
+    InvokeLlmInput,
+    RegisterLlmProfileInput,
+    StreamLlmInput,
+)
+from crxzipple.modules.llm.domain import (
+    LlmApiFamily,
+    LlmCapability,
+    LlmDefaults,
+    LlmMessage,
+    LlmMessageRole,
+    LlmModelFamily,
+    LlmProviderKind,
+    LlmSourceKind,
+    ToolSchema,
+)
+
+
+router = APIRouter()
+
+
+class LlmDefaultsResponse(BaseModel):
+    temperature: float | None = None
+    top_p: float | None = None
+    max_output_tokens: int | None = None
+    reasoning_effort: str | None = None
+
+
+class RegisterLlmProfileRequest(BaseModel):
+    id: str
+    provider: LlmProviderKind
+    api_family: LlmApiFamily
+    model_name: str
+    model_family: LlmModelFamily = LlmModelFamily.GENERAL
+    capabilities: list[LlmCapability] = Field(default_factory=list)
+    default_params: LlmDefaultsResponse = Field(default_factory=LlmDefaultsResponse)
+    base_url: str | None = None
+    credential_binding: str | None = None
+    timeout_seconds: int = 60
+    enabled: bool = True
+
+
+class LlmProfileResponse(BaseModel):
+    id: str
+    provider: str
+    api_family: str
+    model_name: str
+    model_family: str
+    capabilities: list[str]
+    default_params: LlmDefaultsResponse
+    base_url: str | None
+    credential_binding: str | None
+    timeout_seconds: int
+    source_kind: str
+    enabled: bool
+
+
+class LlmMessageRequest(BaseModel):
+    role: LlmMessageRole
+    content: Any
+    name: str | None = None
+    tool_call_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolSchemaRequest(BaseModel):
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class InvokeLlmRequest(BaseModel):
+    messages: list[LlmMessageRequest]
+    tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
+    response_format: dict[str, Any] | None = None
+    overrides: dict[str, Any] = Field(default_factory=dict)
+    invocation_id: str | None = None
+
+
+class ToolCallIntentResponse(BaseModel):
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+class LlmUsageResponse(BaseModel):
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+
+class LlmResultResponse(BaseModel):
+    text: str | None = None
+    tool_calls: list[ToolCallIntentResponse] = Field(default_factory=list)
+    structured_output: Any | None = None
+    usage: LlmUsageResponse | None = None
+    finish_reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LlmErrorResponse(BaseModel):
+    message: str
+    code: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class LlmInvocationResponse(BaseModel):
+    id: str
+    llm_id: str
+    messages: list[LlmMessageRequest]
+    tool_schemas: list[ToolSchemaRequest]
+    response_format: dict[str, Any] | None = None
+    request_overrides: dict[str, Any]
+    status: str
+    result: LlmResultResponse | None = None
+    error: LlmErrorResponse | None = None
+    provider_request_id: str | None = None
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfileInput:
+    return RegisterLlmProfileInput(
+        id=profile.id,
+        provider=LlmProviderKind(profile.provider),
+        api_family=LlmApiFamily(profile.api_family),
+        model_name=profile.model_name,
+        model_family=LlmModelFamily(profile.model_family),
+        capabilities=tuple(LlmCapability(item) for item in profile.capabilities),
+        default_params=LlmDefaults(
+            temperature=(
+                float(profile.default_params["temperature"])
+                if profile.default_params.get("temperature") is not None
+                else None
+            ),
+            top_p=(
+                float(profile.default_params["top_p"])
+                if profile.default_params.get("top_p") is not None
+                else None
+            ),
+            max_output_tokens=(
+                int(profile.default_params["max_output_tokens"])
+                if profile.default_params.get("max_output_tokens") is not None
+                else None
+            ),
+            reasoning_effort=(
+                str(profile.default_params["reasoning_effort"])
+                if profile.default_params.get("reasoning_effort") is not None
+                else None
+            ),
+        ),
+        base_url=profile.base_url,
+        credential_binding=profile.credential_binding,
+        timeout_seconds=profile.timeout_seconds,
+        source_kind=LlmSourceKind(profile.source_kind),
+        enabled=profile.enabled,
+    )
+
+
+@router.post("", response_model=LlmProfileResponse, status_code=status.HTTP_201_CREATED)
+def register_profile(
+    payload: RegisterLlmProfileRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmProfileResponse:
+    profile = container.llm_service.register_profile(
+        RegisterLlmProfileInput(
+            id=payload.id,
+            provider=payload.provider,
+            api_family=payload.api_family,
+            model_name=payload.model_name,
+            model_family=payload.model_family,
+            capabilities=tuple(payload.capabilities),
+            default_params=LlmDefaults(
+                temperature=payload.default_params.temperature,
+                top_p=payload.default_params.top_p,
+                max_output_tokens=payload.default_params.max_output_tokens,
+                reasoning_effort=payload.default_params.reasoning_effort,
+            ),
+            base_url=payload.base_url,
+            credential_binding=payload.credential_binding,
+            timeout_seconds=payload.timeout_seconds,
+            enabled=payload.enabled,
+        ),
+    )
+    return _to_profile_response(profile)
+
+
+@router.get("", response_model=list[LlmProfileResponse])
+def list_profiles(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[LlmProfileResponse]:
+    return [
+        _to_profile_response(profile)
+        for profile in container.llm_service.list_profiles()
+    ]
+
+
+@router.post("/sync-profiles", response_model=list[LlmProfileResponse])
+def sync_profiles(
+    container: Annotated[AppContainer, Depends(get_container)],
+    profile: Annotated[list[str] | None, Query()] = None,
+) -> list[LlmProfileResponse]:
+    selected_ids = set(profile or [])
+    configured_profiles = tuple(
+        item
+        for item in container.settings.llm_profiles
+        if not selected_ids or item.id in selected_ids
+    )
+    synced = container.llm_service.sync_profiles(
+        tuple(_profile_settings_to_input(item) for item in configured_profiles),
+    )
+    return [_to_profile_response(item) for item in synced]
+
+
+@router.get("/{llm_id}", response_model=LlmProfileResponse)
+def get_profile(
+    llm_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmProfileResponse:
+    return _to_profile_response(container.llm_service.get_profile(llm_id))
+
+
+@router.post(
+    "/{llm_id}/invoke",
+    response_model=LlmInvocationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def invoke_llm(
+    llm_id: str,
+    payload: InvokeLlmRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmInvocationResponse:
+    authorize_llm_action(
+        container,
+        llm_id=llm_id,
+        action="llm.invoke",
+        interface_name="http",
+    )
+    invocation = container.llm_service.invoke(
+        InvokeLlmInput(
+            llm_id=llm_id,
+            messages=tuple(
+                LlmMessage(
+                    role=item.role,
+                    content=item.content,
+                    name=item.name,
+                    tool_call_id=item.tool_call_id,
+                    metadata=item.metadata,
+                )
+                for item in payload.messages
+            ),
+            tool_schemas=tuple(
+                ToolSchema(
+                    name=item.name,
+                    description=item.description,
+                    input_schema=item.input_schema,
+                )
+                for item in payload.tool_schemas
+            ),
+            response_format=payload.response_format,
+            overrides=payload.overrides,
+            invocation_id=payload.invocation_id,
+        ),
+    )
+    return _to_invocation_response(invocation)
+
+
+@router.post("/{llm_id}/stream")
+def stream_llm(
+    llm_id: str,
+    payload: InvokeLlmRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> StreamingResponse:
+    authorize_llm_action(
+        container,
+        llm_id=llm_id,
+        action="llm.stream",
+        interface_name="http",
+    )
+    def event_stream():
+        for event in container.llm_service.stream_invoke(
+            StreamLlmInput(
+                llm_id=llm_id,
+                messages=tuple(
+                    LlmMessage(
+                        role=item.role,
+                        content=item.content,
+                        name=item.name,
+                        tool_call_id=item.tool_call_id,
+                        metadata=item.metadata,
+                    )
+                    for item in payload.messages
+                ),
+                tool_schemas=tuple(
+                    ToolSchema(
+                        name=item.name,
+                        description=item.description,
+                        input_schema=item.input_schema,
+                    )
+                    for item in payload.tool_schemas
+                ),
+                response_format=payload.response_format,
+                overrides=payload.overrides,
+                invocation_id=payload.invocation_id,
+            ),
+        ):
+            yield _format_sse_event(event.type, event.to_payload())
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/{llm_id}/invocations", response_model=list[LlmInvocationResponse])
+def list_invocations(
+    llm_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[LlmInvocationResponse]:
+    return [
+        _to_invocation_response(invocation)
+        for invocation in container.llm_service.list_invocations(llm_id=llm_id)
+    ]
+
+
+@router.get("/calls/{invocation_id}", response_model=LlmInvocationResponse)
+def get_invocation(
+    invocation_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmInvocationResponse:
+    return _to_invocation_response(container.llm_service.get_invocation(invocation_id))
+
+
+def _format_sse_event(event_name: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _to_profile_response(profile: Any) -> LlmProfileResponse:
+    return LlmProfileResponse(
+        id=profile.id,
+        provider=profile.provider.value,
+        api_family=profile.api_family.value,
+        model_name=profile.model_name,
+        model_family=profile.model_family.value,
+        capabilities=[item.value for item in profile.capabilities],
+        default_params=LlmDefaultsResponse(
+            temperature=profile.default_params.temperature,
+            top_p=profile.default_params.top_p,
+            max_output_tokens=profile.default_params.max_output_tokens,
+            reasoning_effort=profile.default_params.reasoning_effort,
+        ),
+        base_url=profile.base_url,
+        credential_binding=profile.credential_binding,
+        timeout_seconds=profile.timeout_seconds,
+        source_kind=profile.source_kind.value,
+        enabled=profile.enabled,
+    )
+
+
+def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
+    return LlmInvocationResponse(
+        id=invocation.id,
+        llm_id=invocation.llm_id,
+        messages=[
+            LlmMessageRequest(
+                role=item.role,
+                content=item.content,
+                name=item.name,
+                tool_call_id=item.tool_call_id,
+                metadata=dict(item.metadata),
+            )
+            for item in invocation.messages
+        ],
+        tool_schemas=[
+            ToolSchemaRequest(
+                name=item.name,
+                description=item.description,
+                input_schema=dict(item.input_schema),
+            )
+            for item in invocation.tool_schemas
+        ],
+        response_format=(
+            dict(invocation.response_format)
+            if invocation.response_format is not None
+            else None
+        ),
+        request_overrides=dict(invocation.request_overrides),
+        status=invocation.status.value,
+        result=(
+            LlmResultResponse(
+                text=invocation.result.text,
+                tool_calls=[
+                    ToolCallIntentResponse(
+                        id=item.id,
+                        name=item.name,
+                        arguments=dict(item.arguments),
+                    )
+                    for item in invocation.result.tool_calls
+                ],
+                structured_output=invocation.result.structured_output,
+                usage=(
+                    LlmUsageResponse(
+                        input_tokens=invocation.result.usage.input_tokens,
+                        output_tokens=invocation.result.usage.output_tokens,
+                        total_tokens=invocation.result.usage.total_tokens,
+                        reasoning_tokens=invocation.result.usage.reasoning_tokens,
+                    )
+                    if invocation.result.usage is not None
+                    else None
+                ),
+                finish_reason=invocation.result.finish_reason,
+                metadata=dict(invocation.result.metadata),
+            )
+            if invocation.result is not None
+            else None
+        ),
+        error=(
+            LlmErrorResponse(
+                message=invocation.error.message,
+                code=invocation.error.code,
+                details=dict(invocation.error.details),
+            )
+            if invocation.error is not None
+            else None
+        ),
+        provider_request_id=invocation.provider_request_id,
+        created_at=invocation.created_at.isoformat(),
+        started_at=(
+            invocation.started_at.isoformat()
+            if invocation.started_at is not None
+            else None
+        ),
+        completed_at=(
+            invocation.completed_at.isoformat()
+            if invocation.completed_at is not None
+            else None
+        ),
+    )

@@ -1,0 +1,16 @@
+id: openai.gpt-5.4
+provider: openai
+api_family: openai_responses
+model_name: gpt-5.4
+model_family: reasoning
+capabilities:
+  - tool_calling
+  - structured_output
+  - vision_input
+  - reasoning
+default_params:
+  reasoning_effort: medium
+credential_binding: env:OPENAI_API_KEY
+timeout_seconds: 120
+source_kind: imported
+enabled: true

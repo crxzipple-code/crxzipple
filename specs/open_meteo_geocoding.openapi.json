@@ -1,0 +1,119 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Open-Meteo Geocoding API",
+    "version": "1.0.0",
+    "description": "Selected Open-Meteo geocoding endpoints for place search and ID lookup."
+  },
+  "servers": [
+    {
+      "url": "https://geocoding-api.open-meteo.com"
+    }
+  ],
+  "paths": {
+    "/v1/search": {
+      "get": {
+        "operationId": "search_locations",
+        "summary": "Search locations by name or postal code",
+        "description": "Search for matching locations globally.",
+        "tags": ["geocoding", "search"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "Location name or postal code to search for.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "Maximum number of results to return.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "description": "Language code for localized names.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Response format such as json or protobuf.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "countryCode",
+            "in": "query",
+            "description": "ISO-3166-1 alpha-2 country code filter.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "apikey",
+            "in": "query",
+            "description": "Optional commercial API key for customer endpoints.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Location search response"
+          }
+        }
+      }
+    },
+    "/v1/get": {
+      "get": {
+        "operationId": "get_location",
+        "summary": "Resolve a location by Open-Meteo geocoding ID",
+        "description": "Look up a location using a previously returned geocoding ID.",
+        "tags": ["geocoding", "lookup"],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "Open-Meteo geocoding ID.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "description": "Language code for localized names.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Response format such as json or protobuf.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Location lookup response"
+          }
+        }
+      }
+    }
+  }
+}

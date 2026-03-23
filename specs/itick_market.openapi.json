@@ -1,0 +1,170 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "iTick Market Data API",
+    "version": "1.0.0",
+    "description": "Selected iTick stock and crypto quote endpoints."
+  },
+  "servers": [
+    {
+      "url": "https://api.itick.org"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "TokenHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "token"
+      }
+    }
+  },
+  "security": [
+    {
+      "TokenHeader": []
+    }
+  ],
+  "paths": {
+    "/stock/info": {
+      "get": {
+        "operationId": "stock_info",
+        "summary": "Fetch stock metadata",
+        "description": "Get company and instrument metadata for a stock symbol.",
+        "tags": ["finance", "stocks", "metadata"],
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "description": "Instrument type such as stock.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "region",
+            "in": "query",
+            "required": true,
+            "description": "Market region code such as HK or US.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "description": "Instrument symbol code.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stock info response"
+          }
+        }
+      }
+    },
+    "/stock/quote": {
+      "get": {
+        "operationId": "stock_quote",
+        "summary": "Fetch a real-time stock quote",
+        "description": "Get a single stock's latest quote and trading indicators.",
+        "tags": ["finance", "stocks", "quote"],
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": true,
+            "description": "Market region code such as HK or US.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "description": "Instrument symbol code.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stock quote response"
+          }
+        }
+      }
+    },
+    "/stock/quotes": {
+      "get": {
+        "operationId": "stock_quotes",
+        "summary": "Fetch batch stock quotes",
+        "description": "Get real-time quotes for multiple stock symbols in one request.",
+        "tags": ["finance", "stocks", "quote"],
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": true,
+            "description": "Market region code such as HK or US.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "codes",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated instrument symbol codes.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch stock quotes response"
+          }
+        }
+      }
+    },
+    "/crypto/quote": {
+      "get": {
+        "operationId": "crypto_quote",
+        "summary": "Fetch a real-time crypto quote",
+        "description": "Get a single cryptocurrency quote from a selected exchange region.",
+        "tags": ["finance", "crypto", "quote"],
+        "parameters": [
+          {
+            "name": "region",
+            "in": "query",
+            "required": true,
+            "description": "Market region code such as BA, BT, or PB.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "description": "Crypto instrument symbol code such as BTCUSDT.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Crypto quote response"
+          }
+        }
+      }
+    }
+  }
+}
