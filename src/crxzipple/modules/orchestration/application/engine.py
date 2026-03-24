@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from crxzipple.modules.llm.application import InvokeLlmInput, LlmApplicationService
-from crxzipple.modules.llm.domain import ToolCallIntent
+from crxzipple.modules.llm.application import (
+    InvokeLlmInput,
+    LlmApplicationService,
+    StreamLlmInput,
+)
+from crxzipple.modules.llm.domain import LlmAdapterNotConfiguredError, ToolCallIntent
 from crxzipple.modules.orchestration.application.prompt_assembler import (
     PromptAssembler,
 )
@@ -48,7 +53,12 @@ class OrchestrationEngine:
     tool_resolver: ToolResolver
     tool_service: ToolApplicationService
 
-    def advance_once(self, run: OrchestrationRun) -> EngineAdvanceOutcome:
+    def advance_once(
+        self,
+        run: OrchestrationRun,
+        *,
+        on_llm_stream_update: Callable[[str, str], None] | None = None,
+    ) -> EngineAdvanceOutcome:
         session_key = str(run.metadata.get("session_key", "")).strip()
         if not session_key:
             raise OrchestrationValidationError(
@@ -62,12 +72,11 @@ class OrchestrationEngine:
         user_message_id = self._ensure_inbound_message(run, session_key=session_key)
         resolved_tools = self.tool_resolver.resolve(run)
         prompt = self.prompt_assembler.assemble(run)
-        invocation = self.llm_service.invoke(
-            InvokeLlmInput(
-                llm_id=prompt.llm_id,
-                messages=prompt.messages,
-                tool_schemas=resolved_tools.schemas,
-            ),
+        invocation = self._invoke_llm(
+            llm_id=prompt.llm_id,
+            messages=prompt.messages,
+            tool_schemas=resolved_tools.schemas,
+            on_llm_stream_update=on_llm_stream_update,
         )
         if invocation.result is None:
             if invocation.error is not None:
@@ -150,6 +159,63 @@ class OrchestrationEngine:
             pending_background_tools=tuple(pending_background_tools),
             continue_loop=bool(tool_call_names) and not pending_tool_run_ids,
         )
+
+    def _invoke_llm(
+        self,
+        *,
+        llm_id: str,
+        messages: tuple,
+        tool_schemas: tuple,
+        on_llm_stream_update: Callable[[str, str], None] | None = None,
+    ):
+        try:
+            events = self.llm_service.stream_invoke(
+                StreamLlmInput(
+                    llm_id=llm_id,
+                    messages=messages,
+                    tool_schemas=tool_schemas,
+                ),
+            )
+        except LlmAdapterNotConfiguredError:
+            return self.llm_service.invoke(
+                InvokeLlmInput(
+                    llm_id=llm_id,
+                    messages=messages,
+                    tool_schemas=tool_schemas,
+                ),
+            )
+
+        invocation_id: str | None = None
+        streamed_text = ""
+        for event in events:
+            if event.invocation_id:
+                invocation_id = event.invocation_id
+            if event.type == "invocation_started":
+                if invocation_id is not None and on_llm_stream_update is not None:
+                    on_llm_stream_update(invocation_id, "")
+                continue
+            if event.type == "text_delta":
+                delta = event.data.get("text")
+                if delta is not None:
+                    streamed_text += str(delta)
+                    if invocation_id is not None and on_llm_stream_update is not None:
+                        on_llm_stream_update(invocation_id, streamed_text)
+                continue
+            if event.type == "failed":
+                error_payload = event.data.get("error")
+                if isinstance(error_payload, dict):
+                    message = str(error_payload.get("message") or "LLM stream failed.")
+                    code = str(error_payload.get("code") or "stream_failed")
+                    raise OrchestrationValidationError(
+                        f"LLM invocation failed [{code}]: {message}",
+                    )
+                raise OrchestrationValidationError("LLM invocation failed [stream_failed].")
+
+        if invocation_id is None:
+            raise OrchestrationValidationError(
+                "Streaming llm invocation ended before an invocation id was produced.",
+            )
+        return self.llm_service.get_invocation(invocation_id)
 
     def _ensure_inbound_message(
         self,

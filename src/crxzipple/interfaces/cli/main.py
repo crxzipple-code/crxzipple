@@ -5,6 +5,9 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging, get_logger
+from crxzipple.interfaces.cli.crxzipple import ask as ask_command
+from crxzipple.interfaces.cli.crxzipple import chat as chat_command
+from crxzipple.interfaces.cli.crxzipple import serve as serve_command
 from crxzipple.interfaces.cli.db import build_cli as build_db_cli
 from crxzipple.modules.agent.interfaces.cli import build_cli as build_agent_cli
 from crxzipple.modules.authorization.interfaces.cli import (
@@ -53,6 +56,11 @@ def root() -> None:
 def about() -> None:
     settings = load_settings()
     typer.echo(f"{settings.app_name} [{settings.environment}]")
+
+
+app.command("ask")(ask_command)
+app.command("chat")(chat_command)
+app.command("serve")(serve_command)
 
 
 def _is_missing_database_schema_error(exc: BaseException) -> bool:

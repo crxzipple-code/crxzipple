@@ -21,6 +21,15 @@ from crxzipple.core.config import (
     load_settings,
 )
 from crxzipple.interfaces.http.app import create_app
+from crxzipple.modules.llm.application import LlmStreamEvent
+from crxzipple.modules.llm.application.adapters import LlmAdapterResponse
+from crxzipple.modules.llm.domain import (
+    LlmApiFamily,
+    LlmMessageRole,
+    LlmProviderKind,
+    LlmResult,
+    ToolCallIntent,
+)
 from tests.unit.support import (
     SampleApiServer,
     SampleLlmApiServer,
@@ -53,6 +62,56 @@ class _FakeStreamResponse:
         return None
 
 
+class _FakeStreamingAdapter:
+    def stream_invoke(self, profile, request):  # noqa: ANN001
+        del profile, request
+        yield LlmStreamEvent(
+            type="text_delta",
+            sequence=1,
+            data={"text": "hello "},
+        )
+        yield LlmStreamEvent(
+            type="text_delta",
+            sequence=2,
+            data={"text": "from stream"},
+        )
+        yield LlmStreamEvent(
+            type="completed",
+            sequence=3,
+            data={
+                "result": LlmResult(
+                    text="hello from stream",
+                    finish_reason="completed",
+                ).to_payload(),
+                "provider_request_id": "stream-http-request",
+            },
+        )
+
+
+class _FakeInlineToolAdapter:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def invoke(self, _profile, request):  # noqa: ANN001
+        self.requests.append(request)
+        tool_messages = [
+            message for message in request.messages if message.role is LlmMessageRole.TOOL
+        ]
+        if not tool_messages:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-echo-1",
+                            name="echo",
+                            arguments={"message": "hello from tool"},
+                        ),
+                    ),
+                ),
+            )
+        return LlmAdapterResponse(result=LlmResult(text="tool loop complete"))
+
+
 class HttpTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_openapi_provider_paths = os.environ.get(
@@ -79,6 +138,464 @@ class HttpTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_turns_endpoint_submits_async_turn_without_exposing_orchestration(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            turn_response = self.client.post(
+                "/turns",
+                json={
+                    "content": "hello",
+                    "agent_id": "crxzipple",
+                },
+            )
+
+            self.assertEqual(turn_response.status_code, 202)
+            payload = turn_response.json()
+            self.assertIsNone(payload["output_text"])
+            self.assertEqual(payload["run"]["status"], "queued")
+            self.assertEqual(payload["run"]["stage"], "queued")
+            self.assertEqual(payload["run"]["current_step"], 0)
+
+            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                worker_id="http-test-worker",
+            )
+            self.assertIsNotNone(processed)
+
+            get_response = self.client.get(f"/turns/{payload['run']['id']}")
+            self.assertEqual(get_response.status_code, 200)
+            get_payload = get_response.json()
+            self.assertEqual(get_payload["run"]["id"], payload["run"]["id"])
+            self.assertEqual(get_payload["run"]["status"], "completed")
+            self.assertEqual(get_payload["run"]["stage"], "completed")
+            self.assertEqual(get_payload["run"]["current_step"], 1)
+            self.assertEqual(get_payload["output_text"], "hello from sample llm")
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_conversation_messages_endpoint_reads_history_by_bulk_key(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            turn_response = self.client.post(
+                "/turns",
+                json={
+                    "content": "hello",
+                    "agent_id": "crxzipple",
+                },
+            )
+            self.assertEqual(turn_response.status_code, 202)
+            payload = turn_response.json()
+            bulk_key = payload["run"]["bulk_key"]
+
+            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                worker_id="http-history-worker",
+            )
+            self.assertIsNotNone(processed)
+
+            history_response = self.client.get(f"/conversations/{bulk_key}/messages")
+            self.assertEqual(history_response.status_code, 200)
+            history_payload = history_response.json()
+            self.assertEqual([item["role"] for item in history_payload], ["user", "assistant"])
+            self.assertEqual(history_payload[0]["content"], "hello")
+            self.assertEqual(history_payload[1]["content"], "hello from sample llm")
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_conversations_endpoints_list_and_get_summaries(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            turn_response = self.client.post(
+                "/turns",
+                json={
+                    "content": "hello",
+                    "agent_id": "crxzipple",
+                },
+            )
+            self.assertEqual(turn_response.status_code, 202)
+            payload = turn_response.json()
+            bulk_key = payload["run"]["bulk_key"]
+
+            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                worker_id="http-conversations-worker",
+            )
+            self.assertIsNotNone(processed)
+
+            list_response = self.client.get("/conversations")
+            self.assertEqual(list_response.status_code, 200)
+            list_payload = list_response.json()
+            self.assertEqual(len(list_payload), 1)
+            self.assertEqual(list_payload[0]["bulk_key"], bulk_key)
+            self.assertEqual(list_payload[0]["session_key"], "agent:crxzipple:main")
+            self.assertEqual(list_payload[0]["latest_run_status"], "completed")
+            self.assertEqual(list_payload[0]["last_message_preview"], "hello from sample llm")
+
+            get_response = self.client.get(f"/conversations/{bulk_key}")
+            self.assertEqual(get_response.status_code, 200)
+            get_payload = get_response.json()
+            self.assertEqual(get_payload["bulk_key"], bulk_key)
+            self.assertEqual(get_payload["session_key"], "agent:crxzipple:main")
+            self.assertEqual(get_payload["latest_run_status"], "completed")
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_turn_cancel_endpoint_cancels_submitted_turn(self) -> None:
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai_compatible",
+                "api_family": "openai_chat_compatible",
+                "model_name": "llama3.2",
+                "base_url": "http://example.invalid/v1",
+                "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "local-chat"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "cancel me",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+        turn_id = turn_response.json()["run"]["id"]
+
+        cancel_response = self.client.post(
+            f"/turns/{turn_id}/cancel",
+            json={"reason": "user_cancelled"},
+        )
+        self.assertEqual(cancel_response.status_code, 200)
+        cancel_payload = cancel_response.json()
+        self.assertEqual(cancel_payload["run"]["status"], "cancelled")
+        self.assertEqual(cancel_payload["run"]["stage"], "cancelled")
+        self.assertEqual(cancel_payload["run"]["waiting_reason"], "user_cancelled")
+
+        get_response = self.client.get(f"/turns/{turn_id}")
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.json()["run"]["status"], "cancelled")
+
+    def test_turn_events_endpoint_streams_snapshot_and_completion(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            turn_response = self.client.post(
+                "/turns",
+                json={
+                    "content": "hello",
+                    "agent_id": "crxzipple",
+                },
+            )
+            self.assertEqual(turn_response.status_code, 202)
+            run_id = turn_response.json()["run"]["id"]
+
+            def _process_later() -> None:
+                time.sleep(0.1)
+                self.client.app.state.container.orchestration_service.process_next_queued_run(
+                    worker_id="http-sse-worker",
+                )
+
+            worker = threading.Thread(target=_process_later)
+            worker.start()
+            try:
+                with self.client.stream(
+                    "GET",
+                    f"/turns/{run_id}/events",
+                    params={"poll_interval_seconds": 0.05, "timeout_seconds": 2.0},
+                ) as response:
+                    body = response.read().decode("utf-8")
+                    content_type = response.headers["content-type"]
+                    status_code = response.status_code
+            finally:
+                worker.join(timeout=1.0)
+
+            self.assertEqual(status_code, 200)
+            self.assertIn("text/event-stream", content_type)
+            self.assertIn("event: snapshot", body)
+            self.assertIn("event: message_appended", body)
+            self.assertIn("event: completed", body)
+            self.assertIn("hello from sample llm", body)
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_turn_events_endpoint_streams_llm_text_delta(self) -> None:
+        container = self.client.app.state.container
+        container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            _FakeStreamingAdapter(),
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "streaming-codex",
+                "provider": LlmProviderKind.OPENAI_CODEX.value,
+                "api_family": LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
+                "model_name": "gpt-5-codex",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "streaming-codex"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+        run_id = turn_response.json()["run"]["id"]
+
+        def _process_later() -> None:
+            time.sleep(0.1)
+            container.orchestration_service.process_next_queued_run(
+                worker_id="http-stream-worker",
+            )
+
+        worker = threading.Thread(target=_process_later)
+        worker.start()
+        try:
+            with self.client.stream(
+                "GET",
+                f"/turns/{run_id}/events",
+                params={"poll_interval_seconds": 0.05, "timeout_seconds": 2.0},
+            ) as response:
+                body = response.read().decode("utf-8")
+                content_type = response.headers["content-type"]
+                status_code = response.status_code
+        finally:
+            worker.join(timeout=1.0)
+
+        self.assertEqual(status_code, 200)
+        self.assertIn("text/event-stream", content_type)
+        self.assertIn("event: snapshot", body)
+        self.assertIn("event: llm_text_delta", body)
+        self.assertIn("hello from stream", body)
+        self.assertIn("event: completed", body)
+
+    def test_turn_events_endpoint_streams_tool_started_and_completed(self) -> None:
+        container = self.client.app.state.container
+        container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _FakeInlineToolAdapter(),
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "inline-tool-llm",
+                "provider": LlmProviderKind.OPENAI.value,
+                "api_family": LlmApiFamily.OPENAI_RESPONSES.value,
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "inline-tool-llm"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        discover_response = self.client.post("/tools/discover-local")
+        self.assertEqual(discover_response.status_code, 200)
+        self.assertEqual(discover_response.json()[0]["id"], "echo")
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+        run_id = turn_response.json()["run"]["id"]
+
+        def _process_later() -> None:
+            time.sleep(0.1)
+            container.orchestration_service.process_next_queued_run(
+                worker_id="http-tool-sse-worker",
+            )
+
+        worker = threading.Thread(target=_process_later)
+        worker.start()
+        try:
+            with self.client.stream(
+                "GET",
+                f"/turns/{run_id}/events",
+                params={"poll_interval_seconds": 0.05, "timeout_seconds": 2.0},
+            ) as response:
+                body = response.read().decode("utf-8")
+                content_type = response.headers["content-type"]
+                status_code = response.status_code
+        finally:
+            worker.join(timeout=1.0)
+
+        self.assertEqual(status_code, 200)
+        self.assertIn("text/event-stream", content_type)
+        self.assertIn("event: snapshot", body)
+        self.assertIn("event: message_appended", body)
+        self.assertIn("event: tool_started", body)
+        self.assertIn("event: tool_completed", body)
+        self.assertIn("\"tool_name\": \"echo\"", body)
+        self.assertIn("\"tool_status\": \"succeeded\"", body)
+        self.assertIn("tool loop complete", body)
+        self.assertIn("event: completed", body)
 
     def test_dispatch_endpoints_manage_task_lifecycle(self) -> None:
         create_response = self.client.post(

@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .vscode/
 .DS_Store
+node_modules/
 .env
 .env.*
 dist/

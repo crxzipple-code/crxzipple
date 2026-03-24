@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from crxzipple.core.config import load_settings
+from crxzipple.interfaces.http.conversations import router as conversations_router
+from crxzipple.interfaces.http.turns import router as turns_router
 from crxzipple.modules.agent.interfaces.http import router as agent_router
 from crxzipple.modules.authorization.interfaces.http import router as authorization_router
 from crxzipple.modules.dispatch.interfaces.http import router as dispatch_router
@@ -32,6 +34,8 @@ def about() -> dict[str, str]:
 
 
 api_router.include_router(tool_router, prefix="/tools", tags=["tools"])
+api_router.include_router(conversations_router, tags=["conversations"])
+api_router.include_router(turns_router, tags=["turns"])
 api_router.include_router(dispatch_router, prefix="/dispatch", tags=["dispatch"])
 api_router.include_router(
     orchestration_router,

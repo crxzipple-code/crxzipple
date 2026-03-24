@@ -1,0 +1,14 @@
+id: openai_codex.gpt-5.4-mini
+provider: openai_codex
+api_family: openai_codex_responses
+model_name: gpt-5.4-mini
+model_family: reasoning
+capabilities:
+  - tool_calling
+  - reasoning
+default_params:
+  reasoning_effort: low
+credential_binding: codex_auth_json
+timeout_seconds: 90
+source_kind: imported
+enabled: true

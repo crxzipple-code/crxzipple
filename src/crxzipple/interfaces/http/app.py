@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from crxzipple.bootstrap import build_container
+from crxzipple.bootstrap import AppContainer, build_container
 from crxzipple.core.config import Settings, load_settings
 from crxzipple.core.logger import configure_logging, get_logger
 from crxzipple.interfaces.http.router import api_router
@@ -21,19 +21,27 @@ def create_app(
     settings: Settings | None = None,
     database_url: str | None = None,
     event_bus: EventBus | None = None,
+    container: AppContainer | None = None,
+    manage_container_lifecycle: bool = True,
 ) -> FastAPI:
-    resolved_settings = settings or load_settings()
+    if settings is not None:
+        resolved_settings = settings
+    elif container is not None:
+        resolved_settings = container.settings
+    else:
+        resolved_settings = load_settings()
     configure_logging(resolved_settings)
     app = FastAPI(title=resolved_settings.app_name)
-    app.state.container = build_container(
+    app.state.container = container or build_container(
         settings=resolved_settings,
         database_url=database_url,
         event_bus=event_bus,
     )
 
-    @app.on_event("shutdown")
-    def shutdown_container() -> None:
-        app.state.container.close()
+    if manage_container_lifecycle:
+        @app.on_event("shutdown")
+        def shutdown_container() -> None:
+            app.state.container.close()
 
     @app.exception_handler(AuthorizationDeniedError)
     async def handle_authorization_denied(

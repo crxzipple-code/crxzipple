@@ -315,7 +315,15 @@ class OrchestrationApplicationService:
             )
             run = self.get_run(run_id)
             try:
-                outcome = self.engine.advance_once(run)
+                outcome = self.engine.advance_once(
+                    run,
+                    on_llm_stream_update=lambda invocation_id, text: self._sync_llm_stream(
+                        run_id=run_id,
+                        worker_id=worker_id,
+                        invocation_id=invocation_id,
+                        text=text,
+                    ),
+                )
             except Exception as exc:
                 return self.fail_run(
                     FailOrchestrationRunInput(
@@ -583,6 +591,26 @@ class OrchestrationApplicationService:
 
     def _heartbeat_run_for_manager(self, run_id: str, worker_id: str) -> OrchestrationRun:
         return self.heartbeat_run(run_id, worker_id=worker_id)
+
+    def _sync_llm_stream(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        invocation_id: str,
+        text: str,
+    ) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            run.sync_llm_stream(
+                worker_id=worker_id,
+                invocation_id=invocation_id,
+                text=text,
+            )
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+            return run
 
     def _resume_after_tool_completion(
         self,

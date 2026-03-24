@@ -322,6 +322,30 @@ class OrchestrationRun(AggregateRoot[str]):
             ),
         )
 
+    def sync_llm_stream(
+        self,
+        *,
+        worker_id: str,
+        invocation_id: str,
+        text: str,
+        happened_at: datetime | None = None,
+    ) -> None:
+        if self.status is not OrchestrationRunStatus.RUNNING:
+            raise OrchestrationValidationError(
+                "Only running orchestration runs can sync llm stream state.",
+            )
+        normalized_worker_id = self._require_worker(worker_id)
+        normalized_invocation_id = invocation_id.strip()
+        if not normalized_invocation_id:
+            raise OrchestrationValidationError(
+                "LLM stream invocation_id cannot be empty.",
+            )
+        timestamp = happened_at or utcnow()
+        self.worker_id = normalized_worker_id
+        self.metadata["llm_stream_invocation_id"] = normalized_invocation_id
+        self.metadata["llm_stream_text"] = text
+        self.updated_at = timestamp
+
     def wait_on_tool(
         self,
         *,

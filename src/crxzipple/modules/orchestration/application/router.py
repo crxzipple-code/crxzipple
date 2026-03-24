@@ -37,14 +37,14 @@ def resolve_session_key(context: SessionRouteContext) -> SessionKeyResolution:
     thread_id = _trimmed(context.thread_id)
 
     if chat_type == SessionKind.DIRECT.value:
-        if context.direct_scope is DirectSessionScope.MAIN:
+        if context.direct_scope == DirectSessionScope.MAIN:
             key = f"agent:{context.agent_id}:{context.main_key}"
             kind = SessionKind.MAIN
-        elif context.direct_scope is DirectSessionScope.PER_PEER:
+        elif context.direct_scope == DirectSessionScope.PER_PEER:
             peer_id = _require_segment(context.peer_id, field_name="peer_id")
             key = f"agent:{context.agent_id}:dm:{peer_id}"
             kind = SessionKind.DIRECT
-        elif context.direct_scope is DirectSessionScope.PER_CHANNEL_PEER:
+        elif context.direct_scope == DirectSessionScope.PER_CHANNEL_PEER:
             peer_id = _require_segment(context.peer_id, field_name="peer_id")
             channel = _require_segment(channel, field_name="channel")
             key = f"agent:{context.agent_id}:{channel}:dm:{peer_id}"
@@ -88,7 +88,7 @@ def resolve_bulk_key(context: SessionRouteContext) -> str:
     thread_id = _trimmed(context.thread_id)
 
     if chat_type == SessionKind.DIRECT.value:
-        if context.direct_scope is DirectSessionScope.MAIN:
+        if context.direct_scope == DirectSessionScope.MAIN:
             main_key = _require_segment(context.main_key, field_name="main_key")
             bulk_key = (
                 "conversation:main:"
@@ -96,7 +96,7 @@ def resolve_bulk_key(context: SessionRouteContext) -> str:
                 f"{_default_segment(account_id, default='default')}:"
                 f"{main_key}"
             )
-        elif context.direct_scope is DirectSessionScope.PER_PEER:
+        elif context.direct_scope == DirectSessionScope.PER_PEER:
             peer_id = _require_segment(context.peer_id, field_name="peer_id")
             bulk_key = (
                 "conversation:dm:"

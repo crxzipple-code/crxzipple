@@ -12,6 +12,7 @@ from crxzipple.bootstrap import AppContainer, build_container
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging
 from crxzipple.interfaces.cli.formatters import echo_data
+from crxzipple.interfaces.worker_loops import run_orchestration_worker_loop
 from crxzipple.modules.orchestration.application import (
     AdvanceOrchestrationRunInput,
     CompleteOrchestrationRunInput,
@@ -29,8 +30,6 @@ from crxzipple.modules.orchestration.interfaces.shared import (
     parse_queue_policy,
     parse_run_stage,
 )
-
-
 def _resolve_worker_id(worker_id: str | None) -> str:
     if worker_id is not None and worker_id.strip():
         return worker_id.strip()
@@ -112,6 +111,45 @@ def build_cli() -> typer.Typer:
                     worker_id=resolved_worker_id,
                 )
                 _echo_run_or_idle(run, worker_id=resolved_worker_id)
+            except (OrchestrationValidationError, OrchestrationRunNotFoundError) as exc:
+                _exit_error(exc)
+
+    @app.command("run")
+    def run_worker(
+        poll_interval_seconds: float = typer.Option(
+            0.5,
+            "--poll-interval-seconds",
+            min=0.05,
+            help="Idle wait time between queue polls.",
+        ),
+        max_runs: int | None = typer.Option(
+            None,
+            "--max-runs",
+            min=1,
+            help="Optional maximum number of runs to process before exiting.",
+        ),
+        max_idle_cycles: int | None = typer.Option(
+            None,
+            "--max-idle-cycles",
+            min=1,
+            help="Optional maximum consecutive idle polls before exiting.",
+        ),
+        worker_id: str | None = typer.Option(
+            None,
+            "--worker-id",
+            help="Stable orchestration worker identifier.",
+        ),
+    ) -> None:
+        resolved_worker_id = _resolve_worker_id(worker_id)
+        with _worker_container() as container:
+            try:
+                run_orchestration_worker_loop(
+                    container.orchestration_service,
+                    worker_id=resolved_worker_id,
+                    poll_interval_seconds=poll_interval_seconds,
+                    max_runs=max_runs,
+                    max_idle_cycles=max_idle_cycles,
+                )
             except (OrchestrationValidationError, OrchestrationRunNotFoundError) as exc:
                 _exit_error(exc)
 

@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import os
 import socket
-import time
 from uuid import uuid4
 
 import typer
 
 from crxzipple.bootstrap import build_container
 from crxzipple.core.config import load_settings
-from crxzipple.core.logger import configure_logging, get_logger
+from crxzipple.core.logger import configure_logging
 from crxzipple.interfaces.cli.formatters import echo_data
+from crxzipple.interfaces.worker_loops import run_tool_worker_loop
 from crxzipple.modules.tool.interfaces.dto import ToolRunDTO
-
-logger = get_logger(__name__)
 
 
 def _resolve_worker_id(worker_id: str | None) -> str:
@@ -78,57 +76,15 @@ def build_cli() -> typer.Typer:
         configure_logging(settings)
         container = build_container(settings=settings)
         resolved_worker_id = _resolve_worker_id(worker_id)
-        processed_runs = 0
-        idle_cycles = 0
-
-        logger.info(
-            "tool worker started",
-            extra={
-                "poll_interval_seconds": poll_interval_seconds,
-                "max_runs": max_runs,
-                "max_idle_cycles": max_idle_cycles,
-                "worker_id": resolved_worker_id,
-            },
-        )
 
         try:
-            while True:
-                tool_run = container.tool_service.process_next_queued_run(
-                    worker_id=resolved_worker_id,
-                )
-                if tool_run is None:
-                    idle_cycles += 1
-                    if max_idle_cycles is not None and idle_cycles >= max_idle_cycles:
-                        logger.info(
-                            "tool worker exiting after idle limit",
-                            extra={
-                                "idle_cycles": idle_cycles,
-                                "worker_id": resolved_worker_id,
-                            },
-                        )
-                        break
-                    time.sleep(poll_interval_seconds)
-                    continue
-
-                idle_cycles = 0
-                processed_runs += 1
-                logger.info(
-                    "tool worker processed queued run",
-                    extra={
-                        "run_id": tool_run.id,
-                        "processed_runs": processed_runs,
-                        "worker_id": resolved_worker_id,
-                    },
-                )
-                if max_runs is not None and processed_runs >= max_runs:
-                    logger.info(
-                        "tool worker exiting after processed run limit",
-                        extra={
-                            "processed_runs": processed_runs,
-                            "worker_id": resolved_worker_id,
-                        },
-                    )
-                    break
+            run_tool_worker_loop(
+                container.tool_service,
+                worker_id=resolved_worker_id,
+                poll_interval_seconds=poll_interval_seconds,
+                max_runs=max_runs,
+                max_idle_cycles=max_idle_cycles,
+            )
         finally:
             container.engine.dispose()
 
