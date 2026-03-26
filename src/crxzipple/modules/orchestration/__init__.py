@@ -12,7 +12,6 @@ from crxzipple.modules.orchestration.application import (
     OrchestrationEngine,
     OrchestrationApplicationService,
     OrchestrationDispatchBridge,
-    OrchestrationRunDispatchAdapter,
     OrchestrationRouter,
     OrchestrationScheduler,
     OrchestrationWorker,
@@ -28,10 +27,6 @@ from crxzipple.modules.orchestration.application import (
     RunDispatchClaim,
     RunDispatchPort,
     RouteOrchestrationRunInput,
-    AuthorizationServiceAdapter,
-    LlmServiceAdapter,
-    MemoryServiceAdapter,
-    ToolServiceAdapter,
     SessionBundle,
     SessionResolver,
     SessionRoutingDecision,
@@ -52,6 +47,13 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRunStage,
     OrchestrationRunStatus,
     PendingApprovalRequest,
+)
+from crxzipple.modules.orchestration.infrastructure.adapters import (
+    AuthorizationServiceAdapter,
+    LlmServiceAdapter,
+    MemoryServiceAdapter,
+    OrchestrationRunDispatchAdapter,
+    ToolServiceAdapter,
 )
 
 __all__ = [
