@@ -67,9 +67,12 @@ def _is_missing_database_schema_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return (
         "no such table" in message
+        or "no such column" in message
         or "undefined table" in message
+        or "undefined column" in message
         or ("relation" in message and "does not exist" in message)
         or ("table" in message and "does not exist" in message)
+        or ("column" in message and "does not exist" in message)
     )
 
 
@@ -86,7 +89,7 @@ def main() -> None:
         if not _is_missing_database_schema_error(exc):
             raise
         typer.secho(
-            "Database schema is not initialized for the current APP_DATABASE_URL. "
+            "Database schema is not initialized or is out of date for the current APP_DATABASE_URL. "
             "Run `PYTHONPATH=src python3 -m crxzipple.main db upgrade head` with the same database settings, then retry.",
             err=True,
             fg=typer.colors.RED,

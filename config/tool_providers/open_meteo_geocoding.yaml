@@ -2,3 +2,5 @@ name: open_meteo_geocoding
 description: Open-Meteo geocoding search and location lookup APIs.
 spec_location: ../../specs/open_meteo_geocoding.openapi.json
 timeout_seconds: 10
+default_effect_ids:
+  - weather_data

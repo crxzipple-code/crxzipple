@@ -27,7 +27,7 @@ from tests.unit.support import (
     openapi_fixture_path,
 )
 
-HEAD_REVISION = "0016_session_hot_path_indexes"
+HEAD_REVISION = "0026_drop_agent_profiles_table"
 
 
 class CliTestCase(unittest.TestCase):
@@ -77,6 +77,14 @@ class CliTestCase(unittest.TestCase):
                 "--stream-by-default",
                 "--workspace",
                 "/tmp/workspace",
+                "--requested-effect",
+                "network_search",
+                "--requested-tool",
+                "brave_search.news_search",
+                "--preferred-tool-tag",
+                "search",
+                "--no-prefers-background-tools",
+                "--no-prefers-mutating-tools",
             ],
             env=self.env,
         )
@@ -92,6 +100,164 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(get_result.exit_code, 0)
         self.assertIn('"name": "Writer"', list_result.stdout)
         self.assertIn('"default_llm_id": "openai.gpt-5.4-mini"', get_result.stdout)
+        self.assertIn('"requested_effect_ids": [', get_result.stdout)
+        self.assertIn('"network_search"', get_result.stdout)
+        self.assertIn('"brave_search.news_search"', get_result.stdout)
+
+    def test_agent_cli_migrates_profile_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace = root / "legacy-workspace"
+            home_dir = root / "agent-home"
+            (workspace / "memory").mkdir(parents=True)
+            (workspace / "AGENTS.md").write_text("legacy rules", encoding="utf-8")
+            (workspace / "memory" / "notes.md").write_text(
+                "remember this",
+                encoding="utf-8",
+            )
+
+            register_result = self.runner.invoke(
+                app,
+                [
+                    "agent",
+                    "register-profile",
+                    "writer",
+                    "Writer",
+                    "openai.gpt-5.4-mini",
+                    "--workspace",
+                    str(workspace),
+                ],
+                env=self.env,
+            )
+            self.assertEqual(register_result.exit_code, 0)
+
+            migrate_result = self.runner.invoke(
+                app,
+                [
+                    "agent",
+                    "migrate-home",
+                    "writer",
+                    str(home_dir),
+                ],
+                env=self.env,
+            )
+
+            self.assertEqual(migrate_result.exit_code, 0)
+            self.assertIn('"source_dir":', migrate_result.stdout)
+            self.assertIn(str(home_dir), migrate_result.stdout)
+            self.assertIn('AGENTS.md -> AGENT.md', migrate_result.stdout)
+            self.assertTrue((home_dir / "agent.json").is_file())
+            self.assertEqual(
+                (home_dir / "AGENT.md").read_text(encoding="utf-8"),
+                "legacy rules",
+            )
+            self.assertEqual(
+                (home_dir / "memory" / "notes.md").read_text(encoding="utf-8"),
+                "remember this",
+            )
+
+            get_result = self.runner.invoke(app, ["agent", "get", "writer"], env=self.env)
+            self.assertEqual(get_result.exit_code, 0)
+            self.assertIn(f'"home_dir": "{home_dir}"', get_result.stdout)
+            self.assertIn(f'"workdir": "{workspace}"', get_result.stdout)
+
+    def test_agent_cli_exports_and_syncs_home_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home_dir = root / "agent-home"
+            workdir = root / "workdir"
+
+            register_result = self.runner.invoke(
+                app,
+                [
+                    "agent",
+                    "register-profile",
+                    "writer",
+                    "Writer",
+                    "openai.gpt-5.4-mini",
+                    "--home-dir",
+                    str(home_dir),
+                    "--workdir",
+                    str(workdir),
+                ],
+                env=self.env,
+            )
+            self.assertEqual(register_result.exit_code, 0)
+
+            export_result = self.runner.invoke(
+                app,
+                ["agent", "export-home", "writer"],
+                env=self.env,
+            )
+            self.assertEqual(export_result.exit_code, 0)
+            self.assertIn(str(home_dir), export_result.stdout)
+
+            config_path = home_dir / "agent.json"
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            payload["name"] = "Writer Exported"
+            payload["llm_routing_policy"]["default_llm_id"] = "openai.gpt-5.4"
+            payload["runtime_preferences"]["workdir"] = str(root / "project-c")
+            config_path.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            sync_result = self.runner.invoke(
+                app,
+                ["agent", "sync-home", "writer"],
+                env=self.env,
+            )
+            self.assertEqual(sync_result.exit_code, 0)
+            self.assertIn('"name": "Writer Exported"', sync_result.stdout)
+            self.assertIn('"default_llm_id": "openai.gpt-5.4"', sync_result.stdout)
+            self.assertIn(str(root / "project-c"), sync_result.stdout)
+
+    def test_agent_cli_syncs_legacy_home_config_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home_dir = root / "agent-home"
+
+            register_result = self.runner.invoke(
+                app,
+                [
+                    "agent",
+                    "register-profile",
+                    "writer",
+                    "Writer",
+                    "openai.gpt-5.4-mini",
+                    "--home-dir",
+                    str(home_dir),
+                ],
+                env=self.env,
+            )
+            self.assertEqual(register_result.exit_code, 0)
+
+            config_path = home_dir / "agent.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "id": "writer",
+                        "name": "Legacy Writer",
+                        "default_llm_id": "openai.gpt-5.4",
+                        "workdir": str(root / "legacy-workdir"),
+                    },
+                    ensure_ascii=True,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            sync_result = self.runner.invoke(
+                app,
+                ["agent", "sync-home", "writer"],
+                env=self.env,
+            )
+            self.assertEqual(sync_result.exit_code, 0)
+            self.assertIn('"name": "Legacy Writer"', sync_result.stdout)
+            self.assertIn('"default_llm_id": "openai.gpt-5.4"', sync_result.stdout)
+            self.assertIn(str(root / "legacy-workdir"), sync_result.stdout)
 
     def test_dispatch_cli_manages_task_lifecycle(self) -> None:
         create_result = self.runner.invoke(
@@ -977,6 +1143,24 @@ class CliTestCase(unittest.TestCase):
             self.assertEqual(payload["current_step"], 1)
             self.assertEqual(payload["result_payload"]["output_text"], "hello from sample llm")
             self.assertEqual(payload["result_payload"]["llm_id"], "local-chat")
+
+            preview_result = self.runner.invoke(
+                app,
+                ["orchestration", "prompt-preview", "run-cli-process"],
+                env=self.env,
+            )
+            self.assertEqual(preview_result.exit_code, 0)
+            preview_payload = json.loads(preview_result.stdout)
+            self.assertEqual(preview_payload["run_id"], "run-cli-process")
+            self.assertEqual(preview_payload["llm_id"], "local-chat")
+            self.assertEqual(preview_payload["mode"], "normal_turn")
+            self.assertIsNotNone(preview_payload["prompt_report"])
+            self.assertTrue(
+                any(
+                    item["role"] == "user" and item["content"] == "hello"
+                    for item in preview_payload["messages"]
+                ),
+            )
         finally:
             if previous_token is None:
                 os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
@@ -1263,8 +1447,13 @@ class CliTestCase(unittest.TestCase):
         )
         self.assertEqual(run_result.exit_code, 1)
 
-    def test_cli_schema_error_detector_matches_missing_table_messages(self) -> None:
+    def test_cli_schema_error_detector_matches_missing_schema_messages(self) -> None:
         self.assertTrue(_is_missing_database_schema_error(RuntimeError("no such table: tools")))
+        self.assertTrue(
+            _is_missing_database_schema_error(
+                RuntimeError("no such column: llm_profiles.context_window_tokens"),
+            ),
+        )
         self.assertTrue(
             _is_missing_database_schema_error(
                 RuntimeError('relation "tools" does not exist'),
@@ -1395,6 +1584,7 @@ class CliTestCase(unittest.TestCase):
                         "provider: openai",
                         "api_family: openai_responses",
                         "model_name: gpt-5.4",
+                        "context_window_tokens: 1050000",
                         "model_family: reasoning",
                         "capabilities:",
                         "  - tool_calling",
@@ -1420,6 +1610,7 @@ class CliTestCase(unittest.TestCase):
             sync_payload = json.loads(sync_result.stdout)
             self.assertEqual([item["id"] for item in sync_payload], ["openai.gpt-5.4"])
             self.assertEqual(sync_payload[0]["api_family"], "openai_responses")
+            self.assertEqual(sync_payload[0]["context_window_tokens"], 1050000)
             self.assertEqual(
                 sync_payload[0]["default_params"]["reasoning_effort"],
                 "medium",

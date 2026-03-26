@@ -7,12 +7,16 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationValidationError,
 )
 from crxzipple.modules.orchestration.domain.value_objects import (
+    ApprovalDecision,
+    ApprovalResolution,
+    CapabilityRequestScopeHint,
     DeliveryTarget,
     InboundInstruction,
     OrchestrationErrorPayload,
     OrchestrationQueuePolicy,
     OrchestrationRunStage,
     OrchestrationRunStatus,
+    PendingApprovalRequest,
     utcnow,
 )
 from crxzipple.shared.domain import AggregateRoot
@@ -389,6 +393,144 @@ class OrchestrationRun(AggregateRoot[str]):
                 },
             ),
         )
+
+    def wait_on_tool_after_confirmation(
+        self,
+        *,
+        pending_tool_run_ids: tuple[str, ...] | list[str],
+        reason: str | None = None,
+        happened_at: datetime | None = None,
+    ) -> None:
+        if self.status is not OrchestrationRunStatus.WAITING:
+            raise OrchestrationValidationError(
+                "Only waiting orchestration runs can transition to tool wait after confirmation.",
+            )
+        if self.stage is not OrchestrationRunStage.WAITING_FOR_CONFIRMATION:
+            raise OrchestrationValidationError(
+                "Orchestration run is not waiting for confirmation.",
+            )
+        normalized_tool_run_ids = tuple(
+            tool_run_id.strip()
+            for tool_run_id in pending_tool_run_ids
+            if tool_run_id is not None and tool_run_id.strip()
+        )
+        if not normalized_tool_run_ids:
+            raise OrchestrationValidationError(
+                "Waiting on tool requires at least one pending tool run id.",
+            )
+        timestamp = happened_at or utcnow()
+        self.status = OrchestrationRunStatus.WAITING
+        self.stage = OrchestrationRunStage.WAITING_ON_TOOL
+        self.pending_tool_run_ids = normalized_tool_run_ids
+        self.waiting_reason = (
+            reason.strip()
+            if reason is not None and reason.strip()
+            else "waiting_on_tool"
+        )
+        self.worker_id = None
+        self.updated_at = timestamp
+        self.record_event(
+            DomainEvent(
+                name="orchestration.run.waiting",
+                payload={
+                    "run_id": self.id,
+                    "pending_tool_run_ids": list(self.pending_tool_run_ids),
+                    "reason": self.waiting_reason,
+                },
+            ),
+        )
+
+    def pending_approval_request(self) -> PendingApprovalRequest | None:
+        raw_request = self.metadata.get("pending_approval_request")
+        if not isinstance(raw_request, dict):
+            return None
+        return PendingApprovalRequest.from_payload(raw_request)
+
+    def wait_for_confirmation(
+        self,
+        *,
+        worker_id: str,
+        request: PendingApprovalRequest,
+        reason: str | None = None,
+        happened_at: datetime | None = None,
+    ) -> None:
+        if self.status is not OrchestrationRunStatus.RUNNING:
+            raise OrchestrationValidationError(
+                "Only running orchestration runs can wait for confirmation.",
+            )
+        self._require_worker(worker_id)
+        timestamp = happened_at or utcnow()
+        self.status = OrchestrationRunStatus.WAITING
+        self.stage = OrchestrationRunStage.WAITING_FOR_CONFIRMATION
+        self.pending_tool_run_ids = ()
+        self.waiting_reason = (
+            reason.strip()
+            if reason is not None and reason.strip()
+            else "waiting_for_confirmation"
+        )
+        self.worker_id = None
+        self.updated_at = timestamp
+        self.metadata["pending_approval_request"] = request.to_payload()
+        self.record_event(
+            DomainEvent(
+                name="orchestration.run.waiting_for_confirmation",
+                payload={
+                    "run_id": self.id,
+                    "request_id": request.request_id,
+                    "effect_id": request.effect_id,
+                    "reason": self.waiting_reason,
+                },
+            ),
+        )
+
+    def resolve_approval_request(
+        self,
+        *,
+        request_id: str,
+        decision: ApprovalDecision,
+        happened_at: datetime | None = None,
+    ) -> PendingApprovalRequest:
+        if self.status is not OrchestrationRunStatus.WAITING:
+            raise OrchestrationValidationError(
+                "Only waiting orchestration runs can resolve approval requests.",
+            )
+        if self.stage is not OrchestrationRunStage.WAITING_FOR_CONFIRMATION:
+            raise OrchestrationValidationError(
+                "Orchestration run is not waiting for confirmation.",
+            )
+        pending_request = self.pending_approval_request()
+        if pending_request is None:
+            raise OrchestrationValidationError(
+                "Orchestration run has no pending approval request.",
+            )
+        normalized_request_id = request_id.strip()
+        if not normalized_request_id:
+            raise OrchestrationValidationError(
+                "Approval request_id cannot be empty.",
+            )
+        if pending_request.request_id != normalized_request_id:
+            raise OrchestrationValidationError(
+                "Approval request id does not match the pending approval request.",
+            )
+        timestamp = happened_at or utcnow()
+        self.metadata.pop("pending_approval_request", None)
+        self.metadata["last_approval_resolution"] = ApprovalResolution(
+            request_id=normalized_request_id,
+            decision=decision,
+            resolved_at=timestamp,
+        ).to_payload()
+        self.updated_at = timestamp
+        self.record_event(
+            DomainEvent(
+                name="orchestration.run.approval_resolved",
+                payload={
+                    "run_id": self.id,
+                    "request_id": normalized_request_id,
+                    "decision": decision.value,
+                },
+            ),
+        )
+        return pending_request
 
     def resume(
         self,

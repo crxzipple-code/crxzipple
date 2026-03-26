@@ -21,6 +21,9 @@ class SessionMessageRepository(Protocol):
     def add(self, message: SessionMessage) -> None:
         ...
 
+    def get(self, message_id: str) -> SessionMessage | None:
+        ...
+
     def get_by_source(
         self,
         *,
@@ -40,6 +43,7 @@ class SessionMessageRepository(Protocol):
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
+        include_archived: bool = True,
     ) -> list[SessionMessage]:
         ...
 

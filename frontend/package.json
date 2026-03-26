@@ -7,10 +7,13 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit -p tsconfig.json"
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
   },
   "dependencies": {
+    "katex": "^0.16.42",
     "markdown-it": "^14.1.0",
+    "markdown-it-texmath": "^1.0.0",
     "vue": "^3.4.38"
   },
   "devDependencies": {
@@ -18,6 +21,7 @@
     "@vitejs/plugin-vue": "^4.5.2",
     "typescript": "^5.4.5",
     "vite": "^4.5.5",
+    "vitest": "^4.1.1",
     "vue-tsc": "^3.2.6"
   }
 }

@@ -20,6 +20,7 @@ from crxzipple.modules.orchestration.interfaces.http_models import (
     HeartbeatRunRequest,
     IntakeOrchestrationRunRequest,
     OrchestrationRunResponse,
+    RequestDueHeartbeatsRequest,
     ResumeRunRequest,
     WaitOnToolRequest,
 )
@@ -159,6 +160,26 @@ def heartbeat_run(
     except OrchestrationValidationError as exc:
         raise _bad_request(exc) from None
     return OrchestrationRunResponse.from_dto(OrchestrationRunDTO.from_entity(run))
+
+
+@router.post(
+    "/heartbeats/request-due",
+    response_model=list[OrchestrationRunResponse],
+)
+def request_due_heartbeats(
+    payload: RequestDueHeartbeatsRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[OrchestrationRunResponse]:
+    try:
+        runs = container.orchestration_service.request_due_heartbeats(
+            payload.to_input(),
+        )
+    except OrchestrationValidationError as exc:
+        raise _bad_request(exc) from None
+    return [
+        OrchestrationRunResponse.from_dto(OrchestrationRunDTO.from_entity(run))
+        for run in runs
+    ]
 
 
 @router.post("/runs/{run_id}/wait-on-tool", response_model=OrchestrationRunResponse)

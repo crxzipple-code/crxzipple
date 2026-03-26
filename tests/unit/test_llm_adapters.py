@@ -271,6 +271,86 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(events[0].data["text"], "stream-")
         self.assertEqual(events[1].data["result"]["text"], "stream-openai")
 
+    def test_openai_responses_adapter_retries_transient_server_error_before_output(self) -> None:
+        profile = LlmProfile(
+            id="writer-retry",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding="inline-openai-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Retry please."),
+            ),
+        )
+
+        with (
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_responses.requests.post",
+                side_effect=[
+                    _FakeStreamResponse(
+                        events=(
+                            (
+                                "response.created",
+                                {
+                                    "type": "response.created",
+                                    "response": {
+                                        "id": "resp_retry_1",
+                                        "status": "in_progress",
+                                        "model": "gpt-5",
+                                    },
+                                },
+                            ),
+                            (
+                                "error",
+                                {
+                                    "type": "error",
+                                    "error": {
+                                        "code": "server_error",
+                                        "message": "temporary upstream issue",
+                                    },
+                                },
+                            ),
+                        ),
+                    ),
+                    _FakeStreamResponse(
+                        events=(
+                            (
+                                "response.completed",
+                                {
+                                    "type": "response.completed",
+                                    "response": {
+                                        "id": "resp_retry_2",
+                                        "model": "gpt-5",
+                                        "status": "completed",
+                                        "output": [
+                                            {
+                                                "type": "message",
+                                                "content": [
+                                                    {
+                                                        "type": "output_text",
+                                                        "text": "recovered",
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                },
+                            ),
+                        ),
+                    ),
+                ],
+            ) as post,
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_responses.sleep_before_openai_stream_retry",
+            ),
+        ):
+            response = OpenAIResponsesAdapter().invoke(profile, request)
+
+        self.assertEqual(response.result.text, "recovered")
+        self.assertEqual(post.call_count, 2)
+
     def test_openai_responses_adapter_encodes_tool_history_items(self) -> None:
         profile = LlmProfile(
             id="writer-history",
@@ -859,6 +939,87 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["text_delta", "completed"])
         self.assertEqual(events[0].data["text"], "codex-")
         self.assertEqual(events[1].data["result"]["text"], "codex-stream")
+
+    def test_openai_codex_responses_adapter_retries_transient_server_error_before_output(self) -> None:
+        profile = LlmProfile(
+            id="codex-retry",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5-codex",
+            model_family=LlmModelFamily.CODEX,
+            credential_binding="codex-inline-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Retry codex."),
+            ),
+        )
+
+        with (
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+                side_effect=[
+                    _FakeStreamResponse(
+                        events=(
+                            (
+                                "response.created",
+                                {
+                                    "type": "response.created",
+                                    "response": {
+                                        "id": "resp_codex_retry_1",
+                                        "status": "in_progress",
+                                        "model": "gpt-5-codex",
+                                    },
+                                },
+                            ),
+                            (
+                                "error",
+                                {
+                                    "type": "error",
+                                    "error": {
+                                        "code": "server_error",
+                                        "message": "temporary codex issue",
+                                    },
+                                },
+                            ),
+                        ),
+                    ),
+                    _FakeStreamResponse(
+                        events=(
+                            (
+                                "response.completed",
+                                {
+                                    "type": "response.completed",
+                                    "response": {
+                                        "id": "resp_codex_retry_2",
+                                        "status": "completed",
+                                        "model": "gpt-5-codex",
+                                        "output": [
+                                            {
+                                                "type": "message",
+                                                "content": [
+                                                    {
+                                                        "type": "output_text",
+                                                        "text": "codex-recovered",
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                },
+                            ),
+                        ),
+                    ),
+                ],
+            ) as post,
+            patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.sleep_before_openai_stream_retry",
+            ),
+        ):
+            response = OpenAICodexResponsesAdapter().invoke(profile, request)
+
+        self.assertEqual(response.result.text, "codex-recovered")
+        self.assertEqual(post.call_count, 2)
 
     def test_anthropic_messages_adapter_shapes_request_and_result(self) -> None:
         os.environ["ANTHROPIC_API_KEY"] = "anthropic-secret"

@@ -21,6 +21,11 @@ class ToolModel(Base):
         default=list,
     )
     tags: Mapped[list[str]] = mapped_column(JSON(), nullable=False, default=list)
+    required_effect_ids: Mapped[list[str]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
     requires_confirmation: Mapped[bool] = mapped_column(nullable=False, default=False)
     mutates_state: Mapped[bool] = mapped_column(nullable=False, default=False)
     timeout_seconds: Mapped[int] = mapped_column(

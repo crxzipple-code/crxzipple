@@ -47,6 +47,7 @@ from crxzipple.modules.dispatch.domain import DispatchTaskRepository
 logger = get_logger(__name__)
 DISPATCH_LEASE_EXPIRED_REASON = "Worker lease expired before completion."
 DISPATCH_LEASE_EXHAUSTED_REASON = "Worker lease expired and retry budget exhausted."
+SYSTEM_MANAGED_TOOL_TAG = "system-managed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,7 @@ class RegisterToolInput:
     kind: ToolKind = ToolKind.FUNCTION
     parameters: tuple[RegisterToolParameterInput, ...] = field(default_factory=tuple)
     tags: tuple[str, ...] = field(default_factory=tuple)
+    required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
     timeout_seconds: int = 30
     requires_confirmation: bool = False
     mutates_state: bool = False
@@ -255,9 +257,22 @@ class ToolApplicationService:
     def set_availability(self, data: SetToolAvailabilityInput) -> Tool:
         with self.uow_factory() as uow:
             tool = uow.tools.get(data.id)
+        if tool is None:
+            self.ensure_local_system_tools_registered()
+            with self.uow_factory() as uow:
+                tool = uow.tools.get(data.id)
+                if tool is None:
+                    raise ToolNotFoundError(f"Tool '{data.id}' was not found.")
+                changed = tool.enable() if data.enabled else tool.disable()
+                if changed:
+                    uow.tools.add(tool)
+                    uow.collect(tool)
+                    uow.commit()
+                return tool
+        with self.uow_factory() as uow:
+            tool = uow.tools.get(data.id)
             if tool is None:
                 raise ToolNotFoundError(f"Tool '{data.id}' was not found.")
-
             changed = tool.enable() if data.enabled else tool.disable()
             if changed:
                 uow.tools.add(tool)
@@ -273,12 +288,52 @@ class ToolApplicationService:
         with self.uow_factory() as uow:
             return uow.tools.list_enabled()
 
+    def ensure_local_system_tools_registered(self) -> tuple[Tool, ...]:
+        managed_tools = [
+            tool
+            for tool in self.runtime_gateway.list_local_tools()
+            if SYSTEM_MANAGED_TOOL_TAG in tool.tags
+        ]
+        if not managed_tools:
+            return ()
+        registered: list[Tool] = []
+        with self.uow_factory() as uow:
+            changed = False
+            for tool in managed_tools:
+                existing = uow.tools.get(tool.id)
+                if existing is not None:
+                    registered.append(existing)
+                    continue
+                spec = ToolSpec.from_tool(tool, provider_name="local_system")
+                persisted = self._build_tool_from_spec(spec)
+                persisted.record_event(
+                    DomainEvent(
+                        name="tool.system_registered",
+                        payload={
+                            "tool_id": persisted.id,
+                            "source_kind": persisted.source_kind.value,
+                        },
+                    ),
+                )
+                uow.tools.add(persisted)
+                uow.collect(persisted)
+                registered.append(persisted)
+                changed = True
+            if changed:
+                uow.commit()
+        return tuple(registered)
+
     def get_tool(self, tool_id: str) -> Tool:
         with self.uow_factory() as uow:
             tool = uow.tools.get(tool_id)
-            if tool is None:
-                raise ToolNotFoundError(f"Tool '{tool_id}' was not found.")
-            return tool
+        if tool is None:
+            self.ensure_local_system_tools_registered()
+            with self.uow_factory() as uow:
+                tool = uow.tools.get(tool_id)
+                if tool is None:
+                    raise ToolNotFoundError(f"Tool '{tool_id}' was not found.")
+                return tool
+        return tool
 
     def get_tool_run(self, run_id: str) -> ToolRun:
         with self.uow_factory() as uow:
@@ -419,30 +474,61 @@ class ToolApplicationService:
 
         with self.uow_factory() as uow:
             tool = uow.tools.get(data.tool_id)
-            if tool is None:
-                raise ToolNotFoundError(f"Tool '{data.tool_id}' was not found.")
-            if not tool.enabled:
-                raise ToolExecutionNotAllowedError(
-                    f"Tool '{tool.id}' is disabled and cannot be executed.",
-                )
-            if not tool.supports(target):
-                raise ToolExecutionNotSupportedError(
-                    f"Tool '{tool.id}' does not support {target.mode.value}/{target.strategy.value}/{target.environment.value}.",
-                )
+        if tool is None:
+            self.ensure_local_system_tools_registered()
+            with self.uow_factory() as uow:
+                tool = uow.tools.get(data.tool_id)
+                if tool is None:
+                    raise ToolNotFoundError(f"Tool '{data.tool_id}' was not found.")
+                if not tool.enabled:
+                    raise ToolExecutionNotAllowedError(
+                        f"Tool '{tool.id}' is disabled and cannot be executed.",
+                    )
+                if not tool.supports(target):
+                    raise ToolExecutionNotSupportedError(
+                        f"Tool '{tool.id}' does not support {target.mode.value}/{target.strategy.value}/{target.environment.value}.",
+                    )
 
-            run = ToolRun.create(
-                run_id=data.run_id or uuid4().hex,
-                tool_id=tool.id,
-                input_payload=dict(data.arguments),
-                target=target,
-                max_attempts=self.default_max_attempts,
-            )
-            if target.mode is ToolMode.BACKGROUND:
-                run.queue()
-                self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
-            uow.tool_runs.add(run)
-            uow.collect(run)
-            uow.commit()
+                run = ToolRun.create(
+                    run_id=data.run_id or uuid4().hex,
+                    tool_id=tool.id,
+                    input_payload=dict(data.arguments),
+                    target=target,
+                    max_attempts=self.default_max_attempts,
+                )
+                if target.mode is ToolMode.BACKGROUND:
+                    run.queue()
+                    self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+                uow.tool_runs.add(run)
+                uow.collect(run)
+                uow.commit()
+        else:
+            with self.uow_factory() as uow:
+                tool = uow.tools.get(data.tool_id)
+                if tool is None:
+                    raise ToolNotFoundError(f"Tool '{data.tool_id}' was not found.")
+                if not tool.enabled:
+                    raise ToolExecutionNotAllowedError(
+                        f"Tool '{tool.id}' is disabled and cannot be executed.",
+                    )
+                if not tool.supports(target):
+                    raise ToolExecutionNotSupportedError(
+                        f"Tool '{tool.id}' does not support {target.mode.value}/{target.strategy.value}/{target.environment.value}.",
+                    )
+
+                run = ToolRun.create(
+                    run_id=data.run_id or uuid4().hex,
+                    tool_id=tool.id,
+                    input_payload=dict(data.arguments),
+                    target=target,
+                    max_attempts=self.default_max_attempts,
+                )
+                if target.mode is ToolMode.BACKGROUND:
+                    run.queue()
+                    self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+                uow.tool_runs.add(run)
+                uow.collect(run)
+                uow.commit()
 
         if target.mode is ToolMode.INLINE:
             return await self._perform_run(run.id)
@@ -644,6 +730,7 @@ class ToolApplicationService:
                 for parameter in data.parameters
             ),
             tags=data.tags,
+            required_effect_ids=data.required_effect_ids,
             execution_policy=ToolExecutionPolicy(
                 timeout_seconds=data.timeout_seconds,
                 requires_confirmation=data.requires_confirmation,
@@ -667,6 +754,7 @@ class ToolApplicationService:
             kind=spec.kind,
             parameters=spec.parameters,
             tags=spec.tags,
+            required_effect_ids=spec.required_effect_ids,
             execution_policy=spec.execution_policy,
             execution_support=spec.execution_support,
             source_kind=spec.source_kind,
@@ -686,6 +774,7 @@ class ToolApplicationService:
             or existing.kind is not spec.kind
             or existing.parameters != spec.parameters
             or existing.tags != spec.tags
+            or existing.required_effect_ids != spec.required_effect_ids
             or existing.execution_policy != spec.execution_policy
             or existing.execution_support != spec.execution_support
             or existing.runtime_key != spec.runtime_key

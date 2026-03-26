@@ -9,7 +9,7 @@ This is not a multi-user enterprise authorization system.
 The goal is:
 
 - safe default behavior on a personal machine
-- clear agent capability boundaries
+- clear human-owned permission boundaries
 - per-session user consent
 - hard runtime limits for risky tools
 - simple mental model for CLI and local web usage
@@ -38,139 +38,117 @@ Today, effective tool visibility is resolved at runtime by `ToolResolver`.
 
 Current behavior:
 
-- all `enabled` tools are considered
-- tools with `requires_confirmation=True` are hidden from LLM exposure
-- authorization is checked
-- when authorization is disabled, all checks allow
-
-That means the current default is effectively:
-
-`all enabled, non-confirmation tools are visible`
+- `tool` declares facts, especially `required_effect_ids`
+- `ToolResolver` computes visibility from:
+  - tool facts
+  - run/session temporary grants
+  - long-term authorization rules
+- if an effect is missing, the model gets `request_effect_access`
+- user approval can grant:
+  - once
+  - for session
+  - always for this agent
+- long-term `always` grants are written into `auth`, not into the agent profile
 
 Relevant implementation:
 
 - `ToolResolver`: `src/crxzipple/modules/orchestration/application/tool_resolver.py`
 - authorization service default: `src/crxzipple/modules/authorization/application/services.py`
 - tool execution policy: `src/crxzipple/modules/tool/domain/value_objects.py`
+- shared effects vocabulary: `src/crxzipple/shared/domain/effects.py`
 
 ## Design Principles
 
-### 1. Agent capabilities come first
+### 1. Tool facts come first
 
-Every agent should have a default capability boundary.
+Every tool should declare its effects and runtime characteristics.
 
-The model should only see tools that are inside that boundary.
+The system should reason from tool facts, not orchestration guesses.
 
-### 2. Session grants are explicit
+### 2. Human authorization owns the truth
+
+Agent profiles are not authorization truth.
+
+Long-term rules belong to authorization.
+
+Temporary approvals belong to run/session state.
+
+### 3. Session grants are explicit
 
 Some permissions should be granted only after explicit user approval.
 
 Those approvals should be scoped.
 
-### 3. Runtime limits are hard, not advisory
+### 4. Runtime limits are hard, not advisory
 
 Filesystem, shell, network, and background execution limits must be enforced outside the model.
-
-### 4. Authorization remains useful
-
-Authorization should become the dynamic decision layer.
-
-Agent policy should define the static boundary.
 
 ### 5. Local-first ergonomics
 
 The user should understand permissions as:
 
-- what this agent is allowed to do by default
+- what this assistant is asking to do
 - what this conversation is temporarily allowed to do
-- what always requires confirmation
+- what has been allowed long-term
 
-## Three-Layer Model
+## Permission Model
 
-Use three permission layers.
+Use four layers.
 
-### Layer 1: Agent Tool Policy
+### Layer 1: Tool Facts
 
-Static defaults attached to the agent profile.
+Declared by the tool itself.
 
-This defines what the agent may generally see and attempt.
+This defines what the tool requires and what side effects it can cause.
 
-### Layer 2: Session Grants
+### Layer 2: Temporary Grants
 
-Temporary approvals attached to the current conversation/session.
+Approvals attached to the current run or session.
 
-This defines what the user has explicitly approved for the current thread.
+This defines what the user has explicitly approved in the current interaction context.
 
-### Layer 3: Hard Tool Guards
+### Layer 3: Long-Term Human Rules
+
+Rules stored and evaluated by authorization.
+
+These may include `agent_id`, `tool_id`, `effect_id`, and other context dimensions.
+
+### Layer 4: Hard Tool Guards
 
 Runtime-enforced limits inside tool execution and dispatch paths.
 
 This defines what is technically possible even if the model tries.
 
-## Agent Tool Policy
+## Agent Tool Preferences
 
-Add a new value object under the agent domain.
+Agent profiles may carry tool preferences, but not authorization truth.
 
-Suggested name:
+Current name:
 
-- `AgentToolPolicy`
+- `AgentToolPreferences`
 
 Suggested location:
 
 - `src/crxzipple/modules/agent/domain/value_objects.py`
 
-### Suggested Fields
+### Current Fields
 
-- `default_mode: "allow" | "ask" | "deny"`
-- `allowed_tool_ids: tuple[str, ...]`
-- `denied_tool_ids: tuple[str, ...]`
-- `allowed_tags: tuple[str, ...]`
-- `denied_tags: tuple[str, ...]`
-- `allow_background_tools: bool`
-- `allow_mutating_tools: bool`
-- `allow_network: bool`
-- `allowed_domains: tuple[str, ...]`
-- `allowed_paths: tuple[str, ...]`
-- `allow_shell: bool`
-- `allow_workspace_write: bool`
+- `requested_effect_ids`
+- `requested_tool_ids`
+- `preferred_tags`
+- `prefers_background_tools`
+- `prefers_mutating_tools`
 
 ### Semantics
 
-- `default_mode=deny`
-  Only explicitly allowed tools are visible.
-- `default_mode=ask`
-  Tools can be proposed, but not exposed to the LLM unless a session grant exists.
-- `default_mode=allow`
-  Tools inside policy boundaries are exposed directly.
-
-### Recommended Defaults
-
-#### Read-only assistant
-
-- `default_mode=deny`
-- allow only search, weather, read-file, summarize-style tools
-- `allow_mutating_tools=false`
-- `allow_background_tools=false`
-- `allow_network=true` only for allowed domains if needed
-
-#### Coding assistant
-
-- `default_mode=deny`
-- allow workspace file tools
-- allow shell only inside workspace
-- `allow_workspace_write=true`
-- `allow_background_tools=true` only if needed
-- network off by default
-
-#### Trusted local agent
-
-- `default_mode=ask`
-- broader local tool access
-- mutating tools allowed only after confirmation
+- these fields express intent and preference
+- they do not mean `allow`
+- they do not mean `deny`
+- they should not be treated as authorization truth
 
 ## Session Grants
 
-Session grants represent approvals made by the user during an active conversation.
+Temporary grants represent approvals made by the user during an active conversation.
 
 These are not permanent agent defaults.
 
@@ -185,8 +163,8 @@ Suggested storage options:
 
 ### Suggested Fields
 
-- `scope: "once" | "session" | "agent_default"`
-- `grant_kind: "tool" | "path" | "domain" | "capability"`
+- `scope: "once" | "session"`
+- `grant_kind: "tool" | "path" | "domain" | "effect"`
 - `value`
 - `created_at`
 - `expires_at`
@@ -197,7 +175,22 @@ Suggested storage options:
 - allow tool `shell.exec` once
 - allow domain `api.github.com` for this session
 - allow path `/Users/crxzy/Documents/crxzipple` for this session
-- allow background tool execution once
+- allow background execution once
+
+## Long-Term Authorization Rules
+
+Long-term rules belong to authorization, not to agents.
+
+Examples:
+
+- allow `agent_id=writer` to access `effect_id=workspace_write`
+- deny `tool_id=shell.exec` for every agent
+- allow `agent_id=researcher` to access `tool_id=brave_search.news_search`
+
+Important:
+
+- `agent_id` is a rule condition
+- `agent profile` is not the source of authority
 
 ## Hard Tool Guards
 
@@ -229,17 +222,19 @@ The effective tool set for one run step should be computed in this order:
 
 1. start from `list_enabled_tools()`
 2. remove tools blocked by hard execution support incompatibility
-3. apply `AgentToolPolicy` static filtering
-4. apply session grants
-5. apply authorization policy evaluation
-6. remove tools that still require explicit confirmation
-7. expose the remaining schemas to the model
+3. apply explicit `tool.access_tool` deny from auth
+4. apply explicit `tool.access_tool` allow from auth
+5. apply run/session temporary grants
+6. apply explicit `tool.access_effect` deny from auth
+7. check whether `required_effect_ids` are satisfied by grants or auth rules
+8. if not satisfied, expose `request_effect_access`
+9. expose the remaining tool schemas to the model
 
 This means:
 
-- agent policy narrows the universe
-- session grants open temporary doors
-- authorization makes final dynamic decisions
+- tool facts define requirements
+- temporary grants open short-lived doors
+- authorization owns long-term rules and fine-grained overrides
 
 ## ToolResolver Changes
 
@@ -256,39 +251,22 @@ Suggested responsibilities:
   - hidden-but-requestable tools
   - confirmation-required tools
 
-### Suggested `ResolvedToolSet` additions
+### Current `ResolvedToolSet` shape
 
-- `visible_tools`
-- `hidden_tools`
-- `requestable_tools`
-- `confirmation_required_tools`
-- `blocked_reasons_by_tool`
-
-This will make UI and debugging much easier.
+- visible tools
+- optional `effect_request` surface
+- askable effects derived from missing required effects
 
 ## Authorization Role
 
-Authorization should remain the dynamic policy layer.
+Authorization should remain the long-term dynamic policy layer.
 
 It should answer questions like:
 
-- is this interface allowed to use this tool now
-- is this agent allowed to use a mutating tool in this environment
-- does this action require obligations such as confirmation
-
-### Recommended Direction
-
-Use authorization obligations instead of only allow/deny.
-
-Important obligations:
-
-- `require_confirmation`
-- `require_session_grant`
-- `limit_to_workspace`
-- `limit_to_domains`
-- `deny_background`
-
-This fits the current authorization model well because `AuthorizationDecision` already supports obligations.
+- is this agent allowed long-term to access this effect
+- is this specific tool denied even if its effects are generally safe
+- is this specific tool explicitly allowed as an override
+- is this tool allowed to run in this environment
 
 ## UX Model
 
@@ -305,7 +283,7 @@ When a dangerous action is requested, prompt with:
 
 ### Suggested UI Language
 
-- `Allow this tool once`
+- `Allow this effect once`
 - `Allow for this thread`
 - `Always allow for this agent`
 - `Not now`
@@ -320,131 +298,73 @@ The model should only see tools that are actually usable now.
 
 ### Agent
 
-Add to `AgentProfile`:
+Keep in `AgentProfile`:
 
-- `tool_policy: AgentToolPolicy`
+- `tool_preferences: AgentToolPreferences`
 
 ### Session
 
 Add to session metadata or a new table:
 
-- `session_grants`
+- `tool_grants.effect_ids`
+- `tool_grants.tool_ids`
 
 ### Orchestration
 
 Run metadata may capture:
 
-- effective tool ids for this turn
-- grant ids used
-- confirmation decisions used
+- `granted_effect_ids_once`
+- `granted_tool_ids_once`
+- pending approval request state
 
 This is useful for auditability and debugging.
 
 ## Example Config Shape
 
-Example agent policy payload:
+Example agent preferences payload:
 
 ```json
 {
-  "tool_policy": {
-    "default_mode": "deny",
-    "allowed_tool_ids": [
-      "filesystem.read_text",
-      "brave_search.news_search",
-      "open_meteo_weather.forecast_weather"
+  "tool_preferences": {
+    "requested_effect_ids": [
+      "network_search",
+      "weather_data"
     ],
-    "denied_tool_ids": [
-      "shell.exec",
-      "filesystem.write_text"
+    "requested_tool_ids": [
+      "brave_search.news_search"
     ],
-    "allow_background_tools": false,
-    "allow_mutating_tools": false,
-    "allow_network": true,
-    "allowed_domains": [
-      "search.brave.com",
-      "api.open-meteo.com"
+    "preferred_tags": [
+      "search"
     ],
-    "allowed_paths": [],
-    "allow_shell": false,
-    "allow_workspace_write": false
+    "prefers_background_tools": false,
+    "prefers_mutating_tools": false
   }
 }
 ```
 
-Example coding agent policy:
+Example coding agent preferences:
 
 ```json
 {
-  "tool_policy": {
-    "default_mode": "deny",
-    "allowed_tags": ["workspace", "source-control", "shell"],
-    "allow_background_tools": true,
-    "allow_mutating_tools": true,
-    "allow_network": false,
-    "allowed_paths": ["/Users/crxzy/Documents/crxzipple"],
-    "allow_shell": true,
-    "allow_workspace_write": true
+  "tool_preferences": {
+    "requested_effect_ids": [
+      "workspace_write",
+      "command_execution"
+    ],
+    "preferred_tags": ["workspace", "shell"],
+    "prefers_background_tools": true,
+    "prefers_mutating_tools": true
   }
 }
 ```
 
 ## Implementation Plan
 
-### Phase 1
+Most of this is now implemented.
 
-Add static agent policy.
+The main remaining step is:
 
-- add `AgentToolPolicy`
-- persist it in agent profiles
-- update CLI/HTTP DTOs
-- update frontend selectors later if needed
-
-### Phase 2
-
-Teach `ToolResolver` to apply agent policy before authorization.
-
-- filter by tool id and tags
-- filter background and mutating tools
-- pass richer context into authorization
-
-### Phase 3
-
-Add session grants.
-
-- minimal metadata-backed storage first
-- allow `once` and `session` grants
-
-### Phase 4
-
-Add confirmation obligations.
-
-- authorization may return `require_confirmation`
-- frontend/CLI can surface explicit prompts
-
-### Phase 5
-
-Add hard runtime guards for filesystem, shell, and network.
-
-These should be enforced inside tool execution, not just during visibility resolution.
-
-## Recommended First Cut
-
-For the first product-quality version, do not try to implement the whole model at once.
-
-The best first cut is:
-
-1. `AgentToolPolicy`
-2. `ToolResolver` static filtering
-3. hard deny of dangerous tools by default
-4. session-scoped confirmation for a small set of risky capabilities
-
-That is enough to move the product from:
-
-`all enabled tools are effectively visible`
-
-to:
-
-`each agent only sees the tools it is meant to use`
+- make runtime hard guards fully effect-aware so filesystem, shell, and network enforcement use the same shared effect vocabulary as visibility and approval
 
 ## Summary
 
@@ -452,13 +372,14 @@ For a local private assistant, permissions should not be modeled as enterprise u
 
 They should be modeled as:
 
-- agent default capability boundaries
-- session-scoped user grants
+- tool-declared effects and runtime facts
+- session/run-scoped user grants
+- human-owned long-term authorization rules
 - hard runtime guards
 
 This fits the current `crxzipple` architecture because:
 
-- `AgentProfile` already owns strategy
+- `tool` now declares `required_effect_ids`
 - `ToolResolver` already owns effective tool exposure
-- `AuthorizationDecision` already supports dynamic checks and obligations
-- `session` already exists as the natural place for temporary grants
+- `auth` already owns long-term dynamic policy decisions
+- `session` and `run` already exist as natural places for temporary grants

@@ -84,6 +84,7 @@ def register_builtin_local_tools(catalog: LocalToolCatalog) -> None:
                 ),
             ),
             tags=("local", "builtin", "debug"),
+            required_effect_ids=("local_tool_access",),
             execution_support=ToolExecutionSupport(
                 supported_modes=(ToolMode.INLINE, ToolMode.BACKGROUND),
                 supported_strategies=(

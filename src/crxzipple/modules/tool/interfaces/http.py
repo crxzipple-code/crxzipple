@@ -71,6 +71,7 @@ class RegisterToolRequest(BaseModel):
     kind: ToolKind = ToolKind.FUNCTION
     parameters: list[ToolParameterRequest] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    required_effect_ids: list[str] = Field(default_factory=list)
     timeout_seconds: int = 30
     requires_confirmation: bool = False
     mutates_state: bool = False
@@ -101,6 +102,7 @@ class ToolResponse(BaseModel):
     kind: str
     parameters: list[ToolParameterResponse]
     tags: list[str]
+    required_effect_ids: list[str]
     execution_policy: ToolExecutionPolicyResponse
     execution_support: ToolExecutionSupportResponse
     source_kind: str
@@ -161,6 +163,7 @@ def register_tool(
                 for parameter in payload.parameters
             ),
             tags=tuple(payload.tags),
+            required_effect_ids=tuple(payload.required_effect_ids),
             timeout_seconds=payload.timeout_seconds,
             requires_confirmation=payload.requires_confirmation,
             mutates_state=payload.mutates_state,
@@ -314,6 +317,7 @@ def _to_response(tool) -> ToolResponse:
             for parameter in tool.parameters
         ],
         tags=list(tool.tags),
+        required_effect_ids=list(tool.required_effect_ids),
         execution_policy=ToolExecutionPolicyResponse(
             timeout_seconds=tool.execution_policy.timeout_seconds,
             requires_confirmation=tool.execution_policy.requires_confirmation,

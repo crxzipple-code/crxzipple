@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from crxzipple.modules.authorization.domain.value_objects import (
     AuthorizationEffect,
     AuthorizationObligation,
+    AuthorizationGrantScope,
 )
 
 
@@ -28,3 +30,15 @@ class AuthorizationPolicy:
     enabled: bool = True
     source_kind: str = "imported"
 
+
+@dataclass(frozen=True, slots=True)
+class TemporaryAuthorizationGrant:
+    id: str
+    scope: AuthorizationGrantScope
+    created_at: datetime
+    effect_ids: tuple[str, ...] = ()
+    tool_ids: tuple[str, ...] = ()
+    run_id: str | None = None
+    session_key: str | None = None
+    agent_id: str | None = None
+    approval_request_id: str | None = None

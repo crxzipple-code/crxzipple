@@ -86,6 +86,8 @@ def _tool_resource(
             "strategy": strategy.value,
             "environment": environment.value,
             "tags": list(tool.tags),
+            "required_effect_ids": list(tool.required_effect_ids),
+            "authorization_effect_ids": list(tool.required_effect_ids),
         },
     )
 

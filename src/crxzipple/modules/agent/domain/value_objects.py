@@ -155,15 +155,41 @@ class AgentExecutionPolicy:
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimePreferences:
+    home_dir: str | None = None
+    workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
     attrs: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "home_dir", _normalize_optional_text(self.home_dir))
+        object.__setattr__(self, "workdir", _normalize_optional_text(self.workdir))
+        object.__setattr__(self, "workspace", _normalize_optional_text(self.workspace))
+        object.__setattr__(
+            self,
+            "sandbox_mode",
+            _normalize_optional_text(self.sandbox_mode),
+        )
         object.__setattr__(self, "attrs", dict(self.attrs))
+
+    @property
+    def resolved_home_dir(self) -> str | None:
+        return self.home_dir or self.workspace
+
+    @property
+    def resolved_workdir(self) -> str | None:
+        return self.workdir or self.workspace or self.home_dir
+
+    @property
+    def compat_workspace(self) -> str | None:
+        return self.resolved_workdir
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {"attrs": dict(self.attrs)}
+        if self.home_dir is not None:
+            payload["home_dir"] = self.home_dir
+        if self.workdir is not None:
+            payload["workdir"] = self.workdir
         if self.workspace is not None:
             payload["workspace"] = self.workspace
         if self.sandbox_mode is not None:
@@ -177,6 +203,16 @@ class AgentRuntimePreferences:
     ) -> "AgentRuntimePreferences":
         payload = payload or {}
         return cls(
+            home_dir=(
+                str(payload["home_dir"])
+                if payload.get("home_dir") is not None
+                else None
+            ),
+            workdir=(
+                str(payload["workdir"])
+                if payload.get("workdir") is not None
+                else None
+            ),
             workspace=(
                 str(payload["workspace"])
                 if payload.get("workspace") is not None
@@ -190,4 +226,88 @@ class AgentRuntimePreferences:
             attrs=dict(payload.get("attrs", {}))
             if isinstance(payload.get("attrs"), dict)
             else {},
+        )
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolPreferences:
+    requested_effect_ids: tuple[str, ...] = ()
+    requested_tool_ids: tuple[str, ...] = ()
+    preferred_tags: tuple[str, ...] = ()
+    prefers_background_tools: bool = True
+    prefers_mutating_tools: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "requested_effect_ids",
+            tuple(
+                dict.fromkeys(
+                    item.strip()
+                    for item in self.requested_effect_ids
+                    if item is not None and item.strip()
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "requested_tool_ids",
+            tuple(
+                dict.fromkeys(
+                    item.strip()
+                    for item in self.requested_tool_ids
+                    if item is not None and item.strip()
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "preferred_tags",
+            tuple(
+                dict.fromkeys(
+                    item.strip().lower()
+                    for item in self.preferred_tags
+                    if item is not None and item.strip()
+                ),
+            ),
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "requested_effect_ids": list(self.requested_effect_ids),
+            "requested_tool_ids": list(self.requested_tool_ids),
+            "preferred_tags": list(self.preferred_tags),
+            "prefers_background_tools": self.prefers_background_tools,
+            "prefers_mutating_tools": self.prefers_mutating_tools,
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "AgentToolPreferences":
+        payload = payload or {}
+        return cls(
+            requested_effect_ids=tuple(
+                str(item) for item in (payload.get("requested_effect_ids") or ())
+            ),
+            requested_tool_ids=tuple(
+                str(item) for item in (payload.get("requested_tool_ids") or ())
+            ),
+            preferred_tags=tuple(
+                str(item) for item in (payload.get("preferred_tags") or ())
+            ),
+            prefers_background_tools=bool(
+                payload.get("prefers_background_tools", True),
+            ),
+            prefers_mutating_tools=bool(
+                payload.get("prefers_mutating_tools", True),
+            ),
         )

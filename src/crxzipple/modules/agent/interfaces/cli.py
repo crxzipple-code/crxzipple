@@ -5,13 +5,19 @@ import typer
 from crxzipple.core.config import AgentProfileSettings
 from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
-from crxzipple.modules.agent.application import RegisterAgentProfileInput
+from crxzipple.modules.agent.application import (
+    ExportAgentHomeInput,
+    MigrateAgentHomeInput,
+    RegisterAgentProfileInput,
+    SyncAgentHomeInput,
+)
 from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
+    AgentToolPreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
 
@@ -33,6 +39,7 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         runtime_preferences=AgentRuntimePreferences.from_payload(
             profile.runtime_preferences,
         ),
+        tool_preferences=AgentToolPreferences.from_payload(profile.tool_preferences),
     )
 
 
@@ -75,9 +82,17 @@ def build_cli() -> typer.Typer:
         ),
         timeout_seconds: int = typer.Option(120, help="Execution timeout in seconds."),
         max_turns: int = typer.Option(12, help="Maximum turn budget."),
+        home_dir: str | None = typer.Option(
+            None,
+            help="Optional agent home directory for AGENT.md/SOUL.md/USER.md/MEMORY.md.",
+        ),
+        workdir: str | None = typer.Option(
+            None,
+            help="Optional default working directory for agent tasks.",
+        ),
         workspace: str | None = typer.Option(
             None,
-            help="Optional preferred workspace path.",
+            help="Legacy alias for setting both home_dir and workdir together.",
         ),
         sandbox_mode: str | None = typer.Option(
             None,
@@ -91,6 +106,31 @@ def build_cli() -> typer.Typer:
         emoji: str | None = typer.Option(None, help="Optional identity emoji."),
         avatar: str | None = typer.Option(None, help="Optional identity avatar."),
         enabled: bool = typer.Option(True, "--enabled/--disabled"),
+        requested_effect: list[str] = typer.Option(
+            None,
+            "--requested-effect",
+            help="Effect id this agent prefers to use when available.",
+        ),
+        requested_tool: list[str] = typer.Option(
+            None,
+            "--requested-tool",
+            help="Tool id this agent prefers to use when available.",
+        ),
+        preferred_tool_tag: list[str] = typer.Option(
+            None,
+            "--preferred-tool-tag",
+            help="Tool tag this agent prefers when multiple tools fit.",
+        ),
+        prefers_background_tools: bool = typer.Option(
+            True,
+            "--prefers-background-tools/--no-prefers-background-tools",
+            help="Whether this agent prefers background-capable tools.",
+        ),
+        prefers_mutating_tools: bool = typer.Option(
+            True,
+            "--prefers-mutating-tools/--no-prefers-mutating-tools",
+            help="Whether this agent prefers mutating tools when available.",
+        ),
     ) -> None:
         container = ensure_container(ctx)
         profile = container.agent_service.register_profile(
@@ -122,8 +162,17 @@ def build_cli() -> typer.Typer:
                     max_turns=max_turns,
                 ),
                 runtime_preferences=AgentRuntimePreferences(
+                    home_dir=home_dir,
+                    workdir=workdir,
                     workspace=workspace,
                     sandbox_mode=sandbox_mode,
+                ),
+                tool_preferences=AgentToolPreferences(
+                    requested_effect_ids=tuple(requested_effect or ()),
+                    requested_tool_ids=tuple(requested_tool or ()),
+                    preferred_tags=tuple(preferred_tool_tag or ()),
+                    prefers_background_tools=prefers_background_tools,
+                    prefers_mutating_tools=prefers_mutating_tools,
                 ),
             ),
         )
@@ -188,6 +237,77 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         echo_data(
             AgentProfileDTO.from_entity(container.agent_service.disable_profile(agent_id)),
+        )
+
+    @app.command("migrate-home")
+    def migrate_home(
+        ctx: typer.Context,
+        agent_id: str = typer.Argument(..., help="Agent profile identifier."),
+        home_dir: str = typer.Argument(..., help="Target agent home directory."),
+        workdir: str | None = typer.Option(
+            None,
+            help="Optional workdir to keep after moving agent-home files.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        result = container.agent_service.migrate_profile_home(
+            MigrateAgentHomeInput(
+                id=agent_id,
+                home_dir=home_dir,
+                workdir=workdir,
+            ),
+        )
+        echo_data(
+            {
+                "source_dir": result.source_dir,
+                "home_dir": result.profile.runtime_preferences.resolved_home_dir,
+                "workdir": result.profile.runtime_preferences.resolved_workdir,
+                "copied_paths": list(result.copied_paths),
+                "skipped_paths": list(result.skipped_paths),
+                "profile": AgentProfileDTO.from_entity(result.profile),
+            },
+        )
+
+    @app.command("sync-home")
+    def sync_home(
+        ctx: typer.Context,
+        agent_id: str = typer.Argument(..., help="Agent profile identifier."),
+        home_dir: str | None = typer.Option(
+            None,
+            help="Optional agent home directory override. Defaults to the profile home_dir.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        result = container.agent_service.sync_profile_home(
+            SyncAgentHomeInput(id=agent_id, home_dir=home_dir),
+        )
+        echo_data(
+            {
+                "home_dir": result.home_dir,
+                "path": result.path,
+                "profile": AgentProfileDTO.from_entity(result.profile),
+            },
+        )
+
+    @app.command("export-home")
+    def export_home(
+        ctx: typer.Context,
+        agent_id: str = typer.Argument(..., help="Agent profile identifier."),
+        home_dir: str | None = typer.Option(
+            None,
+            help="Optional agent home directory override. Defaults to the profile home_dir.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        result = container.agent_service.export_profile_home(
+            ExportAgentHomeInput(id=agent_id, home_dir=home_dir),
+        )
+        echo_data(
+            {
+                "home_dir": result.home_dir,
+                "path": result.path,
+                "profile": AgentProfileDTO.from_entity(result.profile),
+            },
         )
 
     return app

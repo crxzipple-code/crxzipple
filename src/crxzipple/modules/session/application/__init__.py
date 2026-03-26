@@ -1,8 +1,10 @@
 from crxzipple.modules.session.application.services import (
+    ArchiveSessionMessagesInput,
     AppendSessionMessageInput,
     EnsureSessionInput,
     ListSessionInstancesInput,
     ListSessionMessagesInput,
+    MergeSessionMetadataInput,
     RoutedSessionResult,
     ResetSessionInput,
     SessionApplicationService,
@@ -12,10 +14,12 @@ from crxzipple.modules.session.application.services import (
 )
 
 __all__ = [
+    "ArchiveSessionMessagesInput",
     "AppendSessionMessageInput",
     "EnsureSessionInput",
     "ListSessionInstancesInput",
     "ListSessionMessagesInput",
+    "MergeSessionMetadataInput",
     "ResetSessionInput",
     "RoutedSessionResult",
     "SessionApplicationService",

@@ -24,6 +24,7 @@ class ToolSpec(ValueObject):
     kind: ToolKind = ToolKind.FUNCTION
     parameters: tuple[ToolParameter, ...] = field(default_factory=tuple)
     tags: tuple[str, ...] = field(default_factory=tuple)
+    required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
     execution_policy: ToolExecutionPolicy = field(default_factory=ToolExecutionPolicy)
     execution_support: ToolExecutionSupport = field(default_factory=ToolExecutionSupport)
     source_kind: ToolSourceKind = ToolSourceKind.MANUAL
@@ -47,6 +48,17 @@ class ToolSpec(ValueObject):
                 ),
             ),
         )
+        object.__setattr__(
+            self,
+            "required_effect_ids",
+            tuple(
+                dict.fromkeys(
+                    effect_id.strip()
+                    for effect_id in self.required_effect_ids
+                    if effect_id is not None and effect_id.strip()
+                ),
+            ),
+        )
 
     @classmethod
     def from_tool(cls, tool: Tool, *, provider_name: str) -> "ToolSpec":
@@ -58,6 +70,7 @@ class ToolSpec(ValueObject):
             kind=tool.kind,
             parameters=tool.parameters,
             tags=tool.tags,
+            required_effect_ids=tool.required_effect_ids,
             execution_policy=tool.execution_policy,
             execution_support=tool.execution_support,
             source_kind=tool.source_kind,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -17,11 +17,21 @@ from crxzipple.interfaces.turns import (
     submit_turn,
 )
 from crxzipple.modules.orchestration.domain import (
+    ApprovalDecision,
+    ApprovalResolution,
     OrchestrationRunNotFoundError,
     OrchestrationQueuePolicy,
     OrchestrationValidationError,
+    PendingApprovalRequest,
 )
-from crxzipple.modules.orchestration.interfaces.dto import OrchestrationRunDTO
+from crxzipple.modules.orchestration.application import ResolveApprovalRequestInput
+from crxzipple.modules.orchestration.application import RequestCompactionInput
+from crxzipple.modules.orchestration.application import RequestHeartbeatInput
+from crxzipple.modules.orchestration.application import RequestMemoryFlushInput
+from crxzipple.modules.orchestration.interfaces.dto import (
+    OrchestrationRunDTO,
+    PromptPreviewDTO,
+)
 from crxzipple.modules.orchestration.interfaces.http_models import OrchestrationRunResponse
 from crxzipple.modules.session.application import ListSessionMessagesInput
 from crxzipple.modules.session.domain import DirectSessionScope, SessionNotFoundError
@@ -71,6 +81,75 @@ class TurnSnapshotResponse(TurnResponse):
     messages: list[SessionMessageResponse] = Field(default_factory=list)
 
 
+class PromptPreviewMessageResponse(BaseModel):
+    role: str
+    content: Any
+    name: str | None = None
+    tool_call_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptPreviewToolSchemaResponse(BaseModel):
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptPreviewContextFileResponse(BaseModel):
+    path: str
+    chars: int
+
+
+class PromptPreviewResponse(BaseModel):
+    run_id: str
+    llm_id: str
+    mode: str
+    messages: list[PromptPreviewMessageResponse] = Field(default_factory=list)
+    tool_schemas: list[PromptPreviewToolSchemaResponse] = Field(default_factory=list)
+    prompt_report: dict[str, Any] | None = None
+    workspace_context_workspace: str | None = None
+    workspace_context_files: list[PromptPreviewContextFileResponse] = Field(default_factory=list)
+
+    @classmethod
+    def from_dto(cls, dto: PromptPreviewDTO) -> "PromptPreviewResponse":
+        return cls(
+            run_id=dto.run_id,
+            llm_id=dto.llm_id,
+            mode=dto.mode,
+            messages=[
+                PromptPreviewMessageResponse(
+                    role=item.role,
+                    content=item.content,
+                    name=item.name,
+                    tool_call_id=item.tool_call_id,
+                    metadata=dict(item.metadata),
+                )
+                for item in dto.messages
+            ],
+            tool_schemas=[
+                PromptPreviewToolSchemaResponse(
+                    name=item.name,
+                    description=item.description,
+                    input_schema=dict(item.input_schema),
+                )
+                for item in dto.tool_schemas
+            ],
+            prompt_report=(
+                dict(dto.prompt_report)
+                if dto.prompt_report is not None
+                else None
+            ),
+            workspace_context_workspace=dto.workspace_context_workspace,
+            workspace_context_files=[
+                PromptPreviewContextFileResponse(
+                    path=item.path,
+                    chars=item.chars,
+                )
+                for item in dto.workspace_context_files
+            ],
+        )
+
+
 class TurnMessageEventResponse(BaseModel):
     run_id: str
     message: SessionMessageResponse
@@ -95,8 +174,76 @@ class TurnToolEventResponse(BaseModel):
     created_at: str
 
 
+class PendingApprovalRequestResponse(BaseModel):
+    request_id: str
+    effect_id: str
+    label: str
+    reason: str
+    tool_ids: list[str]
+    tool_name: str | None = None
+    scope_hint: str | None = None
+    created_at: str
+
+    @classmethod
+    def from_entity(
+        cls,
+        request: PendingApprovalRequest,
+    ) -> "PendingApprovalRequestResponse":
+        return cls(
+            request_id=request.request_id,
+            effect_id=request.effect_id,
+            label=request.label,
+            reason=request.reason,
+            tool_ids=list(request.tool_ids),
+            tool_name=request.tool_name,
+            scope_hint=request.scope_hint.value if request.scope_hint is not None else None,
+            created_at=request.created_at.isoformat(),
+        )
+
+
+class TurnApprovalRequestedEventResponse(BaseModel):
+    run_id: str
+    status: str
+    stage: str
+    request: PendingApprovalRequestResponse
+
+
+class TurnApprovalResolvedEventResponse(BaseModel):
+    run_id: str
+    request_id: str
+    decision: str
+    resolved_at: str
+
+
 class CancelTurnRequest(BaseModel):
     reason: str | None = None
+
+
+class ResolveApprovalRequestRequest(BaseModel):
+    decision: ApprovalDecision
+
+
+class RequestCompactionRequest(BaseModel):
+    reason: str | None = None
+    preserve: str | None = None
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = Field(default=None, ge=0)
+    max_steps: int = Field(default=1, ge=1)
+
+
+class RequestHeartbeatRequest(BaseModel):
+    reason: str | None = None
+    idle_reply: str | None = "HEARTBEAT_OK"
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = Field(default=None, ge=0)
+    max_steps: int = Field(default=1, ge=1)
+
+
+class RequestMemoryFlushRequest(BaseModel):
+    reason: str | None = None
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = Field(default=None, ge=0)
+    max_steps: int = Field(default=1, ge=1)
 
 
 def _turn_response_from_run(run) -> TurnResponse:  # noqa: ANN001
@@ -119,7 +266,10 @@ def _list_turn_messages(
         return []
     try:
         items = container.session_service.list_messages(
-            ListSessionMessagesInput(session_key=session_key),
+            ListSessionMessagesInput(
+                session_key=session_key,
+                include_archived=False,
+            ),
         )
     except SessionNotFoundError:
         return []
@@ -211,6 +361,20 @@ def _format_sse_event(event_name: str, payload: dict[str, object]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _pending_approval_request_from_run(run) -> PendingApprovalRequest | None:  # noqa: ANN001
+    raw_request = run.metadata.get("pending_approval_request")
+    if not isinstance(raw_request, dict):
+        return None
+    return PendingApprovalRequest.from_payload(raw_request)
+
+
+def _last_approval_resolution_from_run(run) -> ApprovalResolution | None:  # noqa: ANN001
+    raw_resolution = run.metadata.get("last_approval_resolution")
+    if not isinstance(raw_resolution, dict):
+        return None
+    return ApprovalResolution.from_payload(raw_resolution)
+
+
 @router.post(
     "/turns",
     response_model=TurnResponse,
@@ -268,6 +432,25 @@ def get_turn(
     return _turn_response_from_run(run)
 
 
+@router.get("/turns/{run_id}/prompt-preview", response_model=PromptPreviewResponse)
+def get_turn_prompt_preview(
+    run_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> PromptPreviewResponse:
+    try:
+        preview = container.orchestration_service.preview_prompt(run_id)
+    except OrchestrationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except OrchestrationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return PromptPreviewResponse.from_dto(
+        PromptPreviewDTO.from_value(
+            run_id=run_id,
+            preview=preview,
+        ),
+    )
+
+
 @router.post("/turns/{run_id}/cancel", response_model=TurnResponse)
 def cancel_turn(
     run_id: str,
@@ -276,6 +459,121 @@ def cancel_turn(
 ) -> TurnResponse:
     try:
         run = container.orchestration_service.cancel_run(run_id, reason=payload.reason)
+    except OrchestrationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except OrchestrationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _turn_response_from_run(run)
+
+
+@router.post(
+    "/turns/{run_id}/compact",
+    response_model=TurnResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_turn_compaction(
+    run_id: str,
+    payload: RequestCompactionRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> TurnResponse:
+    try:
+        run = container.orchestration_service.request_compaction(
+            RequestCompactionInput(
+                anchor_run_id=run_id,
+                reason=payload.reason,
+                preserve=payload.preserve,
+                queue_policy=payload.queue_policy,
+                priority=payload.priority,
+                max_steps=payload.max_steps,
+            ),
+        )
+    except OrchestrationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except OrchestrationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _turn_response_from_run(run)
+
+
+@router.post(
+    "/turns/{run_id}/heartbeat",
+    response_model=TurnResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_turn_heartbeat(
+    run_id: str,
+    payload: RequestHeartbeatRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> TurnResponse:
+    try:
+        run = container.orchestration_service.request_heartbeat(
+            RequestHeartbeatInput(
+                anchor_run_id=run_id,
+                reason=payload.reason,
+                idle_reply=payload.idle_reply,
+                queue_policy=payload.queue_policy,
+                priority=payload.priority,
+                max_steps=payload.max_steps,
+            ),
+        )
+    except OrchestrationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except OrchestrationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _turn_response_from_run(run)
+
+
+@router.post(
+    "/turns/{run_id}/memory-flush",
+    response_model=TurnResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def request_turn_memory_flush(
+    run_id: str,
+    payload: RequestMemoryFlushRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> TurnResponse:
+    try:
+        run = container.orchestration_service.request_memory_flush(
+            RequestMemoryFlushInput(
+                anchor_run_id=run_id,
+                reason=payload.reason,
+                queue_policy=payload.queue_policy,
+                priority=payload.priority,
+                max_steps=payload.max_steps,
+            ),
+        )
+    except OrchestrationRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except OrchestrationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _turn_response_from_run(run)
+
+
+@router.post(
+    "/turns/{run_id}/approvals/{request_id}",
+    response_model=TurnResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def resolve_turn_approval(
+    run_id: str,
+    request_id: str,
+    payload: ResolveApprovalRequestRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> TurnResponse:
+    try:
+        run = container.orchestration_service.resolve_approval_request(
+            ResolveApprovalRequestInput(
+                run_id=run_id,
+                request_id=request_id,
+                decision=payload.decision,
+            ),
+        )
+        if run.status.value == "queued":
+            processed = container.orchestration_service.process_next_queued_run(
+                worker_id=f"http-approval:{run.id}",
+            )
+            if processed is not None and processed.id == run.id:
+                run = processed
     except OrchestrationRunNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except OrchestrationValidationError as exc:
@@ -301,6 +599,8 @@ def stream_turn_events(
         last_message_ids: set[str] = set()
         last_stream_invocation_id: str | None = None
         last_stream_text = ""
+        last_pending_approval_request_id: str | None = None
+        last_approval_resolution_key: tuple[str, str, str] | None = None
         emitted_initial = False
 
         while time.monotonic() < deadline:
@@ -312,6 +612,8 @@ def stream_turn_events(
                 container,
                 session_key=_session_key_from_run(run),
             )
+            pending_approval_request = _pending_approval_request_from_run(run)
+            approval_resolution = _last_approval_resolution_from_run(run)
             stream_invocation_id = run.metadata.get("llm_stream_invocation_id")
             stream_text = run.metadata.get("llm_stream_text")
             if not isinstance(stream_invocation_id, str) or not stream_invocation_id.strip():
@@ -332,6 +634,8 @@ def stream_turn_events(
                 json.dumps(run_payload["error"], sort_keys=True, ensure_ascii=False)
                 if run_payload["error"] is not None
                 else None,
+                pending_approval_request.to_payload() if pending_approval_request is not None else None,
+                approval_resolution.to_payload() if approval_resolution is not None else None,
             )
 
             if not emitted_initial:
@@ -344,9 +648,60 @@ def stream_turn_events(
                     messages=messages,
                 )
                 yield _format_sse_event("snapshot", snapshot.model_dump(mode="json"))
+                if pending_approval_request is not None:
+                    approval_event = TurnApprovalRequestedEventResponse(
+                        run_id=run_id,
+                        status=str(run_payload["status"]),
+                        stage=str(run_payload["stage"]),
+                        request=PendingApprovalRequestResponse.from_entity(
+                            pending_approval_request,
+                        ),
+                    )
+                    yield _format_sse_event(
+                        "approval_requested",
+                        approval_event.model_dump(mode="json"),
+                    )
+                    last_pending_approval_request_id = pending_approval_request.request_id
             elif signature != last_signature:
                 last_signature = signature
                 yield _format_sse_event("updated", payload)
+
+            if pending_approval_request is not None:
+                if pending_approval_request.request_id != last_pending_approval_request_id:
+                    approval_event = TurnApprovalRequestedEventResponse(
+                        run_id=run_id,
+                        status=str(run_payload["status"]),
+                        stage=str(run_payload["stage"]),
+                        request=PendingApprovalRequestResponse.from_entity(
+                            pending_approval_request,
+                        ),
+                    )
+                    yield _format_sse_event(
+                        "approval_requested",
+                        approval_event.model_dump(mode="json"),
+                    )
+                    last_pending_approval_request_id = pending_approval_request.request_id
+            else:
+                last_pending_approval_request_id = None
+
+            if approval_resolution is not None:
+                resolution_key = (
+                    approval_resolution.request_id,
+                    approval_resolution.decision.value,
+                    approval_resolution.resolved_at.isoformat(),
+                )
+                if resolution_key != last_approval_resolution_key:
+                    resolution_event = TurnApprovalResolvedEventResponse(
+                        run_id=run_id,
+                        request_id=approval_resolution.request_id,
+                        decision=approval_resolution.decision.value,
+                        resolved_at=approval_resolution.resolved_at.isoformat(),
+                    )
+                    yield _format_sse_event(
+                        "approval_resolved",
+                        resolution_event.model_dump(mode="json"),
+                    )
+                    last_approval_resolution_key = resolution_key
 
             if stream_invocation_id is not None:
                 if stream_invocation_id != last_stream_invocation_id:

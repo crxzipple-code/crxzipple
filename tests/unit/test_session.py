@@ -9,6 +9,7 @@ from crxzipple.modules.orchestration.application import (
     SessionResolver,
 )
 from crxzipple.modules.session.application import (
+    ArchiveSessionMessagesInput,
     AppendSessionMessageInput,
     EnsureSessionInput,
     ListSessionInstancesInput,
@@ -191,6 +192,52 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(second.source_id, "run-1")
         self.assertEqual(second.visibility.value, "internal")
         self.assertEqual([item.sequence_no for item in history], [1, 2])
+
+    def test_archive_messages_marks_existing_messages_without_duplication(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+                llm_id="openai.gpt-5.4-mini",
+            ),
+        )
+        first = self.service.append_message(
+            AppendSessionMessageInput(
+                session_key=session.id,
+                role="user",
+                content="hello",
+            ),
+        )
+        second = self.service.append_message(
+            AppendSessionMessageInput(
+                session_key=session.id,
+                role="assistant",
+                content="hi",
+            ),
+        )
+
+        archived_count = self.service.archive_messages(
+            ArchiveSessionMessagesInput(
+                session_key=session.id,
+                session_id=session.active_session_id,
+                max_sequence_no=1,
+                reason="compaction",
+            ),
+        )
+        history = self.service.list_messages(
+            ListSessionMessagesInput(
+                session_key=session.id,
+                active_session_only=True,
+            ),
+        )
+
+        self.assertEqual(archived_count, 1)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0].id, first.id)
+        self.assertEqual(history[0].visibility.value, "archived")
+        self.assertEqual(history[0].metadata["archived_reason"], "compaction")
+        self.assertEqual(history[1].id, second.id)
+        self.assertEqual(history[1].visibility.value, "default")
 
     def test_sync_routed_session_records_runtime_binding_snapshots(self) -> None:
         result = self.resolver.resolve(

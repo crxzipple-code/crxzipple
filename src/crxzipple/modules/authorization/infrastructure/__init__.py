@@ -7,10 +7,13 @@ from crxzipple.modules.authorization.infrastructure.loaders.yaml_loader import (
 from crxzipple.modules.authorization.infrastructure.repositories import (
     InMemoryAuthorizationPolicyRepository,
 )
+from crxzipple.modules.authorization.infrastructure.persistence.repositories import (
+    SqlAlchemyTemporaryAuthorizationGrantRepository,
+)
 
 __all__ = [
     "AbacAuthorizationEvaluator",
     "InMemoryAuthorizationPolicyRepository",
+    "SqlAlchemyTemporaryAuthorizationGrantRepository",
     "YamlAuthorizationPolicyLoader",
 ]
-

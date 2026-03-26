@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import requests
@@ -14,6 +15,29 @@ from crxzipple.modules.llm.domain.value_objects import LlmMessage, ToolCallInten
 
 OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 OPENAI_TOOL_NAME_MAX_LENGTH = 64
+OPENAI_TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS = 3
+OPENAI_TRANSIENT_STREAM_INITIAL_BACKOFF_SECONDS = 0.25
+
+
+class RetryableOpenAIStreamError(RuntimeError):
+    """Signals an upstream error that is safe to replay before any output was emitted."""
+
+
+def is_retryable_openai_stream_exception(exc: BaseException) -> bool:
+    if isinstance(exc, RetryableOpenAIStreamError):
+        return True
+    return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+
+
+def openai_stream_backoff_seconds(attempt_number: int) -> float:
+    if attempt_number <= 1:
+        return OPENAI_TRANSIENT_STREAM_INITIAL_BACKOFF_SECONDS
+    return OPENAI_TRANSIENT_STREAM_INITIAL_BACKOFF_SECONDS * (2 ** (attempt_number - 1))
+
+
+def sleep_before_openai_stream_retry(attempt_number: int) -> None:
+    time.sleep(openai_stream_backoff_seconds(attempt_number))
 
 
 def join_url(base_url: str, path: str) -> str:

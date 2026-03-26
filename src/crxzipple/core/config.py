@@ -15,6 +15,9 @@ DEFAULT_OPENAPI_PROVIDER_DIR = PROJECT_ROOT / "config" / "tool_providers"
 DEFAULT_LLM_PROFILE_DIR = PROJECT_ROOT / "config" / "llm_profiles"
 DEFAULT_AGENT_PROFILE_DIR = PROJECT_ROOT / "config" / "agent_profiles"
 DEFAULT_AUTHORIZATION_POLICY_DIR = PROJECT_ROOT / "config" / "authorization_policies"
+DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH = (
+    PROJECT_ROOT / ".crxzipple" / "authorization_runtime.yaml"
+)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -40,6 +43,7 @@ class OpenApiProviderSettings:
     description: str = ""
     timeout_seconds: int = 30
     credential_bindings: tuple[OpenApiCredentialBinding, ...] = ()
+    default_effect_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +52,7 @@ class McpProviderSettings:
     command: tuple[str, ...]
     description: str = ""
     timeout_seconds: int = 30
+    default_effect_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +61,7 @@ class LlmProfileSettings:
     provider: str
     api_family: str
     model_name: str
+    context_window_tokens: int | None = None
     model_family: str = "general"
     capabilities: tuple[str, ...] = ()
     default_params: dict[str, Any] = field(default_factory=dict)
@@ -75,6 +81,7 @@ class AgentProfileDefaultsSettings:
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
+    tool_preferences: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +95,7 @@ class AgentProfileSettings:
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
+    tool_preferences: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_openapi_provider_settings() -> tuple[OpenApiProviderSettings, ...]:
@@ -229,6 +237,11 @@ def _build_openapi_provider_settings(
             raw.get("credentials", {}),
             provider_name=name,
         ),
+        default_effect_ids=tuple(
+            str(item).strip()
+            for item in raw.get("default_effect_ids", []) or []
+            if str(item).strip()
+        ),
     )
 
 
@@ -365,6 +378,11 @@ def _load_mcp_provider_settings() -> tuple[McpProviderSettings, ...]:
                 command=command_parts,
                 description=str(item.get("description", "")).strip(),
                 timeout_seconds=max(int(item.get("timeout_seconds", 30)), 1),
+                default_effect_ids=tuple(
+                    str(part).strip()
+                    for part in item.get("default_effect_ids", []) or []
+                    if str(part).strip()
+                ),
             ),
         )
 
@@ -513,6 +531,14 @@ def _build_llm_profile_settings(
         provider=provider,
         api_family=api_family,
         model_name=model_name,
+        context_window_tokens=(
+            max(
+                int(raw.get("context_window_tokens", raw.get("context_window"))),
+                1,
+            )
+            if raw.get("context_window_tokens", raw.get("context_window")) is not None
+            else None
+        ),
         model_family=str(raw.get("model_family", "general")).strip() or "general",
         capabilities=capabilities,
         default_params=default_params,
@@ -704,6 +730,10 @@ def _build_agent_profile_settings(
             f"Agent profile '{profile_id}' runtime_preferences"
         ),
     )
+    tool_preferences = _coerce_object_payload(
+        raw.get("tool_preferences", {}),
+        source_description=(f"Agent profile '{profile_id}' tool_preferences"),
+    )
 
     return AgentProfileSettings(
         id=profile_id,
@@ -715,6 +745,7 @@ def _build_agent_profile_settings(
         llm_routing_policy=llm_routing_policy,
         execution_policy=execution_policy,
         runtime_preferences=runtime_preferences,
+        tool_preferences=tool_preferences,
     )
 
 
@@ -778,7 +809,17 @@ def _iter_authorization_policy_paths() -> tuple[Path, ...]:
             continue
         seen.add(resolved)
         unique_files.append(resolved)
+    runtime_path = _authorization_runtime_policy_path().resolve()
+    if runtime_path not in seen:
+        unique_files.append(runtime_path)
     return tuple(unique_files)
+
+
+def _authorization_runtime_policy_path() -> Path:
+    raw = os.getenv("APP_AUTHORIZATION_RUNTIME_POLICY_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,8 +840,17 @@ class Settings:
     agent_profiles: tuple[AgentProfileSettings, ...] = ()
     authorization_enabled: bool = False
     authorization_policy_paths: tuple[str, ...] = ()
+    authorization_runtime_policy_path: str = str(DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH)
+    prompt_system_max_chars: int = 120_000
+    prompt_system_max_tokens: int = 30_000
+    prompt_system_context_window_ratio: float = 0.15
     orchestration_run_lease_seconds: int = 30
     orchestration_run_heartbeat_seconds: float = 5.0
+    orchestration_auto_compaction_enabled: bool = True
+    orchestration_auto_compaction_transcript_chars: int = 48_000
+    orchestration_auto_compaction_transcript_tokens: int = 12_000
+    orchestration_auto_compaction_reserve_tokens: int = 20_000
+    orchestration_auto_compaction_soft_threshold_tokens: int = 4_000
     tool_run_max_attempts: int = 3
     tool_run_lease_seconds: int = 30
     tool_run_heartbeat_seconds: float = 5.0
@@ -824,6 +874,19 @@ def load_settings() -> Settings:
         authorization_policy_paths=tuple(
             str(path) for path in _iter_authorization_policy_paths()
         ),
+        authorization_runtime_policy_path=str(_authorization_runtime_policy_path()),
+        prompt_system_max_chars=max(
+            int(os.getenv("APP_PROMPT_SYSTEM_MAX_CHARS", "120000")),
+            1,
+        ),
+        prompt_system_max_tokens=max(
+            int(os.getenv("APP_PROMPT_SYSTEM_MAX_TOKENS", "30000")),
+            1,
+        ),
+        prompt_system_context_window_ratio=max(
+            float(os.getenv("APP_PROMPT_SYSTEM_CONTEXT_WINDOW_RATIO", "0.15")),
+            0.01,
+        ),
         orchestration_run_lease_seconds=max(
             int(os.getenv("APP_ORCHESTRATION_RUN_LEASE_SECONDS", "30")),
             1,
@@ -831,6 +894,46 @@ def load_settings() -> Settings:
         orchestration_run_heartbeat_seconds=max(
             float(os.getenv("APP_ORCHESTRATION_RUN_HEARTBEAT_SECONDS", "5")),
             0.1,
+        ),
+        orchestration_auto_compaction_enabled=_env_flag(
+            "APP_ORCHESTRATION_AUTO_COMPACTION_ENABLED",
+            default=True,
+        ),
+        orchestration_auto_compaction_transcript_chars=max(
+            int(
+                os.getenv(
+                    "APP_ORCHESTRATION_AUTO_COMPACTION_TRANSCRIPT_CHARS",
+                    "48000",
+                ),
+            ),
+            1,
+        ),
+        orchestration_auto_compaction_transcript_tokens=max(
+            int(
+                os.getenv(
+                    "APP_ORCHESTRATION_AUTO_COMPACTION_TRANSCRIPT_TOKENS",
+                    "12000",
+                ),
+            ),
+            1,
+        ),
+        orchestration_auto_compaction_reserve_tokens=max(
+            int(
+                os.getenv(
+                    "APP_ORCHESTRATION_AUTO_COMPACTION_RESERVE_TOKENS",
+                    "20000",
+                ),
+            ),
+            0,
+        ),
+        orchestration_auto_compaction_soft_threshold_tokens=max(
+            int(
+                os.getenv(
+                    "APP_ORCHESTRATION_AUTO_COMPACTION_SOFT_THRESHOLD_TOKENS",
+                    "4000",
+                ),
+            ),
+            0,
         ),
         tool_run_max_attempts=max(int(os.getenv("APP_TOOL_RUN_MAX_ATTEMPTS", "3")), 1),
         tool_run_lease_seconds=max(int(os.getenv("APP_TOOL_RUN_LEASE_SECONDS", "30")), 1),

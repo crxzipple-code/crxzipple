@@ -17,6 +17,7 @@ from crxzipple.modules.orchestration.application import (
     AdvanceOrchestrationRunInput,
     CompleteOrchestrationRunInput,
     FailOrchestrationRunInput,
+    RequestDueHeartbeatsInput,
     ResumeOrchestrationRunInput,
     WaitOnToolInput,
 )
@@ -170,6 +171,51 @@ def build_cli() -> typer.Typer:
                 )
                 echo_data(OrchestrationRunDTO.from_entity(run))
             except (OrchestrationValidationError, OrchestrationRunNotFoundError) as exc:
+                _exit_error(exc)
+
+    @app.command("request-due-heartbeats")
+    def request_due_heartbeats(
+        idle_seconds: int = typer.Option(
+            ...,
+            "--idle-seconds",
+            min=1,
+            help="Minimum idle age before queuing a heartbeat run.",
+        ),
+        agent_id: str | None = typer.Option(
+            None,
+            "--agent-id",
+            help="Optional agent filter.",
+        ),
+        limit: int | None = typer.Option(
+            None,
+            "--limit",
+            min=1,
+            help="Optional maximum number of heartbeat runs to queue.",
+        ),
+        reason: str | None = typer.Option(
+            None,
+            "--reason",
+            help="Optional heartbeat reason.",
+        ),
+        idle_reply: str = typer.Option(
+            "HEARTBEAT_OK",
+            "--idle-reply",
+            help="Default short reply when nothing actionable is pending.",
+        ),
+    ) -> None:
+        with _worker_container() as container:
+            try:
+                runs = container.orchestration_service.request_due_heartbeats(
+                    RequestDueHeartbeatsInput(
+                        idle_seconds=idle_seconds,
+                        agent_id=agent_id,
+                        limit=limit,
+                        reason=reason,
+                        idle_reply=idle_reply,
+                    ),
+                )
+                echo_data([OrchestrationRunDTO.from_entity(run) for run in runs])
+            except OrchestrationValidationError as exc:
                 _exit_error(exc)
 
     @app.command("recover-abandoned")

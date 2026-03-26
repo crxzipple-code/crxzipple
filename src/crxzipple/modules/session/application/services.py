@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Protocol
 from uuid import uuid4
@@ -8,6 +8,7 @@ from uuid import uuid4
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.exceptions import (
     SessionInstanceNotFoundError,
+    SessionMessageNotFoundError,
     SessionNotFoundError,
     SessionValidationError,
 )
@@ -71,10 +72,26 @@ class ResetSessionInput:
 
 
 @dataclass(frozen=True, slots=True)
+class MergeSessionMetadataInput:
+    session_key: str
+    metadata: dict[str, object] = field(default_factory=dict)
+    touch_activity: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ListSessionMessagesInput:
     session_key: str
     limit: int | None = None
     active_session_only: bool = False
+    include_archived: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveSessionMessagesInput:
+    session_key: str
+    session_id: str
+    max_sequence_no: int | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +418,40 @@ class SessionApplicationService:
         with self.uow_factory() as uow:
             return uow.sessions.list(agent_id=agent_id)
 
+    def merge_session_metadata(
+        self,
+        session_key: str,
+        *,
+        metadata: dict[str, object],
+        touch_activity: bool = True,
+    ) -> Session:
+        with self.uow_factory() as uow:
+            session = uow.sessions.get(session_key)
+            if session is None:
+                raise SessionNotFoundError(f"Session '{session_key}' was not found.")
+            session.apply_updates(
+                metadata=metadata,
+                updated_at=utcnow() if touch_activity else session.updated_at,
+            )
+            active_instance = uow.session_instances.get(session.active_session_id)
+            if active_instance is not None:
+                self._sync_instance_runtime_binding(active_instance, session=session)
+                uow.session_instances.add(active_instance)
+            session.record_event(
+                DomainEvent(
+                    name="session.updated",
+                    payload={
+                        "session_key": session.id,
+                        "active_session_id": session.active_session_id,
+                        **self._runtime_binding_payload(session),
+                    },
+                ),
+            )
+            uow.sessions.add(session)
+            uow.collect(session)
+            uow.commit()
+            return session
+
     def list_instances(
         self,
         data: ListSessionInstancesInput,
@@ -421,6 +472,15 @@ class SessionApplicationService:
                     f"Session instance '{instance_id}' was not found.",
                 )
             return instance
+
+    def get_message(self, message_id: str) -> SessionMessage:
+        with self.uow_factory() as uow:
+            message = uow.session_messages.get(message_id)
+            if message is None:
+                raise SessionMessageNotFoundError(
+                    f"Session message '{message_id}' was not found.",
+                )
+            return message
 
     def append_message(self, data: AppendSessionMessageInput) -> SessionMessage:
         with self.uow_factory() as uow:
@@ -473,6 +533,57 @@ class SessionApplicationService:
             uow.commit()
             return message
 
+    def archive_messages(self, data: ArchiveSessionMessagesInput) -> int:
+        with self.uow_factory() as uow:
+            session = uow.sessions.get(data.session_key)
+            if session is None:
+                raise SessionNotFoundError(
+                    f"Session '{data.session_key}' was not found.",
+                )
+            if uow.session_instances.get(data.session_id) is None:
+                raise SessionInstanceNotFoundError(
+                    f"Session instance '{data.session_id}' was not found.",
+                )
+            messages = uow.session_messages.list(
+                session_key=session.id,
+                session_id=data.session_id,
+            )
+            archived_count = 0
+            for message in messages:
+                if (
+                    data.max_sequence_no is not None
+                    and message.sequence_no > data.max_sequence_no
+                ):
+                    continue
+                if message.visibility is SessionMessageVisibility.ARCHIVED:
+                    continue
+                metadata = dict(message.metadata)
+                if data.reason is not None and data.reason.strip():
+                    metadata["archived_reason"] = data.reason.strip()
+                archived = replace(
+                    message,
+                    visibility=SessionMessageVisibility.ARCHIVED,
+                    metadata=metadata,
+                )
+                uow.session_messages.add(archived)
+                archived_count += 1
+            if archived_count > 0:
+                session.apply_updates(updated_at=utcnow())
+                session.record_event(
+                    DomainEvent(
+                        name="session.messages.archived",
+                        payload={
+                            "session_key": session.id,
+                            "session_id": data.session_id,
+                            "count": archived_count,
+                        },
+                    ),
+                )
+                uow.sessions.add(session)
+                uow.collect(session)
+            uow.commit()
+            return archived_count
+
     def get_message_by_source(
         self,
         *,
@@ -513,6 +624,7 @@ class SessionApplicationService:
                 session_key=session.id,
                 session_id=session_id,
                 limit=data.limit,
+                include_archived=data.include_archived,
             )
 
     def reset_session(self, data: ResetSessionInput) -> Session:

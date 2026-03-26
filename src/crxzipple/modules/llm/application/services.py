@@ -44,6 +44,7 @@ class RegisterLlmProfileInput:
     provider: LlmProviderKind
     api_family: LlmApiFamily
     model_name: str
+    context_window_tokens: int | None = None
     model_family: LlmModelFamily = LlmModelFamily.GENERAL
     capabilities: tuple[LlmCapability, ...] = field(default_factory=tuple)
     default_params: LlmDefaults = field(default_factory=LlmDefaults)
@@ -118,6 +119,7 @@ class LlmApplicationService:
                 provider=data.provider,
                 api_family=data.api_family,
                 model_name=data.model_name,
+                context_window_tokens=data.context_window_tokens,
                 model_family=data.model_family,
                 capabilities=data.capabilities,
                 default_params=data.default_params,
@@ -493,6 +495,7 @@ class LlmApplicationService:
             provider=data.provider,
             api_family=data.api_family,
             model_name=data.model_name,
+            context_window_tokens=data.context_window_tokens,
             model_family=data.model_family,
             capabilities=data.capabilities,
             default_params=data.default_params,

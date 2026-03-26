@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from crxzipple.modules.llm.interfaces.dto import LlmMessageDTO, ToolSchemaDTO
+from crxzipple.modules.orchestration.application import PromptPreview
 from crxzipple.modules.orchestration.domain import (
     DeliveryTarget,
     InboundInstruction,
@@ -132,4 +134,56 @@ class OrchestrationRunDTO:
             queued_at=run.queued_at,
             started_at=run.started_at,
             completed_at=run.completed_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PromptPreviewContextFileDTO:
+    path: str
+    chars: int
+
+
+@dataclass(frozen=True, slots=True)
+class PromptPreviewDTO:
+    run_id: str
+    llm_id: str
+    mode: str
+    messages: tuple[LlmMessageDTO, ...]
+    tool_schemas: tuple[ToolSchemaDTO, ...]
+    prompt_report: dict[str, object] | None
+    workspace_context_workspace: str | None
+    workspace_context_files: tuple[PromptPreviewContextFileDTO, ...]
+
+    @classmethod
+    def from_value(
+        cls,
+        *,
+        run_id: str,
+        preview: PromptPreview,
+    ) -> "PromptPreviewDTO":
+        return cls(
+            run_id=run_id,
+            llm_id=preview.llm_id,
+            mode=preview.mode.value,
+            messages=tuple(
+                LlmMessageDTO.from_value(message)
+                for message in preview.messages
+            ),
+            tool_schemas=tuple(
+                ToolSchemaDTO.from_value(schema)
+                for schema in preview.tool_schemas
+            ),
+            prompt_report=(
+                preview.prompt_report.to_payload()
+                if preview.prompt_report is not None
+                else None
+            ),
+            workspace_context_workspace=preview.workspace_context_workspace,
+            workspace_context_files=tuple(
+                PromptPreviewContextFileDTO(
+                    path=item.path,
+                    chars=item.chars,
+                )
+                for item in preview.workspace_context_files
+            ),
         )

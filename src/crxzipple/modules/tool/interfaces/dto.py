@@ -56,6 +56,7 @@ class ToolDTO:
     kind: str
     parameters: tuple[ToolParameterDTO, ...]
     tags: tuple[str, ...]
+    required_effect_ids: tuple[str, ...]
     execution_policy: ToolExecutionPolicyDTO
     execution_support: ToolExecutionSupportDTO
     source_kind: str
@@ -79,6 +80,7 @@ class ToolDTO:
                 for parameter in tool.parameters
             ),
             tags=tool.tags,
+            required_effect_ids=tool.required_effect_ids,
             execution_policy=ToolExecutionPolicyDTO(
                 timeout_seconds=tool.execution_policy.timeout_seconds,
                 requires_confirmation=tool.execution_policy.requires_confirmation,

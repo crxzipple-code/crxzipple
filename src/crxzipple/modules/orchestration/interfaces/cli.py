@@ -12,7 +12,10 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRunNotFoundError,
     OrchestrationValidationError,
 )
-from crxzipple.modules.orchestration.interfaces.dto import OrchestrationRunDTO
+from crxzipple.modules.orchestration.interfaces.dto import (
+    OrchestrationRunDTO,
+    PromptPreviewDTO,
+)
 from crxzipple.modules.orchestration.interfaces.shared import (
     build_accept_run_input,
     build_prepare_session_run_input,
@@ -216,6 +219,26 @@ def build_cli() -> typer.Typer:
         except OrchestrationRunNotFoundError as exc:
             _exit_not_found(exc)
         echo_data(OrchestrationRunDTO.from_entity(run))
+
+    @app.command("prompt-preview")
+    def prompt_preview(
+        ctx: typer.Context,
+        run_id: str = typer.Argument(..., help="Orchestration run identifier."),
+    ) -> None:
+        container = ensure_container(ctx)
+        try:
+            preview = container.orchestration_service.preview_prompt(run_id)
+        except OrchestrationRunNotFoundError as exc:
+            _exit_not_found(exc)
+        except OrchestrationValidationError as exc:
+            typer.secho(str(exc), err=True, fg=typer.colors.RED)
+            raise typer.Exit(code=1) from None
+        echo_data(
+            PromptPreviewDTO.from_value(
+                run_id=run_id,
+                preview=preview,
+            ),
+        )
 
     @app.command("list")
     def list_runs(

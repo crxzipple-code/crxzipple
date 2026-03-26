@@ -9,6 +9,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
+    AgentToolPreferences,
 )
 
 
@@ -87,6 +88,8 @@ class AgentExecutionPolicyDTO:
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimePreferencesDTO:
+    home_dir: str | None
+    workdir: str | None
     workspace: str | None
     sandbox_mode: str | None
     attrs: dict[str, object]
@@ -97,9 +100,33 @@ class AgentRuntimePreferencesDTO:
         value: AgentRuntimePreferences,
     ) -> "AgentRuntimePreferencesDTO":
         return cls(
-            workspace=value.workspace,
+            home_dir=value.resolved_home_dir,
+            workdir=value.resolved_workdir,
+            workspace=value.compat_workspace,
             sandbox_mode=value.sandbox_mode,
             attrs=dict(value.attrs),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentToolPreferencesDTO:
+    requested_effect_ids: tuple[str, ...]
+    requested_tool_ids: tuple[str, ...]
+    preferred_tags: tuple[str, ...]
+    prefers_background_tools: bool
+    prefers_mutating_tools: bool
+
+    @classmethod
+    def from_value(
+        cls,
+        value: AgentToolPreferences,
+    ) -> "AgentToolPreferencesDTO":
+        return cls(
+            requested_effect_ids=value.requested_effect_ids,
+            requested_tool_ids=value.requested_tool_ids,
+            preferred_tags=value.preferred_tags,
+            prefers_background_tools=value.prefers_background_tools,
+            prefers_mutating_tools=value.prefers_mutating_tools,
         )
 
 
@@ -114,6 +141,7 @@ class AgentProfileDTO:
     llm_routing_policy: AgentLlmRoutingPolicyDTO
     execution_policy: AgentExecutionPolicyDTO
     runtime_preferences: AgentRuntimePreferencesDTO
+    tool_preferences: AgentToolPreferencesDTO
 
     @classmethod
     def from_entity(cls, profile: AgentProfile) -> "AgentProfileDTO":
@@ -134,5 +162,8 @@ class AgentProfileDTO:
             ),
             runtime_preferences=AgentRuntimePreferencesDTO.from_value(
                 profile.runtime_preferences,
+            ),
+            tool_preferences=AgentToolPreferencesDTO.from_value(
+                profile.tool_preferences,
             ),
         )

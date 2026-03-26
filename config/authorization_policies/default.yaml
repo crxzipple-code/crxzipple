@@ -16,3 +16,19 @@
     kind: tool
     match:
       mutates_state: false
+
+- id: deny_memory_lookup_tools_in_system_flows
+  description: Hide durable-memory lookup tools during non-conversational system flows.
+  effect: deny
+  actions:
+    - tool.access_tool
+    - tool.run
+  resource:
+    kind: tool
+    id: "memory_*"
+  context:
+    match:
+      prompt_mode:
+        - heartbeat
+        - compaction
+        - memory_flush

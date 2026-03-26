@@ -6,15 +6,16 @@ from sqlalchemy.orm import Session
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.agent.infrastructure.persistence.repositories import (
-    SqlAlchemyAgentProfileRepository,
-)
 from crxzipple.modules.dispatch.infrastructure.persistence.repositories import (
     SqlAlchemyDispatchTaskRepository,
 )
 from crxzipple.modules.llm.infrastructure.persistence.repositories import (
     SqlAlchemyLlmInvocationRepository,
     SqlAlchemyLlmProfileRepository,
+)
+from crxzipple.modules.memory.infrastructure.persistence.repositories import (
+    SqlAlchemyMemoryCandidateRepository,
+    SqlAlchemyMemoryEntryRepository,
 )
 from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
     SqlAlchemyOrchestrationRunRepository,
@@ -58,7 +59,8 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.orchestration_waits = SqlAlchemyOrchestrationRunWaitRepository(
             self.session,
         )
-        self.agent_profiles = SqlAlchemyAgentProfileRepository(self.session)
+        self.memory_candidates = SqlAlchemyMemoryCandidateRepository(self.session)
+        self.memory_entries = SqlAlchemyMemoryEntryRepository(self.session)
         self._seen = []
         logger.debug("opened unit of work")
         return self

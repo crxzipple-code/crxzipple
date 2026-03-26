@@ -1,6 +1,7 @@
 from crxzipple.modules.orchestration.application.engine import (
     EngineAdvanceOutcome,
     OrchestrationEngine,
+    PromptPreview,
 )
 from crxzipple.modules.orchestration.application.dispatch_bridge import (
     OrchestrationDispatchBridge,
@@ -42,9 +43,15 @@ from crxzipple.modules.orchestration.application.services import (
     OrchestrationApplicationService,
     OrchestrationUnitOfWork,
     PrepareSessionRunInput,
+    RequestCompactionInput,
+    RequestDueHeartbeatsInput,
+    RequestHeartbeatInput,
+    RequestMemoryFlushInput,
+    ResolveApprovalRequestInput,
     ResumeOrchestrationRunInput,
     RouteOrchestrationRunInput,
     WaitOnToolInput,
+    WaitForConfirmationInput,
 )
 from crxzipple.modules.orchestration.application.worker import (
     OrchestrationWorker,
@@ -67,8 +74,14 @@ __all__ = [
     "OrchestrationUnitOfWork",
     "OrchestrationWorker",
     "PrepareSessionRunInput",
+    "RequestCompactionInput",
+    "RequestDueHeartbeatsInput",
+    "RequestHeartbeatInput",
+    "RequestMemoryFlushInput",
+    "ResolveApprovalRequestInput",
     "PromptAssembler",
     "PromptEnvelope",
+    "PromptPreview",
     "ResolvedTool",
     "ResolvedToolSet",
     "ResolveSessionBundleInput",
@@ -80,4 +93,5 @@ __all__ = [
     "OrchestrationToolEventSubscriber",
     "ToolResolver",
     "WaitOnToolInput",
+    "WaitForConfirmationInput",
 ]

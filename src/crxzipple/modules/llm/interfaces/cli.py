@@ -88,6 +88,7 @@ def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfil
         provider=LlmProviderKind(profile.provider),
         api_family=LlmApiFamily(profile.api_family),
         model_name=profile.model_name,
+        context_window_tokens=profile.context_window_tokens,
         model_family=LlmModelFamily(profile.model_family),
         capabilities=tuple(LlmCapability(item) for item in profile.capabilities),
         default_params=LlmDefaults.from_payload(profile.default_params),
@@ -109,6 +110,10 @@ def build_cli() -> typer.Typer:
         provider: LlmProviderKind = typer.Argument(..., help="Provider kind."),
         api_family: LlmApiFamily = typer.Argument(..., help="Adapter API family."),
         model_name: str = typer.Argument(..., help="Model name."),
+        context_window_tokens: int | None = typer.Option(
+            None,
+            help="Optional model context window in tokens.",
+        ),
         model_family: LlmModelFamily = typer.Option(
             LlmModelFamily.GENERAL,
             help="Model family.",
@@ -143,6 +148,7 @@ def build_cli() -> typer.Typer:
                 provider=provider,
                 api_family=api_family,
                 model_name=model_name,
+                context_window_tokens=context_window_tokens,
                 model_family=model_family,
                 capabilities=tuple(capability or ()),
                 default_params=LlmDefaults(

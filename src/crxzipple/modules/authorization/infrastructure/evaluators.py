@@ -6,6 +6,7 @@ from typing import Any
 from crxzipple.modules.authorization.application import AuthorizationEvaluator
 from crxzipple.modules.authorization.domain import (
     AuthorizationDecision,
+    AuthorizationDecisionCode,
     AuthorizationEffect,
     AuthorizationObligation,
     AuthorizationPolicy,
@@ -30,6 +31,7 @@ class AbacAuthorizationEvaluator(AuthorizationEvaluator):
             return AuthorizationDecision(
                 allowed=False,
                 reason=f"Authorization denied by policy '{deny_matches[0].id}'.",
+                code=AuthorizationDecisionCode.POLICY_DENIED,
                 matched_policy_ids=tuple(policy.id for policy in matched),
             )
 
@@ -41,6 +43,7 @@ class AbacAuthorizationEvaluator(AuthorizationEvaluator):
             return AuthorizationDecision(
                 allowed=True,
                 reason=f"Authorization allowed by policy '{allow_matches[0].id}'.",
+                code=AuthorizationDecisionCode.ALLOW,
                 matched_policy_ids=tuple(policy.id for policy in matched),
                 obligations=tuple(obligations),
             )
@@ -48,6 +51,7 @@ class AbacAuthorizationEvaluator(AuthorizationEvaluator):
         return AuthorizationDecision(
             allowed=False,
             reason="Authorization denied because no matching allow policy was found.",
+            code=AuthorizationDecisionCode.NO_MATCH,
         )
 
     def _matches_policy(
@@ -199,4 +203,3 @@ class AbacAuthorizationEvaluator(AuthorizationEvaluator):
             path = raw.removeprefix("context.")
             return self._lookup_path(request.context.attrs, path)
         return raw
-

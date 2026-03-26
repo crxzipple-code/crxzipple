@@ -38,8 +38,13 @@ def import_models() -> None:
     from crxzipple.modules.dispatch.infrastructure.persistence import (
         models as _dispatch_models,
     )
-    from crxzipple.modules.agent.infrastructure.persistence import models as _agent_models
+    from crxzipple.modules.authorization.infrastructure.persistence import (
+        models as _authorization_models,
+    )
     from crxzipple.modules.llm.infrastructure.persistence import models as _llm_models
+    from crxzipple.modules.memory.infrastructure.persistence import (
+        models as _memory_models,
+    )
     from crxzipple.modules.orchestration.infrastructure.persistence import (
         models as _orchestration_models,
     )
@@ -50,8 +55,9 @@ def import_models() -> None:
 
     _ = (
         _dispatch_models,
-        _agent_models,
+        _authorization_models,
         _llm_models,
+        _memory_models,
         _orchestration_models,
         _session_models,
         _tool_models,

@@ -1,16 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
+from crxzipple.core.logger import get_logger
 from crxzipple.modules.dispatch.application import (
     DispatchApplicationService,
+)
+from crxzipple.modules.agent.application import (
+    AgentApplicationService,
+)
+from crxzipple.modules.authorization.application import AuthorizationApplicationService
+from crxzipple.modules.llm.domain import ToolCallIntent
+from crxzipple.modules.llm.application import LlmApplicationService
+from crxzipple.modules.memory.application import MemoryApplicationService
+from crxzipple.modules.memory.application import RecordMemoryFlushInput
+from crxzipple.modules.orchestration.application.memory_flush import (
+    is_memory_flush_skip_reply,
 )
 from crxzipple.modules.orchestration.application.engine import (
     EngineAdvanceOutcome,
     OrchestrationEngine,
+    PromptPreview,
 )
 from crxzipple.modules.orchestration.application.dispatch_bridge import (
     OrchestrationDispatchBridge,
@@ -22,6 +35,10 @@ from crxzipple.modules.orchestration.application.router import OrchestrationRout
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
 )
+from crxzipple.modules.orchestration.application.memory_candidates import (
+    extract_memory_candidate,
+)
+from crxzipple.modules.orchestration.application.prompting import PromptMode
 from crxzipple.modules.orchestration.application.session_resolver import (
     ResolveSessionBundleInput,
     SessionBundle,
@@ -40,15 +57,33 @@ from crxzipple.modules.orchestration.domain.repositories import (
     OrchestrationRunWaitRepository,
 )
 from crxzipple.modules.orchestration.domain.value_objects import (
+    ApprovalDecision,
+    ApprovalResolution,
+    CapabilityRequestScopeHint,
     DeliveryTarget,
     InboundInstruction,
     OrchestrationQueuePolicy,
     OrchestrationRunStage,
     OrchestrationRunStatus,
+    PendingApprovalRequest,
 )
-from crxzipple.modules.session.domain import SessionResetPolicy, SessionRouteContext
+from crxzipple.modules.session.application import (
+    ArchiveSessionMessagesInput,
+    AppendSessionMessageInput,
+    ListSessionMessagesInput,
+    SessionApplicationService,
+)
+from crxzipple.modules.session.domain import (
+    SessionMessageKind,
+    SessionMessageNotFoundError,
+    SessionResetPolicy,
+    SessionRouteContext,
+)
+from crxzipple.modules.tool.domain import ToolRun
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +142,17 @@ class WaitOnToolInput:
 
 
 @dataclass(frozen=True, slots=True)
+class WaitForConfirmationInput:
+    run_id: str
+    worker_id: str
+    request: PendingApprovalRequest
+    llm_invocation_id: str
+    metadata: dict[str, object] = field(default_factory=dict)
+    reason: str | None = None
+    now: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ResumeOrchestrationRunInput:
     run_id: str
     lane_key: str | None = None
@@ -114,6 +160,7 @@ class ResumeOrchestrationRunInput:
     priority: int | None = None
     reason: str | None = None
     clear_pending_tool_run_ids: bool = True
+    metadata: dict[str, object] = field(default_factory=dict)
     now: datetime | None = None
 
 
@@ -122,6 +169,7 @@ class CompleteOrchestrationRunInput:
     run_id: str
     worker_id: str
     result_payload: dict[str, object] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
     now: datetime | None = None
 
 
@@ -144,6 +192,62 @@ class PrepareSessionRunInput:
     reset_policy: SessionResetPolicy | None = None
     priority: int | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    now: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolveApprovalRequestInput:
+    run_id: str
+    request_id: str
+    decision: ApprovalDecision
+    now: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestCompactionInput:
+    anchor_run_id: str
+    reason: str | None = None
+    preserve: str | None = None
+    trigger_basis: str = "manual"
+    trigger_details: dict[str, object] = field(default_factory=dict)
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = None
+    max_steps: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RequestHeartbeatInput:
+    anchor_run_id: str
+    reason: str | None = None
+    idle_reply: str | None = "HEARTBEAT_OK"
+    trigger_basis: str = "manual"
+    trigger_details: dict[str, object] = field(default_factory=dict)
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = None
+    max_steps: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RequestMemoryFlushInput:
+    anchor_run_id: str
+    reason: str | None = None
+    trigger_basis: str = "manual"
+    trigger_details: dict[str, object] = field(default_factory=dict)
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = None
+    max_steps: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RequestDueHeartbeatsInput:
+    idle_seconds: int
+    agent_id: str | None = None
+    limit: int | None = None
+    reason: str | None = None
+    idle_reply: str | None = "HEARTBEAT_OK"
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = None
+    max_steps: int = 1
     now: datetime | None = None
 
 
@@ -180,21 +284,41 @@ class OrchestrationApplicationService:
         scheduler: OrchestrationScheduler | None = None,
         dispatch_bridge: OrchestrationDispatchBridge | None = None,
         dispatch_service: DispatchApplicationService | None = None,
+        agent_service: AgentApplicationService | None = None,
+        authorization_service: AuthorizationApplicationService | None = None,
+        llm_service: LlmApplicationService | None = None,
+        memory_service: MemoryApplicationService | None = None,
+        session_service: SessionApplicationService | None = None,
         router: OrchestrationRouter | None = None,
         session_resolver: SessionResolver | None = None,
         engine: OrchestrationEngine | None = None,
         worker_lease_seconds: int = 30,
         worker_heartbeat_seconds: float = 5.0,
+        auto_compaction_enabled: bool = True,
+        auto_compaction_transcript_chars: int = 48_000,
+        auto_compaction_transcript_tokens: int = 12_000,
+        auto_compaction_reserve_tokens: int = 20_000,
+        auto_compaction_soft_threshold_tokens: int = 4_000,
     ) -> None:
         self.uow_factory = uow_factory
         self.scheduler = scheduler or OrchestrationScheduler()
         self.dispatch_bridge = dispatch_bridge or OrchestrationDispatchBridge()
         self.dispatch_service = dispatch_service
+        self.agent_service = agent_service
+        self.authorization_service = authorization_service
+        self.llm_service = llm_service
+        self.memory_service = memory_service
+        self.session_service = session_service
         self.router = router or OrchestrationRouter()
         self.session_resolver = session_resolver
         self.engine = engine
         self.worker_lease_seconds = worker_lease_seconds
         self.worker_heartbeat_seconds = worker_heartbeat_seconds
+        self.auto_compaction_enabled = auto_compaction_enabled
+        self.auto_compaction_transcript_chars = auto_compaction_transcript_chars
+        self.auto_compaction_transcript_tokens = auto_compaction_transcript_tokens
+        self.auto_compaction_reserve_tokens = auto_compaction_reserve_tokens
+        self.auto_compaction_soft_threshold_tokens = auto_compaction_soft_threshold_tokens
         self.lease_manager = OrchestrationLeaseManager(
             uow_factory=uow_factory,
             dispatch_bridge=self.dispatch_bridge,
@@ -275,6 +399,14 @@ class OrchestrationApplicationService:
         with self.uow_factory() as uow:
             return self._get_run(uow, run_id)
 
+    def preview_prompt(self, run_id: str) -> PromptPreview:
+        if self.engine is None:
+            raise OrchestrationValidationError(
+                "Prompt preview requires an orchestration engine.",
+            )
+        run = self.get_run(run_id)
+        return self.engine.preview_prompt(run)
+
     def list_runs(
         self,
         *,
@@ -334,6 +466,7 @@ class OrchestrationApplicationService:
                         details={"stage": OrchestrationRunStage.LLM.value},
                     ),
                 )
+            self._clear_prompt_flow_hint(run_id)
 
             if outcome.pending_tool_run_ids:
                 self.advance_run(
@@ -347,6 +480,7 @@ class OrchestrationApplicationService:
                             "pending_background_tools": [
                                 dict(item) for item in outcome.pending_background_tools
                             ],
+                            **self._prompt_metadata_from_outcome(outcome),
                         },
                     ),
                 )
@@ -359,6 +493,18 @@ class OrchestrationApplicationService:
                     ),
                 )
 
+            if outcome.pending_approval_request is not None:
+                return self.wait_for_confirmation(
+                    WaitForConfirmationInput(
+                        run_id=run_id,
+                        worker_id=worker_id,
+                        request=outcome.pending_approval_request,
+                        llm_invocation_id=outcome.llm_invocation_id,
+                        metadata=self._prompt_metadata_from_outcome(outcome),
+                        reason="approval_requested",
+                    ),
+                )
+
             if outcome.continue_loop:
                 self.advance_run(
                     AdvanceOrchestrationRunInput(
@@ -368,6 +514,7 @@ class OrchestrationApplicationService:
                         metadata={
                             "llm_invocation_id": outcome.llm_invocation_id,
                             "tool_call_names": list(outcome.tool_call_names),
+                            **self._prompt_metadata_from_outcome(outcome),
                         },
                     ),
                 )
@@ -378,6 +525,7 @@ class OrchestrationApplicationService:
                     run_id=run_id,
                     worker_id=worker_id,
                     result_payload=self._result_payload_from_outcome(outcome),
+                    metadata=self._prompt_metadata_from_outcome(outcome),
                 ),
             )
 
@@ -431,6 +579,9 @@ class OrchestrationApplicationService:
                 active_session_id=bundle.active_instance.id,
                 bulk_key=bundle.routing.bulk_key,
             )
+            prompt_flow_hint = self._session_start_prompt_flow_hint(bundle)
+            if prompt_flow_hint is not None:
+                run.metadata["prompt_flow_hint"] = prompt_flow_hint
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -460,6 +611,19 @@ class OrchestrationApplicationService:
                 reason=data.reason,
                 happened_at=data.now,
             )
+            run.metadata["recovery_contract"] = self._tool_wait_recovery_contract_payload(
+                pending_tool_run_ids=run.pending_tool_run_ids,
+                pending_background_tools=tuple(
+                    dict(item)
+                    for item in (
+                        run.metadata.get("pending_background_tools", [])
+                        if isinstance(run.metadata.get("pending_background_tools"), list)
+                        else []
+                    )
+                    if isinstance(item, dict)
+                ),
+                source="tool_wait",
+            )
             self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.replace_tool_waits(
                 run.id,
@@ -471,6 +635,32 @@ class OrchestrationApplicationService:
         self._reconcile_tool_waits(data.pending_tool_run_ids)
         return self.get_run(data.run_id)
 
+    def wait_for_confirmation(
+        self,
+        data: WaitForConfirmationInput,
+    ) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, data.run_id)
+            run.wait_for_confirmation(
+                worker_id=data.worker_id,
+                request=data.request,
+                reason=data.reason,
+                happened_at=data.now,
+            )
+            run.metadata["llm_invocation_id"] = data.llm_invocation_id
+            if data.metadata:
+                run.metadata.update(data.metadata)
+            run.metadata["recovery_contract"] = self._approval_recovery_contract_payload(
+                request=data.request,
+                state="pending_decision",
+            )
+            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            uow.orchestration_waits.delete_for_run(run.id)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+            return run
+
     def heartbeat_run(self, run_id: str, *, worker_id: str) -> OrchestrationRun:
         return self.lease_manager.heartbeat_run(
             run_id,
@@ -481,6 +671,8 @@ class OrchestrationApplicationService:
     def resume_run(self, data: ResumeOrchestrationRunInput) -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
+            if data.metadata:
+                run.metadata.update(data.metadata)
             run.resume(
                 lane_key=data.lane_key,
                 queue_policy=data.queue_policy,
@@ -499,6 +691,8 @@ class OrchestrationApplicationService:
     def complete_run(self, data: CompleteOrchestrationRunInput) -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
+            if data.metadata:
+                run.metadata.update(data.metadata)
             run.complete(
                 worker_id=data.worker_id,
                 result_payload=data.result_payload,
@@ -509,7 +703,11 @@ class OrchestrationApplicationService:
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
-            return run
+        self._apply_compaction_summary(run)
+        self._apply_memory_flush(run)
+        self._extract_memory_candidate(run)
+        self._maybe_request_auto_compaction(run)
+        return self.get_run(data.run_id)
 
     def fail_run(self, data: FailOrchestrationRunInput) -> OrchestrationRun:
         with self.uow_factory() as uow:
@@ -526,7 +724,9 @@ class OrchestrationApplicationService:
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
-            return run
+        if self._is_compaction_run(run):
+            self._clear_pending_compaction_marker(run)
+        return run
 
     def cancel_run(self, run_id: str, *, reason: str | None = None) -> OrchestrationRun:
         with self.uow_factory() as uow:
@@ -537,10 +737,350 @@ class OrchestrationApplicationService:
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
+        if self._is_compaction_run(run):
+            self._clear_pending_compaction_marker(run)
+        return run
+
+    def resolve_approval_request(
+        self,
+        data: ResolveApprovalRequestInput,
+    ) -> OrchestrationRun:
+        if self.session_service is None:
+            raise RuntimeError("Orchestration session service is not configured.")
+        if self.agent_service is None:
+            raise RuntimeError("Orchestration agent service is not configured.")
+
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, data.run_id)
+            pending_request = run.resolve_approval_request(
+                request_id=data.request_id,
+                decision=data.decision,
+                happened_at=data.now,
+            )
+            run.metadata["recovery_contract"] = self._approval_recovery_contract_payload(
+                request=pending_request,
+                state=(
+                    "resolved_deny_pending_resume"
+                    if data.decision is ApprovalDecision.DENY
+                    else "resolved_allow_pending_replay"
+                ),
+                decision=data.decision,
+            )
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+
+        if data.decision is ApprovalDecision.ALLOW_ONCE:
+            self._grant_run_tool_access(
+                run_id=data.run_id,
+                approval_request_id=pending_request.request_id,
+                effect_ids=(pending_request.effect_id,),
+                tool_ids=pending_request.tool_ids,
+            )
+        elif data.decision is ApprovalDecision.ALLOW_FOR_SESSION:
+            self._grant_session_tool_access(
+                run_id=data.run_id,
+                approval_request_id=pending_request.request_id,
+                effect_ids=(pending_request.effect_id,),
+                tool_ids=pending_request.tool_ids,
+            )
+        elif data.decision is ApprovalDecision.ALWAYS_FOR_AGENT:
+            self._grant_agent_effect_access(
+                run_id=data.run_id,
+                effect_ids=(pending_request.effect_id,),
+            )
+
+        self._append_approval_resolution_message(
+            run_id=data.run_id,
+            request=pending_request,
+            decision=data.decision,
+        )
+        return self._continue_recovery_contract(data.run_id)
+
+    def request_compaction(self, data: RequestCompactionInput) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            anchor = self._get_run(uow, data.anchor_run_id)
+            if anchor.agent_id is None or not anchor.agent_id.strip():
+                raise OrchestrationValidationError(
+                    "Compaction anchor run agent_id is required.",
+                )
+            if anchor.bulk_key is None or not anchor.bulk_key.strip():
+                raise OrchestrationValidationError(
+                    "Compaction anchor run bulk_key is required.",
+                )
+            if anchor.active_session_id is None or not anchor.active_session_id.strip():
+                raise OrchestrationValidationError(
+                    "Compaction anchor run active_session_id is required.",
+                )
+            session_key = str(anchor.metadata.get("session_key", "")).strip()
+            if not session_key:
+                raise OrchestrationValidationError(
+                    "Compaction anchor run metadata.session_key is required.",
+                )
+            trigger_basis = data.trigger_basis.strip() or "manual"
+            trigger_details = dict(data.trigger_details)
+            metadata = {
+                "session_key": session_key,
+                "session_kind": str(anchor.metadata.get("session_kind", "")).strip(),
+                "prompt_flow_hint": self._compaction_prompt_flow_hint(
+                    reason=data.reason,
+                    preserve=data.preserve,
+                ),
+                "compaction_anchor_run_id": anchor.id,
+                "compaction_request": {
+                    "basis": trigger_basis,
+                    "details": trigger_details,
+                    "reason": (data.reason or "").strip() or "manual",
+                },
+            }
+            run = OrchestrationRun.accept(
+                run_id=uuid4().hex,
+                inbound_instruction=InboundInstruction(source="compaction"),
+                queue_policy=data.queue_policy,
+                priority=anchor.priority if data.priority is None else data.priority,
+                max_steps=data.max_steps,
+                metadata=metadata,
+            )
+            run.route(
+                agent_id=anchor.agent_id,
+                bulk_key=anchor.bulk_key,
+                lane_key=anchor.lane_key,
+                priority=run.priority,
+                metadata=metadata,
+            )
+            run.bind_session(
+                active_session_id=anchor.active_session_id,
+                bulk_key=anchor.bulk_key,
+            )
+            self.scheduler.enqueue(
+                run,
+                lane_key=anchor.lane_key,
+                queue_policy=data.queue_policy,
+                priority=run.priority,
+            )
+            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+        if self.session_service is not None:
+            self._merge_session_compaction_metadata(
+                session_key=session_key,
+                metadata={
+                    "pending_run_id": run.id,
+                    "requested_at": run.created_at.isoformat(),
+                    "request_reason": (data.reason or "").strip() or "manual",
+                    "trigger_basis": trigger_basis,
+                    "trigger_details": trigger_details,
+                    "anchor_run_id": anchor.id,
+                },
+            )
+        return run
+
+    def request_heartbeat(self, data: RequestHeartbeatInput) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            anchor = self._get_run(uow, data.anchor_run_id)
+            if anchor.agent_id is None or not anchor.agent_id.strip():
+                raise OrchestrationValidationError(
+                    "Heartbeat anchor run agent_id is required.",
+                )
+            if anchor.bulk_key is None or not anchor.bulk_key.strip():
+                raise OrchestrationValidationError(
+                    "Heartbeat anchor run bulk_key is required.",
+                )
+            if anchor.active_session_id is None or not anchor.active_session_id.strip():
+                raise OrchestrationValidationError(
+                    "Heartbeat anchor run active_session_id is required.",
+                )
+            session_key = str(anchor.metadata.get("session_key", "")).strip()
+            if not session_key:
+                raise OrchestrationValidationError(
+                    "Heartbeat anchor run metadata.session_key is required.",
+                )
+            metadata = {
+                "session_key": session_key,
+                "session_kind": str(anchor.metadata.get("session_kind", "")).strip(),
+                "prompt_flow_hint": self._heartbeat_prompt_flow_hint(
+                    reason=data.reason,
+                    idle_reply=data.idle_reply,
+                ),
+                "heartbeat_anchor_run_id": anchor.id,
+                "heartbeat_request": {
+                    "basis": data.trigger_basis.strip() or "manual",
+                    "details": dict(data.trigger_details),
+                    "reason": (data.reason or "").strip() or "manual",
+                    "idle_reply": (data.idle_reply or "").strip() or "HEARTBEAT_OK",
+                },
+            }
+            run = OrchestrationRun.accept(
+                run_id=uuid4().hex,
+                inbound_instruction=InboundInstruction(source="heartbeat"),
+                queue_policy=data.queue_policy,
+                priority=anchor.priority if data.priority is None else data.priority,
+                max_steps=data.max_steps,
+                metadata=metadata,
+            )
+            run.route(
+                agent_id=anchor.agent_id,
+                bulk_key=anchor.bulk_key,
+                lane_key=anchor.lane_key,
+                priority=run.priority,
+                metadata=metadata,
+            )
+            run.bind_session(
+                active_session_id=anchor.active_session_id,
+                bulk_key=anchor.bulk_key,
+            )
+            self.scheduler.enqueue(
+                run,
+                lane_key=anchor.lane_key,
+                queue_policy=data.queue_policy,
+                priority=run.priority,
+            )
+            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
             return run
 
+    def request_memory_flush(self, data: RequestMemoryFlushInput) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            anchor = self._get_run(uow, data.anchor_run_id)
+            if anchor.agent_id is None or not anchor.agent_id.strip():
+                raise OrchestrationValidationError(
+                    "Memory flush anchor run agent_id is required.",
+                )
+            if anchor.bulk_key is None or not anchor.bulk_key.strip():
+                raise OrchestrationValidationError(
+                    "Memory flush anchor run bulk_key is required.",
+                )
+            if anchor.active_session_id is None or not anchor.active_session_id.strip():
+                raise OrchestrationValidationError(
+                    "Memory flush anchor run active_session_id is required.",
+                )
+            session_key = str(anchor.metadata.get("session_key", "")).strip()
+            if not session_key:
+                raise OrchestrationValidationError(
+                    "Memory flush anchor run metadata.session_key is required.",
+                )
+            trigger_basis = data.trigger_basis.strip() or "manual"
+            trigger_details = dict(data.trigger_details)
+            metadata = {
+                "session_key": session_key,
+                "session_kind": str(anchor.metadata.get("session_kind", "")).strip(),
+                "prompt_flow_hint": self._memory_flush_prompt_flow_hint(
+                    reason=data.reason,
+                ),
+                "memory_flush_anchor_run_id": anchor.id,
+                "memory_flush_request": {
+                    "basis": trigger_basis,
+                    "details": trigger_details,
+                    "reason": (data.reason or "").strip() or "manual",
+                },
+            }
+            run = OrchestrationRun.accept(
+                run_id=uuid4().hex,
+                inbound_instruction=InboundInstruction(source="memory_flush"),
+                queue_policy=data.queue_policy,
+                priority=anchor.priority if data.priority is None else data.priority,
+                max_steps=data.max_steps,
+                metadata=metadata,
+            )
+            run.route(
+                agent_id=anchor.agent_id,
+                bulk_key=anchor.bulk_key,
+                lane_key=anchor.lane_key,
+                priority=run.priority,
+                metadata=metadata,
+            )
+            run.bind_session(
+                active_session_id=anchor.active_session_id,
+                bulk_key=anchor.bulk_key,
+            )
+            self.scheduler.enqueue(
+                run,
+                lane_key=anchor.lane_key,
+                queue_policy=data.queue_policy,
+                priority=run.priority,
+            )
+            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+            return run
+
+    def request_due_heartbeats(
+        self,
+        data: RequestDueHeartbeatsInput,
+    ) -> list[OrchestrationRun]:
+        if self.session_service is None:
+            raise RuntimeError("Orchestration session service is not configured.")
+        if data.idle_seconds <= 0:
+            raise OrchestrationValidationError(
+                "Heartbeat idle_seconds must be greater than zero.",
+            )
+        if data.limit is not None and data.limit <= 0:
+            raise OrchestrationValidationError(
+                "Heartbeat limit must be greater than zero when provided.",
+            )
+
+        now = data.now or datetime.now(timezone.utc)
+        idle_before = now - timedelta(seconds=data.idle_seconds)
+        latest_runs = self._latest_anchor_runs_by_session_key()
+        requested: list[OrchestrationRun] = []
+        sessions = sorted(
+            self.session_service.list_sessions(agent_id=data.agent_id),
+            key=lambda item: item.updated_at,
+        )
+        for session in sessions:
+            if data.limit is not None and len(requested) >= data.limit:
+                break
+            if session.status.strip().lower() != "active":
+                continue
+            updated_at = session.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            if updated_at > idle_before:
+                continue
+            if self._existing_inflight_run(session.id) is not None:
+                continue
+            anchor = latest_runs.get(session.id)
+            if anchor is None:
+                continue
+            requested.append(
+                self.request_heartbeat(
+                    RequestHeartbeatInput(
+                        anchor_run_id=anchor.id,
+                        reason=data.reason or "idle_session_heartbeat",
+                        idle_reply=data.idle_reply,
+                        trigger_basis="idle_session",
+                        trigger_details={
+                            "idle_seconds": data.idle_seconds,
+                            "session_updated_at": updated_at.isoformat(),
+                        },
+                        queue_policy=data.queue_policy,
+                        priority=data.priority,
+                        max_steps=data.max_steps,
+                    ),
+                ),
+            )
+        return requested
+
     def recover_abandoned_runs(self) -> list[OrchestrationRun]:
-        return self.lease_manager.recover_abandoned_runs()
+        recovered: dict[str, OrchestrationRun] = {
+            run.id: run for run in self.lease_manager.recover_abandoned_runs()
+        }
+        for run in self.list_runs(status=OrchestrationRunStatus.WAITING):
+            try:
+                continued = self._continue_recovery_contract(run.id)
+            except Exception:
+                logger.exception(
+                    "failed to continue stalled recovery contract",
+                    extra={"run_id": run.id},
+                )
+                continue
+            if continued.status is not run.status or continued.stage is not run.stage:
+                recovered[continued.id] = continued
+        return list(recovered.values())
 
     def handle_recovered_dispatch_task(
         self,
@@ -581,6 +1121,76 @@ class OrchestrationApplicationService:
         return payload
 
     @staticmethod
+    def _prompt_metadata_from_outcome(
+        outcome: EngineAdvanceOutcome,
+    ) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        if outcome.prompt_report is not None:
+            metadata["prompt_mode"] = outcome.prompt_report.mode.value
+            metadata["prompt_report"] = outcome.prompt_report.to_payload()
+        metadata["workspace_context_files"] = [
+            {"path": item.path, "chars": item.chars}
+            for item in outcome.workspace_context_files
+        ]
+        if (
+            outcome.workspace_context_workspace is not None
+            and outcome.workspace_context_workspace.strip()
+        ):
+            metadata["workspace_context_workspace"] = (
+                outcome.workspace_context_workspace.strip()
+            )
+        return metadata
+
+    def _extract_memory_candidate(self, run: OrchestrationRun) -> None:
+        if self.memory_service is None:
+            return
+        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
+        if prompt_mode in {
+            PromptMode.COMPACTION.value,
+            PromptMode.HEARTBEAT.value,
+            PromptMode.MEMORY_FLUSH.value,
+        }:
+            return
+        try:
+            extracted = extract_memory_candidate(
+                run,
+                result_payload=run.result_payload,
+            )
+            if extracted is None:
+                return
+            candidate = self.memory_service.create_candidate(extracted.create_input)
+            with self.uow_factory() as uow:
+                current = self._get_run(uow, run.id)
+                candidate_ids = current.metadata.get("memory_candidate_ids")
+                if isinstance(candidate_ids, list):
+                    updated_candidate_ids = [
+                        str(item)
+                        for item in candidate_ids
+                        if isinstance(item, str) and item.strip()
+                    ]
+                else:
+                    updated_candidate_ids = []
+                if candidate.id not in updated_candidate_ids:
+                    updated_candidate_ids.append(candidate.id)
+                current.metadata["memory_candidate_ids"] = updated_candidate_ids
+                current.metadata["memory_candidate_count"] = len(updated_candidate_ids)
+                current.metadata.pop("memory_candidate_error", None)
+                uow.orchestration_runs.add(current)
+                uow.commit()
+        except Exception as exc:
+            logger.exception(
+                "failed to extract memory candidate for completed run",
+                extra={"run_id": run.id},
+            )
+            with self.uow_factory() as uow:
+                current = self._get_run(uow, run.id)
+                current.metadata["memory_candidate_error"] = (
+                    str(exc) or type(exc).__name__
+                )
+                uow.orchestration_runs.add(current)
+                uow.commit()
+
+    @staticmethod
     def _get_run(uow: OrchestrationUnitOfWork, run_id: str) -> OrchestrationRun:
         run = uow.orchestration_runs.get(run_id)
         if run is None:
@@ -591,6 +1201,16 @@ class OrchestrationApplicationService:
 
     def _heartbeat_run_for_manager(self, run_id: str, worker_id: str) -> OrchestrationRun:
         return self.heartbeat_run(run_id, worker_id=worker_id)
+
+    def _clear_prompt_flow_hint(self, run_id: str) -> None:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            if "prompt_flow_hint" not in run.metadata:
+                return
+            run.metadata.pop("prompt_flow_hint", None)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
 
     def _sync_llm_stream(
         self,
@@ -623,5 +1243,954 @@ class OrchestrationApplicationService:
                 run_id=run_id,
                 queue_policy=queue_policy,
                 reason=reason,
+                metadata={
+                    "prompt_flow_hint": {
+                        "mode": "recovery_resume",
+                        "reason": reason,
+                    },
+                },
             ),
         )
+
+    @staticmethod
+    def _session_start_prompt_flow_hint(
+        bundle: SessionBundle,
+    ) -> dict[str, object] | None:
+        resolution = bundle.resolution.resolution
+        if resolution.created:
+            return {
+                "mode": "session_start",
+                "event": "created",
+                "session_kind": resolution.kind.value,
+            }
+        if resolution.reset:
+            payload: dict[str, object] = {
+                "mode": "session_start",
+                "event": "reset",
+                "session_kind": resolution.kind.value,
+            }
+            if (
+                resolution.reset_reason is not None
+                and resolution.reset_reason.strip()
+            ):
+                payload["reason"] = resolution.reset_reason.strip()
+            return payload
+        return None
+
+    @staticmethod
+    def _compaction_prompt_flow_hint(
+        *,
+        reason: str | None,
+        preserve: str | None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"mode": "compaction"}
+        if reason is not None and reason.strip():
+            payload["reason"] = reason.strip()
+        if preserve is not None and preserve.strip():
+            payload["preserve"] = preserve.strip()
+        return payload
+
+    @staticmethod
+    def _heartbeat_prompt_flow_hint(
+        *,
+        reason: str | None,
+        idle_reply: str | None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"mode": "heartbeat"}
+        if reason is not None and reason.strip():
+            payload["reason"] = reason.strip()
+        if idle_reply is not None and idle_reply.strip():
+            payload["idle_reply"] = idle_reply.strip()
+        return payload
+
+    @staticmethod
+    def _memory_flush_prompt_flow_hint(
+        *,
+        reason: str | None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"mode": "memory_flush"}
+        if reason is not None and reason.strip():
+            payload["reason"] = reason.strip()
+        return payload
+
+    def _apply_compaction_summary(self, run: OrchestrationRun) -> None:
+        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
+        if prompt_mode != "compaction":
+            return
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key:
+            return
+        if run.active_session_id is None or not run.active_session_id.strip():
+            return
+        result_payload = run.result_payload or {}
+        summary_message_id = result_payload.get("assistant_message_id")
+        summary_text = result_payload.get("output_text")
+        if not isinstance(summary_message_id, str) or not summary_message_id.strip():
+            return
+        if not isinstance(summary_text, str) or not summary_text.strip():
+            return
+        try:
+            summary_message = self.session_service.get_message(summary_message_id.strip())
+        except SessionMessageNotFoundError:
+            return
+        summary_metadata = dict(summary_message.metadata)
+        summary_metadata["maintenance_kind"] = "compaction_summary"
+        summary_metadata["maintenance_run_id"] = run.id
+        with self.session_service.uow_factory() as session_uow:
+            session_uow.session_messages.add(
+                replace(summary_message, metadata=summary_metadata),
+            )
+            session_uow.commit()
+        cutoff_sequence_no = summary_message.sequence_no - 1
+        if cutoff_sequence_no <= 0:
+            return
+        archived_count = self.session_service.archive_messages(
+            ArchiveSessionMessagesInput(
+                session_key=session_key,
+                session_id=run.active_session_id,
+                max_sequence_no=cutoff_sequence_no,
+                reason="compaction",
+            ),
+        )
+        self.session_service.merge_session_metadata(
+            session_key=session_key,
+            metadata={
+                "compaction": {
+                    "run_id": run.id,
+                    "assistant_message_id": summary_message_id.strip(),
+                    "archived_message_count": archived_count,
+                    "archived_through_sequence_no": cutoff_sequence_no,
+                    "summary": summary_text.strip(),
+                    "compacted_at": (
+                        run.completed_at.isoformat()
+                        if run.completed_at is not None
+                        else run.updated_at.isoformat()
+                    ),
+                },
+            },
+            touch_activity=False,
+        )
+        with self.uow_factory() as uow:
+            persisted_run = self._get_run(uow, run.id)
+            persisted_run.metadata["compaction_result"] = {
+                "archived_message_count": archived_count,
+                "archived_through_sequence_no": cutoff_sequence_no,
+                "assistant_message_id": summary_message_id.strip(),
+                "summary": summary_text.strip(),
+                "compacted_at": (
+                    run.completed_at.isoformat()
+                    if run.completed_at is not None
+                    else run.updated_at.isoformat()
+                ),
+            }
+            uow.orchestration_runs.add(persisted_run)
+            uow.collect(persisted_run)
+            uow.commit()
+
+    def _apply_memory_flush(self, run: OrchestrationRun) -> None:
+        if not self._is_memory_flush_run(run):
+            return
+        if self.memory_service is None:
+            return
+        result_payload = run.result_payload or {}
+        output_text = result_payload.get("output_text")
+        if not isinstance(output_text, str) or not output_text.strip():
+            self._store_memory_flush_result(
+                run=run,
+                payload={"skipped": True, "reason": "empty_output"},
+            )
+            return
+        normalized_output = output_text.strip()
+        if is_memory_flush_skip_reply(normalized_output):
+            self._store_memory_flush_result(
+                run=run,
+                payload={"skipped": True, "reason": "no_memory_flush"},
+            )
+            return
+        try:
+            entry = self.memory_service.record_flush_entry(
+                RecordMemoryFlushInput(
+                    agent_id=run.agent_id or "workspace",
+                    content=normalized_output,
+                    session_key=_normalized_metadata_text(run.metadata, "session_key"),
+                    run_id=run.id,
+                    metadata={
+                        "source": "memory_flush",
+                        "memory_flush_anchor_run_id": run.metadata.get(
+                            "memory_flush_anchor_run_id",
+                        ),
+                        "request": dict(
+                            run.metadata.get("memory_flush_request", {})
+                            if isinstance(run.metadata.get("memory_flush_request"), dict)
+                            else {}
+                        ),
+                    },
+                ),
+            )
+        except Exception as exc:
+            logger.exception(
+                "failed to persist memory flush result",
+                extra={"run_id": run.id},
+            )
+            self._store_memory_flush_result(
+                run=run,
+                payload={"skipped": False, "error": str(exc) or type(exc).__name__},
+            )
+            return
+        self._store_memory_flush_result(
+            run=run,
+            payload={
+                "skipped": False,
+                "entry_id": entry.id,
+                "title": entry.title,
+                "summary": entry.summary,
+                "memory_file_path": entry.metadata.get("memory_file_path"),
+                "storage_kind": entry.metadata.get("storage_kind"),
+            },
+        )
+
+    def _maybe_request_auto_compaction(self, run: OrchestrationRun) -> OrchestrationRun | None:
+        if not self.auto_compaction_enabled:
+            return None
+        if self.session_service is None:
+            return None
+        if self._is_compaction_run(run):
+            return None
+        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
+        if prompt_mode not in {
+            PromptMode.NORMAL_TURN.value,
+            PromptMode.RECOVERY_RESUME.value,
+        }:
+            return None
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key:
+            return None
+        prompt_report = run.metadata.get("prompt_report")
+        if not isinstance(prompt_report, dict):
+            return None
+        transcript_payload = prompt_report.get("transcript")
+        if not isinstance(transcript_payload, dict):
+            return None
+        estimated_total_tokens = _coerce_non_negative_int(
+            prompt_report.get("estimated_total_tokens"),
+        )
+        transcript_chars = _coerce_non_negative_int(transcript_payload.get("chars"))
+        transcript_estimated_tokens = _coerce_non_negative_int(
+            transcript_payload.get("estimated_tokens"),
+        )
+        absolute_threshold_exceeded = (
+            transcript_chars >= self.auto_compaction_transcript_chars
+            or transcript_estimated_tokens >= self.auto_compaction_transcript_tokens
+        )
+        dynamic_threshold = self._auto_compaction_prompt_threshold_tokens(run)
+        dynamic_threshold_exceeded = (
+            dynamic_threshold is not None
+            and estimated_total_tokens >= dynamic_threshold
+        )
+        if not absolute_threshold_exceeded and not dynamic_threshold_exceeded:
+            return None
+        if self._existing_pending_compaction_run(session_key) is not None:
+            return None
+        logger.info(
+            "auto compaction requested after completed run",
+            extra={
+                "run_id": run.id,
+                "session_key": session_key,
+                "transcript_chars": transcript_chars,
+                "transcript_estimated_tokens": transcript_estimated_tokens,
+                "estimated_total_tokens": estimated_total_tokens,
+                "dynamic_threshold": dynamic_threshold,
+            },
+        )
+        trigger_details = {
+            "transcript_chars": transcript_chars,
+            "transcript_estimated_tokens": transcript_estimated_tokens,
+            "transcript_char_threshold": self.auto_compaction_transcript_chars,
+            "transcript_token_threshold": self.auto_compaction_transcript_tokens,
+            "estimated_total_tokens": estimated_total_tokens,
+        }
+        if dynamic_threshold is not None:
+            trigger_details["prompt_threshold_tokens"] = dynamic_threshold
+        if dynamic_threshold_exceeded and dynamic_threshold is not None:
+            trigger_basis = "prompt_budget"
+            reason = (
+                "auto_compaction_prompt_budget_exceeded"
+                f":{estimated_total_tokens}/{dynamic_threshold}"
+            )
+        else:
+            trigger_basis = "transcript_budget"
+            reason = (
+                "auto_compaction_transcript_budget_exceeded"
+                f":{transcript_estimated_tokens}"
+            )
+        return self.request_compaction(
+            RequestCompactionInput(
+                anchor_run_id=run.id,
+                reason=reason,
+                preserve="open tasks, decisions, approvals, constraints, and preferences",
+                trigger_basis=trigger_basis,
+                trigger_details=trigger_details,
+            ),
+        )
+
+    def _auto_compaction_prompt_threshold_tokens(
+        self,
+        run: OrchestrationRun,
+    ) -> int | None:
+        context_window_tokens = self._context_window_tokens_for_run(run)
+        if context_window_tokens is None:
+            return None
+        threshold = (
+            context_window_tokens
+            - self.auto_compaction_reserve_tokens
+            - self.auto_compaction_soft_threshold_tokens
+        )
+        return threshold if threshold > 0 else None
+
+    def _context_window_tokens_for_run(
+        self,
+        run: OrchestrationRun,
+    ) -> int | None:
+        if self.llm_service is None:
+            return None
+        result_payload = run.result_payload or {}
+        llm_id = result_payload.get("llm_id")
+        if not isinstance(llm_id, str) or not llm_id.strip():
+            return None
+        try:
+            return self.llm_service.get_profile(llm_id.strip()).context_window_tokens
+        except Exception:
+            return None
+
+    def _existing_pending_compaction_run(self, session_key: str) -> OrchestrationRun | None:
+        if self.session_service is None:
+            return None
+        session = self.session_service.get_session(session_key)
+        compaction_payload = session.metadata.get("compaction")
+        if not isinstance(compaction_payload, dict):
+            return None
+        pending_run_id = compaction_payload.get("pending_run_id")
+        if not isinstance(pending_run_id, str) or not pending_run_id.strip():
+            return None
+        try:
+            pending_run = self.get_run(pending_run_id.strip())
+        except OrchestrationRunNotFoundError:
+            return None
+        if pending_run.status in {
+            OrchestrationRunStatus.COMPLETED,
+            OrchestrationRunStatus.FAILED,
+            OrchestrationRunStatus.CANCELLED,
+        }:
+            return None
+        return pending_run
+
+    def _latest_anchor_runs_by_session_key(self) -> dict[str, OrchestrationRun]:
+        with self.uow_factory() as uow:
+            runs = sorted(
+                uow.orchestration_runs.list(),
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )
+        latest: dict[str, OrchestrationRun] = {}
+        for run in runs:
+            session_key = str(run.metadata.get("session_key", "")).strip()
+            if not session_key or session_key in latest:
+                continue
+            if run.agent_id is None or not run.agent_id.strip():
+                continue
+            if run.bulk_key is None or not run.bulk_key.strip():
+                continue
+            if run.active_session_id is None or not run.active_session_id.strip():
+                continue
+            latest[session_key] = run
+        return latest
+
+    def _existing_inflight_run(self, session_key: str) -> OrchestrationRun | None:
+        terminal_statuses = {
+            OrchestrationRunStatus.COMPLETED,
+            OrchestrationRunStatus.FAILED,
+            OrchestrationRunStatus.CANCELLED,
+        }
+        with self.uow_factory() as uow:
+            runs = uow.orchestration_runs.list()
+        for run in sorted(runs, key=lambda item: item.updated_at, reverse=True):
+            current_session_key = str(run.metadata.get("session_key", "")).strip()
+            if current_session_key != session_key:
+                continue
+            if run.status in terminal_statuses:
+                continue
+            return run
+        return None
+
+    def _merge_session_compaction_metadata(
+        self,
+        *,
+        session_key: str,
+        metadata: dict[str, object],
+        remove_keys: tuple[str, ...] = (),
+    ) -> None:
+        if self.session_service is None:
+            return
+        session = self.session_service.get_session(session_key)
+        current = session.metadata.get("compaction")
+        payload = dict(current) if isinstance(current, dict) else {}
+        payload.update(metadata)
+        for key in remove_keys:
+            payload.pop(key, None)
+        self.session_service.merge_session_metadata(
+            session_key=session_key,
+            metadata={"compaction": payload},
+            touch_activity=False,
+        )
+
+    def _clear_pending_compaction_marker(self, run: OrchestrationRun) -> None:
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key:
+            return
+        self._merge_session_compaction_metadata(
+            session_key=session_key,
+            metadata={},
+            remove_keys=(
+                "pending_run_id",
+                "requested_at",
+                "request_reason",
+                "anchor_run_id",
+            ),
+        )
+
+    def _store_memory_flush_result(
+        self,
+        *,
+        run: OrchestrationRun,
+        payload: dict[str, object],
+    ) -> None:
+        with self.uow_factory() as uow:
+            persisted_run = self._get_run(uow, run.id)
+            persisted_run.metadata["memory_flush_result"] = dict(payload)
+            uow.orchestration_runs.add(persisted_run)
+            uow.collect(persisted_run)
+            uow.commit()
+
+    @staticmethod
+    def _is_memory_flush_run(run: OrchestrationRun) -> bool:
+        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
+        if prompt_mode == PromptMode.MEMORY_FLUSH.value:
+            return True
+        if run.inbound_instruction.source == "memory_flush":
+            return True
+        prompt_flow_hint = run.metadata.get("prompt_flow_hint")
+        if isinstance(prompt_flow_hint, dict):
+            raw_mode = str(prompt_flow_hint.get("mode", "")).strip().lower()
+            if raw_mode == PromptMode.MEMORY_FLUSH.value:
+                return True
+        return False
+
+    @staticmethod
+    def _is_compaction_run(run: OrchestrationRun) -> bool:
+        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
+        if prompt_mode == PromptMode.COMPACTION.value:
+            return True
+        if run.inbound_instruction.source == "compaction":
+            return True
+        prompt_flow_hint = run.metadata.get("prompt_flow_hint")
+        if isinstance(prompt_flow_hint, dict):
+            raw_mode = str(prompt_flow_hint.get("mode", "")).strip().lower()
+            if raw_mode == PromptMode.COMPACTION.value:
+                return True
+        return False
+
+    def _grant_run_tool_access(
+        self,
+        *,
+        run_id: str,
+        approval_request_id: str | None,
+        effect_ids: tuple[str, ...],
+        tool_ids: tuple[str, ...],
+    ) -> None:
+        if self.authorization_service is None:
+            raise RuntimeError("Authorization service is not configured.")
+        run = self.get_run(run_id)
+        self.authorization_service.grant_run_access(
+            run_id=run.id,
+            agent_id=run.agent_id,
+            approval_request_id=approval_request_id,
+            effect_ids=effect_ids,
+            tool_ids=tool_ids,
+        )
+
+    def _grant_session_tool_access(
+        self,
+        *,
+        run_id: str,
+        approval_request_id: str | None,
+        effect_ids: tuple[str, ...],
+        tool_ids: tuple[str, ...],
+    ) -> None:
+        if self.authorization_service is None:
+            raise RuntimeError("Authorization service is not configured.")
+        run = self.get_run(run_id)
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key:
+            raise OrchestrationValidationError(
+                "Orchestration run metadata.session_key is required for session grants.",
+            )
+        self.authorization_service.grant_session_access(
+            session_key=session_key,
+            agent_id=run.agent_id,
+            approval_request_id=approval_request_id,
+            effect_ids=effect_ids,
+            tool_ids=tool_ids,
+        )
+
+    def _grant_agent_effect_access(
+        self,
+        *,
+        run_id: str,
+        effect_ids: tuple[str, ...],
+    ) -> None:
+        if self.authorization_service is None:
+            raise RuntimeError("Authorization service is not configured.")
+        run = self.get_run(run_id)
+        if run.agent_id is None or not run.agent_id.strip():
+            raise OrchestrationValidationError(
+                "Orchestration run agent_id is required for agent grants.",
+            )
+        for effect_id in effect_ids:
+            self.authorization_service.grant_agent_effect_access(
+                agent_id=run.agent_id,
+                effect_id=effect_id,
+            )
+
+    def _append_approval_resolution_message(
+        self,
+        *,
+        run_id: str,
+        request: PendingApprovalRequest,
+        decision: ApprovalDecision,
+    ) -> None:
+        run = self.get_run(run_id)
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key:
+            raise OrchestrationValidationError(
+                "Orchestration run metadata.session_key is required for approval messages.",
+            )
+        if run.active_session_id is None or not run.active_session_id.strip():
+            raise OrchestrationValidationError(
+                "Orchestration run active_session_id is required for approval messages.",
+            )
+        status = "approved" if decision is not ApprovalDecision.DENY else "denied"
+        tool_name = request.tool_name or request.effect_id
+        target_phrase = (
+            f"running {tool_name}"
+            if request.tool_name is not None
+            else f"{request.label} ({request.effect_id})"
+        )
+        detail = {
+            ApprovalDecision.ALLOW_ONCE: (
+                f"Approved once for this turn only for {target_phrase}. "
+                "This access expires after the current turn and must be requested again later if it is still needed."
+            ),
+            ApprovalDecision.ALLOW_FOR_SESSION: (
+                f"Approved for this session for {target_phrase}. "
+                "This access remains available for later turns in the current session unless visibility changes."
+            ),
+            ApprovalDecision.ALWAYS_FOR_AGENT: (
+                f"Approved for future turns with this agent for {target_phrase}. "
+                "This access should remain available in later turns unless visibility changes."
+            ),
+            ApprovalDecision.DENY: "Denied by the user.",
+        }[decision]
+        self.session_service.append_message(
+            AppendSessionMessageInput(
+                session_key=session_key,
+                session_id=run.active_session_id,
+                role="tool",
+                kind=SessionMessageKind.TOOL_RESULT,
+                content=detail,
+                content_payload={
+                    "tool_name": tool_name,
+                    "tool_call_id": request.request_id,
+                    "status": status,
+                    "effect_id": request.effect_id,
+                    "label": request.label,
+                    "decision": decision.value,
+                    "tool_ids": list(request.tool_ids),
+                    "output": detail,
+                },
+                source_kind="approval_request",
+                source_id=request.request_id,
+                metadata={
+                    "tool_call_id": request.request_id,
+                    "tool_name": tool_name,
+                },
+            ),
+        )
+
+    def _wait_on_replayed_background_tools(
+        self,
+        *,
+        run_id: str,
+        background_runs: tuple[tuple[ToolCallIntent, ToolRun], ...],
+    ) -> OrchestrationRun:
+        pending_tool_run_ids = tuple(
+            tool_run.id
+            for _, tool_run in background_runs
+        )
+        pending_background_tools = tuple(
+            {
+                "tool_run_id": tool_run.id,
+                "tool_call_id": tool_call.id,
+                "tool_name": tool_call.name,
+            }
+            for tool_call, tool_run in background_runs
+        )
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            run.metadata["pending_background_tools"] = [dict(item) for item in pending_background_tools]
+            run.metadata["recovery_contract"] = self._tool_wait_recovery_contract_payload(
+                pending_tool_run_ids=pending_tool_run_ids,
+                pending_background_tools=pending_background_tools,
+                source="approval_replay",
+            )
+            run.wait_on_tool_after_confirmation(
+                pending_tool_run_ids=pending_tool_run_ids,
+                reason="tool_background_wait",
+            )
+            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            uow.orchestration_waits.replace_tool_waits(
+                run.id,
+                run.pending_tool_run_ids,
+            )
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+        self._reconcile_tool_waits(pending_tool_run_ids)
+        return self.get_run(run_id)
+
+    def _continue_recovery_contract(self, run_id: str) -> OrchestrationRun:
+        run = self.get_run(run_id)
+        contract = self._recovery_contract_payload(run)
+        if contract is None:
+            return run
+        kind = str(contract.get("kind", "")).strip().lower()
+        if kind == "approval":
+            return self._continue_approval_recovery(run, contract)
+        if kind == "tool_wait":
+            return self._continue_tool_wait_recovery(run, contract)
+        return run
+
+    def _continue_approval_recovery(
+        self,
+        run: OrchestrationRun,
+        contract: dict[str, object],
+    ) -> OrchestrationRun:
+        if self.engine is None:
+            return run
+        if run.status is not OrchestrationRunStatus.WAITING:
+            return run
+        if run.stage is not OrchestrationRunStage.WAITING_FOR_CONFIRMATION:
+            return run
+        request_payload = contract.get("request")
+        if not isinstance(request_payload, dict):
+            return run
+        state = str(contract.get("state", "")).strip().lower()
+        decision_raw = contract.get("decision")
+        decision = (
+            ApprovalDecision(str(decision_raw))
+            if isinstance(decision_raw, str) and decision_raw.strip()
+            else None
+        )
+        request = PendingApprovalRequest.from_payload(request_payload)
+        if decision is ApprovalDecision.DENY or state == "resolved_deny_pending_resume":
+            return self._resume_after_approval_resolution(
+                run_id=run.id,
+                request=request,
+                decision=ApprovalDecision.DENY,
+            )
+        if decision is None:
+            return run
+        if state == "inline_replayed_pending_resume":
+            return self._resume_after_approval_resolution(
+                run_id=run.id,
+                request=request,
+                decision=decision,
+            )
+        if state == "background_replayed_pending_wait":
+            return self._wait_on_replayed_background_tools_from_contract(
+                run_id=run.id,
+                contract=contract,
+            )
+        if state != "resolved_allow_pending_replay":
+            return run
+        existing_tool_result_message_ids = self._tool_result_message_ids_for_call(
+            run=run,
+            tool_call_id=request.request_id,
+        )
+        if existing_tool_result_message_ids:
+            self._store_recovery_contract(
+                run.id,
+                self._approval_recovery_contract_payload(
+                    request=request,
+                    state="inline_replayed_pending_resume",
+                    decision=decision,
+                    tool_result_message_ids=existing_tool_result_message_ids,
+                ),
+            )
+            return self._resume_after_approval_resolution(
+                run_id=run.id,
+                request=request,
+                decision=decision,
+            )
+        replay_outcome = self.engine.replay_approved_tool_call(
+            self.get_run(run.id),
+            request=request,
+        )
+        if replay_outcome.background_runs:
+            pending_tool_run_ids = tuple(
+                tool_run.id for _, tool_run in replay_outcome.background_runs
+            )
+            pending_background_tools = tuple(
+                {
+                    "tool_run_id": tool_run.id,
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                }
+                for tool_call, tool_run in replay_outcome.background_runs
+            )
+            self._store_recovery_contract(
+                run.id,
+                self._approval_recovery_contract_payload(
+                    request=request,
+                    state="background_replayed_pending_wait",
+                    decision=decision,
+                    pending_tool_run_ids=pending_tool_run_ids,
+                    pending_background_tools=pending_background_tools,
+                ),
+            )
+            return self._wait_on_replayed_background_tools(
+                run_id=run.id,
+                background_runs=replay_outcome.background_runs,
+            )
+        inline_message_ids = tuple(message_id for message_id, _ in replay_outcome.inline_runs)
+        self._store_recovery_contract(
+            run.id,
+            self._approval_recovery_contract_payload(
+                request=request,
+                state="inline_replayed_pending_resume",
+                decision=decision,
+                tool_result_message_ids=inline_message_ids,
+            ),
+        )
+        return self._resume_after_approval_resolution(
+            run_id=run.id,
+            request=request,
+            decision=decision,
+        )
+
+    def _continue_tool_wait_recovery(
+        self,
+        run: OrchestrationRun,
+        contract: dict[str, object],
+    ) -> OrchestrationRun:
+        if run.status is not OrchestrationRunStatus.WAITING:
+            return run
+        if run.stage is not OrchestrationRunStage.WAITING_ON_TOOL:
+            return run
+        if self.engine is None:
+            return run
+        pending_tool_run_ids = tuple(
+            tool_run_id
+            for tool_run_id in run.pending_tool_run_ids
+            if tool_run_id is not None and tool_run_id.strip()
+        )
+        if not pending_tool_run_ids:
+            return run
+        pending_tool_runs = tuple(
+            self.engine.tool_service.get_tool_run(tool_run_id)
+            for tool_run_id in pending_tool_run_ids
+        )
+        if not all(tool_run.is_terminal() for tool_run in pending_tool_runs):
+            return run
+        self.engine.append_completed_background_tool_results(
+            run,
+            tool_runs=pending_tool_runs,
+        )
+        resumed = self._resume_after_tool_completion(
+            run.id,
+            OrchestrationQueuePolicy.RESUME_FIRST,
+            self.tool_resume._resume_reason_from_tool_runs(pending_tool_runs),
+        )
+        self._store_recovery_contract(
+            resumed.id,
+            {
+                **contract,
+                "state": "resumed",
+                "resumed_at": resumed.updated_at.isoformat(),
+            },
+        )
+        return resumed
+
+    def _wait_on_replayed_background_tools_from_contract(
+        self,
+        *,
+        run_id: str,
+        contract: dict[str, object],
+    ) -> OrchestrationRun:
+        raw_pending_tool_run_ids = contract.get("pending_tool_run_ids")
+        pending_tool_run_ids = tuple(
+            tool_run_id.strip()
+            for tool_run_id in raw_pending_tool_run_ids
+            if isinstance(tool_run_id, str) and tool_run_id.strip()
+        ) if isinstance(raw_pending_tool_run_ids, list | tuple) else ()
+        raw_pending_background_tools = contract.get("pending_background_tools")
+        pending_background_tools = tuple(
+            dict(item)
+            for item in raw_pending_background_tools
+            if isinstance(item, dict)
+        ) if isinstance(raw_pending_background_tools, list | tuple) else ()
+        if not pending_tool_run_ids:
+            return self.get_run(run_id)
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            run.metadata["pending_background_tools"] = [dict(item) for item in pending_background_tools]
+            run.metadata["recovery_contract"] = self._tool_wait_recovery_contract_payload(
+                pending_tool_run_ids=pending_tool_run_ids,
+                pending_background_tools=pending_background_tools,
+                source="approval_replay",
+            )
+            run.wait_on_tool_after_confirmation(
+                pending_tool_run_ids=pending_tool_run_ids,
+                reason="tool_background_wait",
+            )
+            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            uow.orchestration_waits.replace_tool_waits(
+                run.id,
+                run.pending_tool_run_ids,
+            )
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+        self._reconcile_tool_waits(pending_tool_run_ids)
+        return self.get_run(run_id)
+
+    def _resume_after_approval_resolution(
+        self,
+        *,
+        run_id: str,
+        request: PendingApprovalRequest,
+        decision: ApprovalDecision,
+    ) -> OrchestrationRun:
+        return self.resume_run(
+            ResumeOrchestrationRunInput(
+                run_id=run_id,
+                reason=f"approval_{decision.value}",
+                metadata={
+                    "prompt_flow_hint": {
+                        "mode": (
+                            "approval_denied"
+                            if decision is ApprovalDecision.DENY
+                            else "approval_resume"
+                        ),
+                        "decision": decision.value,
+                        "effect_id": request.effect_id,
+                        "label": request.label,
+                    },
+                },
+            ),
+        )
+
+    def _store_recovery_contract(self, run_id: str, payload: dict[str, object]) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            run.metadata["recovery_contract"] = dict(payload)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+            return run
+
+    @staticmethod
+    def _recovery_contract_payload(run: OrchestrationRun) -> dict[str, object] | None:
+        raw_payload = run.metadata.get("recovery_contract")
+        return dict(raw_payload) if isinstance(raw_payload, dict) else None
+
+    @staticmethod
+    def _approval_recovery_contract_payload(
+        *,
+        request: PendingApprovalRequest,
+        state: str,
+        decision: ApprovalDecision | None = None,
+        pending_tool_run_ids: tuple[str, ...] = (),
+        pending_background_tools: tuple[dict[str, str], ...] = (),
+        tool_result_message_ids: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": "approval",
+            "state": state,
+            "request": request.to_payload(),
+        }
+        if decision is not None:
+            payload["decision"] = decision.value
+        if pending_tool_run_ids:
+            payload["pending_tool_run_ids"] = list(pending_tool_run_ids)
+        if pending_background_tools:
+            payload["pending_background_tools"] = [dict(item) for item in pending_background_tools]
+        if tool_result_message_ids:
+            payload["tool_result_message_ids"] = list(tool_result_message_ids)
+        return payload
+
+    @staticmethod
+    def _tool_wait_recovery_contract_payload(
+        *,
+        pending_tool_run_ids: tuple[str, ...],
+        pending_background_tools: tuple[dict[str, object], ...],
+        source: str,
+    ) -> dict[str, object]:
+        return {
+            "kind": "tool_wait",
+            "state": "waiting_on_tool",
+            "source": source,
+            "pending_tool_run_ids": list(pending_tool_run_ids),
+            "pending_background_tools": [dict(item) for item in pending_background_tools],
+        }
+
+    def _tool_result_message_ids_for_call(
+        self,
+        *,
+        run: OrchestrationRun,
+        tool_call_id: str,
+    ) -> tuple[str, ...]:
+        if self.session_service is None:
+            return ()
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key or run.active_session_id is None or not run.active_session_id.strip():
+            return ()
+        messages = self.session_service.list_messages(
+            ListSessionMessagesInput(
+                session_key=session_key,
+                include_archived=False,
+            ),
+        )
+        return tuple(
+            message.id
+            for message in messages
+            if message.session_id == run.active_session_id
+            and message.kind is SessionMessageKind.TOOL_RESULT
+            and message.source_kind == "tool_run"
+            and str(message.metadata.get("tool_call_id", "")).strip() == tool_call_id
+        )
+
+
+def _coerce_non_negative_int(value: object) -> int:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, resolved)
+
+
+def _normalized_metadata_text(metadata: dict[str, object], key: str) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None

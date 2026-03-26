@@ -15,6 +15,7 @@ class LlmProfileModel(Base):
     provider: Mapped[str] = mapped_column(String(100), nullable=False)
     api_family: Mapped[str] = mapped_column(String(100), nullable=False)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    context_window_tokens: Mapped[int | None] = mapped_column(Integer(), nullable=True)
     model_family: Mapped[str] = mapped_column(String(100), nullable=False)
     capabilities: Mapped[list[str]] = mapped_column(JSON(), nullable=False, default=list)
     default_params: Mapped[dict[str, object]] = mapped_column(

@@ -42,6 +42,7 @@ class SqlAlchemyToolRepository:
                     for parameter in tool.parameters
                 ],
                 tags=list(tool.tags),
+                required_effect_ids=list(tool.required_effect_ids),
                 requires_confirmation=tool.execution_policy.requires_confirmation,
                 mutates_state=tool.execution_policy.mutates_state,
                 timeout_seconds=tool.execution_policy.timeout_seconds,
@@ -95,6 +96,7 @@ class SqlAlchemyToolRepository:
                 for parameter in model.parameters
             ),
             tags=tuple(model.tags),
+            required_effect_ids=tuple(model.required_effect_ids),
             execution_policy=ToolExecutionPolicy(
                 timeout_seconds=model.timeout_seconds,
                 requires_confirmation=model.requires_confirmation,

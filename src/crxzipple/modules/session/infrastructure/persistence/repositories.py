@@ -116,6 +116,12 @@ class SqlAlchemySessionMessageRepository:
             ),
         )
 
+    def get(self, message_id: str) -> SessionMessage | None:
+        model = self.session.get(SessionMessageModel, message_id)
+        if model is None:
+            return None
+        return self._to_entity(model)
+
     def get_by_source(
         self,
         *,
@@ -158,12 +164,17 @@ class SqlAlchemySessionMessageRepository:
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
+        include_archived: bool = True,
     ) -> list[SessionMessage]:
         statement = select(SessionMessageModel).where(
             SessionMessageModel.session_key == session_key,
         )
         if session_id is not None:
             statement = statement.where(SessionMessageModel.session_id == session_id)
+        if not include_archived:
+            statement = statement.where(
+                SessionMessageModel.visibility != SessionMessageVisibility.ARCHIVED.value,
+            )
         statement = statement.order_by(
             SessionMessageModel.created_at.desc(),
             SessionMessageModel.sequence_no.desc(),

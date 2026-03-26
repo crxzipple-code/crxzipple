@@ -77,6 +77,11 @@ def build_cli() -> typer.Typer:
             help="Optional parameter as name:type[:description].",
         ),
         tag: list[str] | None = typer.Option(None, "--tag", help="Tool classification tag."),
+        required_effect: list[str] | None = typer.Option(
+            None,
+            "--required-effect",
+            help="Required shared effect id. Repeat to declare multiple values.",
+        ),
         timeout_seconds: int = typer.Option(
             30,
             "--timeout-seconds",
@@ -135,6 +140,7 @@ def build_cli() -> typer.Typer:
                 kind=kind,
                 parameters=tuple(parameters),
                 tags=tuple(tag or []),
+                required_effect_ids=tuple(required_effect or []),
                 timeout_seconds=timeout_seconds,
                 requires_confirmation=requires_confirmation,
                 mutates_state=mutates_state,

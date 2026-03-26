@@ -12,3 +12,7 @@ class SessionNotFoundError(SessionError):
 
 class SessionInstanceNotFoundError(SessionError):
     """Raised when the requested session instance does not exist."""
+
+
+class SessionMessageNotFoundError(SessionError):
+    """Raised when the requested session message does not exist."""

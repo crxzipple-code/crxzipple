@@ -9,6 +9,7 @@ from crxzipple.modules.orchestration.application import (
     EnqueueOrchestrationRunInput,
     FailOrchestrationRunInput,
     PrepareSessionRunInput,
+    RequestDueHeartbeatsInput,
     ResumeOrchestrationRunInput,
     WaitOnToolInput,
 )
@@ -208,6 +209,29 @@ class AdvanceRunRequest(BaseModel):
 
 class HeartbeatRunRequest(BaseModel):
     worker_id: str
+
+
+class RequestDueHeartbeatsRequest(BaseModel):
+    idle_seconds: int = Field(..., ge=1)
+    agent_id: str | None = None
+    limit: int | None = Field(default=None, ge=1)
+    reason: str | None = None
+    idle_reply: str | None = "HEARTBEAT_OK"
+    queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
+    priority: int | None = Field(default=None, ge=0)
+    max_steps: int = Field(default=1, ge=1)
+
+    def to_input(self) -> RequestDueHeartbeatsInput:
+        return RequestDueHeartbeatsInput(
+            idle_seconds=self.idle_seconds,
+            agent_id=self.agent_id,
+            limit=self.limit,
+            reason=self.reason,
+            idle_reply=self.idle_reply,
+            queue_policy=self.queue_policy,
+            priority=self.priority,
+            max_steps=self.max_steps,
+        )
 
 
 class WaitOnToolRequest(BaseModel):

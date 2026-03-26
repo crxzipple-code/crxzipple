@@ -37,6 +37,7 @@ class LlmProfileDTO:
     provider: str
     api_family: str
     model_name: str
+    context_window_tokens: int | None
     model_family: str
     capabilities: tuple[str, ...]
     default_params: LlmDefaultsDTO
@@ -53,6 +54,7 @@ class LlmProfileDTO:
             provider=profile.provider.value,
             api_family=profile.api_family.value,
             model_name=profile.model_name,
+            context_window_tokens=profile.context_window_tokens,
             model_family=profile.model_family.value,
             capabilities=tuple(item.value for item in profile.capabilities),
             default_params=LlmDefaultsDTO.from_value(profile.default_params),

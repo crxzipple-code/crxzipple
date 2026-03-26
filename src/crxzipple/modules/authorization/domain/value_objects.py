@@ -10,6 +10,19 @@ class AuthorizationEffect(StrEnum):
     DENY = "deny"
 
 
+class AuthorizationGrantScope(StrEnum):
+    RUN = "run"
+    SESSION = "session"
+
+
+class AuthorizationDecisionCode(StrEnum):
+    ALLOW = "allow"
+    POLICY_DENIED = "policy_denied"
+    NO_MATCH = "no_match"
+    APPROVAL_REQUIRED = "approval_required"
+    AUTHORIZATION_DISABLED = "authorization_disabled"
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizationSubject:
     type: str = "anonymous"
@@ -44,9 +57,20 @@ class AuthorizationRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolExecutionAuthorizationRequest:
+    subject: AuthorizationSubject
+    resource: AuthorizationResource
+    context: AuthorizationContext = field(default_factory=AuthorizationContext)
+    required_effect_ids: tuple[str, ...] = ()
+    granted_tool_ids: tuple[str, ...] = ()
+    granted_effect_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AuthorizationDecision:
     allowed: bool
     reason: str
+    code: AuthorizationDecisionCode = AuthorizationDecisionCode.ALLOW
     matched_policy_ids: tuple[str, ...] = ()
     obligations: tuple[AuthorizationObligation, ...] = ()
-
+    details: dict[str, Any] = field(default_factory=dict)

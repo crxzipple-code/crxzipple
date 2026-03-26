@@ -2,6 +2,7 @@ id: openai_codex.gpt-5.4
 provider: openai_codex
 api_family: openai_codex_responses
 model_name: gpt-5.4
+context_window_tokens: 1050000
 model_family: reasoning
 capabilities:
   - tool_calling

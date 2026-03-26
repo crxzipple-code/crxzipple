@@ -13,6 +13,7 @@ from crxzipple.modules.orchestration.application import (
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationRun,
+    OrchestrationRunStage,
     OrchestrationRunStatus,
 )
 from crxzipple.modules.orchestration.interfaces.shared import (
@@ -244,6 +245,8 @@ def run_foreground_turn(
         run = orchestration_service.get_run(run.id)
         if terminal(run):
             return run
+        if run.stage is OrchestrationRunStage.WAITING_FOR_CONFIRMATION:
+            return run
 
         progressed = False
         processed_run = orchestration_service.process_next_queued_run(
@@ -254,6 +257,8 @@ def run_foreground_turn(
         run = orchestration_service.get_run(run.id)
         if terminal(run):
             return run
+        if run.stage is OrchestrationRunStage.WAITING_FOR_CONFIRMATION:
+            return run
 
         processed_tool_run = tool_service.process_next_queued_run(
             worker_id=options.tool_worker_id,
@@ -262,6 +267,8 @@ def run_foreground_turn(
             progressed = True
         run = orchestration_service.get_run(run.id)
         if terminal(run):
+            return run
+        if run.stage is OrchestrationRunStage.WAITING_FOR_CONFIRMATION:
             return run
 
         if not progressed:

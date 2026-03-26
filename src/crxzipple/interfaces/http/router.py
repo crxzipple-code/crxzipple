@@ -9,6 +9,7 @@ from crxzipple.modules.agent.interfaces.http import router as agent_router
 from crxzipple.modules.authorization.interfaces.http import router as authorization_router
 from crxzipple.modules.dispatch.interfaces.http import router as dispatch_router
 from crxzipple.modules.llm.interfaces.http import router as llm_router
+from crxzipple.modules.memory.interfaces.http import router as memory_router
 from crxzipple.modules.orchestration.interfaces.http import (
     router as orchestration_router,
 )
@@ -44,6 +45,7 @@ api_router.include_router(
 )
 api_router.include_router(session_router, prefix="/sessions", tags=["sessions"])
 api_router.include_router(llm_router, prefix="/llms", tags=["llms"])
+api_router.include_router(memory_router, tags=["memory"])
 api_router.include_router(agent_router, prefix="/agents", tags=["agents"])
 api_router.include_router(
     authorization_router,

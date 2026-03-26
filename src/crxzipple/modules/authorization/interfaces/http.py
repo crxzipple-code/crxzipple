@@ -49,8 +49,10 @@ class AuthorizationObligationResponse(BaseModel):
 class AuthorizationDecisionResponse(BaseModel):
     allowed: bool
     reason: str
+    code: str
     matched_policy_ids: list[str] = Field(default_factory=list)
     obligations: list[AuthorizationObligationResponse] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class AuthorizationPolicyResponse(BaseModel):
@@ -107,11 +109,13 @@ def _to_decision_response(decision) -> AuthorizationDecisionResponse:
     return AuthorizationDecisionResponse(
         allowed=decision.allowed,
         reason=decision.reason,
+        code=decision.code.value,
         matched_policy_ids=list(decision.matched_policy_ids),
         obligations=[
             AuthorizationObligationResponse(name=item.name, params=dict(item.params))
             for item in decision.obligations
         ],
+        details=dict(decision.details),
     )
 
 
@@ -137,4 +141,3 @@ def _to_policy_response(policy) -> AuthorizationPolicyResponse:
         enabled=policy.enabled,
         source_kind=policy.source_kind,
     )
-

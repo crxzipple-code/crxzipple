@@ -13,11 +13,7 @@ class SessionModel(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     active_session_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    agent_id: Mapped[str | None] = mapped_column(
-        ForeignKey("agents.id"),
-        nullable=True,
-        index=True,
-    )
+    agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     llm_id: Mapped[str | None] = mapped_column(
         ForeignKey("llm_profiles.id"),
         nullable=True,

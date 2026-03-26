@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 import unittest
+import yaml
 
 from crxzipple.core.config import load_settings
 from crxzipple.interfaces.authorization import (
@@ -13,9 +14,11 @@ from crxzipple.interfaces.authorization import (
 from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
     AuthorizationDeniedError,
+    AuthorizationDecisionCode,
     AuthorizationRequest,
     AuthorizationResource,
     AuthorizationSubject,
+    ToolExecutionAuthorizationRequest,
 )
 from crxzipple.modules.llm.application import (
     InvokeLlmInput,
@@ -83,7 +86,14 @@ class AuthorizationTestCase(unittest.TestCase):
         container = self.harness.build_container(settings=settings)
 
         policies = container.authorization_service.list_policies()
-        self.assertEqual([item.id for item in policies], ["allow_llm_invocation", "allow_safe_tool_execution"])
+        self.assertEqual(
+            [item.id for item in policies],
+            [
+                "allow_llm_invocation",
+                "allow_safe_tool_execution",
+                "deny_memory_lookup_tools_in_system_flows",
+            ],
+        )
 
         llm_decision = container.authorization_service.check(
             AuthorizationRequest(
@@ -238,3 +248,291 @@ class AuthorizationTestCase(unittest.TestCase):
                 action="llm.invoke",
                 interface_name="http",
             )
+
+    def test_grant_agent_effect_access_persists_runtime_policy_and_allows_effect_access(self) -> None:
+        runtime_policy_path = Path(self.harness.authorization_runtime_policy_path)
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        policy = container.authorization_service.grant_agent_effect_access(
+            agent_id="assistant",
+            effect_id="network_search",
+        )
+
+        self.assertEqual(policy.actions, ("tool.access_effect",))
+        self.assertTrue(runtime_policy_path.exists())
+        payload = yaml.safe_load(runtime_policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload[0]["id"], policy.id)
+        self.assertEqual(payload[0]["actions"], ["tool.access_effect"])
+        self.assertEqual(
+            payload[0]["resource"]["match"]["authorization_effect_ids"],
+            ["network_search"],
+        )
+
+        allowed = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.access_effect",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="brave_search.news_search",
+                    attrs={"authorization_effect_ids": ["network_search"]},
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "assistant"},
+                ),
+            ),
+        )
+        denied = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.access_effect",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="brave_search.news_search",
+                    attrs={"authorization_effect_ids": ["network_search"]},
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "other-agent"},
+                ),
+            ),
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertIn(policy.id, allowed.matched_policy_ids)
+        self.assertFalse(denied.allowed)
+
+    def test_grant_agent_tool_access_persists_runtime_policy_and_allows_tool_access(self) -> None:
+        runtime_policy_path = Path(self.harness.authorization_runtime_policy_path)
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        policy = container.authorization_service.grant_agent_tool_access(
+            agent_id="assistant",
+            tool_id="filesystem.read_text",
+        )
+
+        payload = yaml.safe_load(runtime_policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload[0]["id"], policy.id)
+        self.assertEqual(payload[0]["actions"], ["tool.access_tool"])
+        self.assertEqual(payload[0]["resource"]["id"], "filesystem.read_text")
+
+        allowed = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.access_tool",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="filesystem.read_text",
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "assistant"},
+                ),
+            ),
+        )
+        denied = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.access_tool",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="filesystem.read_text",
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "other-agent"},
+                ),
+            ),
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertIn(policy.id, allowed.matched_policy_ids)
+        self.assertFalse(denied.allowed)
+
+    def test_check_tool_execution_returns_approval_required_when_effect_is_missing(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=False,
+            authorization_policy_paths=(),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="open_meteo_weather.forecast_weather",
+                    attrs={
+                        "environment": "remote",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": ["weather_data"],
+                        "authorization_effect_ids": ["weather_data"],
+                        "mutates_state": False,
+                        "tags": [],
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "assistant"},
+                ),
+                required_effect_ids=("weather_data",),
+            ),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.APPROVAL_REQUIRED)
+        self.assertEqual(decision.details["missing_effect_ids"], ["weather_data"])
+
+    def test_check_tool_execution_allows_run_grant_recorded_in_authorization_store(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=False,
+            authorization_policy_paths=(),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+        container.authorization_service.grant_run_access(
+            run_id="run-weather-1",
+            agent_id="assistant",
+            approval_request_id="approval-weather-1",
+            effect_ids=("weather_data",),
+            tool_ids=("open_meteo_weather.forecast_weather",),
+        )
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="open_meteo_weather.forecast_weather",
+                    attrs={
+                        "environment": "remote",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": ["weather_data"],
+                        "authorization_effect_ids": ["weather_data"],
+                        "mutates_state": False,
+                        "tags": [],
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={
+                        "interface": "http",
+                        "agent_id": "assistant",
+                        "run_id": "run-weather-1",
+                    },
+                ),
+                required_effect_ids=("weather_data",),
+            ),
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.ALLOW)
+
+    def test_check_tool_execution_still_requires_effect_when_tool_access_policy_allows_tool(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+        container.authorization_service.grant_agent_tool_access(
+            agent_id="assistant",
+            tool_id="open_meteo_weather.forecast_weather",
+        )
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="open_meteo_weather.forecast_weather",
+                    attrs={
+                        "environment": "remote",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": ["weather_data"],
+                        "authorization_effect_ids": ["weather_data"],
+                        "mutates_state": False,
+                        "tags": [],
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "assistant"},
+                ),
+                required_effect_ids=("weather_data",),
+            ),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.APPROVAL_REQUIRED)
+        self.assertEqual(decision.details["missing_effect_ids"], ["weather_data"])
+
+    def test_check_tool_execution_returns_policy_denied_when_mode_policy_blocks_tool(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="memory_search",
+                    attrs={
+                        "environment": "local",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": [],
+                        "authorization_effect_ids": ["local_tool_access"],
+                        "mutates_state": False,
+                        "tags": ["system-managed"],
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={
+                        "interface": "http",
+                        "agent_id": "assistant",
+                        "prompt_mode": "heartbeat",
+                    },
+                ),
+                required_effect_ids=("local_tool_access",),
+            ),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.POLICY_DENIED)

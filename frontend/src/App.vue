@@ -1,389 +1,299 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from "vue";
 
 import ComposerPanel from "@/components/ComposerPanel.vue";
 import ConversationSidebar from "@/components/ConversationSidebar.vue";
 import MessageTimeline from "@/components/MessageTimeline.vue";
-import TurnInspector from "@/components/TurnInspector.vue";
-import {
-  cancelTurn,
-  createTurn,
-  getConversation,
-  getConversationMessages,
-  listAgents,
-  listConversations,
-  listLlms,
-  openTurnEvents,
-} from "@/lib/api";
-import {
-  createDraftRoute,
-  routeFromConversation,
-  routePayload,
-} from "@/lib/conversationRoute";
-import type {
-  AgentProfileSummary,
-  ConversationRoute,
-  ConversationSummary,
-  LlmProfileSummary,
-  SessionMessage,
-  TurnMessageEventPayload,
-  TurnEventEntry,
-  TurnEventName,
-  TurnResponse,
-  TurnSnapshotResponse,
-  TurnTextDeltaEventPayload,
-  TurnToolEventPayload,
-} from "@/types";
+import { useAgentDirectory } from "@/composables/useAgentDirectory";
+import { useAgentHomeEditor } from "@/composables/useAgentHomeEditor";
+import { useConversationSession } from "@/composables/useConversationSession";
+import { useMemoryPanel } from "@/composables/useMemoryPanel";
+import { usePersistentUiState } from "@/composables/usePersistentUiState";
+import { useRunPresentation } from "@/composables/useRunPresentation";
+import { useTheme } from "@/composables/useTheme";
+import { useTurnStream } from "@/composables/useTurnStream";
+
+const TurnInspector = defineAsyncComponent(
+  () => import("@/components/TurnInspector.vue"),
+);
+const MemoryDrawer = defineAsyncComponent(
+  () => import("@/components/MemoryDrawer.vue"),
+);
+const AgentHomeDrawer = defineAsyncComponent(
+  () => import("@/components/AgentHomeDrawer.vue"),
+);
 
 const defaultAgentId = ref("crxzipple");
-const agents = ref<AgentProfileSummary[]>([]);
-const llms = ref<LlmProfileSummary[]>([]);
-const conversations = ref<ConversationSummary[]>([]);
-const activeBulkKey = ref<string | null>(null);
-const activeConversation = ref<ConversationSummary | null>(null);
-const messages = ref<SessionMessage[]>([]);
-const loadingConversations = ref(false);
-const loadingMessages = ref(false);
 const composer = ref("");
-const busy = ref(false);
-const lastError = ref<string | null>(null);
-const activeTurn = ref<TurnResponse | null>(null);
-const streamState = ref<"idle" | "streaming" | "closed">("idle");
-const turnEvents = ref<TurnEventEntry[]>([]);
-const draftRoute = ref<ConversationRoute>(createDraftRoute(defaultAgentId.value));
-const turnEventSource = shallowRef<EventSource | null>(null);
-const inspectorOpen = ref(true);
-const deckOpen = ref(true);
+const { theme, toggleTitle, toggleTheme } = useTheme();
+const {
+  deckOpen,
+  preferredRightPanel,
+  activeRightPanel,
+  setActiveRightPanel,
+  agentPanelAgentId,
+} = usePersistentUiState();
 const selectedAgentId = ref<string | null>(defaultAgentId.value);
 const selectedLlmId = ref<string | null>(null);
 
-const activeRoute = computed(() =>
-  activeConversation.value
-    ? {
-        ...routeFromConversation(activeConversation.value, defaultAgentId.value),
-        agentId:
-          selectedAgentId.value ??
-          activeConversation.value.runtime_binding.agent_id ??
-          defaultAgentId.value,
-        llmId:
-          selectedLlmId.value ??
-          activeConversation.value.runtime_binding.llm_id ??
-          undefined,
-      }
-    : {
-        ...draftRoute.value,
-        agentId: selectedAgentId.value ?? draftRoute.value.agentId,
-        llmId: selectedLlmId.value ?? draftRoute.value.llmId ?? undefined,
-      },
-);
-
-const activeTitle = computed(() => {
-  if (activeConversation.value?.last_message_preview) {
-    return activeConversation.value.last_message_preview;
-  }
-  return "New thread";
+const {
+  conversations,
+  activeBulkKey,
+  activeConversation,
+  messages,
+  loadingConversations,
+  loadingMessages,
+  busy,
+  lastError,
+  activeTurn,
+  pendingApproval,
+  draftRoute,
+  activeRoute,
+  currentRunId,
+  bindStream,
+  refreshConversations,
+  hydrateConversationAfterTurn,
+  selectConversation,
+  createFreshConversation,
+  submitTurn,
+  cancelActiveTurn,
+  requestCompaction,
+  requestMemoryFlush,
+  resolveActiveApproval,
+} = useConversationSession({
+  defaultAgentId,
+  selectedAgentId,
+  selectedLlmId,
+  refreshMemoryPanel: (agentId) => refreshMemoryPanel(agentId),
+  refreshAgentHomeIfSafe,
+  closeDeckIfCompact,
 });
 
-const canSubmit = computed(
-  () => composer.value.trim().length > 0 && !busy.value,
-);
+const inspectorOpen = computed(() => activeRightPanel.value === "inspect");
+const memoryOpen = computed(() => activeRightPanel.value === "memory");
+const agentHomeOpen = computed(() => activeRightPanel.value === "agent");
 
-const inspectorPayload = computed(() =>
-  JSON.stringify(routePayload(activeRoute.value), null, 2),
+const currentMemoryAgentId = computed(
+  () => activeRoute.value.agentId ?? selectedAgentId.value ?? defaultAgentId.value,
 );
-
-const outputPreview = computed(() => {
-  const text = activeTurn.value?.output_text?.trim();
-  if (!text) {
-    return null;
-  }
-  if (text.length <= 260) {
-    return text;
-  }
-  return `${text.slice(0, 257)}...`;
+const {
+  pendingMemoryCandidates,
+  approvedMemoryEntries,
+  memoryQuery,
+  loadingMemory,
+  currentThreadMemoryCandidates,
+  otherMemoryCandidates,
+  refreshMemoryPanel,
+  approveMemoryCandidateById,
+  rejectMemoryCandidateById,
+} = useMemoryPanel({
+  activeAgentId: currentMemoryAgentId,
+  activeConversation,
+  lastError,
 });
 
-function buildOptimisticUserMessage(content: string): SessionMessage {
-  const now = new Date().toISOString();
-  return {
-    id: `local-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    session_key: activeConversation.value?.session_key ?? draftRoute.value.mainKey,
-    session_id: activeConversation.value?.active_session_id ?? "pending-session",
-    sequence_no: messages.value.length + 1,
-    role: "user",
-    kind: "message",
-    content,
-    content_payload: { text: content },
-    source_kind: "web",
-    source_id: "local-pending",
-    visibility: "default",
-    metadata: {
-      optimistic: true,
-    },
-    created_at: now,
-  };
-}
+const preferredAgentHomeId = computed(
+  () => activeRoute.value.agentId ?? selectedAgentId.value ?? defaultAgentId.value,
+);
+const currentAgentHomeId = computed(
+  () => agentPanelAgentId.value ?? preferredAgentHomeId.value,
+);
 
-function pushEvent(event: TurnEventName, payload: TurnResponse) {
-  turnEvents.value.unshift({
-    id: `${payload.run.id}:${event}:${Date.now()}`,
-    event,
-    status: payload.run.status,
-    stage: payload.run.stage,
-    at: new Date().toISOString(),
-    detail: null,
-  });
-  turnEvents.value = turnEvents.value.slice(0, 10);
-}
+const {
+  loading: loadingAgentHome,
+  saving: savingAgentHome,
+  errorMessage: agentHomeError,
+  snapshot: agentHomeSnapshot,
+  selectedFileName: selectedAgentHomeFile,
+  draftContent: activeAgentHomeDraftContent,
+  dirtyFileNames: dirtyAgentHomeFileNames,
+  currentFileDirty: currentAgentHomeFileDirty,
+  hasDirtyChanges: hasDirtyAgentHomeChanges,
+  refresh: refreshAgentHome,
+  selectFile: selectAgentHomeFile,
+  updateDraft: updateAgentHomeDraft,
+  saveCurrentFile: saveAgentHomeFile,
+} = useAgentHomeEditor({
+  currentAgentId: currentAgentHomeId,
+  initialFileName: "AGENT.md",
+});
 
-function pushToolEvent(
-  event: "tool_started" | "tool_completed",
-  payload: TurnToolEventPayload,
-) {
-  turnEvents.value.unshift({
-    id: `${payload.run_id}:${event}:${payload.message_id}`,
-    event,
-    status: payload.status,
-    stage: payload.stage,
-    at: payload.created_at,
-    detail:
-      event === "tool_completed" && payload.tool_status
-        ? `${payload.tool_name} · ${payload.tool_status}`
-        : payload.tool_name,
-  });
-  turnEvents.value = turnEvents.value.slice(0, 10);
-}
+const {
+  agents,
+  llms,
+  creatingAgent,
+  updatingAgentStatusId,
+  errorMessage: agentDirectoryError,
+  enabledAgents,
+  suggestedAgentHomeBaseDir,
+  refreshProfiles,
+  selectAgent,
+  selectAgentHomeAgent,
+  useAgentForNewChats,
+  createAgentFromPanel,
+  updateAgentEnabledState,
+  selectLlm,
+} = useAgentDirectory({
+  defaultAgentId,
+  selectedAgentId,
+  selectedLlmId,
+  draftRoute,
+  activeConversation,
+  agentPanelAgentId,
+  currentAgentHomeId,
+  agentHomeOpen,
+  hasDirtyAgentHomeChanges,
+  refreshMemoryPanel,
+  refreshAgentHome,
+  confirmDiscardAgentHomeChanges,
+});
 
-function messagePreviewText(message: SessionMessage) {
-  if (message.content && message.content.trim()) {
-    return message.content.trim();
-  }
-  const payloadText = message.content_payload.text;
-  if (typeof payloadText === "string" && payloadText.trim()) {
-    return payloadText.trim();
-  }
-  return "";
-}
+const {
+  streamState,
+  turnEvents,
+  pushEvent,
+  closeTurnStream,
+  syncPendingApprovalFromTurn,
+  clearTurnEvents,
+  setStreamState,
+  watchTurn,
+} = useTurnStream({
+  messages,
+  activeTurn,
+  pendingApproval,
+  activeBulkKey,
+  busy,
+  activeConversation,
+  draftMainKey: computed(() => draftRoute.value.mainKey),
+  hydrateConversationAfterTurn,
+  refreshConversations,
+});
 
-function mergeMessage(message: SessionMessage) {
-  let next = [...messages.value];
-  if (next.some((item) => item.id === message.id)) {
-    return;
-  }
+bindStream({
+  pushEvent,
+  closeTurnStream,
+  syncPendingApprovalFromTurn,
+  clearTurnEvents,
+  setStreamState,
+  watchTurn,
+});
 
-  if (message.role === "user") {
-    const incomingText = messagePreviewText(message);
-    const optimisticIndex = next.findIndex(
-      (item) =>
-        Boolean(item.metadata.optimistic) &&
-        item.role === "user" &&
-        messagePreviewText(item) === incomingText,
-    );
-    if (optimisticIndex >= 0) {
-      next.splice(optimisticIndex, 1);
-    }
-  }
+const {
+  activeTitle,
+  activeCompactionRequest,
+  activeContextBudget,
+  activeContextMeter,
+  topbarStatusNote,
+  activeRunFeedback,
+  compactionRunning,
+  memoryFlushRunning,
+  canCompact,
+  canMemoryFlush,
+  canSubmit,
+  inspectorPayload,
+  outputPreview,
+} = useRunPresentation({
+  activeConversation,
+  activeTurn,
+  pendingApproval,
+  turnEvents,
+  streamState,
+  busy,
+  loadingMessages,
+  currentRunId,
+  activeRoute,
+  composer,
+});
 
-  if (
-    message.role === "assistant" &&
-    message.source_kind === "llm_invocation" &&
-    typeof message.source_id === "string" &&
-    message.source_id.trim()
-  ) {
-    const draftIndex = next.findIndex(
-      (item) =>
-        Boolean(item.metadata.optimistic) &&
-        item.role === "assistant" &&
-        item.metadata.llm_stream === true &&
-        item.metadata.llm_stream_invocation_id === message.source_id,
-    );
-    if (draftIndex >= 0) {
-      next.splice(draftIndex, 1);
-    }
-  }
+const agentPanelError = computed(
+  () => agentHomeError.value ?? agentDirectoryError.value,
+);
 
-  next.push(message);
-  next.sort((left, right) => left.sequence_no - right.sequence_no);
-  messages.value = next;
-}
-
-function mergeSnapshotMessages(snapshotMessages: SessionMessage[]) {
-  if (snapshotMessages.length === 0) {
-    return;
-  }
-  const merged = new Map<string, SessionMessage>();
-  for (const message of messages.value) {
-    if (!message.metadata.optimistic) {
-      merged.set(message.id, message);
-    }
-  }
-  for (const message of snapshotMessages) {
-    merged.set(message.id, message);
-  }
-  messages.value = [...merged.values()].sort(
-    (left, right) => left.sequence_no - right.sequence_no,
-  );
-}
-
-function mergeStreamingAssistant(payload: TurnTextDeltaEventPayload) {
-  const next = [...messages.value];
-  const existingIndex = next.findIndex(
-    (item) =>
-      Boolean(item.metadata.optimistic) &&
-      item.role === "assistant" &&
-      item.metadata.llm_stream === true &&
-      item.metadata.llm_stream_invocation_id === payload.invocation_id,
-  );
-  const baseMessage: SessionMessage = {
-    id: `local-assistant-${payload.invocation_id}`,
-    session_key: activeConversation.value?.session_key ?? draftRoute.value.mainKey,
-    session_id: activeConversation.value?.active_session_id ?? "pending-session",
-    sequence_no: next.length + 1,
-    role: "assistant",
-    kind: "message",
-    content: payload.text,
-    content_payload: { text: payload.text },
-    source_kind: "llm_stream",
-    source_id: payload.invocation_id,
-    visibility: "default",
-    metadata: {
-      optimistic: true,
-      llm_stream: true,
-      llm_stream_invocation_id: payload.invocation_id,
-    },
-    created_at: new Date().toISOString(),
-  };
-
-  if (existingIndex >= 0) {
-    next[existingIndex] = {
-      ...next[existingIndex],
-      content: payload.text,
-      content_payload: { text: payload.text },
-      metadata: {
-        ...next[existingIndex].metadata,
-        optimistic: true,
-        llm_stream: true,
-        llm_stream_invocation_id: payload.invocation_id,
-      },
-    };
-  } else {
-    next.push(baseMessage);
-  }
-
-  next.sort((left, right) => left.sequence_no - right.sequence_no);
-  messages.value = next;
-}
-
-function closeTurnStream() {
-  turnEventSource.value?.close();
-  turnEventSource.value = null;
-  if (streamState.value === "streaming") {
-    streamState.value = "closed";
+async function refreshAgentHomeIfSafe(agentId?: string | null) {
+  if (agentHomeOpen.value && !hasDirtyAgentHomeChanges.value) {
+    await refreshAgentHome(agentId);
   }
 }
 
-async function refreshProfiles() {
-  const [agentItems, llmItems] = await Promise.all([listAgents(), listLlms()]);
-  agents.value = agentItems.filter((item) => item.enabled);
-  llms.value = llmItems.filter((item) => item.enabled);
-
-  if (
-    selectedAgentId.value === null ||
-    !agents.value.some((item) => item.id === selectedAgentId.value)
-  ) {
-    selectedAgentId.value =
-      agents.value.find((item) => item.id === defaultAgentId.value)?.id ??
-      agents.value[0]?.id ??
-      defaultAgentId.value;
-  }
-}
-
-async function refreshConversations() {
-  loadingConversations.value = true;
-  try {
-    conversations.value = await listConversations();
-    if (
-      activeBulkKey.value &&
-      !conversations.value.some((item) => item.bulk_key === activeBulkKey.value)
-    ) {
-      activeBulkKey.value = null;
-      activeConversation.value = null;
-    }
-  } finally {
-    loadingConversations.value = false;
-  }
-}
-
-async function selectConversation(bulkKey: string) {
-  loadingMessages.value = true;
-  lastError.value = null;
-  try {
-    const [conversation, history] = await Promise.all([
-      getConversation(bulkKey),
-      getConversationMessages(bulkKey),
-    ]);
-    activeBulkKey.value = bulkKey;
-    activeConversation.value = conversation;
-    messages.value = history;
-    draftRoute.value = routeFromConversation(conversation, defaultAgentId.value);
-    selectedAgentId.value =
-      conversation.runtime_binding.agent_id ??
-      selectedAgentId.value ??
-      defaultAgentId.value;
-    selectedLlmId.value = conversation.runtime_binding.llm_id ?? null;
-    closeDeckIfCompact();
-  } catch (error) {
-    lastError.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    loadingMessages.value = false;
-  }
-}
-
-function createFreshConversation() {
-  closeTurnStream();
-  activeBulkKey.value = null;
-  activeConversation.value = null;
-  messages.value = [];
-  activeTurn.value = null;
-  turnEvents.value = [];
-  draftRoute.value = createDraftRoute(selectedAgentId.value ?? defaultAgentId.value);
-  selectedLlmId.value = null;
+async function startFreshConversation() {
   composer.value = "";
-  closeDeckIfCompact();
+  await createFreshConversation();
 }
 
-function selectAgent(agentId: string) {
-  selectedAgentId.value = agentId;
-  if (activeConversation.value === null) {
-    draftRoute.value = {
-      ...draftRoute.value,
-      agentId,
-    };
+function confirmDiscardAgentHomeChanges(reason: string) {
+  if (!hasDirtyAgentHomeChanges.value) {
+    return true;
   }
-}
-
-function selectLlm(llmId: string | null) {
-  selectedLlmId.value = llmId;
-  if (activeConversation.value === null) {
-    draftRoute.value = {
-      ...draftRoute.value,
-      llmId: llmId ?? undefined,
-    };
-  }
+  const files = dirtyAgentHomeFileNames.value.join(", ");
+  return window.confirm(
+    `You have unsaved agent home changes in ${files}. ${reason}`,
+  );
 }
 
 function toggleInspector() {
-  inspectorOpen.value = !inspectorOpen.value;
+  if (activeRightPanel.value === "inspect") {
+    setActiveRightPanel(null);
+    return;
+  }
+  setActiveRightPanel("inspect");
+}
+
+function toggleMemory() {
+  if (activeRightPanel.value === "memory") {
+    setActiveRightPanel(null);
+    return;
+  }
+  setActiveRightPanel("memory");
+}
+
+async function toggleAgentHome() {
+  const nextPanel = activeRightPanel.value === "agent" ? null : "agent";
+  if (nextPanel === null) {
+    setActiveRightPanel(null);
+  } else {
+    setActiveRightPanel(nextPanel);
+  }
+  if (nextPanel === "agent") {
+    if (!agentPanelAgentId.value) {
+      agentPanelAgentId.value = preferredAgentHomeId.value;
+    }
+    if (!hasDirtyAgentHomeChanges.value) {
+      await refreshAgentHome();
+    }
+  }
 }
 
 function isCompactViewport() {
   return window.matchMedia("(max-width: 860px)").matches;
 }
 
+async function reloadAgentHomeWithGuard() {
+  if (
+    !confirmDiscardAgentHomeChanges(
+      "Reloading the home will discard unsaved edits.",
+    )
+  ) {
+    return;
+  }
+  await refreshAgentHome();
+}
+
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  if (!hasDirtyAgentHomeChanges.value) {
+    return;
+  }
+  event.preventDefault();
+  event.returnValue = "";
+}
+
 function syncPanelsForViewport() {
   if (isCompactViewport()) {
     deckOpen.value = false;
-    inspectorOpen.value = false;
+    setActiveRightPanel(null, { persist: false });
+    return;
+  }
+  if (activeRightPanel.value === null && preferredRightPanel.value !== null) {
+    setActiveRightPanel(preferredRightPanel.value, { persist: false });
   }
 }
 
@@ -393,119 +303,18 @@ function closeDeckIfCompact() {
   }
 }
 
+function closeRightPanel() {
+  setActiveRightPanel(null);
+}
+
 function toggleDeck() {
   deckOpen.value = !deckOpen.value;
 }
 
-async function hydrateConversationAfterTurn(bulkKey: string | null) {
-  await refreshConversations();
-  if (bulkKey) {
-    await selectConversation(bulkKey);
-  }
-}
-
-function watchTurn(runId: string) {
-  closeTurnStream();
-  streamState.value = "streaming";
-  turnEventSource.value = openTurnEvents(runId, {
-    pollIntervalSeconds: 0.35,
-    timeoutSeconds: 90,
-    onEvent: async (event, payload) => {
-      if (event === "message_appended") {
-        mergeMessage((payload as TurnMessageEventPayload).message);
-        return;
-      }
-      if (event === "llm_text_delta") {
-        mergeStreamingAssistant(payload as TurnTextDeltaEventPayload);
-        return;
-      }
-      if (event === "tool_started" || event === "tool_completed") {
-        pushToolEvent(event, payload as TurnToolEventPayload);
-        return;
-      }
-
-      const turnPayload =
-        event === "snapshot"
-          ? ({
-              run: (payload as TurnSnapshotResponse).run,
-              output_text: (payload as TurnSnapshotResponse).output_text,
-            } satisfies TurnResponse)
-          : (payload as TurnResponse);
-
-      activeTurn.value = turnPayload;
-      if (turnPayload.run.bulk_key) {
-        activeBulkKey.value = turnPayload.run.bulk_key;
-      }
-      pushEvent(event, turnPayload);
-
-      if (event === "snapshot") {
-        mergeSnapshotMessages((payload as TurnSnapshotResponse).messages);
-      }
-      if (event === "completed" || event === "failed" || event === "cancelled") {
-        busy.value = false;
-        streamState.value = "closed";
-        closeTurnStream();
-        await hydrateConversationAfterTurn(turnPayload.run.bulk_key);
-      }
-      if (event === "timeout") {
-        busy.value = false;
-        streamState.value = "closed";
-      }
-    },
-    onError: () => {
-      streamState.value = "closed";
-    },
-  });
-}
-
-async function submitTurn() {
-  if (!canSubmit.value) {
-    return;
-  }
-  lastError.value = null;
-  busy.value = true;
-
-  const content = composer.value.trim();
-  const route = activeRoute.value;
-  const optimisticMessage = buildOptimisticUserMessage(content);
-  const previousMessages = [...messages.value];
-  messages.value = [...messages.value, optimisticMessage];
-  composer.value = "";
-
-  try {
-    const payload = await createTurn({
-      content,
-      source: "web",
-      ...routePayload(route),
-    });
-    activeTurn.value = payload;
-    pushEvent("snapshot", payload);
-    if (payload.run.bulk_key) {
-      activeBulkKey.value = payload.run.bulk_key;
-    }
-    await refreshConversations();
-    watchTurn(payload.run.id);
-  } catch (error) {
-    messages.value = previousMessages;
-    busy.value = false;
-    composer.value = content;
-    lastError.value = error instanceof Error ? error.message : String(error);
-  }
-}
-
-async function cancelActiveTurn() {
-  if (!activeTurn.value || !busy.value) {
-    return;
-  }
-  try {
-    const payload = await cancelTurn(activeTurn.value.run.id, "user_cancelled");
-    activeTurn.value = payload;
-    pushEvent("cancelled", payload);
-    busy.value = false;
-    closeTurnStream();
-    await hydrateConversationAfterTurn(payload.run.bulk_key);
-  } catch (error) {
-    lastError.value = error instanceof Error ? error.message : String(error);
+async function submitComposerTurn() {
+  const submitted = await submitTurn(composer.value);
+  if (submitted) {
+    composer.value = "";
   }
 }
 
@@ -521,17 +330,21 @@ function formatTime(value: string | null) {
 }
 
 onMounted(async () => {
+  window.addEventListener("beforeunload", handleBeforeUnload);
+  window.addEventListener("resize", syncPanelsForViewport);
   syncPanelsForViewport();
   await refreshProfiles();
   await refreshConversations();
   if (conversations.value[0]) {
     await selectConversation(conversations.value[0].bulk_key);
   } else {
-    draftRoute.value = createDraftRoute(selectedAgentId.value ?? defaultAgentId.value);
+    await createFreshConversation();
   }
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("beforeunload", handleBeforeUnload);
+  window.removeEventListener("resize", syncPanelsForViewport);
   closeTurnStream();
 });
 </script>
@@ -541,7 +354,7 @@ onBeforeUnmount(() => {
     class="app-shell"
     :class="{
       'app-shell--deck-open': deckOpen,
-      'app-shell--inspector-open': inspectorOpen,
+      'app-shell--inspector-open': inspectorOpen || memoryOpen || agentHomeOpen,
     }"
   >
     <div class="app-shell__bg"></div>
@@ -558,24 +371,70 @@ onBeforeUnmount(() => {
       :active-bulk-key="activeBulkKey"
       :loading="loadingConversations"
       @select="selectConversation"
-      @fresh="createFreshConversation"
+      @fresh="startFreshConversation"
       @close="deckOpen = false"
     />
 
     <main class="workspace">
       <header class="topbar shell">
         <div class="topbar__group">
-          <button class="ghost-button" type="button" @click="toggleDeck">
+          <button
+            class="ghost-button"
+            type="button"
+            :title="deckOpen ? 'Close thread list' : 'Open thread list'"
+            @click="toggleDeck"
+          >
             <span class="button-glyph button-glyph--threads" aria-hidden="true"></span>
             <span class="sr-only">Threads</span>
           </button>
           <div class="topbar__title">
             <p class="eyebrow">crxzipple</p>
             <h1>{{ activeTitle }}</h1>
+            <div v-if="topbarStatusNote" class="topbar__meta-row">
+              <p v-if="topbarStatusNote" class="topbar__meta-note">
+                {{ topbarStatusNote }}
+              </p>
+            </div>
           </div>
         </div>
         <div class="topbar__actions">
-          <button class="ghost-button" type="button" @click="toggleInspector">
+          <button
+            class="ghost-button"
+            type="button"
+            :title="toggleTitle"
+            @click="toggleTheme"
+          >
+            <span
+              class="button-glyph"
+              :class="theme === 'dark' ? 'button-glyph--theme-dark' : 'button-glyph--theme-light'"
+              aria-hidden="true"
+            ></span>
+            <span class="sr-only">{{ toggleTitle }}</span>
+          </button>
+          <button
+            class="ghost-button"
+            type="button"
+            :title="agentHomeOpen ? 'Close agent directory' : 'Open agent directory'"
+            @click="toggleAgentHome"
+          >
+            <span class="button-glyph button-glyph--agent" aria-hidden="true"></span>
+            <span class="sr-only">{{ agentHomeOpen ? "Hide agents" : "Agents" }}</span>
+          </button>
+          <button
+            class="ghost-button"
+            type="button"
+            :title="memoryOpen ? 'Close memory panel' : 'Open memory panel'"
+            @click="toggleMemory"
+          >
+            <span class="button-glyph button-glyph--memory" aria-hidden="true"></span>
+            <span class="sr-only">{{ memoryOpen ? "Hide memory" : "Memory" }}</span>
+          </button>
+          <button
+            class="ghost-button"
+            type="button"
+            :title="inspectorOpen ? 'Close inspector' : 'Open inspector'"
+            @click="toggleInspector"
+          >
             <span class="button-glyph button-glyph--inspect" aria-hidden="true"></span>
             <span class="sr-only">{{ inspectorOpen ? "Hide inspect" : "Inspect" }}</span>
           </button>
@@ -587,9 +446,11 @@ onBeforeUnmount(() => {
           :messages="messages"
           :turn-events="turnEvents"
           :active-turn="activeTurn"
+          :compaction-request="activeCompactionRequest"
           :conversation="activeConversation"
           :loading="loadingMessages"
           :last-error="lastError"
+          :run-feedback="activeRunFeedback"
         />
       </div>
 
@@ -597,12 +458,23 @@ onBeforeUnmount(() => {
         v-model="composer"
         :busy="busy"
         :disabled="!canSubmit"
-        :agents="agents"
+        :can-compact="canCompact"
+        :can-memory-flush="canMemoryFlush"
+        :compaction-running="compactionRunning"
+        :memory-flush-running="memoryFlushRunning"
+        :agents="enabledAgents"
         :llms="llms"
         :selected-agent-id="selectedAgentId"
         :selected-llm-id="selectedLlmId"
-        @submit="submitTurn"
+        :pending-approval="pendingApproval"
+        :pending-memory-candidate-count="pendingMemoryCandidates.length"
+        :context-meter="activeContextMeter"
+        :run-feedback="activeRunFeedback"
+        @submit="submitComposerTurn"
         @cancel="cancelActiveTurn"
+        @compact="requestCompaction"
+        @memory-flush="requestMemoryFlush"
+        @resolve-approval="resolveActiveApproval"
         @select-agent="selectAgent"
         @select-llm="selectLlm"
       />
@@ -611,13 +483,61 @@ onBeforeUnmount(() => {
     <TurnInspector
       :open="inspectorOpen"
       :active-turn="activeTurn"
+      :compaction-request="activeCompactionRequest"
       :turn-events="turnEvents"
       :payload="inspectorPayload"
       :output-preview="outputPreview"
       :last-error="lastError"
       :stream-state="streamState"
+      :context-budget="activeContextBudget"
       :format-time="formatTime"
-      @close="inspectorOpen = false"
+      @close="closeRightPanel"
+    />
+
+    <MemoryDrawer
+      :open="memoryOpen"
+      :loading="loadingMemory"
+      :current-thread-memory-candidates="currentThreadMemoryCandidates"
+      :other-memory-candidates="otherMemoryCandidates"
+      :entries="approvedMemoryEntries"
+      :query="memoryQuery"
+      :format-time="formatTime"
+      @approve-memory-candidate="approveMemoryCandidateById"
+      @reject-memory-candidate="rejectMemoryCandidateById"
+      @update:query="memoryQuery = $event"
+      @refresh="refreshMemoryPanel"
+      @close="closeRightPanel"
+    />
+
+    <AgentHomeDrawer
+      :open="agentHomeOpen"
+      :loading="loadingAgentHome"
+      :saving="savingAgentHome"
+      :creating="creatingAgent"
+      :updating-agent-status-id="updatingAgentStatusId"
+      :agents="agents"
+      :llms="llms"
+      :selected-agent-id="currentAgentHomeId"
+      :draft-agent-id="selectedAgentId"
+      :conversation-agent-id="activeConversation?.runtime_binding.agent_id ?? null"
+      :suggested-home-base-dir="suggestedAgentHomeBaseDir"
+      :snapshot="agentHomeSnapshot"
+      :selected-file-name="selectedAgentHomeFile"
+      :draft-content="activeAgentHomeDraftContent"
+      :dirty-file-count="dirtyAgentHomeFileNames.length"
+      :dirty-file-names="dirtyAgentHomeFileNames"
+      :current-file-dirty="currentAgentHomeFileDirty"
+      :error-message="agentPanelError"
+      @close="closeRightPanel"
+      @select-agent="selectAgentHomeAgent"
+      @use-agent="useAgentForNewChats"
+      @enable-agent="updateAgentEnabledState($event, true)"
+      @disable-agent="updateAgentEnabledState($event, false)"
+      @create-agent="createAgentFromPanel"
+      @select-file="selectAgentHomeFile"
+      @update:draft-content="updateAgentHomeDraft"
+      @reload="reloadAgentHomeWithGuard()"
+      @save="saveAgentHomeFile"
     />
   </div>
 </template>

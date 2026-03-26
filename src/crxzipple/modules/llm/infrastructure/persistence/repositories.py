@@ -34,6 +34,7 @@ class SqlAlchemyLlmProfileRepository:
                 provider=profile.provider.value,
                 api_family=profile.api_family.value,
                 model_name=profile.model_name,
+                context_window_tokens=profile.context_window_tokens,
                 model_family=profile.model_family.value,
                 capabilities=[item.value for item in profile.capabilities],
                 default_params=profile.default_params.to_payload(),
@@ -64,6 +65,7 @@ class SqlAlchemyLlmProfileRepository:
             provider=LlmProviderKind(model.provider),
             api_family=LlmApiFamily(model.api_family),
             model_name=model.model_name,
+            context_window_tokens=model.context_window_tokens,
             model_family=LlmModelFamily(model.model_family),
             capabilities=tuple(
                 LlmCapability(item) for item in (model.capabilities or [])

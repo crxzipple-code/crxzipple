@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -21,6 +24,8 @@ from crxzipple.core.config import (
     load_settings,
 )
 from crxzipple.interfaces.http.app import create_app
+from crxzipple.interfaces.http.conversations import _normalize_preview_text
+from crxzipple.modules.agent.infrastructure import derive_agent_home_root
 from crxzipple.modules.llm.application import LlmStreamEvent
 from crxzipple.modules.llm.application.adapters import LlmAdapterResponse
 from crxzipple.modules.llm.domain import (
@@ -30,6 +35,11 @@ from crxzipple.modules.llm.domain import (
     LlmResult,
     ToolCallIntent,
 )
+from crxzipple.modules.memory.application import CreateMemoryCandidateInput
+from crxzipple.modules.memory.domain.value_objects import MemoryCandidateStatus
+from crxzipple.modules.session.application import ListSessionMessagesInput
+from crxzipple.modules.tool.application import RegisterToolInput
+from crxzipple.modules.tool.domain import ToolMode
 from tests.unit.support import (
     SampleApiServer,
     SampleLlmApiServer,
@@ -112,12 +122,58 @@ class _FakeInlineToolAdapter:
         return LlmAdapterResponse(result=LlmResult(text="tool loop complete"))
 
 
+class _FakeEffectApprovalAdapter:
+    def invoke(self, _profile, request):  # noqa: ANN001
+        tool_messages = [
+            message for message in request.messages if message.role is LlmMessageRole.TOOL
+        ]
+        echo_messages = [message for message in tool_messages if message.name == "echo"]
+        if not tool_messages:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-echo-1",
+                            name="echo",
+                            arguments={"message": "hello after approval"},
+                        ),
+                    ),
+                ),
+            )
+        if not echo_messages:
+            raise AssertionError("approval replay should provide an echo tool result")
+        return LlmAdapterResponse(result=LlmResult(text="approval flow complete"))
+
+
+class _SequentialTextAdapter:
+    def __init__(self, *texts: str) -> None:
+        self._texts = list(texts)
+        self.requests: list[object] = []
+
+    def invoke(self, _profile, request):  # noqa: ANN001
+        self.requests.append(request)
+        text = self._texts.pop(0) if self._texts else ""
+        return LlmAdapterResponse(result=LlmResult(text=text))
+
+
 class HttpTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_openapi_provider_paths = os.environ.get(
             "APP_TOOL_OPENAPI_PROVIDER_PATHS",
         )
         os.environ["APP_TOOL_OPENAPI_PROVIDER_PATHS"] = os.pathsep
+        self._skills_tempdir = tempfile.TemporaryDirectory()
+        skills_root = Path(self._skills_tempdir.name)
+        self._global_skills_patcher = patch(
+            "crxzipple.modules.orchestration.application.skills_context.DEFAULT_GLOBAL_SKILLS_DIR",
+            skills_root / "global",
+        )
+        self._system_skills_patcher = patch(
+            "crxzipple.modules.orchestration.application.skills_context.DEFAULT_SYSTEM_SKILLS_DIR",
+            skills_root / "system",
+        )
+        self._global_skills_patcher.start()
+        self._system_skills_patcher.start()
         self.harness = SqliteTestHarness()
         self.harness.initialize_schema()
         self.client = TestClient(create_app(database_url=self.harness.database_url))
@@ -126,6 +182,9 @@ class HttpTestCase(unittest.TestCase):
         self.client.close()
         self.client.app.state.container.engine.dispose()
         self.harness.close()
+        self._system_skills_patcher.stop()
+        self._global_skills_patcher.stop()
+        self._skills_tempdir.cleanup()
         if self.previous_openapi_provider_paths is None:
             os.environ.pop("APP_TOOL_OPENAPI_PROVIDER_PATHS", None)
         else:
@@ -159,6 +218,300 @@ class HttpTestCase(unittest.TestCase):
             )
             self.assertEqual(llm_response.status_code, 201)
 
+            with tempfile.TemporaryDirectory() as tempdir:
+                workspace = Path(tempdir)
+                (workspace / "AGENTS.md").write_text(
+                    "# AGENTS.md\n\nUse the local project context.\n",
+                    encoding="utf-8",
+                )
+                agent_response = self.client.post(
+                    "/agents",
+                    json={
+                        "id": "crxzipple",
+                        "name": "crxzipple",
+                        "llm_routing_policy": {"default_llm_id": "local-chat"},
+                        "instruction_policy": {"system_prompt": "Be helpful."},
+                        "runtime_preferences": {"workspace": str(workspace)},
+                    },
+                )
+                self.assertEqual(agent_response.status_code, 201)
+
+                turn_response = self.client.post(
+                    "/turns",
+                    json={
+                        "content": "hello",
+                        "agent_id": "crxzipple",
+                    },
+                )
+
+                self.assertEqual(turn_response.status_code, 202)
+                payload = turn_response.json()
+                self.assertIsNone(payload["output_text"])
+                self.assertEqual(payload["run"]["status"], "queued")
+                self.assertEqual(payload["run"]["stage"], "queued")
+                self.assertEqual(payload["run"]["current_step"], 0)
+
+                processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                    worker_id="http-test-worker",
+                )
+                self.assertIsNotNone(processed)
+
+                get_response = self.client.get(f"/turns/{payload['run']['id']}")
+                self.assertEqual(get_response.status_code, 200)
+                get_payload = get_response.json()
+                self.assertEqual(get_payload["run"]["id"], payload["run"]["id"])
+                self.assertEqual(get_payload["run"]["status"], "completed")
+                self.assertEqual(get_payload["run"]["stage"], "completed")
+                self.assertEqual(get_payload["run"]["current_step"], 1)
+                self.assertEqual(get_payload["output_text"], "hello from sample llm")
+                self.assertEqual(
+                    get_payload["run"]["metadata"]["workspace_context_workspace"],
+                    str(workspace),
+                )
+                workspace_context_files = get_payload["run"]["metadata"]["workspace_context_files"]
+                self.assertIn(
+                    {"path": "AGENTS.md", "chars": len("# AGENTS.md\n\nUse the local project context.")},
+                    workspace_context_files,
+                )
+                self.assertEqual(get_payload["run"]["metadata"]["prompt_mode"], "session_start")
+                self.assertEqual(
+                    get_payload["run"]["metadata"]["prompt_report"]["system_budget"]["source"],
+                    "fixed",
+                )
+                self.assertEqual(
+                    get_payload["run"]["metadata"]["prompt_report"]["system_budget"]["max_estimated_tokens"],
+                    30000,
+                )
+                self.assertEqual(
+                    [block["kind"] for block in get_payload["run"]["metadata"]["prompt_report"]["system_blocks"]],
+                    ["agent_instruction", "runtime_context", "flow_prompt", "project_context"],
+                )
+                preview_response = self.client.get(
+                    f"/turns/{payload['run']['id']}/prompt-preview",
+                )
+                self.assertEqual(preview_response.status_code, 200)
+                preview_payload = preview_response.json()
+                self.assertEqual(preview_payload["run_id"], payload["run"]["id"])
+                self.assertEqual(preview_payload["llm_id"], "local-chat")
+                self.assertEqual(preview_payload["mode"], "normal_turn")
+                self.assertIsNotNone(preview_payload["prompt_report"])
+                self.assertTrue(
+                    any(
+                        item["role"] == "user" and item["content"] == "hello"
+                        for item in preview_payload["messages"]
+                    ),
+                )
+                self.assertIn(
+                    {"path": "AGENTS.md", "chars": len("# AGENTS.md\n\nUse the local project context.")},
+                    preview_payload["workspace_context_files"],
+                )
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_turn_compaction_endpoint_creates_compaction_run(self) -> None:
+        adapter = _SequentialTextAdapter("initial answer", "compacted summary")
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "local-chat"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+        run_id = turn_response.json()["run"]["id"]
+
+        processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-test-worker",
+        )
+        self.assertIsNotNone(processed)
+
+        compact_response = self.client.post(
+            f"/turns/{run_id}/compact",
+            json={
+                "reason": "manual compaction",
+                "preserve": "open tasks and constraints",
+            },
+        )
+        self.assertEqual(compact_response.status_code, 202)
+        compact_payload = compact_response.json()
+        self.assertEqual(compact_payload["run"]["status"], "queued")
+        self.assertEqual(
+            compact_payload["run"]["metadata"]["prompt_flow_hint"]["mode"],
+            "compaction",
+        )
+        self.assertEqual(
+            compact_payload["run"]["metadata"]["compaction_request"]["basis"],
+            "manual",
+        )
+
+        compact_run = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-test-worker",
+        )
+        self.assertIsNotNone(compact_run)
+        assert compact_run is not None
+        self.assertEqual(compact_run.metadata["prompt_mode"], "compaction")
+
+        conversations_response = self.client.get("/conversations")
+        self.assertEqual(conversations_response.status_code, 200)
+        conversations_payload = conversations_response.json()
+        self.assertEqual(conversations_payload[0]["title"], "hello")
+        self.assertEqual(conversations_payload[0]["latest_run_id"], compact_run.id)
+        self.assertEqual(conversations_payload[0]["latest_run_status"], "completed")
+        self.assertEqual(conversations_payload[0]["display_run_id"], run_id)
+        self.assertEqual(conversations_payload[0]["display_run_status"], "completed")
+        self.assertEqual(conversations_payload[0]["last_message_preview"], "initial answer")
+
+        live_history_response = self.client.get(
+            f"/conversations/{compact_payload['run']['bulk_key']}/messages",
+        )
+        self.assertEqual(live_history_response.status_code, 200)
+        live_history_payload = live_history_response.json()
+        self.assertTrue(
+            all(item["visibility"] != "archived" for item in live_history_payload),
+        )
+
+        full_history_response = self.client.get(
+            f"/conversations/{compact_payload['run']['bulk_key']}/messages?include_archived=true",
+        )
+        self.assertEqual(full_history_response.status_code, 200)
+        full_history_payload = full_history_response.json()
+        self.assertGreater(len(full_history_payload), len(live_history_payload))
+        self.assertTrue(
+            any(item["visibility"] == "archived" for item in full_history_payload),
+        )
+
+        session_key = str(compact_run.metadata["session_key"])
+        session_messages = self.client.app.state.container.session_service.list_messages(
+            ListSessionMessagesInput(
+                session_key=session_key,
+                active_session_only=True,
+            ),
+        )
+        archived_messages = [
+            message for message in session_messages if message.visibility.value == "archived"
+        ]
+        self.assertGreaterEqual(len(archived_messages), 2)
+
+    def test_turn_heartbeat_endpoint_creates_heartbeat_run(self) -> None:
+        adapter = _SequentialTextAdapter("initial answer", "HEARTBEAT_OK")
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "local-chat"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+        run_id = turn_response.json()["run"]["id"]
+
+        processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-test-worker",
+        )
+        self.assertIsNotNone(processed)
+
+        heartbeat_response = self.client.post(
+            f"/turns/{run_id}/heartbeat",
+            json={
+                "reason": "scheduled_check",
+            },
+        )
+        self.assertEqual(heartbeat_response.status_code, 202)
+        heartbeat_payload = heartbeat_response.json()
+        self.assertEqual(heartbeat_payload["run"]["status"], "queued")
+        self.assertEqual(
+            heartbeat_payload["run"]["metadata"]["prompt_flow_hint"]["mode"],
+            "heartbeat",
+        )
+        self.assertEqual(
+            heartbeat_payload["run"]["metadata"]["heartbeat_request"]["basis"],
+            "manual",
+        )
+
+        heartbeat_run = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-test-worker",
+        )
+        self.assertIsNotNone(heartbeat_run)
+        assert heartbeat_run is not None
+        self.assertEqual(heartbeat_run.metadata["prompt_mode"], "heartbeat")
+
+    def test_turn_memory_flush_endpoint_creates_memory_flush_run(self) -> None:
+        adapter = _SequentialTextAdapter(
+            "initial answer",
+            "# Durable Memory\n\nKeep effect approvals as the default path for risky actions.",
+        )
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir)
             agent_response = self.client.post(
                 "/agents",
                 json={
@@ -166,6 +519,7 @@ class HttpTestCase(unittest.TestCase):
                     "name": "crxzipple",
                     "llm_routing_policy": {"default_llm_id": "local-chat"},
                     "instruction_policy": {"system_prompt": "Be helpful."},
+                    "runtime_preferences": {"workspace": str(workspace)},
                 },
             )
             self.assertEqual(agent_response.status_code, 201)
@@ -177,33 +531,190 @@ class HttpTestCase(unittest.TestCase):
                     "agent_id": "crxzipple",
                 },
             )
-
             self.assertEqual(turn_response.status_code, 202)
-            payload = turn_response.json()
-            self.assertIsNone(payload["output_text"])
-            self.assertEqual(payload["run"]["status"], "queued")
-            self.assertEqual(payload["run"]["stage"], "queued")
-            self.assertEqual(payload["run"]["current_step"], 0)
+            run_id = turn_response.json()["run"]["id"]
 
             processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
                 worker_id="http-test-worker",
             )
             self.assertIsNotNone(processed)
 
-            get_response = self.client.get(f"/turns/{payload['run']['id']}")
-            self.assertEqual(get_response.status_code, 200)
-            get_payload = get_response.json()
-            self.assertEqual(get_payload["run"]["id"], payload["run"]["id"])
-            self.assertEqual(get_payload["run"]["status"], "completed")
-            self.assertEqual(get_payload["run"]["stage"], "completed")
-            self.assertEqual(get_payload["run"]["current_step"], 1)
-            self.assertEqual(get_payload["output_text"], "hello from sample llm")
-        finally:
-            if previous_token is None:
-                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
-            else:
-                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
-            server.close()
+            flush_response = self.client.post(
+                f"/turns/{run_id}/memory-flush",
+                json={
+                    "reason": "manual memory flush",
+                },
+            )
+            self.assertEqual(flush_response.status_code, 202)
+            flush_payload = flush_response.json()
+            self.assertEqual(flush_payload["run"]["status"], "queued")
+            self.assertEqual(
+                flush_payload["run"]["metadata"]["prompt_flow_hint"]["mode"],
+                "memory_flush",
+            )
+            self.assertEqual(
+                flush_payload["run"]["metadata"]["memory_flush_request"]["basis"],
+                "manual",
+            )
+
+            flush_run = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                worker_id="http-test-worker",
+            )
+            self.assertIsNotNone(flush_run)
+            assert flush_run is not None
+            self.assertEqual(flush_run.metadata["prompt_mode"], "memory_flush")
+            self.assertEqual(flush_run.metadata["memory_flush_result"]["skipped"], False)
+            entries = self.client.get(
+                "/memory/entries",
+                params={"agent_id": "crxzipple", "query": "risky actions"},
+            )
+            self.assertEqual(entries.status_code, 200)
+            self.assertEqual(len(entries.json()), 1)
+
+    def test_orchestration_request_due_heartbeats_endpoint_queues_idle_session(self) -> None:
+        adapter = _SequentialTextAdapter("initial answer", "HEARTBEAT_OK")
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "local-chat"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+        _ = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-test-worker",
+        )
+
+        with self.client.app.state.container.session_service.uow_factory() as uow:
+            session = uow.sessions.get("agent:crxzipple:main")
+            assert session is not None
+            session.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+            uow.sessions.add(session)
+            uow.commit()
+
+        due_response = self.client.post(
+            "/orchestration/heartbeats/request-due",
+            json={
+                "idle_seconds": 60,
+                "limit": 5,
+            },
+        )
+        self.assertEqual(due_response.status_code, 200)
+        payload = due_response.json()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["metadata"]["prompt_flow_hint"]["mode"], "heartbeat")
+        self.assertEqual(payload[0]["metadata"]["heartbeat_request"]["basis"], "idle_session")
+
+    def test_turn_events_emit_approval_request_and_endpoint_resumes_run(self) -> None:
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-capability",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "writer",
+                "name": "Writer",
+                "llm_routing_policy": {"default_llm_id": "local-capability"},
+                "instruction_policy": {"system_prompt": "Use tools when needed."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+        tool = self.client.app.state.container.tool_service.register(
+            RegisterToolInput(
+                id="echo",
+                name="Echo",
+                description="Echoes a message.",
+                supported_modes=(ToolMode.INLINE,),
+                required_effect_ids=("local_tool_access",),
+                runtime_key="echo",
+            ),
+        )
+
+        async def echo(arguments: dict[str, object]) -> dict[str, object]:
+            return {"echo": arguments.get("message")}
+
+        self.client.app.state.container.local_tool_catalog.register(tool, echo)
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _FakeEffectApprovalAdapter(),
+        )
+
+        created = self.client.post(
+            "/turns",
+            json={"content": "please continue", "agent_id": "writer"},
+        )
+        self.assertEqual(created.status_code, 202)
+        run_id = created.json()["run"]["id"]
+
+        waiting = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-test-worker",
+        )
+        self.assertIsNotNone(waiting)
+        assert waiting is not None
+        self.assertEqual(waiting.stage.value, "waiting_for_confirmation")
+
+        with self.client.stream("GET", f"/turns/{run_id}/events") as response:
+            self.assertEqual(response.status_code, 200)
+            event_names: list[str] = []
+            request_id: str | None = None
+            current_event: str | None = None
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                decoded = line.decode("utf-8") if isinstance(line, bytes) else line
+                if decoded.startswith("event: "):
+                    current_event = decoded.removeprefix("event: ").strip()
+                    event_names.append(current_event)
+                    continue
+                if decoded.startswith("data: ") and current_event == "approval_requested":
+                    payload = json.loads(decoded.removeprefix("data: "))
+                    request_id = payload["request"]["request_id"]
+                    break
+
+        self.assertIn("snapshot", event_names)
+        self.assertIn("approval_requested", event_names)
+        self.assertIsNotNone(request_id)
+        assert request_id is not None
+
+        approval_response = self.client.post(
+            f"/turns/{run_id}/approvals/{request_id}",
+            json={"decision": "allow_once"},
+        )
+        self.assertEqual(approval_response.status_code, 202)
+        self.assertEqual(approval_response.json()["run"]["status"], "completed")
 
     def test_conversation_messages_endpoint_reads_history_by_bulk_key(self) -> None:
         server = SampleLlmApiServer()
@@ -318,6 +829,7 @@ class HttpTestCase(unittest.TestCase):
             self.assertEqual(len(list_payload), 1)
             self.assertEqual(list_payload[0]["bulk_key"], bulk_key)
             self.assertEqual(list_payload[0]["session_key"], "agent:crxzipple:main")
+            self.assertEqual(list_payload[0]["title"], "hello")
             self.assertEqual(list_payload[0]["latest_run_status"], "completed")
             self.assertEqual(list_payload[0]["last_message_preview"], "hello from sample llm")
 
@@ -326,6 +838,7 @@ class HttpTestCase(unittest.TestCase):
             get_payload = get_response.json()
             self.assertEqual(get_payload["bulk_key"], bulk_key)
             self.assertEqual(get_payload["session_key"], "agent:crxzipple:main")
+            self.assertEqual(get_payload["title"], "hello")
             self.assertEqual(get_payload["latest_run_status"], "completed")
         finally:
             if previous_token is None:
@@ -333,6 +846,339 @@ class HttpTestCase(unittest.TestCase):
             else:
                 os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
             server.close()
+
+    def test_conversations_use_stable_title_instead_of_latest_message_preview(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            for prompt in (
+                "hello",
+                "plan a long weekend in Beijing with museums and food",
+                "去北京呢",
+            ):
+                turn_response = self.client.post(
+                    "/turns",
+                    json={
+                        "content": prompt,
+                        "agent_id": "crxzipple",
+                    },
+                )
+                self.assertEqual(turn_response.status_code, 202)
+                processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                    worker_id="http-conversation-title-worker",
+                )
+                self.assertIsNotNone(processed)
+
+            list_response = self.client.get("/conversations")
+            self.assertEqual(list_response.status_code, 200)
+            list_payload = list_response.json()
+            self.assertEqual(len(list_payload), 1)
+            self.assertEqual(
+                list_payload[0]["title"],
+                "plan a long weekend in Beijing with museums and food",
+            )
+            self.assertEqual(list_payload[0]["last_message_preview"], "hello from sample llm")
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_conversation_preview_strips_markdown_formatting(self) -> None:
+        adapter = _SequentialTextAdapter(
+            "# Heading\n\nUse **bold** and `code` with [link](https://example.com).\n\n- [x] done\n- [ ] todo\n\n$$x^2$$ and \\(a+b\\)\n\n---",
+        )
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "local-chat"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+
+        processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-preview-worker",
+        )
+        self.assertIsNotNone(processed)
+
+        list_response = self.client.get("/conversations")
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(
+            list_payload[0]["last_message_preview"],
+            "Heading Use bold and code with link. done todo x^2 and a+b",
+        )
+
+    def test_conversation_preview_strips_markdown_headings_without_spaces(self) -> None:
+        adapter = _SequentialTextAdapter(
+            "###标题\n\n* 列表一\n* 列表二\n\n**重点**\n\n#一级\n##二级",
+        )
+        self.client.app.state.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "local-chat",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        agent_response = self.client.post(
+            "/agents",
+            json={
+                "id": "crxzipple",
+                "name": "crxzipple",
+                "llm_routing_policy": {"default_llm_id": "local-chat"},
+                "instruction_policy": {"system_prompt": "Be helpful."},
+            },
+        )
+        self.assertEqual(agent_response.status_code, 201)
+
+        turn_response = self.client.post(
+            "/turns",
+            json={
+                "content": "hello",
+                "agent_id": "crxzipple",
+            },
+        )
+        self.assertEqual(turn_response.status_code, 202)
+
+        processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            worker_id="http-preview-worker",
+        )
+        self.assertIsNotNone(processed)
+
+        list_response = self.client.get("/conversations")
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(
+            list_payload[0]["last_message_preview"],
+            "标题 列表一 列表二 重点 一级 二级",
+        )
+
+    def test_conversation_preview_strips_inline_markdown_markers(self) -> None:
+        preview = _normalize_preview_text(
+            "可以，给你安排一个**“拍夕阳 + 吃晚饭”**的轻松版行程。 "
+            "## 推荐路线：滇池看夕阳 + 附近吃晚饭 "
+            "### 16:30-17:30 出发 - 先去 **海埂大坝 / 滇池海埂公园** "
+            "- 先走一圈找机位，边走边拍 "
+            "### 19:40-20:30 吃晚饭 "
+            "1. **适合两个人约会版** 2. **适合一个人散步拍照版**",
+        )
+
+        self.assertEqual(
+            preview,
+            "可以，给你安排一个“拍夕阳 + 吃晚饭”的轻松版行程。 推荐路线：滇池看夕阳 + "
+            "附近吃晚饭 16:30-17:30 出发 先去 海埂大坝 / 滇池海埂公园 先走一圈找机位，边走边拍 "
+            "19:40-20:30 吃晚饭 适合两个人约会版 适合一个人散步拍照版",
+        )
+
+    def test_memory_candidates_endpoints_list_filter_and_approve(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir)
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "runtime_preferences": {"workspace": str(workspace)},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            first = self.client.app.state.container.memory_service.create_candidate(
+                CreateMemoryCandidateInput(
+                    agent_id="crxzipple",
+                    session_key="agent:crxzipple:main",
+                    run_id="run-memory-1",
+                    title="User preference",
+                    content="The user prefers concise summaries.",
+                    summary="Prefer concise summaries.",
+                    tags=("preference",),
+                ),
+            )
+            second = self.client.app.state.container.memory_service.create_candidate(
+                CreateMemoryCandidateInput(
+                    agent_id="crxzipple",
+                    session_key="agent:crxzipple:secondary",
+                    run_id="run-memory-2",
+                    title="Different thread",
+                    content="This memory belongs to another thread.",
+                    summary="Other thread memory.",
+                    tags=("thread",),
+                ),
+            )
+
+            list_response = self.client.get(
+                "/memory/candidates",
+                params={
+                    "agent_id": "crxzipple",
+                    "session_key": "agent:crxzipple:main",
+                    "status": "pending",
+                },
+            )
+            self.assertEqual(list_response.status_code, 200)
+            self.assertEqual([item["id"] for item in list_response.json()], [first.id])
+
+            entries_before_review = self.client.get(
+                "/memory/entries",
+                params={"agent_id": "crxzipple", "query": "concise"},
+            )
+            self.assertEqual(entries_before_review.status_code, 200)
+            self.assertEqual(
+                [item["id"] for item in entries_before_review.json()],
+                [first.approved_entry_id],
+            )
+
+            approve_response = self.client.post(
+                f"/memory/candidates/{first.id}/approve",
+            )
+            self.assertEqual(approve_response.status_code, 200)
+            approved_entry = approve_response.json()
+            self.assertEqual(approved_entry["source_candidate_id"], first.id)
+            self.assertEqual(approved_entry["session_key"], "agent:crxzipple:main")
+
+            approved_candidate = self.client.app.state.container.memory_service.get_candidate(
+                first.id,
+            )
+            untouched_candidate = self.client.app.state.container.memory_service.get_candidate(
+                second.id,
+            )
+            self.assertEqual(approved_candidate.status, MemoryCandidateStatus.APPROVED)
+            self.assertEqual(untouched_candidate.status, MemoryCandidateStatus.PENDING)
+
+            entries_response = self.client.get(
+                "/memory/entries",
+                params={"agent_id": "crxzipple", "query": "concise"},
+            )
+            self.assertEqual(entries_response.status_code, 200)
+            self.assertEqual(
+                [item["id"] for item in entries_response.json()],
+                [approved_entry["id"]],
+            )
+
+    def test_memory_candidate_reject_endpoint_marks_candidate_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir)
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "runtime_preferences": {"workspace": str(workspace)},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            candidate = self.client.app.state.container.memory_service.create_candidate(
+                CreateMemoryCandidateInput(
+                    agent_id="crxzipple",
+                    session_key="agent:crxzipple:main",
+                    run_id="run-memory-3",
+                    title="Ephemeral note",
+                    content="This should stay out of durable memory.",
+                    summary="Not durable enough.",
+                ),
+            )
+
+            entries_before_reject = self.client.get(
+                "/memory/entries",
+                params={"agent_id": "crxzipple", "query": "durable"},
+            )
+            self.assertEqual(entries_before_reject.status_code, 200)
+            self.assertEqual(len(entries_before_reject.json()), 1)
+
+            reject_response = self.client.post(
+                f"/memory/candidates/{candidate.id}/reject",
+                json={"reason": "not durable enough"},
+            )
+
+            self.assertEqual(reject_response.status_code, 200)
+            payload = reject_response.json()
+            self.assertEqual(payload["status"], "rejected")
+            self.assertEqual(payload["review_reason"], "not durable enough")
+            self.assertIsNone(payload["approved_entry_id"])
+
+            entries_after_reject = self.client.get(
+                "/memory/entries",
+                params={"agent_id": "crxzipple", "query": "durable"},
+            )
+            self.assertEqual(entries_after_reject.status_code, 200)
+            self.assertEqual(entries_after_reject.json(), [])
+
+    def test_memory_candidates_endpoint_rejects_invalid_status_filter(self) -> None:
+        response = self.client.get(
+            "/memory/candidates",
+            params={"status": "unknown"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"],
+            "Unsupported memory candidate status 'unknown'.",
+        )
 
     def test_turn_cancel_endpoint_cancels_submitted_turn(self) -> None:
         llm_response = self.client.post(
@@ -552,9 +1398,20 @@ class HttpTestCase(unittest.TestCase):
         )
         self.assertEqual(agent_response.status_code, 201)
 
-        discover_response = self.client.post("/tools/discover-local")
-        self.assertEqual(discover_response.status_code, 200)
-        self.assertEqual(discover_response.json()[0]["id"], "echo")
+        tool = container.tool_service.register(
+            RegisterToolInput(
+                id="echo",
+                name="Echo",
+                description="Echoes a message.",
+                supported_modes=(ToolMode.INLINE,),
+                runtime_key="echo",
+            ),
+        )
+
+        async def echo(arguments: dict[str, object]) -> dict[str, object]:
+            return {"echo": arguments.get("message")}
+
+        container.local_tool_catalog.register(tool, echo)
 
         turn_response = self.client.post(
             "/turns",
@@ -1291,46 +2148,88 @@ class HttpTestCase(unittest.TestCase):
             server.close()
 
     def test_agent_profile_endpoints_register_fetch_and_list(self) -> None:
-        create_response = self.client.post(
-            "/agents",
-            json={
-                "id": "writer",
-                "name": "Writer",
-                "description": "Writes concise summaries.",
-                "identity": {"display_name": "Writer Agent", "emoji": ":memo:"},
-                "instruction_policy": {
-                    "system_prompt": "Be concise.",
-                    "stream_by_default": True,
+        with tempfile.TemporaryDirectory() as tempdir:
+            home_dir = Path(tempdir) / "agent-writer-home"
+            workdir = Path(tempdir) / "agent-writer-work"
+            create_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "writer",
+                    "name": "Writer",
+                    "description": "Writes concise summaries.",
+                    "identity": {"display_name": "Writer Agent", "emoji": ":memo:"},
+                    "instruction_policy": {
+                        "system_prompt": "Be concise.",
+                        "stream_by_default": True,
+                    },
+                    "llm_routing_policy": {
+                        "default_llm_id": "openai.gpt-5.4-mini",
+                        "fallback_llm_ids": ["openai.gpt-5.4"],
+                    },
+                    "execution_policy": {"timeout_seconds": 90, "max_turns": 8},
+                    "runtime_preferences": {
+                        "home_dir": str(home_dir),
+                        "workdir": str(workdir),
+                        "sandbox_mode": "sandbox",
+                    },
+                    "tool_preferences": {
+                        "requested_effect_ids": ["network_search"],
+                        "requested_tool_ids": ["brave_search.news_search"],
+                        "preferred_tags": ["search"],
+                        "prefers_background_tools": False,
+                        "prefers_mutating_tools": False,
+                    },
                 },
-                "llm_routing_policy": {
-                    "default_llm_id": "openai.gpt-5.4-mini",
-                    "fallback_llm_ids": ["openai.gpt-5.4"],
-                },
-                "execution_policy": {"timeout_seconds": 90, "max_turns": 8},
-                "runtime_preferences": {
-                    "workspace": "/tmp/agent-writer",
-                    "sandbox_mode": "sandbox",
-                },
-            },
-        )
+            )
 
-        self.assertEqual(create_response.status_code, 201)
-        self.assertEqual(create_response.json()["id"], "writer")
-        self.assertEqual(
-            create_response.json()["llm_routing_policy"]["default_llm_id"],
-            "openai.gpt-5.4-mini",
-        )
+            self.assertEqual(create_response.status_code, 201)
+            self.assertEqual(create_response.json()["id"], "writer")
+            self.assertEqual(
+                create_response.json()["llm_routing_policy"]["default_llm_id"],
+                "openai.gpt-5.4-mini",
+            )
 
-        get_response = self.client.get("/agents/writer")
-        list_response = self.client.get("/agents")
+            self.assertTrue((home_dir / "agent.json").is_file())
+            self.assertTrue((home_dir / "AGENT.md").is_file())
+            self.assertTrue((home_dir / "SOUL.md").is_file())
+            self.assertTrue((home_dir / "USER.md").is_file())
+            self.assertTrue((home_dir / "IDENTITY.md").is_file())
+            self.assertTrue((home_dir / "MEMORY.md").is_file())
+            self.assertTrue((home_dir / "memory").is_dir())
+            self.assertTrue((home_dir / "skills").is_dir())
+            self.assertTrue((home_dir / ".state").is_dir())
 
-        self.assertEqual(get_response.status_code, 200)
-        self.assertEqual(get_response.json()["identity"]["display_name"], "Writer Agent")
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(len(list_response.json()), 1)
-        self.assertTrue(list_response.json()[0]["instruction_policy"]["stream_by_default"])
+            get_response = self.client.get("/agents/writer")
+            list_response = self.client.get("/agents")
+
+            self.assertEqual(get_response.status_code, 200)
+            self.assertEqual(get_response.json()["identity"]["display_name"], "Writer Agent")
+            self.assertEqual(
+                get_response.json()["runtime_preferences"]["home_dir"],
+                str(home_dir),
+            )
+            self.assertEqual(
+                get_response.json()["runtime_preferences"]["workdir"],
+                str(workdir),
+            )
+            self.assertEqual(
+                get_response.json()["runtime_preferences"]["workspace"],
+                str(workdir),
+            )
+            self.assertEqual(
+                get_response.json()["tool_preferences"]["requested_effect_ids"],
+                ["network_search"],
+            )
+            self.assertEqual(list_response.status_code, 200)
+            self.assertEqual(len(list_response.json()), 1)
+            self.assertTrue(
+                list_response.json()[0]["instruction_policy"]["stream_by_default"]
+            )
 
     def test_agent_sync_profiles_endpoint_uses_configured_profiles(self) -> None:
+        home_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home_root, True)
+        home_dir = home_root / "writer-home"
         settings = replace(
             load_settings(),
             database_url=self.harness.database_url,
@@ -1346,7 +2245,14 @@ class HttpTestCase(unittest.TestCase):
                     },
                     llm_routing_policy={"default_llm_id": "openai.gpt-5.4-mini"},
                     execution_policy={"timeout_seconds": 75, "max_turns": 7},
-                    runtime_preferences={"sandbox_mode": "sandbox"},
+                    runtime_preferences={
+                        "home_dir": str(home_dir),
+                        "sandbox_mode": "sandbox",
+                    },
+                    tool_preferences={
+                        "requested_tool_ids": ["filesystem.read_text"],
+                        "prefers_background_tools": False,
+                    },
                 ),
             ),
             tool_openapi_providers=(),
@@ -1369,8 +2275,352 @@ class HttpTestCase(unittest.TestCase):
                 get_response.json()["execution_policy"]["timeout_seconds"],
                 75,
             )
+            self.assertEqual(
+                get_response.json()["tool_preferences"]["requested_tool_ids"],
+                ["filesystem.read_text"],
+            )
+            self.assertTrue((home_dir / "agent.json").is_file())
+            self.assertTrue((home_dir / "AGENT.md").is_file())
         finally:
             client.close()
+
+    def test_agent_migrate_home_endpoint_copies_legacy_workspace_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            workspace = root / "legacy-workspace"
+            home_dir = root / "agent-home"
+            (workspace / "memory").mkdir(parents=True)
+            (workspace / "skills" / "weather").mkdir(parents=True)
+            (workspace / "AGENTS.md").write_text("legacy agent rules", encoding="utf-8")
+            (workspace / "SOUL.md").write_text("calm voice", encoding="utf-8")
+            (workspace / "memory" / "preferences.md").write_text(
+                "prefers concise replies",
+                encoding="utf-8",
+            )
+            (workspace / "skills" / "weather" / "SKILL.md").write_text(
+                "# Weather\n",
+                encoding="utf-8",
+            )
+
+            create_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "writer",
+                    "name": "Writer",
+                    "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                    "runtime_preferences": {"workspace": str(workspace)},
+                },
+            )
+            self.assertEqual(create_response.status_code, 201)
+
+            migrate_response = self.client.post(
+                "/agents/writer/migrate-home",
+                json={"home_dir": str(home_dir)},
+            )
+
+            self.assertEqual(migrate_response.status_code, 200)
+            payload = migrate_response.json()
+            self.assertEqual(payload["source_dir"], str(workspace))
+            self.assertEqual(payload["home_dir"], str(home_dir))
+            self.assertEqual(payload["workdir"], str(workspace))
+            self.assertEqual(
+                payload["profile"]["runtime_preferences"]["home_dir"],
+                str(home_dir),
+            )
+            self.assertEqual(
+                payload["profile"]["runtime_preferences"]["workdir"],
+                str(workspace),
+            )
+            self.assertEqual(
+                payload["profile"]["runtime_preferences"]["workspace"],
+                str(workspace),
+            )
+            self.assertIn("AGENTS.md -> AGENT.md", payload["copied_paths"])
+            self.assertIn("memory/preferences.md", payload["copied_paths"])
+            self.assertIn("skills/weather/SKILL.md", payload["copied_paths"])
+            self.assertTrue((home_dir / "agent.json").is_file())
+            self.assertEqual(
+                (home_dir / "AGENT.md").read_text(encoding="utf-8"),
+                "legacy agent rules",
+            )
+            self.assertEqual(
+                (home_dir / "SOUL.md").read_text(encoding="utf-8"),
+                "calm voice",
+            )
+            self.assertEqual(
+                (home_dir / "memory" / "preferences.md").read_text(encoding="utf-8"),
+                "prefers concise replies",
+            )
+            self.assertTrue((home_dir / "skills" / "weather" / "SKILL.md").is_file())
+            self.assertTrue((workspace / "AGENTS.md").is_file())
+
+    def test_agent_export_and_sync_home_endpoint_round_trip_profile_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home_dir = root / "agent-home"
+            workdir = root / "workdir"
+            create_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "writer",
+                    "name": "Writer",
+                    "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                    "runtime_preferences": {
+                        "home_dir": str(home_dir),
+                        "workdir": str(workdir),
+                    },
+                },
+            )
+            self.assertEqual(create_response.status_code, 201)
+
+            export_response = self.client.post("/agents/writer/export-home", json={})
+            self.assertEqual(export_response.status_code, 200)
+            self.assertEqual(export_response.json()["home_dir"], str(home_dir))
+
+            agent_config_path = home_dir / "agent.json"
+            payload = json.loads(agent_config_path.read_text(encoding="utf-8"))
+            payload["name"] = "Writer Home"
+            payload["instruction_policy"]["stream_by_default"] = True
+            payload["llm_routing_policy"]["default_llm_id"] = "openai.gpt-5.4"
+            payload["runtime_preferences"]["workdir"] = str(root / "project-b")
+            payload["tool_preferences"]["requested_effect_ids"] = ["weather_data"]
+            agent_config_path.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            sync_response = self.client.post("/agents/writer/sync-home", json={})
+
+            self.assertEqual(sync_response.status_code, 200)
+            synced = sync_response.json()["profile"]
+            self.assertEqual(synced["name"], "Writer Home")
+            self.assertTrue(synced["instruction_policy"]["stream_by_default"])
+            self.assertEqual(
+                synced["llm_routing_policy"]["default_llm_id"],
+                "openai.gpt-5.4",
+            )
+            self.assertEqual(
+                synced["runtime_preferences"]["workdir"],
+                str(root / "project-b"),
+            )
+            self.assertEqual(
+                synced["tool_preferences"]["requested_effect_ids"],
+                ["weather_data"],
+            )
+
+    def test_agent_home_endpoint_reads_and_updates_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home_dir = root / "agent-home"
+            create_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "writer",
+                    "name": "Writer",
+                    "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                    "runtime_preferences": {"home_dir": str(home_dir)},
+                },
+            )
+            self.assertEqual(create_response.status_code, 201)
+
+            get_response = self.client.get("/agents/writer/home")
+            self.assertEqual(get_response.status_code, 200)
+            files = {item["name"]: item for item in get_response.json()["files"]}
+            self.assertIn("AGENT.md", files)
+            self.assertIn("agent.json", files)
+
+            update_response = self.client.put(
+                "/agents/writer/home",
+                json={
+                    "files": [
+                        {
+                            "name": "AGENT.md",
+                            "content": "# AGENT.md\n\nUpdated role instructions.\n",
+                        },
+                        {
+                            "name": "SOUL.md",
+                            "content": "# SOUL.md\n\n- Voice: measured\n",
+                        },
+                    ],
+                },
+            )
+
+            self.assertEqual(update_response.status_code, 200)
+            updated_files = {
+                item["name"]: item
+                for item in update_response.json()["files"]
+            }
+            self.assertEqual(
+                updated_files["AGENT.md"]["content"],
+                "# AGENT.md\n\nUpdated role instructions.\n",
+            )
+            self.assertEqual(
+                updated_files["SOUL.md"]["content"],
+                "# SOUL.md\n\n- Voice: measured\n",
+            )
+            self.assertEqual(
+                (home_dir / "AGENT.md").read_text(encoding="utf-8"),
+                "# AGENT.md\n\nUpdated role instructions.\n",
+            )
+            self.assertEqual(
+                (home_dir / "SOUL.md").read_text(encoding="utf-8"),
+                "# SOUL.md\n\n- Voice: measured\n",
+            )
+
+    def test_agent_sync_home_endpoint_accepts_legacy_agent_json_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home_dir = root / "agent-home"
+            create_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "writer",
+                    "name": "Writer",
+                    "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                    "runtime_preferences": {"home_dir": str(home_dir)},
+                },
+            )
+            self.assertEqual(create_response.status_code, 201)
+
+            agent_config_path = home_dir / "agent.json"
+            agent_config_path.write_text(
+                json.dumps(
+                    {
+                        "id": "writer",
+                        "name": "Legacy Writer",
+                        "description": "Legacy home config.",
+                        "default_llm_id": "openai.gpt-5.4",
+                        "workdir": str(root / "legacy-workdir"),
+                        "sandbox_mode": "sandbox",
+                    },
+                    ensure_ascii=True,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            sync_response = self.client.post("/agents/writer/sync-home", json={})
+
+            self.assertEqual(sync_response.status_code, 200)
+            synced = sync_response.json()["profile"]
+            self.assertEqual(synced["name"], "Legacy Writer")
+            self.assertEqual(synced["description"], "Legacy home config.")
+            self.assertEqual(
+                synced["llm_routing_policy"]["default_llm_id"],
+                "openai.gpt-5.4",
+            )
+            self.assertEqual(
+                synced["runtime_preferences"]["workdir"],
+                str(root / "legacy-workdir"),
+            )
+            self.assertEqual(
+                synced["runtime_preferences"]["sandbox_mode"],
+                "sandbox",
+            )
+
+    def test_agent_get_endpoint_reads_file_first_home_config_without_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home_dir = root / "agent-home"
+            create_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "writer",
+                    "name": "Writer",
+                    "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                    "runtime_preferences": {
+                        "home_dir": str(home_dir),
+                        "workdir": str(root / "workdir-a"),
+                    },
+                },
+            )
+            self.assertEqual(create_response.status_code, 201)
+
+            agent_config_path = home_dir / "agent.json"
+            payload = json.loads(agent_config_path.read_text(encoding="utf-8"))
+            payload["name"] = "Writer From Home"
+            payload["instruction_policy"]["system_prompt"] = "Use the home config."
+            payload["llm_routing_policy"]["default_llm_id"] = "openai.gpt-5.4"
+            payload["runtime_preferences"]["workdir"] = str(root / "workdir-b")
+            agent_config_path.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            get_response = self.client.get("/agents/writer")
+
+            self.assertEqual(get_response.status_code, 200)
+            profile = get_response.json()
+            self.assertEqual(profile["name"], "Writer From Home")
+            self.assertEqual(
+                profile["instruction_policy"]["system_prompt"],
+                "Use the home config.",
+            )
+            self.assertEqual(
+                profile["llm_routing_policy"]["default_llm_id"],
+                "openai.gpt-5.4",
+            )
+            self.assertEqual(
+                profile["runtime_preferences"]["workdir"],
+                str(root / "workdir-b"),
+            )
+
+    def test_agent_endpoints_discover_home_only_profiles_without_db_projection(self) -> None:
+        agent_home_root = derive_agent_home_root(self.harness.database_url)
+        home_dir = agent_home_root / "file-only-writer"
+        home_dir.mkdir(parents=True, exist_ok=True)
+        (home_dir / "agent.json").write_text(
+            json.dumps(
+                {
+                    "id": "file-only-writer",
+                    "name": "File Only Writer",
+                    "description": "Loaded directly from agent_home.",
+                    "enabled": True,
+                    "instruction_policy": {
+                        "system_prompt": "You only exist in files.",
+                        "stream_by_default": False,
+                    },
+                    "llm_routing_policy": {
+                        "default_llm_id": "openai.gpt-5.4-mini",
+                        "fallback_llm_ids": [],
+                    },
+                    "runtime_preferences": {
+                        "home_dir": str(home_dir),
+                        "workdir": str(home_dir / "workspace"),
+                        "attrs": {},
+                    },
+                    "tool_preferences": {
+                        "requested_effect_ids": [],
+                        "requested_tool_ids": [],
+                        "preferred_tags": [],
+                        "prefers_background_tools": True,
+                        "prefers_mutating_tools": True,
+                    },
+                },
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        list_response = self.client.get("/agents")
+        get_response = self.client.get("/agents/file-only-writer")
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertIn(
+            "file-only-writer",
+            [item["id"] for item in list_response.json()],
+        )
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.json()["name"], "File Only Writer")
+        self.assertEqual(
+            get_response.json()["runtime_preferences"]["home_dir"],
+            str(home_dir),
+        )
 
     def test_authorization_endpoints_list_policies_and_check(self) -> None:
         settings = replace(
@@ -1393,10 +2643,10 @@ class HttpTestCase(unittest.TestCase):
         try:
             policies_response = client.get("/authorization/policies")
             self.assertEqual(policies_response.status_code, 200)
-            self.assertEqual(
-                [item["id"] for item in policies_response.json()],
-                ["allow_llm_invocation", "allow_safe_tool_execution"],
-            )
+            policy_ids = [item["id"] for item in policies_response.json()]
+            self.assertIn("allow_llm_invocation", policy_ids)
+            self.assertIn("allow_safe_tool_execution", policy_ids)
+            self.assertIn("deny_memory_lookup_tools_in_system_flows", policy_ids)
 
             check_response = client.post(
                 "/authorization/check",

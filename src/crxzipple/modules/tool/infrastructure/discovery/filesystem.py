@@ -113,6 +113,10 @@ def _load_manifest(
         kind=_parse_kind(payload.get("kind", ToolKind.FUNCTION.value), manifest_path),
         parameters=_parse_parameters(payload.get("parameters", []), manifest_path),
         tags=_parse_tags(payload.get("tags", []), manifest_path),
+        required_effect_ids=_parse_effect_ids(
+            payload.get("required_effect_ids", []),
+            manifest_path,
+        ),
         execution_policy=ToolExecutionPolicy(
             timeout_seconds=int(payload.get("timeout_seconds", 30)),
             requires_confirmation=bool(payload.get("requires_confirmation", False)),
@@ -207,6 +211,14 @@ def _parse_tags(raw: Any, manifest_path: Path) -> tuple[str, ...]:
             f"Tool manifest '{manifest_path}' field 'tags' must be a list.",
         )
     return tuple(str(tag).strip() for tag in raw if str(tag).strip())
+
+
+def _parse_effect_ids(raw: Any, manifest_path: Path) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise ToolValidationError(
+            f"Tool manifest '{manifest_path}' field 'required_effect_ids' must be a list.",
+        )
+    return tuple(str(effect_id).strip() for effect_id in raw if str(effect_id).strip())
 
 
 def _parse_modes(raw: Any, manifest_path: Path) -> tuple[ToolMode, ...]:

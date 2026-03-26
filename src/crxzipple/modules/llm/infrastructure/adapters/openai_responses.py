@@ -17,10 +17,15 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     build_openai_tool_name_aliases,
     build_tool_call_intents,
     default_base_url,
+    is_retryable_openai_stream_exception,
     join_url,
     openai_response_input_items,
     openai_tool_schema,
+    OPENAI_TRANSIENT_HTTP_STATUS_CODES,
+    OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS,
+    RetryableOpenAIStreamError,
     resolve_credential_binding,
+    sleep_before_openai_stream_retry,
 )
 
 
@@ -68,22 +73,39 @@ class OpenAIResponsesAdapter:
             alias: original
             for original, alias in tool_name_aliases.items()
         }
-        response = self._open_stream(
-            profile,
-            request,
-            tool_name_aliases=tool_name_aliases,
-        )
-        try:
-            yield from self._stream_sse_response(
-                profile,
-                response,
-                description=f"OpenAI Responses profile '{profile.id}'",
-                tool_name_aliases=alias_to_original,
-            )
-        finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
+        description = f"OpenAI Responses profile '{profile.id}'"
+        attempt = 1
+        while True:
+            response: requests.Response | None = None
+            emitted_output = False
+            try:
+                response = self._open_stream(
+                    profile,
+                    request,
+                    tool_name_aliases=tool_name_aliases,
+                )
+                for event in self._stream_sse_response(
+                    profile,
+                    response,
+                    description=description,
+                    tool_name_aliases=alias_to_original,
+                ):
+                    emitted_output = True
+                    yield event
+                return
+            except Exception as exc:
+                if (
+                    emitted_output
+                    or attempt >= OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS
+                    or not is_retryable_openai_stream_exception(exc)
+                ):
+                    raise
+                sleep_before_openai_stream_retry(attempt)
+                attempt += 1
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
 
     def _open_stream(
         self,
@@ -153,6 +175,10 @@ class OpenAIResponsesAdapter:
         tool_name_aliases: dict[str, str] | None = None,
     ) -> Iterator[LlmStreamEvent]:
         if response.status_code >= 400:
+            if response.status_code in OPENAI_TRANSIENT_HTTP_STATUS_CODES:
+                raise RetryableOpenAIStreamError(
+                    f"{description} failed with HTTP {response.status_code}: {response.text}",
+                )
             raise RuntimeError(
                 f"{description} failed with HTTP {response.status_code}: {response.text}",
             )
@@ -253,8 +279,16 @@ class OpenAIResponsesAdapter:
             return None, True
 
         if payload.get("type") == "error":
+            error_payload = payload.get("error")
+            message = payload.get("message")
+            if isinstance(error_payload, dict):
+                message = error_payload.get("message") or message
+                if error_payload.get("code") == "server_error":
+                    raise RetryableOpenAIStreamError(
+                        f"{description} returned an error event: {message or payload}",
+                    )
             raise RuntimeError(
-                f"{description} returned an error event: {payload.get('message') or payload}",
+                f"{description} returned an error event: {message or payload}",
             )
 
         if event_name == "response.output_text.delta":

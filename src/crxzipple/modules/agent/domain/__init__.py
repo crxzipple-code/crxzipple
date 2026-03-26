@@ -5,13 +5,13 @@ from crxzipple.modules.agent.domain.exceptions import (
     AgentNotFoundError,
     AgentValidationError,
 )
-from crxzipple.modules.agent.domain.repositories import AgentProfileRepository
 from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
+    AgentToolPreferences,
 )
 
 __all__ = [
@@ -23,7 +23,7 @@ __all__ = [
     "AgentLlmRoutingPolicy",
     "AgentNotFoundError",
     "AgentProfile",
-    "AgentProfileRepository",
     "AgentRuntimePreferences",
+    "AgentToolPreferences",
     "AgentValidationError",
 ]

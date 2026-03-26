@@ -5,10 +5,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
 import tempfile
+from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
 from crxzipple.bootstrap import AppContainer, build_container
-from crxzipple.core.config import Settings
+from crxzipple.core.config import Settings, load_settings
 from crxzipple.core.db import create_schema
 
 
@@ -16,19 +17,37 @@ class SqliteTestHarness:
     def __init__(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory()
         database_path = Path(self._tempdir.name) / "test.db"
+        self.authorization_runtime_policy_path = str(
+            Path(self._tempdir.name) / "authorization_runtime.yaml",
+        )
         self.database_url = f"sqlite:///{database_path}"
         self._containers: list[AppContainer] = []
 
     def initialize_schema(self, *, settings: Settings | None = None) -> None:
-        container = build_container(settings=settings, database_url=self.database_url)
+        resolved_settings = self._resolved_settings(settings)
+        container = build_container(
+            settings=resolved_settings,
+            database_url=self.database_url,
+        )
         create_schema(container.engine)
         container.close()
 
     def build_container(self, *, settings: Settings | None = None) -> AppContainer:
-        container = build_container(settings=settings, database_url=self.database_url)
+        resolved_settings = self._resolved_settings(settings)
+        container = build_container(
+            settings=resolved_settings,
+            database_url=self.database_url,
+        )
         create_schema(container.engine)
         self._containers.append(container)
         return container
+
+    def _resolved_settings(self, settings: Settings | None) -> Settings:
+        resolved = settings or load_settings()
+        return replace(
+            resolved,
+            authorization_runtime_policy_path=self.authorization_runtime_policy_path,
+        )
 
     def close(self) -> None:
         while self._containers:

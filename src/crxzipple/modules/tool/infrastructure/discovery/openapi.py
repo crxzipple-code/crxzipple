@@ -59,6 +59,7 @@ class OpenApiOperation:
     security_schemes: tuple[OpenApiSecurityScheme, ...] = ()
     security_requirements: tuple[OpenApiSecurityRequirement, ...] = ()
     credential_bindings: tuple[OpenApiCredentialBinding, ...] = ()
+    required_effect_ids: tuple[str, ...] = ()
 
     def to_tool_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -69,6 +70,7 @@ class OpenApiOperation:
             kind=ToolKind.HTTP,
             parameters=self.parameters,
             tags=self.tags,
+            required_effect_ids=self.required_effect_ids,
             execution_policy=ToolExecutionPolicy(
                 timeout_seconds=self.timeout_seconds,
                 requires_confirmation=False,
@@ -230,6 +232,7 @@ def _parse_operations(config: OpenApiProviderSettings) -> list[OpenApiOperation]
                     security_schemes=tuple(security_schemes.values()),
                     security_requirements=effective_security,
                     credential_bindings=config.credential_bindings,
+                    required_effect_ids=config.default_effect_ids,
                 ),
             )
 

@@ -27,6 +27,7 @@ class LlmProfile(AggregateRoot[str]):
     provider: LlmProviderKind
     api_family: LlmApiFamily
     model_name: str
+    context_window_tokens: int | None = None
     model_family: LlmModelFamily = LlmModelFamily.GENERAL
     capabilities: tuple[LlmCapability, ...] = field(default_factory=tuple)
     default_params: LlmDefaults = field(default_factory=LlmDefaults)
@@ -41,6 +42,10 @@ class LlmProfile(AggregateRoot[str]):
             raise LlmValidationError("LLM model_name cannot be empty.")
         if self.timeout_seconds <= 0:
             raise LlmValidationError("LLM timeout_seconds must be greater than zero.")
+        if self.context_window_tokens is not None and self.context_window_tokens <= 0:
+            raise LlmValidationError(
+                "LLM context_window_tokens must be greater than zero when provided.",
+            )
         self.capabilities = tuple(dict.fromkeys(self.capabilities))
 
 

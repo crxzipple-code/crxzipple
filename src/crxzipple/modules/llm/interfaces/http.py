@@ -44,6 +44,7 @@ class RegisterLlmProfileRequest(BaseModel):
     provider: LlmProviderKind
     api_family: LlmApiFamily
     model_name: str
+    context_window_tokens: int | None = None
     model_family: LlmModelFamily = LlmModelFamily.GENERAL
     capabilities: list[LlmCapability] = Field(default_factory=list)
     default_params: LlmDefaultsResponse = Field(default_factory=LlmDefaultsResponse)
@@ -58,6 +59,7 @@ class LlmProfileResponse(BaseModel):
     provider: str
     api_family: str
     model_name: str
+    context_window_tokens: int | None = None
     model_family: str
     capabilities: list[str]
     default_params: LlmDefaultsResponse
@@ -140,6 +142,7 @@ def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfil
         provider=LlmProviderKind(profile.provider),
         api_family=LlmApiFamily(profile.api_family),
         model_name=profile.model_name,
+        context_window_tokens=profile.context_window_tokens,
         model_family=LlmModelFamily(profile.model_family),
         capabilities=tuple(LlmCapability(item) for item in profile.capabilities),
         default_params=LlmDefaults(
@@ -183,6 +186,7 @@ def register_profile(
             provider=payload.provider,
             api_family=payload.api_family,
             model_name=payload.model_name,
+            context_window_tokens=payload.context_window_tokens,
             model_family=payload.model_family,
             capabilities=tuple(payload.capabilities),
             default_params=LlmDefaults(
@@ -357,6 +361,7 @@ def _to_profile_response(profile: Any) -> LlmProfileResponse:
         provider=profile.provider.value,
         api_family=profile.api_family.value,
         model_name=profile.model_name,
+        context_window_tokens=profile.context_window_tokens,
         model_family=profile.model_family.value,
         capabilities=[item.value for item in profile.capabilities],
         default_params=LlmDefaultsResponse(

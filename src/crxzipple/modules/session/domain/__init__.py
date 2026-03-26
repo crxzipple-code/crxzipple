@@ -2,6 +2,7 @@ from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.exceptions import (
     SessionError,
     SessionInstanceNotFoundError,
+    SessionMessageNotFoundError,
     SessionNotFoundError,
     SessionValidationError,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "SessionKind",
     "SessionMessage",
     "SessionMessageKind",
+    "SessionMessageNotFoundError",
     "SessionMessageRepository",
     "SessionMessageVisibility",
     "SessionNotFoundError",

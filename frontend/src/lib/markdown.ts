@@ -1,10 +1,22 @@
+import "katex/dist/katex.min.css";
 import MarkdownIt from "markdown-it";
+import texmath from "markdown-it-texmath";
+import katex from "katex";
 
 const markdown = new MarkdownIt({
   html: false,
   breaks: true,
   linkify: true,
   typographer: false,
+});
+
+markdown.use(texmath, {
+  engine: katex,
+  delimiters: ["dollars", "brackets", "beg_end"],
+  katexOptions: {
+    throwOnError: false,
+    strict: "ignore",
+  },
 });
 
 const defaultLinkOpen =

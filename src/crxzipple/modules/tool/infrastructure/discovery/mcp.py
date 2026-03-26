@@ -31,6 +31,7 @@ class McpToolDefinition:
     parameters: tuple[ToolParameter, ...]
     timeout_seconds: int
     mutates_state: bool
+    required_effect_ids: tuple[str, ...] = ()
 
     def to_tool_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -41,6 +42,7 @@ class McpToolDefinition:
             kind=ToolKind.MCP,
             parameters=self.parameters,
             tags=self.tags,
+            required_effect_ids=self.required_effect_ids,
             execution_policy=ToolExecutionPolicy(
                 timeout_seconds=self.timeout_seconds,
                 requires_confirmation=False,
@@ -84,6 +86,7 @@ class McpDiscoveryProvider:
                 _parse_tool_definitions(
                     self.name,
                     self.config.timeout_seconds,
+                    self.config.default_effect_ids,
                     self.client.list_tools(),
                 ),
             )
@@ -93,6 +96,7 @@ class McpDiscoveryProvider:
 def _parse_tool_definitions(
     provider_name: str,
     timeout_seconds: int,
+    default_effect_ids: tuple[str, ...],
     tools: list[dict[str, Any]],
 ) -> list[McpToolDefinition]:
     definitions: list[McpToolDefinition] = []
@@ -138,6 +142,7 @@ def _parse_tool_definitions(
                 parameters=_parameters_from_input_schema(input_schema),
                 timeout_seconds=timeout_seconds,
                 mutates_state=_mutates_state(tool),
+                required_effect_ids=default_effect_ids,
             ),
         )
 

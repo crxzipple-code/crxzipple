@@ -9,15 +9,22 @@ from crxzipple.modules.orchestration.domain.repositories import (
     OrchestrationRunWaitRepository,
 )
 from crxzipple.modules.orchestration.domain.value_objects import (
+    ApprovalDecision,
+    ApprovalResolution,
+    CapabilityRequestScopeHint,
     DeliveryTarget,
     InboundInstruction,
     OrchestrationErrorPayload,
     OrchestrationQueuePolicy,
     OrchestrationRunStage,
     OrchestrationRunStatus,
+    PendingApprovalRequest,
 )
 
 __all__ = [
+    "ApprovalDecision",
+    "ApprovalResolution",
+    "CapabilityRequestScopeHint",
     "DeliveryTarget",
     "InboundInstruction",
     "OrchestrationError",
@@ -30,4 +37,5 @@ __all__ = [
     "OrchestrationRunStage",
     "OrchestrationRunStatus",
     "OrchestrationValidationError",
+    "PendingApprovalRequest",
 ]

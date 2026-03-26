@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
-from crxzipple.modules.session.domain.value_objects import SessionMessage
+from crxzipple.modules.session.domain.value_objects import (
+    SessionMessage,
+    SessionMessageVisibility,
+)
 
 
 class InMemorySessionRepository:
@@ -31,7 +34,17 @@ class InMemorySessionMessageRepository:
         self._items: list[SessionMessage] = []
 
     def add(self, message: SessionMessage) -> None:
+        for index, item in enumerate(self._items):
+            if item.id == message.id:
+                self._items[index] = message
+                return
         self._items.append(message)
+
+    def get(self, message_id: str) -> SessionMessage | None:
+        for item in self._items:
+            if item.id == message_id:
+                return item
+        return None
 
     def get_by_source(
         self,
@@ -70,10 +83,17 @@ class InMemorySessionMessageRepository:
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
+        include_archived: bool = True,
     ) -> list[SessionMessage]:
         items = [item for item in self._items if item.session_key == session_key]
         if session_id is not None:
             items = [item for item in items if item.session_id == session_id]
+        if not include_archived:
+            items = [
+                item
+                for item in items
+                if item.visibility is not SessionMessageVisibility.ARCHIVED
+            ]
         items = sorted(
             items,
             key=lambda item: (item.created_at, item.sequence_no, item.id),

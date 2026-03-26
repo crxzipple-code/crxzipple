@@ -31,6 +31,7 @@ class Tool(AggregateRoot[str]):
     kind: ToolKind = ToolKind.FUNCTION
     parameters: tuple[ToolParameter, ...] = field(default_factory=tuple)
     tags: tuple[str, ...] = field(default_factory=tuple)
+    required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
     execution_policy: ToolExecutionPolicy = field(default_factory=ToolExecutionPolicy)
     execution_support: ToolExecutionSupport = field(
         default_factory=ToolExecutionSupport,
@@ -54,6 +55,13 @@ class Tool(AggregateRoot[str]):
                 tag.strip().lower()
                 for tag in self.tags
                 if tag is not None and tag.strip()
+            ),
+        )
+        self.required_effect_ids = tuple(
+            dict.fromkeys(
+                effect_id.strip()
+                for effect_id in self.required_effect_ids
+                if effect_id is not None and effect_id.strip()
             ),
         )
         self.parameters = tuple(self.parameters)

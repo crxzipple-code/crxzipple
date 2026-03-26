@@ -9,6 +9,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
+    AgentToolPreferences,
 )
 from crxzipple.shared.domain import AggregateRoot
 from crxzipple.shared.domain.events import DomainEvent
@@ -28,6 +29,7 @@ class AgentProfile(AggregateRoot[str]):
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
     )
+    tool_preferences: AgentToolPreferences = field(default_factory=AgentToolPreferences)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -57,6 +59,7 @@ class AgentProfile(AggregateRoot[str]):
         llm_routing_policy: AgentLlmRoutingPolicy | None = None,
         execution_policy: AgentExecutionPolicy | None = None,
         runtime_preferences: AgentRuntimePreferences | None = None,
+        tool_preferences: AgentToolPreferences | None = None,
     ) -> None:
         if name is not None:
             if not name.strip():
@@ -88,6 +91,8 @@ class AgentProfile(AggregateRoot[str]):
             self.execution_policy = execution_policy
         if runtime_preferences is not None:
             self.runtime_preferences = runtime_preferences
+        if tool_preferences is not None:
+            self.tool_preferences = tool_preferences
         self.record_event(
             DomainEvent(
                 name="agent.profile.updated",

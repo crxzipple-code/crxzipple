@@ -95,6 +95,7 @@ class LlmServiceTestCase(unittest.TestCase):
                 provider=LlmProviderKind.OPENAI,
                 api_family=LlmApiFamily.OPENAI_RESPONSES,
                 model_name="gpt-5",
+                context_window_tokens=128_000,
                 model_family=LlmModelFamily.REASONING,
                 capabilities=(
                     LlmCapability.TOOL_CALLING,
@@ -146,6 +147,7 @@ class LlmServiceTestCase(unittest.TestCase):
         invocation_list = self.service.list_invocations(llm_id="writer")
 
         self.assertEqual(fetched_profile.model_name, "gpt-5")
+        self.assertEqual(fetched_profile.context_window_tokens, 128_000)
         self.assertEqual(fetched_profile.default_params.temperature, 0.2)
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
         self.assertEqual([item.id for item in invocation_list], [invocation.id])

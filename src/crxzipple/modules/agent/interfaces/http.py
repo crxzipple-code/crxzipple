@@ -2,19 +2,32 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from crxzipple.bootstrap import AppContainer
 from crxzipple.core.config import AgentProfileSettings
 from crxzipple.interfaces.http.dependencies import get_container
-from crxzipple.modules.agent.application import RegisterAgentProfileInput
+from crxzipple.modules.agent.application import (
+    AgentHomeFileSnapshot,
+    AgentHomeSnapshot,
+    ExportAgentHomeInput,
+    MigrateAgentHomeInput,
+    RegisterAgentProfileInput,
+    SyncAgentHomeInput,
+    UpdateAgentHomeFilesInput,
+)
+from crxzipple.modules.agent.domain.exceptions import (
+    AgentNotFoundError,
+    AgentValidationError,
+)
 from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
+    AgentToolPreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
 
@@ -49,9 +62,19 @@ class AgentExecutionPolicyRequest(BaseModel):
 
 
 class AgentRuntimePreferencesRequest(BaseModel):
+    home_dir: str | None = None
+    workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
     attrs: dict[str, object] = Field(default_factory=dict)
+
+
+class AgentToolPreferencesRequest(BaseModel):
+    requested_effect_ids: list[str] = Field(default_factory=list)
+    requested_tool_ids: list[str] = Field(default_factory=list)
+    preferred_tags: list[str] = Field(default_factory=list)
+    prefers_background_tools: bool = True
+    prefers_mutating_tools: bool = True
 
 
 class RegisterAgentProfileRequest(BaseModel):
@@ -70,6 +93,31 @@ class RegisterAgentProfileRequest(BaseModel):
     runtime_preferences: AgentRuntimePreferencesRequest = Field(
         default_factory=AgentRuntimePreferencesRequest,
     )
+    tool_preferences: AgentToolPreferencesRequest = Field(
+        default_factory=AgentToolPreferencesRequest,
+    )
+
+
+class MigrateAgentHomeRequest(BaseModel):
+    home_dir: str
+    workdir: str | None = None
+
+
+class SyncAgentHomeRequest(BaseModel):
+    home_dir: str | None = None
+
+
+class ExportAgentHomeRequest(BaseModel):
+    home_dir: str | None = None
+
+
+class AgentHomeFileRequest(BaseModel):
+    name: str
+    content: str
+
+
+class UpdateAgentHomeFilesRequest(BaseModel):
+    files: list[AgentHomeFileRequest] = Field(default_factory=list)
 
 
 class AgentIdentityResponse(BaseModel):
@@ -99,9 +147,19 @@ class AgentExecutionPolicyResponse(BaseModel):
 
 
 class AgentRuntimePreferencesResponse(BaseModel):
+    home_dir: str | None = None
+    workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
     attrs: dict[str, object] = Field(default_factory=dict)
+
+
+class AgentToolPreferencesResponse(BaseModel):
+    requested_effect_ids: list[str]
+    requested_tool_ids: list[str]
+    preferred_tags: list[str]
+    prefers_background_tools: bool
+    prefers_mutating_tools: bool
 
 
 class AgentProfileResponse(BaseModel):
@@ -114,6 +172,38 @@ class AgentProfileResponse(BaseModel):
     llm_routing_policy: AgentLlmRoutingPolicyResponse
     execution_policy: AgentExecutionPolicyResponse
     runtime_preferences: AgentRuntimePreferencesResponse
+    tool_preferences: AgentToolPreferencesResponse
+
+
+class AgentHomeMigrationResponse(BaseModel):
+    source_dir: str | None = None
+    home_dir: str | None = None
+    workdir: str | None = None
+    copied_paths: list[str] = Field(default_factory=list)
+    skipped_paths: list[str] = Field(default_factory=list)
+    profile: AgentProfileResponse
+
+
+class AgentHomeConfigResponse(BaseModel):
+    home_dir: str
+    path: str
+    profile: AgentProfileResponse
+
+
+class AgentHomeFileResponse(BaseModel):
+    name: str
+    path: str
+    exists: bool
+    language: str
+    content: str
+
+
+class AgentHomeSnapshotResponse(BaseModel):
+    agent_id: str
+    agent_name: str
+    home_dir: str
+    workdir: str | None = None
+    files: list[AgentHomeFileResponse]
 
 
 def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentProfileInput:
@@ -133,6 +223,7 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         runtime_preferences=AgentRuntimePreferences.from_payload(
             profile.runtime_preferences,
         ),
+        tool_preferences=AgentToolPreferences.from_payload(profile.tool_preferences),
     )
 
 
@@ -170,9 +261,20 @@ def register_profile(
                 max_turns=payload.execution_policy.max_turns,
             ),
             runtime_preferences=AgentRuntimePreferences(
+                home_dir=payload.runtime_preferences.home_dir,
+                workdir=payload.runtime_preferences.workdir,
                 workspace=payload.runtime_preferences.workspace,
                 sandbox_mode=payload.runtime_preferences.sandbox_mode,
                 attrs=payload.runtime_preferences.attrs,
+            ),
+            tool_preferences=AgentToolPreferences(
+                requested_effect_ids=tuple(
+                    payload.tool_preferences.requested_effect_ids,
+                ),
+                requested_tool_ids=tuple(payload.tool_preferences.requested_tool_ids),
+                preferred_tags=tuple(payload.tool_preferences.preferred_tags),
+                prefers_background_tools=payload.tool_preferences.prefers_background_tools,
+                prefers_mutating_tools=payload.tool_preferences.prefers_mutating_tools,
             ),
         ),
     )
@@ -204,6 +306,116 @@ def sync_profiles(
         tuple(_profile_settings_to_input(item) for item in configured_profiles),
     )
     return [_to_response(AgentProfileDTO.from_entity(item)) for item in synced]
+
+
+@router.post("/{agent_id}/migrate-home", response_model=AgentHomeMigrationResponse)
+def migrate_home(
+    agent_id: str,
+    payload: MigrateAgentHomeRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AgentHomeMigrationResponse:
+    try:
+        result = container.agent_service.migrate_profile_home(
+            MigrateAgentHomeInput(
+                id=agent_id,
+                home_dir=payload.home_dir,
+                workdir=payload.workdir,
+            ),
+        )
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except AgentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return AgentHomeMigrationResponse(
+        source_dir=result.source_dir,
+        home_dir=result.profile.runtime_preferences.resolved_home_dir,
+        workdir=result.profile.runtime_preferences.resolved_workdir,
+        copied_paths=list(result.copied_paths),
+        skipped_paths=list(result.skipped_paths),
+        profile=_to_response(AgentProfileDTO.from_entity(result.profile)),
+    )
+
+
+@router.get("/{agent_id}/home", response_model=AgentHomeSnapshotResponse)
+def get_home(
+    agent_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AgentHomeSnapshotResponse:
+    try:
+        snapshot = container.agent_service.inspect_profile_home(agent_id)
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except AgentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _to_home_snapshot_response(snapshot)
+
+
+@router.put("/{agent_id}/home", response_model=AgentHomeSnapshotResponse)
+def update_home(
+    agent_id: str,
+    payload: UpdateAgentHomeFilesRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AgentHomeSnapshotResponse:
+    try:
+        snapshot = container.agent_service.update_profile_home_files(
+            UpdateAgentHomeFilesInput(
+                id=agent_id,
+                files={item.name: item.content for item in payload.files},
+            ),
+        )
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except AgentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _to_home_snapshot_response(snapshot)
+
+
+@router.post("/{agent_id}/sync-home", response_model=AgentHomeConfigResponse)
+def sync_home(
+    agent_id: str,
+    payload: SyncAgentHomeRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AgentHomeConfigResponse:
+    try:
+        result = container.agent_service.sync_profile_home(
+            SyncAgentHomeInput(
+                id=agent_id,
+                home_dir=payload.home_dir,
+            ),
+        )
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except AgentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return AgentHomeConfigResponse(
+        home_dir=result.home_dir,
+        path=result.path,
+        profile=_to_response(AgentProfileDTO.from_entity(result.profile)),
+    )
+
+
+@router.post("/{agent_id}/export-home", response_model=AgentHomeConfigResponse)
+def export_home(
+    agent_id: str,
+    payload: ExportAgentHomeRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AgentHomeConfigResponse:
+    try:
+        result = container.agent_service.export_profile_home(
+            ExportAgentHomeInput(
+                id=agent_id,
+                home_dir=payload.home_dir,
+            ),
+        )
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except AgentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return AgentHomeConfigResponse(
+        home_dir=result.home_dir,
+        path=result.path,
+        profile=_to_response(AgentProfileDTO.from_entity(result.profile)),
+    )
 
 
 @router.get("/{agent_id}", response_model=AgentProfileResponse)
@@ -265,8 +477,37 @@ def _to_response(dto: AgentProfileDTO) -> AgentProfileResponse:
             max_turns=dto.execution_policy.max_turns,
         ),
         runtime_preferences=AgentRuntimePreferencesResponse(
+            home_dir=dto.runtime_preferences.home_dir,
+            workdir=dto.runtime_preferences.workdir,
             workspace=dto.runtime_preferences.workspace,
             sandbox_mode=dto.runtime_preferences.sandbox_mode,
             attrs=dict(dto.runtime_preferences.attrs),
         ),
+        tool_preferences=AgentToolPreferencesResponse(
+            requested_effect_ids=list(dto.tool_preferences.requested_effect_ids),
+            requested_tool_ids=list(dto.tool_preferences.requested_tool_ids),
+            preferred_tags=list(dto.tool_preferences.preferred_tags),
+            prefers_background_tools=dto.tool_preferences.prefers_background_tools,
+            prefers_mutating_tools=dto.tool_preferences.prefers_mutating_tools,
+        ),
+    )
+
+
+def _to_home_snapshot_response(snapshot: AgentHomeSnapshot) -> AgentHomeSnapshotResponse:
+    return AgentHomeSnapshotResponse(
+        agent_id=snapshot.profile.id,
+        agent_name=snapshot.profile.name,
+        home_dir=snapshot.home_dir,
+        workdir=snapshot.workdir,
+        files=[_to_home_file_response(item) for item in snapshot.files],
+    )
+
+
+def _to_home_file_response(file: AgentHomeFileSnapshot) -> AgentHomeFileResponse:
+    return AgentHomeFileResponse(
+        name=file.name,
+        path=file.path,
+        exists=file.exists,
+        language=file.language,
+        content=file.content,
     )

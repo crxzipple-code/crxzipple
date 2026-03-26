@@ -2,5 +2,7 @@ name: brave_search
 description: Brave Search web, news, and autosuggest APIs.
 spec_location: ../../specs/brave_search.openapi.json
 timeout_seconds: 15
+default_effect_ids:
+  - network_search
 credentials:
   SubscriptionToken: env:BRAVE_SEARCH_API_KEY
