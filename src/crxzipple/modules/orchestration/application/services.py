@@ -11,6 +11,7 @@ from crxzipple.modules.agent.application import (
 )
 from crxzipple.modules.memory.application import RecordMemoryFlushInput
 from crxzipple.modules.orchestration.application.coordinators import (
+    RunIntakeCoordinator,
     RunProgressCoordinator,
     RunWaitCoordinator,
 )
@@ -317,6 +318,16 @@ class OrchestrationApplicationService:
         self.auto_compaction_transcript_tokens = auto_compaction_transcript_tokens
         self.auto_compaction_reserve_tokens = auto_compaction_reserve_tokens
         self.auto_compaction_soft_threshold_tokens = auto_compaction_soft_threshold_tokens
+        self.intake_coordinator = RunIntakeCoordinator(
+            uow_factory=uow_factory,
+            scheduler=self.scheduler,
+            dispatch_port=self.dispatch_port,
+            resolve_session_bundle=self.resolve_session_bundle,
+            resolve_session_bundle_input_factory=lambda **kwargs: ResolveSessionBundleInput(
+                **kwargs,
+            ),
+            session_start_prompt_flow_hint=self._session_start_prompt_flow_hint,
+        )
         self.lease_manager = OrchestrationLeaseManager(
             uow_factory=uow_factory,
             dispatch_port=self.dispatch_port,
@@ -374,62 +385,16 @@ class OrchestrationApplicationService:
         )
 
     def accept(self, data: AcceptOrchestrationRunInput) -> OrchestrationRun:
-        run = OrchestrationRun.accept(
-            run_id=data.run_id or uuid4().hex,
-            inbound_instruction=data.inbound_instruction,
-            delivery_target=data.delivery_target,
-            queue_policy=data.queue_policy,
-            priority=data.priority,
-            max_steps=data.max_steps,
-            metadata=data.metadata,
-        )
-        with self.uow_factory() as uow:
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.intake_coordinator.accept(data)
 
     def route(self, data: RouteOrchestrationRunInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            run.route(
-                agent_id=data.agent_id,
-                bulk_key=data.bulk_key,
-                lane_key=data.lane_key,
-                priority=data.priority,
-                metadata=data.metadata,
-            )
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.intake_coordinator.route(data)
 
     def bind_session(self, data: BindSessionInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            run.bind_session(
-                active_session_id=data.active_session_id,
-                bulk_key=data.bulk_key,
-            )
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.intake_coordinator.bind_session(data)
 
     def enqueue(self, data: EnqueueOrchestrationRunInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            self.scheduler.enqueue(
-                run,
-                lane_key=data.lane_key,
-                queue_policy=data.queue_policy,
-                priority=data.priority,
-            )
-            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.intake_coordinator.enqueue(data)
 
     def get_run(self, run_id: str) -> OrchestrationRun:
         with self.uow_factory() as uow:
@@ -576,46 +541,7 @@ class OrchestrationApplicationService:
         return self.session_resolver.resolve(data)
 
     def prepare_session_run(self, data: PrepareSessionRunInput) -> OrchestrationRun:
-        bundle = self.resolve_session_bundle(
-            ResolveSessionBundleInput(
-                context=data.context,
-                ensure=data.ensure,
-                touch_activity=data.touch_activity,
-                reset_policy=data.reset_policy,
-                now=data.now,
-            ),
-        )
-        if bundle.session is None or bundle.active_instance is None:
-            raise OrchestrationValidationError(
-                "Session resolution did not produce an active session to bind.",
-            )
-
-        route_metadata = {
-            "session_key": bundle.routing.key_resolution.key,
-            "session_kind": bundle.routing.key_resolution.kind.value,
-        }
-        route_metadata.update(data.metadata)
-
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            run.route(
-                agent_id=data.context.agent_id,
-                bulk_key=bundle.routing.bulk_key,
-                lane_key=bundle.routing.lane_key,
-                priority=data.priority,
-                metadata=route_metadata,
-            )
-            run.bind_session(
-                active_session_id=bundle.active_instance.id,
-                bulk_key=bundle.routing.bulk_key,
-            )
-            prompt_flow_hint = self._session_start_prompt_flow_hint(bundle)
-            if prompt_flow_hint is not None:
-                run.metadata["prompt_flow_hint"] = prompt_flow_hint
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.intake_coordinator.prepare_session_run(data)
 
     def advance_run(self, data: AdvanceOrchestrationRunInput) -> OrchestrationRun:
         return self.progress_coordinator.advance_run(data)
