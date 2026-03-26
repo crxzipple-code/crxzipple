@@ -78,6 +78,7 @@ from crxzipple.modules.session.application import SessionApplicationService
 from crxzipple.modules.tool.application import ToolApplicationService
 from crxzipple.modules.tool.application import ToolDispatchBridge
 from crxzipple.modules.tool.application import ToolDispatchEventSubscriber
+from crxzipple.modules.tool.infrastructure.adapters import ToolRunDispatchAdapter
 from crxzipple.modules.tool.infrastructure import (
     build_sandbox_backend,
     FilesystemLocalToolDiscoveryProvider,
@@ -90,7 +91,6 @@ from crxzipple.modules.tool.infrastructure import (
     RemoteAsyncToolExecutor,
     SandboxAsyncToolExecutor,
     ToolDiscoveryRegistry,
-    ToolRunDispatchAdapter,
     ToolRuntimeRegistry,
     ToolRuntimeRouter,
     register_mcp_remote_handlers,
