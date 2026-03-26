@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from crxzipple.modules.agent.application import AgentApplicationService
@@ -29,6 +28,9 @@ from crxzipple.modules.orchestration.application.prompting import (
     build_workspace_context_block,
     estimate_text_tokens,
 )
+from crxzipple.modules.orchestration.application.prompt_transcript import (
+    build_prompt_transcript,
+)
 from crxzipple.modules.orchestration.application.skill_requests import SkillRequestSurface
 from crxzipple.modules.orchestration.application.skills_context import (
     AvailableSkill,
@@ -43,7 +45,7 @@ from crxzipple.modules.session.application import (
     ListSessionMessagesInput,
     SessionApplicationService,
 )
-from crxzipple.modules.session.domain import SessionMessage, SessionRuntimeBinding
+from crxzipple.modules.session.domain import SessionRuntimeBinding
 from crxzipple.modules.session.domain import SessionMessageVisibility
 
 
@@ -198,19 +200,14 @@ class PromptAssembler:
                 active_session_only=True,
             ),
         )
-        filtered_session_messages = self._filter_transcript_messages(
-            tuple(
-                message
-                for message in session_messages
-                if message.session_id == run.active_session_id
-                and message.visibility is not SessionMessageVisibility.ARCHIVED
-            ),
+        filtered_session_messages = tuple(
+            message
+            for message in session_messages
+            if message.session_id == run.active_session_id
+            and message.visibility is not SessionMessageVisibility.ARCHIVED
         )
-        transcript_messages = tuple(
-            self._to_llm_message(message)
-            for message in filtered_session_messages
-        )
-        llm_messages.extend(transcript_messages)
+        transcript = build_prompt_transcript(filtered_session_messages)
+        llm_messages.extend(transcript.messages)
         if not llm_messages:
             raise OrchestrationValidationError(
                 "Prompt assembly requires at least one llm message.",
@@ -239,15 +236,9 @@ class PromptAssembler:
             llm_context_window_tokens=llm_profile.context_window_tokens,
             system_chars=system_chars,
             system_estimated_tokens=system_estimated_tokens,
-            transcript_message_count=len(transcript_messages),
-            transcript_chars=sum(
-                self._message_content_chars(message.content)
-                for message in transcript_messages
-            ),
-            transcript_estimated_tokens=sum(
-                self._message_content_tokens(message.content)
-                for message in transcript_messages
-            ),
+            transcript_message_count=transcript.message_count,
+            transcript_chars=transcript.chars,
+            transcript_estimated_tokens=transcript.estimated_tokens,
         )
         tool_schemas = (
             (
@@ -353,113 +344,6 @@ class PromptAssembler:
             if candidate:
                 return candidate
         return ""
-
-    @staticmethod
-    def _to_llm_message(message: SessionMessage) -> LlmMessage:
-        try:
-            role = LlmMessageRole(message.role)
-        except ValueError:
-            role = LlmMessageRole.USER
-        tool_call_id = message.metadata.get("tool_call_id")
-        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-            tool_call_id = None
-        tool_name = message.metadata.get("tool_name")
-        if not isinstance(tool_name, str) or not tool_name.strip():
-            payload_tool_name = message.content_payload.get("tool_name")
-            if isinstance(payload_tool_name, str) and payload_tool_name.strip():
-                tool_name = payload_tool_name.strip()
-            else:
-                tool_name = None
-        metadata = {
-            "session_message_id": message.id,
-            "kind": message.kind.value,
-            "source_kind": message.source_kind,
-            "source_id": message.source_id,
-        }
-        if tool_name is not None:
-            metadata["tool_name"] = tool_name
-        return LlmMessage(
-            role=role,
-            content=PromptAssembler._extract_content(message, role=role),
-            name=tool_name,
-            tool_call_id=tool_call_id,
-            metadata=metadata,
-        )
-
-    @staticmethod
-    def _extract_content(
-        message: SessionMessage,
-        *,
-        role: LlmMessageRole,
-    ) -> object:
-        if message.content is not None and message.content.strip():
-            return message.content
-        if (
-            role is LlmMessageRole.ASSISTANT
-            and message.content_payload.get("type") == "function_call"
-        ):
-            return dict(message.content_payload)
-        text_content = message.content_payload.get("text")
-        if isinstance(text_content, str) and text_content.strip():
-            return text_content
-        return json.dumps(
-            message.content_payload,
-            ensure_ascii=True,
-            sort_keys=True,
-        )
-
-    @staticmethod
-    def _message_content_chars(content: object) -> int:
-        if isinstance(content, str):
-            return len(content)
-        return len(
-            json.dumps(
-                content,
-                ensure_ascii=True,
-                sort_keys=True,
-            ),
-        )
-
-    @staticmethod
-    def _message_content_tokens(content: object) -> int:
-        if isinstance(content, str):
-            return estimate_text_tokens(content)
-        return estimate_text_tokens(
-            json.dumps(
-                content,
-                ensure_ascii=True,
-                sort_keys=True,
-            ),
-        )
-
-    @staticmethod
-    def _filter_transcript_messages(
-        messages: tuple[SessionMessage, ...],
-    ) -> tuple[SessionMessage, ...]:
-        completed_tool_call_ids = {
-            tool_call_id.strip()
-            for message in messages
-            if message.role == "tool"
-            for tool_call_id in (message.metadata.get("tool_call_id"),)
-            if isinstance(tool_call_id, str) and tool_call_id.strip()
-        }
-        filtered: list[SessionMessage] = []
-        for message in messages:
-            is_function_call = (
-                message.role == "assistant"
-                and message.content_payload.get("type") == "function_call"
-            )
-            if not is_function_call:
-                filtered.append(message)
-                continue
-            tool_call_id = message.metadata.get("tool_call_id")
-            if (
-                isinstance(tool_call_id, str)
-                and tool_call_id.strip()
-                and tool_call_id.strip() in completed_tool_call_ids
-            ):
-                filtered.append(message)
-        return tuple(filtered)
 
     @staticmethod
     def _resolve_prompt_mode(
