@@ -11,6 +11,7 @@ from crxzipple.modules.agent.application import (
 )
 from crxzipple.modules.memory.application import RecordMemoryFlushInput
 from crxzipple.modules.orchestration.application.coordinators import (
+    RunProgressCoordinator,
     RunWaitCoordinator,
 )
 from crxzipple.modules.orchestration.application.memory_flush import (
@@ -322,6 +323,26 @@ class OrchestrationApplicationService:
             worker_lease_seconds=worker_lease_seconds,
             worker_heartbeat_seconds=worker_heartbeat_seconds,
         )
+        self.progress_coordinator = RunProgressCoordinator(
+            uow_factory=uow_factory,
+            dispatch_port=self.dispatch_port,
+            lease_manager=self.lease_manager,
+            claim_next_queued_run=lambda worker_id: self.claim_next_queued_run(
+                worker_id=worker_id,
+            ),
+            advance_once=lambda run_id, worker_id: self.advance_once(
+                run_id=run_id,
+                worker_id=worker_id,
+            ),
+            heartbeat_run=self._heartbeat_run_for_manager,
+            get_run=self.get_run,
+            apply_compaction_summary=self._apply_compaction_summary,
+            apply_memory_flush=self._apply_memory_flush,
+            extract_memory_candidate=self._extract_memory_candidate,
+            maybe_request_auto_compaction=self._maybe_request_auto_compaction,
+            clear_pending_compaction_marker=self._clear_pending_compaction_marker,
+            is_compaction_run=self._is_compaction_run,
+        )
         self.wait_coordinator = RunWaitCoordinator(
             uow_factory=uow_factory,
             dispatch_port=self.dispatch_port,
@@ -545,15 +566,9 @@ class OrchestrationApplicationService:
             )
 
     def process_next_queued_run(self, *, worker_id: str) -> OrchestrationRun | None:
-        run = self.claim_next_queued_run(worker_id=worker_id)
-        if run is None:
-            return None
-        with self.lease_manager.heartbeat_while_processing(
-            run_id=run.id,
+        return self.progress_coordinator.process_next_queued_run(
             worker_id=worker_id,
-            heartbeat_run=self._heartbeat_run_for_manager,
-        ):
-            return self.advance_once(run_id=run.id, worker_id=worker_id)
+        )
 
     def resolve_session_bundle(self, data: ResolveSessionBundleInput) -> SessionBundle:
         if self.session_resolver is None:
@@ -603,19 +618,7 @@ class OrchestrationApplicationService:
             return run
 
     def advance_run(self, data: AdvanceOrchestrationRunInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            run.advance(
-                worker_id=data.worker_id,
-                stage=data.stage,
-                step_increment=data.step_increment,
-                metadata=data.metadata,
-                happened_at=data.now,
-            )
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.progress_coordinator.advance_run(data)
 
     def wait_on_tool(self, data: WaitOnToolInput) -> OrchestrationRun:
         return self.wait_coordinator.wait_on_tool(data)
@@ -637,57 +640,13 @@ class OrchestrationApplicationService:
         return self.wait_coordinator.resume_run(data)
 
     def complete_run(self, data: CompleteOrchestrationRunInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            if data.metadata:
-                run.metadata.update(data.metadata)
-            run.complete(
-                worker_id=data.worker_id,
-                result_payload=data.result_payload,
-                happened_at=data.now,
-            )
-            self.dispatch_port.complete(uow.dispatch_tasks, uow, run)
-            uow.orchestration_waits.delete_for_run(run.id)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-        self._apply_compaction_summary(run)
-        self._apply_memory_flush(run)
-        self._extract_memory_candidate(run)
-        self._maybe_request_auto_compaction(run)
-        return self.get_run(data.run_id)
+        return self.progress_coordinator.complete_run(data)
 
     def fail_run(self, data: FailOrchestrationRunInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, data.run_id)
-            run.fail(
-                worker_id=data.worker_id,
-                message=data.message,
-                code=data.code,
-                details=data.details,
-                happened_at=data.now,
-            )
-            self.dispatch_port.fail(uow.dispatch_tasks, uow, run)
-            uow.orchestration_waits.delete_for_run(run.id)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-        if self._is_compaction_run(run):
-            self._clear_pending_compaction_marker(run)
-        return run
+        return self.progress_coordinator.fail_run(data)
 
     def cancel_run(self, run_id: str, *, reason: str | None = None) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, run_id)
-            run.cancel(reason=reason)
-            self.dispatch_port.cancel(uow.dispatch_tasks, uow, run)
-            uow.orchestration_waits.delete_for_run(run.id)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-        if self._is_compaction_run(run):
-            self._clear_pending_compaction_marker(run)
-        return run
+        return self.progress_coordinator.cancel_run(run_id, reason=reason)
 
     def resolve_approval_request(
         self,
