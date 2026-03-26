@@ -138,81 +138,102 @@ class AppContainer:
         self.engine.dispose()
 
 
-def build_container(
-    *,
-    settings: Settings | None = None,
-    database_url: str | None = None,
-    event_bus: EventBus | None = None,
-) -> AppContainer:
-    resolved_settings = settings or load_settings()
-    if database_url is not None:
-        resolved_settings = replace(resolved_settings, database_url=database_url)
+@dataclass(slots=True)
+class _ToolInfrastructure:
+    local_tool_catalog: LocalToolCatalog
+    tool_discovery_registry: ToolDiscoveryRegistry
+    sandbox_tool_registry: ToolRuntimeRegistry
+    remote_tool_registry: ToolRuntimeRegistry
+    tool_runtime_gateway: ToolRuntimeRouter
+    cleanup_callbacks: tuple[Callable[[], None], ...] = field(default_factory=tuple)
 
-    engine = build_engine(resolved_settings)
-    session_factory = build_session_factory(engine)
-    resolved_event_bus = event_bus or InMemoryEventBus()
-    local_tool_catalog = LocalToolCatalog()
-    tool_discovery_registry = ToolDiscoveryRegistry()
-    sandbox_tool_registry = ToolRuntimeRegistry()
-    remote_tool_registry = ToolRuntimeRegistry()
-    llm_adapter_registry = LlmAdapterRegistry()
+
+@dataclass(slots=True)
+class _CoreServices:
+    session_service: SessionApplicationService
+    llm_service: LlmApplicationService
+    agent_service: AgentApplicationService
+    memory_service: MemoryApplicationService
+    dispatch_service: DispatchApplicationService
+
+
+def _build_authorization_service(
+    settings: Settings,
+    session_factory: SessionFactory,
+) -> tuple[AuthorizationApplicationService, int]:
     authorization_policy_paths = tuple(
         dict.fromkeys(
             (
-                *resolved_settings.authorization_policy_paths,
-                resolved_settings.authorization_runtime_policy_path,
+                *settings.authorization_policy_paths,
+                settings.authorization_runtime_policy_path,
             ),
         ),
     )
     authorization_policies = YamlAuthorizationPolicyLoader().load_paths(
         authorization_policy_paths,
     )
-    authorization_service = AuthorizationApplicationService(
+    service = AuthorizationApplicationService(
         policy_repository=InMemoryAuthorizationPolicyRepository(
             policies=list(authorization_policies),
-            managed_path=Path(
-                resolved_settings.authorization_runtime_policy_path,
-            ).expanduser(),
+            managed_path=Path(settings.authorization_runtime_policy_path).expanduser(),
         ),
         evaluator=AbacAuthorizationEvaluator(),
         temporary_grant_repository_factory=(
             lambda: SqlAlchemyTemporaryAuthorizationGrantRepository(session_factory)
         ),
-        enabled=resolved_settings.authorization_enabled,
+        enabled=settings.authorization_enabled,
     )
-    llm_adapter_registry.register(
+    return service, len(authorization_policies)
+
+
+def _build_llm_adapter_registry() -> LlmAdapterRegistry:
+    registry = LlmAdapterRegistry()
+    registry.register(
         LlmApiFamily.OPENAI_RESPONSES,
         OpenAIResponsesAdapter(),
     )
-    llm_adapter_registry.register(
+    registry.register(
         LlmApiFamily.OPENAI_CODEX_RESPONSES,
         OpenAICodexResponsesAdapter(),
     )
-    llm_adapter_registry.register(
+    registry.register(
         LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
         OpenAIChatCompatibleAdapter(),
     )
-    llm_adapter_registry.register(
+    registry.register(
         LlmApiFamily.ANTHROPIC_MESSAGES,
         AnthropicMessagesAdapter(),
     )
-    llm_adapter_registry.register(
+    registry.register(
         LlmApiFamily.GEMINI_GENERATE_CONTENT,
         GeminiGenerateContentAdapter(),
     )
+    return registry
+
+
+def _build_tool_infrastructure(settings: Settings) -> _ToolInfrastructure:
+    local_tool_catalog = LocalToolCatalog()
+    tool_discovery_registry = ToolDiscoveryRegistry()
+    sandbox_tool_registry = ToolRuntimeRegistry()
+    remote_tool_registry = ToolRuntimeRegistry()
+
     register_builtin_local_tools(local_tool_catalog)
-    tool_discovery_registry.register(LocalCatalogDiscoveryProvider(local_tool_catalog))
-    if resolved_settings.tool_local_paths:
+    tool_discovery_registry.register(
+        LocalCatalogDiscoveryProvider(local_tool_catalog),
+    )
+    if settings.tool_local_paths:
         filesystem_provider = FilesystemLocalToolDiscoveryProvider(
             local_tool_catalog,
-            resolved_settings.tool_local_paths,
+            settings.tool_local_paths,
         )
         tool_discovery_registry.register(filesystem_provider)
         filesystem_provider.discover_specs()
+
     register_builtin_sandbox_handlers(sandbox_tool_registry)
     register_builtin_remote_handlers(remote_tool_registry)
+
     cleanup_callbacks: list[Callable[[], None]] = []
-    for provider_settings in resolved_settings.tool_mcp_providers:
+    for provider_settings in settings.tool_mcp_providers:
         mcp_client = McpStdioClient(provider_settings)
         mcp_provider = McpDiscoveryProvider(provider_settings, client=mcp_client)
         tool_discovery_registry.register(mcp_provider)
@@ -222,47 +243,40 @@ def build_container(
             client=mcp_client,
         )
         cleanup_callbacks.append(mcp_client.close)
-    for provider_settings in resolved_settings.tool_openapi_providers:
+
+    for provider_settings in settings.tool_openapi_providers:
         openapi_provider = OpenApiDiscoveryProvider(provider_settings)
         tool_discovery_registry.register(openapi_provider)
         register_openapi_remote_handlers(
             remote_tool_registry,
             openapi_provider.operations(),
         )
-    sandbox_backend = build_sandbox_backend(resolved_settings)
+
+    sandbox_backend = build_sandbox_backend(settings)
     tool_runtime_gateway = ToolRuntimeRouter(
         LocalAsyncToolExecutor(local_tool_catalog),
         SandboxAsyncToolExecutor(sandbox_tool_registry, sandbox_backend),
         RemoteAsyncToolExecutor(remote_tool_registry),
     )
-
-    logger.info(
-        "building app container",
-        extra={
-            "environment": resolved_settings.environment,
-            "database_url": resolved_settings.database_url,
-            "event_bus": type(resolved_event_bus).__name__,
-            "local_tool_count": len(tool_runtime_gateway.list_local_tools()),
-            "local_tool_path_count": len(resolved_settings.tool_local_paths),
-            "tool_discovery_provider_count": len(
-                tool_discovery_registry.list_providers(),
-            ),
-            "mcp_provider_count": len(resolved_settings.tool_mcp_providers),
-            "openapi_provider_count": len(resolved_settings.tool_openapi_providers),
-            "sandbox_backend": resolved_settings.sandbox_backend,
-            "sandbox_runtime_count": sandbox_tool_registry.count(),
-            "remote_runtime_count": remote_tool_registry.count(),
-            "authorization_enabled": resolved_settings.authorization_enabled,
-            "authorization_policy_count": len(authorization_policies),
-        },
+    return _ToolInfrastructure(
+        local_tool_catalog=local_tool_catalog,
+        tool_discovery_registry=tool_discovery_registry,
+        sandbox_tool_registry=sandbox_tool_registry,
+        remote_tool_registry=remote_tool_registry,
+        tool_runtime_gateway=tool_runtime_gateway,
+        cleanup_callbacks=tuple(cleanup_callbacks),
     )
 
-    def uow_factory() -> SqlAlchemyUnitOfWork:
-        return SqlAlchemyUnitOfWork(session_factory, resolved_event_bus)
 
+def _build_core_services(
+    settings: Settings,
+    uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+    llm_adapter_registry: LlmAdapterRegistry,
+    local_tool_catalog: LocalToolCatalog,
+) -> _CoreServices:
     session_service = SessionApplicationService(uow_factory)
     llm_service = LlmApplicationService(uow_factory, llm_adapter_registry)
-    agent_home_root = str(derive_agent_home_root(resolved_settings.database_url))
+    agent_home_root = str(derive_agent_home_root(settings.database_url))
     agent_service = AgentApplicationService(
         uow_factory,
         agent_home_root=agent_home_root,
@@ -303,39 +317,48 @@ def build_container(
         ),
     )
     register_builtin_memory_tools(local_tool_catalog, memory_service)
-    dispatch_service = DispatchApplicationService(uow_factory)
-    orchestration_router = OrchestrationRouter()
-    session_resolver = SessionResolver(
+    return _CoreServices(
         session_service=session_service,
-        router=orchestration_router,
-    )
-    memory_port = MemoryServiceAdapter(memory_service)
-    authorization_port = AuthorizationServiceAdapter(authorization_service)
-    llm_port = LlmServiceAdapter(llm_service)
-    prompt_assembler = PromptAssembler(
+        llm_service=llm_service,
         agent_service=agent_service,
+        memory_service=memory_service,
+        dispatch_service=DispatchApplicationService(uow_factory),
+    )
+
+
+def _build_runtime_services(
+    settings: Settings,
+    uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+    authorization_service: AuthorizationApplicationService,
+    tool_infrastructure: _ToolInfrastructure,
+    core_services: _CoreServices,
+) -> tuple[ToolApplicationService, OrchestrationApplicationService]:
+    memory_port = MemoryServiceAdapter(core_services.memory_service)
+    authorization_port = AuthorizationServiceAdapter(authorization_service)
+    llm_port = LlmServiceAdapter(core_services.llm_service)
+    prompt_assembler = PromptAssembler(
+        agent_service=core_services.agent_service,
         llm_port=llm_port,
         memory_port=memory_port,
-        session_service=session_service,
-        system_prompt_max_chars=resolved_settings.prompt_system_max_chars,
-        system_prompt_max_tokens=resolved_settings.prompt_system_max_tokens,
+        session_service=core_services.session_service,
+        system_prompt_max_chars=settings.prompt_system_max_chars,
+        system_prompt_max_tokens=settings.prompt_system_max_tokens,
         system_prompt_context_window_ratio=(
-            resolved_settings.prompt_system_context_window_ratio
+            settings.prompt_system_context_window_ratio
         ),
     )
-    tool_port = ToolServiceAdapter(
-        ToolApplicationService(
-            uow_factory,
-            tool_runtime_gateway,
-            tool_discovery_registry,
-            dispatch_port=ToolRunDispatchAdapter(
-                dispatch_service=dispatch_service,
-            ),
-            default_max_attempts=resolved_settings.tool_run_max_attempts,
-            worker_lease_seconds=resolved_settings.tool_run_lease_seconds,
-            worker_heartbeat_seconds=resolved_settings.tool_run_heartbeat_seconds,
+    tool_service = ToolApplicationService(
+        uow_factory,
+        tool_infrastructure.tool_runtime_gateway,
+        tool_infrastructure.tool_discovery_registry,
+        dispatch_port=ToolRunDispatchAdapter(
+            dispatch_service=core_services.dispatch_service,
         ),
+        default_max_attempts=settings.tool_run_max_attempts,
+        worker_lease_seconds=settings.tool_run_lease_seconds,
+        worker_heartbeat_seconds=settings.tool_run_heartbeat_seconds,
     )
+    tool_port = ToolServiceAdapter(tool_service)
     tool_resolver = ToolResolver(
         tool_catalog=tool_port,
         authorization_port=authorization_port,
@@ -344,7 +367,7 @@ def build_container(
             or (
                 run.agent_id is not None
                 and bool(
-                    memory_service.list_entries(
+                    core_services.memory_service.list_entries(
                         ListMemoryEntriesInput(
                             agent_id=run.agent_id,
                             limit=1,
@@ -354,45 +377,57 @@ def build_container(
             )
         ),
     )
-    tool_service = tool_port.service
     orchestration_engine = OrchestrationEngine(
         prompt_assembler=prompt_assembler,
-        session_service=session_service,
+        session_service=core_services.session_service,
         llm_port=llm_port,
         tool_resolver=tool_resolver,
         tool_execution_port=tool_port,
         memory_port=memory_port,
     )
-    orchestration_dispatch_port = OrchestrationRunDispatchAdapter(
-        dispatch_service=dispatch_service,
+    orchestration_router = OrchestrationRouter()
+    session_resolver = SessionResolver(
+        session_service=core_services.session_service,
+        router=orchestration_router,
     )
     orchestration_service = OrchestrationApplicationService(
         uow_factory,
-        dispatch_port=orchestration_dispatch_port,
-        agent_service=agent_service,
+        dispatch_port=OrchestrationRunDispatchAdapter(
+            dispatch_service=core_services.dispatch_service,
+        ),
+        agent_service=core_services.agent_service,
         authorization_port=authorization_port,
         llm_port=llm_port,
         memory_port=memory_port,
-        session_service=session_service,
+        session_service=core_services.session_service,
         router=orchestration_router,
         session_resolver=session_resolver,
         engine=orchestration_engine,
-        worker_lease_seconds=resolved_settings.orchestration_run_lease_seconds,
-        worker_heartbeat_seconds=resolved_settings.orchestration_run_heartbeat_seconds,
-        auto_compaction_enabled=resolved_settings.orchestration_auto_compaction_enabled,
+        worker_lease_seconds=settings.orchestration_run_lease_seconds,
+        worker_heartbeat_seconds=settings.orchestration_run_heartbeat_seconds,
+        auto_compaction_enabled=settings.orchestration_auto_compaction_enabled,
         auto_compaction_transcript_chars=(
-            resolved_settings.orchestration_auto_compaction_transcript_chars
+            settings.orchestration_auto_compaction_transcript_chars
         ),
         auto_compaction_transcript_tokens=(
-            resolved_settings.orchestration_auto_compaction_transcript_tokens
+            settings.orchestration_auto_compaction_transcript_tokens
         ),
         auto_compaction_reserve_tokens=(
-            resolved_settings.orchestration_auto_compaction_reserve_tokens
+            settings.orchestration_auto_compaction_reserve_tokens
         ),
         auto_compaction_soft_threshold_tokens=(
-            resolved_settings.orchestration_auto_compaction_soft_threshold_tokens
+            settings.orchestration_auto_compaction_soft_threshold_tokens
         ),
     )
+    return tool_service, orchestration_service
+
+
+def _subscribe_runtime_events(
+    event_bus: EventBus,
+    *,
+    tool_service: ToolApplicationService,
+    orchestration_service: OrchestrationApplicationService,
+) -> None:
     tool_event_subscriber = OrchestrationToolEventSubscriber(
         service=orchestration_service,
     )
@@ -406,17 +441,83 @@ def build_container(
         "tool.run.cancelled",
         "tool.run.timed_out",
     ):
-        resolved_event_bus.subscribe(
+        event_bus.subscribe(
             event_name,
             tool_event_subscriber.handle_terminal_tool_run,
         )
-    resolved_event_bus.subscribe(
+    event_bus.subscribe(
         "dispatch.task.recovered",
         orchestration_dispatch_subscriber.handle_recovered_dispatch_task,
     )
-    resolved_event_bus.subscribe(
+    event_bus.subscribe(
         "dispatch.task.recovered",
         tool_dispatch_subscriber.handle_recovered_dispatch_task,
+    )
+
+
+def build_container(
+    *,
+    settings: Settings | None = None,
+    database_url: str | None = None,
+    event_bus: EventBus | None = None,
+) -> AppContainer:
+    resolved_settings = settings or load_settings()
+    if database_url is not None:
+        resolved_settings = replace(resolved_settings, database_url=database_url)
+
+    engine = build_engine(resolved_settings)
+    session_factory = build_session_factory(engine)
+    resolved_event_bus = event_bus or InMemoryEventBus()
+    authorization_service, authorization_policy_count = _build_authorization_service(
+        resolved_settings,
+        session_factory,
+    )
+    llm_adapter_registry = _build_llm_adapter_registry()
+    tool_infrastructure = _build_tool_infrastructure(resolved_settings)
+
+    logger.info(
+        "building app container",
+        extra={
+            "environment": resolved_settings.environment,
+            "database_url": resolved_settings.database_url,
+            "event_bus": type(resolved_event_bus).__name__,
+            "local_tool_count": len(
+                tool_infrastructure.tool_runtime_gateway.list_local_tools(),
+            ),
+            "local_tool_path_count": len(resolved_settings.tool_local_paths),
+            "tool_discovery_provider_count": len(
+                tool_infrastructure.tool_discovery_registry.list_providers(),
+            ),
+            "mcp_provider_count": len(resolved_settings.tool_mcp_providers),
+            "openapi_provider_count": len(resolved_settings.tool_openapi_providers),
+            "sandbox_backend": resolved_settings.sandbox_backend,
+            "sandbox_runtime_count": tool_infrastructure.sandbox_tool_registry.count(),
+            "remote_runtime_count": tool_infrastructure.remote_tool_registry.count(),
+            "authorization_enabled": resolved_settings.authorization_enabled,
+            "authorization_policy_count": authorization_policy_count,
+        },
+    )
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        return SqlAlchemyUnitOfWork(session_factory, resolved_event_bus)
+
+    core_services = _build_core_services(
+        resolved_settings,
+        uow_factory,
+        llm_adapter_registry,
+        tool_infrastructure.local_tool_catalog,
+    )
+    tool_service, orchestration_service = _build_runtime_services(
+        resolved_settings,
+        uow_factory,
+        authorization_service,
+        tool_infrastructure,
+        core_services,
+    )
+    _subscribe_runtime_events(
+        resolved_event_bus,
+        tool_service=tool_service,
+        orchestration_service=orchestration_service,
     )
 
     return AppContainer(
@@ -424,19 +525,19 @@ def build_container(
         engine=engine,
         session_factory=session_factory,
         event_bus=resolved_event_bus,
-        local_tool_catalog=local_tool_catalog,
-        tool_discovery_registry=tool_discovery_registry,
-        sandbox_tool_registry=sandbox_tool_registry,
-        remote_tool_registry=remote_tool_registry,
+        local_tool_catalog=tool_infrastructure.local_tool_catalog,
+        tool_discovery_registry=tool_infrastructure.tool_discovery_registry,
+        sandbox_tool_registry=tool_infrastructure.sandbox_tool_registry,
+        remote_tool_registry=tool_infrastructure.remote_tool_registry,
         llm_adapter_registry=llm_adapter_registry,
         authorization_service=authorization_service,
         uow_factory=uow_factory,
-        dispatch_service=dispatch_service,
+        dispatch_service=core_services.dispatch_service,
         orchestration_service=orchestration_service,
         tool_service=tool_service,
-        session_service=session_service,
-        llm_service=llm_service,
-        memory_service=memory_service,
-        agent_service=agent_service,
-        cleanup_callbacks=tuple(cleanup_callbacks),
+        session_service=core_services.session_service,
+        llm_service=core_services.llm_service,
+        memory_service=core_services.memory_service,
+        agent_service=core_services.agent_service,
+        cleanup_callbacks=tool_infrastructure.cleanup_callbacks,
     )
