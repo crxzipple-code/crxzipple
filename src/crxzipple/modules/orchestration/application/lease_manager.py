@@ -6,13 +6,9 @@ import threading
 from typing import Any, Callable, Protocol
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.dispatch.application import (
-    DispatchApplicationService,
-    RecoverAbandonedDispatchTasksInput,
-)
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
-from crxzipple.modules.orchestration.application.dispatch_bridge import (
-    OrchestrationDispatchBridge,
+from crxzipple.modules.orchestration.application.ports import (
+    RunDispatchPort,
 )
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
@@ -24,7 +20,6 @@ from crxzipple.shared.domain.aggregates import AggregateRoot
 
 logger = get_logger(__name__)
 
-DISPATCH_OWNER_KIND = "orchestration_run"
 DISPATCH_LEASE_EXPIRED_REASON = "Orchestration worker lease expired before completion."
 DISPATCH_LEASE_EXHAUSTED_REASON = (
     "Orchestration worker lease expired before completion and the run was failed for safety."
@@ -56,8 +51,7 @@ class LeaseUnitOfWork(Protocol):
 @dataclass(slots=True)
 class OrchestrationLeaseManager:
     uow_factory: Callable[[], LeaseUnitOfWork]
-    dispatch_bridge: OrchestrationDispatchBridge
-    dispatch_service: DispatchApplicationService | None
+    dispatch_port: RunDispatchPort
     worker_lease_seconds: int
     worker_heartbeat_seconds: float
 
@@ -69,16 +63,16 @@ class OrchestrationLeaseManager:
     ) -> OrchestrationRun | None:
         self.recover_abandoned_runs()
         with self.uow_factory() as uow:
-            task = self.dispatch_bridge.claim_next_queued(
+            claim = self.dispatch_port.claim_next_queued(
                 uow.dispatch_tasks,
                 uow,
                 worker_id=worker_id,
                 lease_seconds=self.worker_lease_seconds,
             )
-            if task is None:
+            if claim is None:
                 return None
-            run = get_run(uow, task.owner_id)
-            run.claim(worker_id=worker_id, claimed_at=task.claimed_at)
+            run = get_run(uow, claim.run_id)
+            run.claim(worker_id=worker_id, claimed_at=claim.claimed_at)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -106,7 +100,7 @@ class OrchestrationLeaseManager:
                 )
                 return run
             run.heartbeat(worker_id=worker_id)
-            self.dispatch_bridge.heartbeat(
+            self.dispatch_port.heartbeat(
                 uow.dispatch_tasks,
                 uow,
                 run,
@@ -119,17 +113,11 @@ class OrchestrationLeaseManager:
             return run
 
     def recover_abandoned_runs(self) -> list[OrchestrationRun]:
-        if self.dispatch_service is None:
-            raise RuntimeError("Orchestration dispatch_service is not configured.")
-        recovered_tasks = self.dispatch_service.recover_abandoned_tasks(
-            RecoverAbandonedDispatchTasksInput(
-                owner_kind=DISPATCH_OWNER_KIND,
-                reason=DISPATCH_LEASE_EXPIRED_REASON,
-            ),
+        recovered_ids = self.dispatch_port.recover_abandoned_run_ids(
+            reason=DISPATCH_LEASE_EXPIRED_REASON,
         )
-        if not recovered_tasks:
+        if not recovered_ids:
             return []
-        recovered_ids = [task.owner_id for task in recovered_tasks]
         with self.uow_factory() as uow:
             recovered_runs = []
             for run_id in recovered_ids:
@@ -163,7 +151,7 @@ class OrchestrationLeaseManager:
                 code="worker_lease_expired",
                 details={"reason": reason},
             )
-            self.dispatch_bridge.fail(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.fail(uow.dispatch_tasks, uow, run)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()

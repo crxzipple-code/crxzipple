@@ -6,19 +6,11 @@ from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.dispatch.application import (
-    DispatchApplicationService,
-)
 from crxzipple.modules.agent.application import (
     AgentApplicationService,
 )
 from crxzipple.modules.llm.domain import ToolCallIntent
 from crxzipple.modules.memory.application import RecordMemoryFlushInput
-from crxzipple.modules.orchestration.application.ports import (
-    AuthorizationPort,
-    LlmPort,
-    MemoryPort,
-)
 from crxzipple.modules.orchestration.application.memory_flush import (
     is_memory_flush_skip_reply,
 )
@@ -27,11 +19,14 @@ from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
     PromptPreview,
 )
-from crxzipple.modules.orchestration.application.dispatch_bridge import (
-    OrchestrationDispatchBridge,
-)
 from crxzipple.modules.orchestration.application.lease_manager import (
     OrchestrationLeaseManager,
+)
+from crxzipple.modules.orchestration.application.ports import (
+    AuthorizationPort,
+    LlmPort,
+    MemoryPort,
+    RunDispatchPort,
 )
 from crxzipple.modules.orchestration.application.router import OrchestrationRouter
 from crxzipple.modules.orchestration.application.scheduler import (
@@ -284,8 +279,7 @@ class OrchestrationApplicationService:
         self,
         uow_factory: Callable[[], OrchestrationUnitOfWork],
         scheduler: OrchestrationScheduler | None = None,
-        dispatch_bridge: OrchestrationDispatchBridge | None = None,
-        dispatch_service: DispatchApplicationService | None = None,
+        dispatch_port: RunDispatchPort | None = None,
         agent_service: AgentApplicationService | None = None,
         authorization_port: AuthorizationPort | None = None,
         llm_port: LlmPort | None = None,
@@ -304,8 +298,9 @@ class OrchestrationApplicationService:
     ) -> None:
         self.uow_factory = uow_factory
         self.scheduler = scheduler or OrchestrationScheduler()
-        self.dispatch_bridge = dispatch_bridge or OrchestrationDispatchBridge()
-        self.dispatch_service = dispatch_service
+        if dispatch_port is None:
+            raise RuntimeError("Orchestration dispatch port is not configured.")
+        self.dispatch_port = dispatch_port
         self.agent_service = agent_service
         self.authorization_port = authorization_port
         self.llm_port = llm_port
@@ -323,8 +318,7 @@ class OrchestrationApplicationService:
         self.auto_compaction_soft_threshold_tokens = auto_compaction_soft_threshold_tokens
         self.lease_manager = OrchestrationLeaseManager(
             uow_factory=uow_factory,
-            dispatch_bridge=self.dispatch_bridge,
-            dispatch_service=self.dispatch_service,
+            dispatch_port=self.dispatch_port,
             worker_lease_seconds=worker_lease_seconds,
             worker_heartbeat_seconds=worker_heartbeat_seconds,
         )
@@ -391,7 +385,7 @@ class OrchestrationApplicationService:
                 queue_policy=data.queue_policy,
                 priority=data.priority,
             )
-            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -626,7 +620,7 @@ class OrchestrationApplicationService:
                 ),
                 source="tool_wait",
             )
-            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.wait(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.replace_tool_waits(
                 run.id,
                 run.pending_tool_run_ids,
@@ -656,7 +650,7 @@ class OrchestrationApplicationService:
                 request=data.request,
                 state="pending_decision",
             )
-            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.wait(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.delete_for_run(run.id)
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -683,7 +677,7 @@ class OrchestrationApplicationService:
                 clear_pending_tool_run_ids=data.clear_pending_tool_run_ids,
                 happened_at=data.now,
             )
-            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.delete_for_run(run.id)
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -700,7 +694,7 @@ class OrchestrationApplicationService:
                 result_payload=data.result_payload,
                 happened_at=data.now,
             )
-            self.dispatch_bridge.complete(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.complete(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.delete_for_run(run.id)
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -721,7 +715,7 @@ class OrchestrationApplicationService:
                 details=data.details,
                 happened_at=data.now,
             )
-            self.dispatch_bridge.fail(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.fail(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.delete_for_run(run.id)
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -734,7 +728,7 @@ class OrchestrationApplicationService:
         with self.uow_factory() as uow:
             run = self._get_run(uow, run_id)
             run.cancel(reason=reason)
-            self.dispatch_bridge.cancel(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.cancel(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.delete_for_run(run.id)
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -860,7 +854,7 @@ class OrchestrationApplicationService:
                 queue_policy=data.queue_policy,
                 priority=run.priority,
             )
-            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -938,7 +932,7 @@ class OrchestrationApplicationService:
                 queue_policy=data.queue_policy,
                 priority=run.priority,
             )
-            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -1004,7 +998,7 @@ class OrchestrationApplicationService:
                 queue_policy=data.queue_policy,
                 priority=run.priority,
             )
-            self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -1858,7 +1852,7 @@ class OrchestrationApplicationService:
                 pending_tool_run_ids=pending_tool_run_ids,
                 reason="tool_background_wait",
             )
-            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.wait(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.replace_tool_waits(
                 run.id,
                 run.pending_tool_run_ids,
@@ -2064,7 +2058,7 @@ class OrchestrationApplicationService:
                 pending_tool_run_ids=pending_tool_run_ids,
                 reason="tool_background_wait",
             )
-            self.dispatch_bridge.wait(uow.dispatch_tasks, uow, run)
+            self.dispatch_port.wait(uow.dispatch_tasks, uow, run)
             uow.orchestration_waits.replace_tool_waits(
                 run.id,
                 run.pending_tool_run_ids,

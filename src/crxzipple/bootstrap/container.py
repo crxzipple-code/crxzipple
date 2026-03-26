@@ -71,6 +71,7 @@ from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
     LlmServiceAdapter,
     MemoryServiceAdapter,
+    OrchestrationRunDispatchAdapter,
     ToolServiceAdapter,
 )
 from crxzipple.modules.session.application import SessionApplicationService
@@ -362,11 +363,13 @@ def build_container(
         tool_execution_port=tool_port,
         memory_port=memory_port,
     )
-    orchestration_dispatch_bridge = OrchestrationDispatchBridge()
+    orchestration_dispatch_port = OrchestrationRunDispatchAdapter(
+        bridge=OrchestrationDispatchBridge(),
+        dispatch_service=dispatch_service,
+    )
     orchestration_service = OrchestrationApplicationService(
         uow_factory,
-        dispatch_bridge=orchestration_dispatch_bridge,
-        dispatch_service=dispatch_service,
+        dispatch_port=orchestration_dispatch_port,
         agent_service=agent_service,
         authorization_port=authorization_port,
         llm_port=llm_port,

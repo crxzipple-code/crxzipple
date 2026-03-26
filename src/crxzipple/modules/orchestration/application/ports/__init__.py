@@ -1,3 +1,7 @@
+from crxzipple.modules.orchestration.application.ports.dispatch import (
+    RunDispatchClaim,
+    RunDispatchPort,
+)
 from crxzipple.modules.orchestration.application.ports.authorization import (
     AuthorizationPort,
 )
@@ -12,6 +16,8 @@ __all__ = [
     "AuthorizationPort",
     "LlmPort",
     "MemoryPort",
+    "RunDispatchClaim",
+    "RunDispatchPort",
     "ToolCatalogPort",
     "ToolExecutionPort",
 ]

@@ -1,3 +1,6 @@
+from crxzipple.modules.orchestration.infrastructure.adapters.dispatch import (
+    OrchestrationRunDispatchAdapter,
+)
 from crxzipple.modules.orchestration.infrastructure.adapters.authorization import (
     AuthorizationServiceAdapter,
 )
@@ -15,5 +18,6 @@ __all__ = [
     "AuthorizationServiceAdapter",
     "LlmServiceAdapter",
     "MemoryServiceAdapter",
+    "OrchestrationRunDispatchAdapter",
     "ToolServiceAdapter",
 ]

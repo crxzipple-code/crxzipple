@@ -7,6 +7,8 @@ from crxzipple.modules.orchestration.application.ports import (
     AuthorizationPort,
     LlmPort,
     MemoryPort,
+    RunDispatchClaim,
+    RunDispatchPort,
     ToolCatalogPort,
     ToolExecutionPort,
 )
@@ -67,6 +69,7 @@ from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
     LlmServiceAdapter,
     MemoryServiceAdapter,
+    OrchestrationRunDispatchAdapter,
     ToolServiceAdapter,
 )
 
@@ -89,6 +92,7 @@ __all__ = [
     "OrchestrationScheduler",
     "OrchestrationUnitOfWork",
     "OrchestrationWorker",
+    "OrchestrationRunDispatchAdapter",
     "PrepareSessionRunInput",
     "RequestCompactionInput",
     "RequestDueHeartbeatsInput",
@@ -106,6 +110,8 @@ __all__ = [
     "ResolvedToolSet",
     "ResolveSessionBundleInput",
     "ResumeOrchestrationRunInput",
+    "RunDispatchClaim",
+    "RunDispatchPort",
     "RouteOrchestrationRunInput",
     "SessionBundle",
     "SessionResolver",
