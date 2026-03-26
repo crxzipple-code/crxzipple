@@ -6,20 +6,17 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from crxzipple.modules.llm.application import (
-    InvokeLlmInput,
-    LlmApplicationService,
-    StreamLlmInput,
-)
+from crxzipple.modules.llm.application import InvokeLlmInput, StreamLlmInput
 from crxzipple.modules.llm.domain import (
     LlmAdapterNotConfiguredError,
     LlmMessage,
     ToolCallIntent,
     ToolSchema,
 )
-from crxzipple.modules.memory.infrastructure import (
-    inject_memory_tool_context,
-    is_memory_tool_name,
+from crxzipple.modules.orchestration.application.ports import (
+    LlmPort,
+    MemoryPort,
+    ToolExecutionPort,
 )
 from crxzipple.modules.orchestration.application.prompting import PromptReport
 from crxzipple.modules.orchestration.application.prompting import PromptMode
@@ -42,7 +39,7 @@ from crxzipple.modules.session.application import (
     SessionApplicationService,
 )
 from crxzipple.modules.session.domain import SessionMessageKind
-from crxzipple.modules.tool.application import ExecuteToolInput, ToolApplicationService
+from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import (
     ToolEnvironment,
     ToolExecutionStrategy,
@@ -108,9 +105,10 @@ class _ToolExecutionBatchOutcome:
 class OrchestrationEngine:
     prompt_assembler: PromptAssembler
     session_service: SessionApplicationService
-    llm_service: LlmApplicationService
+    llm_port: LlmPort
     tool_resolver: ToolResolver
-    tool_service: ToolApplicationService
+    tool_execution_port: ToolExecutionPort
+    memory_port: MemoryPort | None = None
 
     def preview_prompt(self, run: OrchestrationRun) -> PromptPreview:
         surface = self._build_prompt_surface(run)
@@ -317,7 +315,7 @@ class OrchestrationEngine:
         on_llm_stream_update: Callable[[str, str], None] | None = None,
     ):
         try:
-            events = self.llm_service.stream_invoke(
+            events = self.llm_port.stream_invoke(
                 StreamLlmInput(
                     llm_id=llm_id,
                     messages=messages,
@@ -325,7 +323,7 @@ class OrchestrationEngine:
                 ),
             )
         except LlmAdapterNotConfiguredError:
-            return self.llm_service.invoke(
+            return self.llm_port.invoke(
                 InvokeLlmInput(
                     llm_id=llm_id,
                     messages=messages,
@@ -363,7 +361,7 @@ class OrchestrationEngine:
             raise OrchestrationValidationError(
                 "Streaming llm invocation ended before an invocation id was produced.",
             )
-        return self.llm_service.get_invocation(invocation_id)
+        return self.llm_port.get_invocation(invocation_id)
 
     def _ensure_inbound_message(
         self,
@@ -548,17 +546,19 @@ class OrchestrationEngine:
                     ),
                 )
             execution_arguments = dict(tool_call.arguments)
-            if is_memory_tool_name(tool_call.name):
+            if self.memory_port is not None and self.memory_port.is_memory_tool_name(
+                tool_call.name,
+            ):
                 if run.agent_id is None or not run.agent_id.strip():
                     raise OrchestrationValidationError(
                         "Memory lookup tools require run.agent_id.",
                     )
-                execution_arguments = inject_memory_tool_context(
+                execution_arguments = self.memory_port.inject_tool_context(
                     execution_arguments,
                     agent_id=run.agent_id,
                 )
             tool_run = asyncio.run(
-                self.tool_service.execute(
+                self.tool_execution_port.execute(
                     ExecuteToolInput(
                         tool_id=resolved_tool.tool.id,
                         arguments=execution_arguments,

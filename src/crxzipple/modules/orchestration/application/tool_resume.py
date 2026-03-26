@@ -45,7 +45,7 @@ class OrchestrationToolResumeCoordinator:
             if run.status is not OrchestrationRunStatus.WAITING:
                 continue
             pending_tool_runs = tuple(
-                self.engine.tool_service.get_tool_run(pending_run_id)
+                self.engine.tool_execution_port.get_tool_run(pending_run_id)
                 for pending_run_id in run.pending_tool_run_ids
             )
             if not all(tool_run.is_terminal() for tool_run in pending_tool_runs):

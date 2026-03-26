@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from crxzipple.modules.memory.application import (
-    MemoryApplicationService,
-    RecallMemoryEntriesInput,
-)
 from crxzipple.modules.memory.domain import MemoryEntry
+from crxzipple.modules.orchestration.application.ports import MemoryPort
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 
 
@@ -21,7 +18,7 @@ class RecalledMemory:
 
 
 def recall_prompt_memories(
-    memory_service: MemoryApplicationService,
+    memory_service: MemoryPort,
     *,
     run: OrchestrationRun,
     limit: int = 3,
@@ -32,11 +29,9 @@ def recall_prompt_memories(
     if not query_text:
         return ()
     entries = memory_service.recall_entries(
-        RecallMemoryEntriesInput(
-            agent_id=run.agent_id,
-            query_text=query_text,
-            limit=limit,
-        ),
+        agent_id=run.agent_id,
+        query_text=query_text,
+        limit=limit,
     )
     return tuple(_to_recalled_memory(entry) for entry in entries)
 

@@ -12,11 +12,13 @@ from crxzipple.modules.dispatch.application import (
 from crxzipple.modules.agent.application import (
     AgentApplicationService,
 )
-from crxzipple.modules.authorization.application import AuthorizationApplicationService
 from crxzipple.modules.llm.domain import ToolCallIntent
-from crxzipple.modules.llm.application import LlmApplicationService
-from crxzipple.modules.memory.application import MemoryApplicationService
 from crxzipple.modules.memory.application import RecordMemoryFlushInput
+from crxzipple.modules.orchestration.application.ports import (
+    AuthorizationPort,
+    LlmPort,
+    MemoryPort,
+)
 from crxzipple.modules.orchestration.application.memory_flush import (
     is_memory_flush_skip_reply,
 )
@@ -285,9 +287,9 @@ class OrchestrationApplicationService:
         dispatch_bridge: OrchestrationDispatchBridge | None = None,
         dispatch_service: DispatchApplicationService | None = None,
         agent_service: AgentApplicationService | None = None,
-        authorization_service: AuthorizationApplicationService | None = None,
-        llm_service: LlmApplicationService | None = None,
-        memory_service: MemoryApplicationService | None = None,
+        authorization_port: AuthorizationPort | None = None,
+        llm_port: LlmPort | None = None,
+        memory_port: MemoryPort | None = None,
         session_service: SessionApplicationService | None = None,
         router: OrchestrationRouter | None = None,
         session_resolver: SessionResolver | None = None,
@@ -305,9 +307,9 @@ class OrchestrationApplicationService:
         self.dispatch_bridge = dispatch_bridge or OrchestrationDispatchBridge()
         self.dispatch_service = dispatch_service
         self.agent_service = agent_service
-        self.authorization_service = authorization_service
-        self.llm_service = llm_service
-        self.memory_service = memory_service
+        self.authorization_port = authorization_port
+        self.llm_port = llm_port
+        self.memory_port = memory_port
         self.session_service = session_service
         self.router = router or OrchestrationRouter()
         self.session_resolver = session_resolver
@@ -1142,7 +1144,7 @@ class OrchestrationApplicationService:
         return metadata
 
     def _extract_memory_candidate(self, run: OrchestrationRun) -> None:
-        if self.memory_service is None:
+        if self.memory_port is None:
             return
         prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
         if prompt_mode in {
@@ -1158,7 +1160,7 @@ class OrchestrationApplicationService:
             )
             if extracted is None:
                 return
-            candidate = self.memory_service.create_candidate(extracted.create_input)
+            candidate = self.memory_port.create_candidate(extracted.create_input)
             with self.uow_factory() as uow:
                 current = self._get_run(uow, run.id)
                 candidate_ids = current.metadata.get("memory_candidate_ids")
@@ -1390,7 +1392,7 @@ class OrchestrationApplicationService:
     def _apply_memory_flush(self, run: OrchestrationRun) -> None:
         if not self._is_memory_flush_run(run):
             return
-        if self.memory_service is None:
+        if self.memory_port is None:
             return
         result_payload = run.result_payload or {}
         output_text = result_payload.get("output_text")
@@ -1408,7 +1410,7 @@ class OrchestrationApplicationService:
             )
             return
         try:
-            entry = self.memory_service.record_flush_entry(
+            entry = self.memory_port.record_flush_entry(
                 RecordMemoryFlushInput(
                     agent_id=run.agent_id or "workspace",
                     content=normalized_output,
@@ -1551,14 +1553,14 @@ class OrchestrationApplicationService:
         self,
         run: OrchestrationRun,
     ) -> int | None:
-        if self.llm_service is None:
+        if self.llm_port is None:
             return None
         result_payload = run.result_payload or {}
         llm_id = result_payload.get("llm_id")
         if not isinstance(llm_id, str) or not llm_id.strip():
             return None
         try:
-            return self.llm_service.get_profile(llm_id.strip()).context_window_tokens
+            return self.llm_port.get_profile(llm_id.strip()).context_window_tokens
         except Exception:
             return None
 
@@ -1707,10 +1709,10 @@ class OrchestrationApplicationService:
         effect_ids: tuple[str, ...],
         tool_ids: tuple[str, ...],
     ) -> None:
-        if self.authorization_service is None:
+        if self.authorization_port is None:
             raise RuntimeError("Authorization service is not configured.")
         run = self.get_run(run_id)
-        self.authorization_service.grant_run_access(
+        self.authorization_port.grant_run_access(
             run_id=run.id,
             agent_id=run.agent_id,
             approval_request_id=approval_request_id,
@@ -1726,7 +1728,7 @@ class OrchestrationApplicationService:
         effect_ids: tuple[str, ...],
         tool_ids: tuple[str, ...],
     ) -> None:
-        if self.authorization_service is None:
+        if self.authorization_port is None:
             raise RuntimeError("Authorization service is not configured.")
         run = self.get_run(run_id)
         session_key = str(run.metadata.get("session_key", "")).strip()
@@ -1734,7 +1736,7 @@ class OrchestrationApplicationService:
             raise OrchestrationValidationError(
                 "Orchestration run metadata.session_key is required for session grants.",
             )
-        self.authorization_service.grant_session_access(
+        self.authorization_port.grant_session_access(
             session_key=session_key,
             agent_id=run.agent_id,
             approval_request_id=approval_request_id,
@@ -1748,7 +1750,7 @@ class OrchestrationApplicationService:
         run_id: str,
         effect_ids: tuple[str, ...],
     ) -> None:
-        if self.authorization_service is None:
+        if self.authorization_port is None:
             raise RuntimeError("Authorization service is not configured.")
         run = self.get_run(run_id)
         if run.agent_id is None or not run.agent_id.strip():
@@ -1756,7 +1758,7 @@ class OrchestrationApplicationService:
                 "Orchestration run agent_id is required for agent grants.",
             )
         for effect_id in effect_ids:
-            self.authorization_service.grant_agent_effect_access(
+            self.authorization_port.grant_agent_effect_access(
                 agent_id=run.agent_id,
                 effect_id=effect_id,
             )
@@ -2006,7 +2008,7 @@ class OrchestrationApplicationService:
         if not pending_tool_run_ids:
             return run
         pending_tool_runs = tuple(
-            self.engine.tool_service.get_tool_run(tool_run_id)
+            self.engine.tool_execution_port.get_tool_run(tool_run_id)
             for tool_run_id in pending_tool_run_ids
         )
         if not all(tool_run.is_terminal() for tool_run in pending_tool_runs):

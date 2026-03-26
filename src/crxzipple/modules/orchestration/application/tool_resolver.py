@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from crxzipple.modules.authorization.application import AuthorizationApplicationService
 from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
     AuthorizationDecision,
@@ -13,8 +12,11 @@ from crxzipple.modules.authorization.domain import (
     ToolExecutionAuthorizationRequest,
 )
 from crxzipple.modules.llm.domain import ToolSchema
+from crxzipple.modules.orchestration.application.ports import (
+    AuthorizationPort,
+    ToolCatalogPort,
+)
 from crxzipple.modules.orchestration.domain import OrchestrationRun
-from crxzipple.modules.tool.application import ToolApplicationService
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolEnvironment,
@@ -63,8 +65,8 @@ class ResolvedToolSet:
 
 @dataclass(slots=True)
 class ToolResolver:
-    tool_service: ToolApplicationService
-    authorization_service: AuthorizationApplicationService
+    tool_catalog: ToolCatalogPort
+    authorization_port: AuthorizationPort
     tool_availability_filter: Callable[[OrchestrationRun, Tool], bool] | None = None
     default_remote_ask_effect_id: str = field(default="remote_tool_access")
     default_background_effect_id: str = field(default="background_execution")
@@ -72,9 +74,9 @@ class ToolResolver:
     default_confirmation_effect_id: str = field(default="sensitive_access")
 
     def resolve(self, run: OrchestrationRun) -> ResolvedToolSet:
-        self.tool_service.ensure_local_system_tools_registered()
+        self.tool_catalog.ensure_local_system_tools_registered()
         resolved: list[ResolvedTool] = []
-        for tool in self.tool_service.list_enabled_tools():
+        for tool in self.tool_catalog.list_enabled_tools():
             if self.tool_availability_filter is not None and not self.tool_availability_filter(
                 run,
                 tool,
@@ -102,7 +104,7 @@ class ToolResolver:
         target: ToolExecutionTarget,
     ) -> ToolExecutionDecision:
         authorization_effect_ids = self._authorization_effect_ids(tool, target=target)
-        decision = self.authorization_service.check_tool_execution(
+        decision = self.authorization_port.check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(
                     type="interface",
@@ -267,7 +269,7 @@ class ToolResolver:
         tool: Tool,
         target: ToolExecutionTarget,
     ) -> str:
-        if not self.authorization_service.is_enabled():
+        if not self.authorization_port.is_enabled():
             return "no_match"
         decision = self._check_authorization(
             AuthorizationRequest(
@@ -328,7 +330,7 @@ class ToolResolver:
         target: ToolExecutionTarget,
         effect_id: str,
     ) -> str:
-        if not self.authorization_service.is_enabled():
+        if not self.authorization_port.is_enabled():
             return "no_match"
         decision = self._check_authorization(
             AuthorizationRequest(
@@ -372,7 +374,7 @@ class ToolResolver:
         tool: Tool,
         target: ToolExecutionTarget,
     ) -> str:
-        if not self.authorization_service.is_enabled():
+        if not self.authorization_port.is_enabled():
             return "no_match"
         decision = self._check_authorization(
             AuthorizationRequest(
@@ -424,7 +426,7 @@ class ToolResolver:
         self,
         request: AuthorizationRequest,
     ) -> AuthorizationDecision:
-        return self.authorization_service.check(request)
+        return self.authorization_port.check(request)
 
     @staticmethod
     def _decision_mode(decision: AuthorizationDecision) -> str:

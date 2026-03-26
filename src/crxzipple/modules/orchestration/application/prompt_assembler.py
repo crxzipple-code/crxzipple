@@ -4,10 +4,7 @@ import json
 from dataclasses import dataclass, field
 
 from crxzipple.modules.agent.application import AgentApplicationService
-from crxzipple.modules.llm.application import LlmApplicationService
 from crxzipple.modules.llm.domain import LlmMessage, LlmMessageRole, ToolSchema
-from crxzipple.modules.memory.infrastructure import memory_lookup_instruction
-from crxzipple.modules.memory.application import MemoryApplicationService
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationValidationError,
@@ -16,6 +13,7 @@ from crxzipple.modules.orchestration.application.memory_context import (
     RecalledMemory,
     recall_prompt_memories,
 )
+from crxzipple.modules.orchestration.application.ports import LlmPort, MemoryPort
 from crxzipple.modules.orchestration.application.prompting import (
     PromptMode,
     PromptReport,
@@ -69,8 +67,8 @@ class PromptEnvelope:
 @dataclass(slots=True)
 class PromptAssembler:
     agent_service: AgentApplicationService
-    llm_service: LlmApplicationService
-    memory_service: MemoryApplicationService
+    llm_port: LlmPort
+    memory_port: MemoryPort | None
     session_service: SessionApplicationService
     system_prompt_max_chars: int = 120_000
     system_prompt_max_tokens: int = 30_000
@@ -110,7 +108,7 @@ class PromptAssembler:
             raise OrchestrationValidationError(
                 "Prompt assembly could not determine an llm_id.",
             )
-        llm_profile = self.llm_service.get_profile(llm_id)
+        llm_profile = self.llm_port.get_profile(llm_id)
 
         resolved_mode = self._resolve_prompt_mode(run, mode=mode)
         surface_policy = self._resolve_surface_policy(resolved_mode)
@@ -120,10 +118,10 @@ class PromptAssembler:
         context_files = load_workspace_context_files(agent_home_dir)
         recalled_memories = (
             recall_prompt_memories(
-                self.memory_service,
+                self.memory_port,
                 run=run,
             )
-            if surface_policy.auto_recall_memories
+            if surface_policy.auto_recall_memories and self.memory_port is not None
             else ()
         )
         available_skills = (
@@ -301,8 +299,8 @@ class PromptAssembler:
             include_tool_schemas=not maintenance_mode,
         )
 
-    @staticmethod
     def _memory_lookup_instruction(
+        self,
         resolved_tools: ResolvedToolSet | None,
         *,
         include_guidance: bool,
@@ -314,7 +312,9 @@ class PromptAssembler:
             and resolved_tools.by_name("memory_get") is not None
         ):
             return None
-        return memory_lookup_instruction()
+        if self.memory_port is None:
+            return None
+        return self.memory_port.memory_lookup_instruction()
 
     def _resolve_system_prompt_budget(
         self,

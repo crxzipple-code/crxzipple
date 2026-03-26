@@ -3,6 +3,13 @@ from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
     PromptPreview,
 )
+from crxzipple.modules.orchestration.application.ports import (
+    AuthorizationPort,
+    LlmPort,
+    MemoryPort,
+    ToolCatalogPort,
+    ToolExecutionPort,
+)
 from crxzipple.modules.orchestration.application.dispatch_bridge import (
     OrchestrationDispatchBridge,
 )
@@ -56,15 +63,24 @@ from crxzipple.modules.orchestration.application.services import (
 from crxzipple.modules.orchestration.application.worker import (
     OrchestrationWorker,
 )
+from crxzipple.modules.orchestration.infrastructure.adapters import (
+    AuthorizationServiceAdapter,
+    LlmServiceAdapter,
+    MemoryServiceAdapter,
+    ToolServiceAdapter,
+)
 
 __all__ = [
     "AcceptOrchestrationRunInput",
     "AdvanceOrchestrationRunInput",
+    "AuthorizationPort",
     "BindSessionInput",
     "CompleteOrchestrationRunInput",
     "EngineAdvanceOutcome",
     "EnqueueOrchestrationRunInput",
     "FailOrchestrationRunInput",
+    "LlmPort",
+    "MemoryPort",
     "OrchestrationDispatchBridge",
     "OrchestrationDispatchEventSubscriber",
     "OrchestrationEngine",
@@ -79,6 +95,10 @@ __all__ = [
     "RequestHeartbeatInput",
     "RequestMemoryFlushInput",
     "ResolveApprovalRequestInput",
+    "AuthorizationServiceAdapter",
+    "LlmServiceAdapter",
+    "MemoryServiceAdapter",
+    "ToolServiceAdapter",
     "PromptAssembler",
     "PromptEnvelope",
     "PromptPreview",
@@ -90,6 +110,8 @@ __all__ = [
     "SessionBundle",
     "SessionResolver",
     "SessionRoutingDecision",
+    "ToolCatalogPort",
+    "ToolExecutionPort",
     "OrchestrationToolEventSubscriber",
     "ToolResolver",
     "WaitOnToolInput",

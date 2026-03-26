@@ -67,6 +67,12 @@ from crxzipple.modules.orchestration.application import (
     SessionResolver,
     ToolResolver,
 )
+from crxzipple.modules.orchestration.infrastructure.adapters import (
+    AuthorizationServiceAdapter,
+    LlmServiceAdapter,
+    MemoryServiceAdapter,
+    ToolServiceAdapter,
+)
 from crxzipple.modules.session.application import SessionApplicationService
 from crxzipple.modules.tool.application import ToolApplicationService
 from crxzipple.modules.tool.application import ToolDispatchBridge
@@ -303,10 +309,13 @@ def build_container(
         session_service=session_service,
         router=orchestration_router,
     )
+    memory_port = MemoryServiceAdapter(memory_service)
+    authorization_port = AuthorizationServiceAdapter(authorization_service)
+    llm_port = LlmServiceAdapter(llm_service)
     prompt_assembler = PromptAssembler(
         agent_service=agent_service,
-        llm_service=llm_service,
-        memory_service=memory_service,
+        llm_port=llm_port,
+        memory_port=memory_port,
         session_service=session_service,
         system_prompt_max_chars=resolved_settings.prompt_system_max_chars,
         system_prompt_max_tokens=resolved_settings.prompt_system_max_tokens,
@@ -314,8 +323,8 @@ def build_container(
             resolved_settings.prompt_system_context_window_ratio
         ),
     )
-    tool_resolver = ToolResolver(
-        tool_service=ToolApplicationService(
+    tool_port = ToolServiceAdapter(
+        ToolApplicationService(
             uow_factory,
             tool_runtime_gateway,
             tool_discovery_registry,
@@ -325,7 +334,10 @@ def build_container(
             worker_lease_seconds=resolved_settings.tool_run_lease_seconds,
             worker_heartbeat_seconds=resolved_settings.tool_run_heartbeat_seconds,
         ),
-        authorization_service=authorization_service,
+    )
+    tool_resolver = ToolResolver(
+        tool_catalog=tool_port,
+        authorization_port=authorization_port,
         tool_availability_filter=lambda run, tool: (
             not is_memory_tool_name(tool.id)
             or (
@@ -341,13 +353,14 @@ def build_container(
             )
         ),
     )
-    tool_service = tool_resolver.tool_service
+    tool_service = tool_port.service
     orchestration_engine = OrchestrationEngine(
         prompt_assembler=prompt_assembler,
         session_service=session_service,
-        llm_service=llm_service,
+        llm_port=llm_port,
         tool_resolver=tool_resolver,
-        tool_service=tool_service,
+        tool_execution_port=tool_port,
+        memory_port=memory_port,
     )
     orchestration_dispatch_bridge = OrchestrationDispatchBridge()
     orchestration_service = OrchestrationApplicationService(
@@ -355,9 +368,9 @@ def build_container(
         dispatch_bridge=orchestration_dispatch_bridge,
         dispatch_service=dispatch_service,
         agent_service=agent_service,
-        authorization_service=authorization_service,
-        llm_service=llm_service,
-        memory_service=memory_service,
+        authorization_port=authorization_port,
+        llm_port=llm_port,
+        memory_port=memory_port,
         session_service=session_service,
         router=orchestration_router,
         session_resolver=session_resolver,
