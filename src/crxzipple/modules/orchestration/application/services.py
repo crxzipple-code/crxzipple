@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Callable, Protocol
-from uuid import uuid4
 
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.agent.application import (
@@ -13,6 +12,8 @@ from crxzipple.modules.memory.application import RecordMemoryFlushInput
 from crxzipple.modules.orchestration.application.coordinators import (
     RunIntakeCoordinator,
     RunProgressCoordinator,
+    RunRecoveryCoordinator,
+    RunRequestCoordinator,
     RunWaitCoordinator,
 )
 from crxzipple.modules.orchestration.application.memory_flush import (
@@ -328,6 +329,15 @@ class OrchestrationApplicationService:
             ),
             session_start_prompt_flow_hint=self._session_start_prompt_flow_hint,
         )
+        self.request_coordinator = RunRequestCoordinator(
+            uow_factory=uow_factory,
+            scheduler=self.scheduler,
+            dispatch_port=self.dispatch_port,
+            session_service=session_service,
+            request_heartbeat_input_factory=lambda **kwargs: RequestHeartbeatInput(
+                **kwargs,
+            ),
+        )
         self.lease_manager = OrchestrationLeaseManager(
             uow_factory=uow_factory,
             dispatch_port=self.dispatch_port,
@@ -351,7 +361,9 @@ class OrchestrationApplicationService:
             apply_memory_flush=self._apply_memory_flush,
             extract_memory_candidate=self._extract_memory_candidate,
             maybe_request_auto_compaction=self._maybe_request_auto_compaction,
-            clear_pending_compaction_marker=self._clear_pending_compaction_marker,
+            clear_pending_compaction_marker=(
+                self.request_coordinator.clear_pending_compaction_marker
+            ),
             is_compaction_run=self._is_compaction_run,
         )
         self.wait_coordinator = RunWaitCoordinator(
@@ -368,7 +380,11 @@ class OrchestrationApplicationService:
             grant_session_tool_access=self._grant_session_tool_access,
             grant_agent_effect_access=self._grant_agent_effect_access,
             append_approval_resolution_message=self._append_approval_resolution_message,
-            reconcile_tool_waits=self._reconcile_tool_waits,
+            reconcile_tool_waits=(
+                lambda tool_run_ids: self.recovery_coordinator.reconcile_tool_waits(
+                    tool_run_ids,
+                )
+            ),
             continue_recovery_contract_callback=(
                 lambda run_id: self._continue_recovery_contract(run_id)
             ),
@@ -382,6 +398,12 @@ class OrchestrationApplicationService:
             )
             if engine is not None
             else None
+        )
+        self.recovery_coordinator = RunRecoveryCoordinator(
+            uow_factory=uow_factory,
+            lease_manager=self.lease_manager,
+            wait_coordinator=self.wait_coordinator,
+            tool_resume=self.tool_resume,
         )
 
     def accept(self, data: AcceptOrchestrationRunInput) -> OrchestrationRun:
@@ -581,289 +603,22 @@ class OrchestrationApplicationService:
         return self.wait_coordinator.resolve_approval_request(data)
 
     def request_compaction(self, data: RequestCompactionInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            anchor = self._get_run(uow, data.anchor_run_id)
-            if anchor.agent_id is None or not anchor.agent_id.strip():
-                raise OrchestrationValidationError(
-                    "Compaction anchor run agent_id is required.",
-                )
-            if anchor.bulk_key is None or not anchor.bulk_key.strip():
-                raise OrchestrationValidationError(
-                    "Compaction anchor run bulk_key is required.",
-                )
-            if anchor.active_session_id is None or not anchor.active_session_id.strip():
-                raise OrchestrationValidationError(
-                    "Compaction anchor run active_session_id is required.",
-                )
-            session_key = str(anchor.metadata.get("session_key", "")).strip()
-            if not session_key:
-                raise OrchestrationValidationError(
-                    "Compaction anchor run metadata.session_key is required.",
-                )
-            trigger_basis = data.trigger_basis.strip() or "manual"
-            trigger_details = dict(data.trigger_details)
-            metadata = {
-                "session_key": session_key,
-                "session_kind": str(anchor.metadata.get("session_kind", "")).strip(),
-                "prompt_flow_hint": self._compaction_prompt_flow_hint(
-                    reason=data.reason,
-                    preserve=data.preserve,
-                ),
-                "compaction_anchor_run_id": anchor.id,
-                "compaction_request": {
-                    "basis": trigger_basis,
-                    "details": trigger_details,
-                    "reason": (data.reason or "").strip() or "manual",
-                },
-            }
-            run = OrchestrationRun.accept(
-                run_id=uuid4().hex,
-                inbound_instruction=InboundInstruction(source="compaction"),
-                queue_policy=data.queue_policy,
-                priority=anchor.priority if data.priority is None else data.priority,
-                max_steps=data.max_steps,
-                metadata=metadata,
-            )
-            run.route(
-                agent_id=anchor.agent_id,
-                bulk_key=anchor.bulk_key,
-                lane_key=anchor.lane_key,
-                priority=run.priority,
-                metadata=metadata,
-            )
-            run.bind_session(
-                active_session_id=anchor.active_session_id,
-                bulk_key=anchor.bulk_key,
-            )
-            self.scheduler.enqueue(
-                run,
-                lane_key=anchor.lane_key,
-                queue_policy=data.queue_policy,
-                priority=run.priority,
-            )
-            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-        if self.session_service is not None:
-            self._merge_session_compaction_metadata(
-                session_key=session_key,
-                metadata={
-                    "pending_run_id": run.id,
-                    "requested_at": run.created_at.isoformat(),
-                    "request_reason": (data.reason or "").strip() or "manual",
-                    "trigger_basis": trigger_basis,
-                    "trigger_details": trigger_details,
-                    "anchor_run_id": anchor.id,
-                },
-            )
-        return run
+        return self.request_coordinator.request_compaction(data)
 
     def request_heartbeat(self, data: RequestHeartbeatInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            anchor = self._get_run(uow, data.anchor_run_id)
-            if anchor.agent_id is None or not anchor.agent_id.strip():
-                raise OrchestrationValidationError(
-                    "Heartbeat anchor run agent_id is required.",
-                )
-            if anchor.bulk_key is None or not anchor.bulk_key.strip():
-                raise OrchestrationValidationError(
-                    "Heartbeat anchor run bulk_key is required.",
-                )
-            if anchor.active_session_id is None or not anchor.active_session_id.strip():
-                raise OrchestrationValidationError(
-                    "Heartbeat anchor run active_session_id is required.",
-                )
-            session_key = str(anchor.metadata.get("session_key", "")).strip()
-            if not session_key:
-                raise OrchestrationValidationError(
-                    "Heartbeat anchor run metadata.session_key is required.",
-                )
-            metadata = {
-                "session_key": session_key,
-                "session_kind": str(anchor.metadata.get("session_kind", "")).strip(),
-                "prompt_flow_hint": self._heartbeat_prompt_flow_hint(
-                    reason=data.reason,
-                    idle_reply=data.idle_reply,
-                ),
-                "heartbeat_anchor_run_id": anchor.id,
-                "heartbeat_request": {
-                    "basis": data.trigger_basis.strip() or "manual",
-                    "details": dict(data.trigger_details),
-                    "reason": (data.reason or "").strip() or "manual",
-                    "idle_reply": (data.idle_reply or "").strip() or "HEARTBEAT_OK",
-                },
-            }
-            run = OrchestrationRun.accept(
-                run_id=uuid4().hex,
-                inbound_instruction=InboundInstruction(source="heartbeat"),
-                queue_policy=data.queue_policy,
-                priority=anchor.priority if data.priority is None else data.priority,
-                max_steps=data.max_steps,
-                metadata=metadata,
-            )
-            run.route(
-                agent_id=anchor.agent_id,
-                bulk_key=anchor.bulk_key,
-                lane_key=anchor.lane_key,
-                priority=run.priority,
-                metadata=metadata,
-            )
-            run.bind_session(
-                active_session_id=anchor.active_session_id,
-                bulk_key=anchor.bulk_key,
-            )
-            self.scheduler.enqueue(
-                run,
-                lane_key=anchor.lane_key,
-                queue_policy=data.queue_policy,
-                priority=run.priority,
-            )
-            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.request_coordinator.request_heartbeat(data)
 
     def request_memory_flush(self, data: RequestMemoryFlushInput) -> OrchestrationRun:
-        with self.uow_factory() as uow:
-            anchor = self._get_run(uow, data.anchor_run_id)
-            if anchor.agent_id is None or not anchor.agent_id.strip():
-                raise OrchestrationValidationError(
-                    "Memory flush anchor run agent_id is required.",
-                )
-            if anchor.bulk_key is None or not anchor.bulk_key.strip():
-                raise OrchestrationValidationError(
-                    "Memory flush anchor run bulk_key is required.",
-                )
-            if anchor.active_session_id is None or not anchor.active_session_id.strip():
-                raise OrchestrationValidationError(
-                    "Memory flush anchor run active_session_id is required.",
-                )
-            session_key = str(anchor.metadata.get("session_key", "")).strip()
-            if not session_key:
-                raise OrchestrationValidationError(
-                    "Memory flush anchor run metadata.session_key is required.",
-                )
-            trigger_basis = data.trigger_basis.strip() or "manual"
-            trigger_details = dict(data.trigger_details)
-            metadata = {
-                "session_key": session_key,
-                "session_kind": str(anchor.metadata.get("session_kind", "")).strip(),
-                "prompt_flow_hint": self._memory_flush_prompt_flow_hint(
-                    reason=data.reason,
-                ),
-                "memory_flush_anchor_run_id": anchor.id,
-                "memory_flush_request": {
-                    "basis": trigger_basis,
-                    "details": trigger_details,
-                    "reason": (data.reason or "").strip() or "manual",
-                },
-            }
-            run = OrchestrationRun.accept(
-                run_id=uuid4().hex,
-                inbound_instruction=InboundInstruction(source="memory_flush"),
-                queue_policy=data.queue_policy,
-                priority=anchor.priority if data.priority is None else data.priority,
-                max_steps=data.max_steps,
-                metadata=metadata,
-            )
-            run.route(
-                agent_id=anchor.agent_id,
-                bulk_key=anchor.bulk_key,
-                lane_key=anchor.lane_key,
-                priority=run.priority,
-                metadata=metadata,
-            )
-            run.bind_session(
-                active_session_id=anchor.active_session_id,
-                bulk_key=anchor.bulk_key,
-            )
-            self.scheduler.enqueue(
-                run,
-                lane_key=anchor.lane_key,
-                queue_policy=data.queue_policy,
-                priority=run.priority,
-            )
-            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+        return self.request_coordinator.request_memory_flush(data)
 
     def request_due_heartbeats(
         self,
         data: RequestDueHeartbeatsInput,
     ) -> list[OrchestrationRun]:
-        if self.session_service is None:
-            raise RuntimeError("Orchestration session service is not configured.")
-        if data.idle_seconds <= 0:
-            raise OrchestrationValidationError(
-                "Heartbeat idle_seconds must be greater than zero.",
-            )
-        if data.limit is not None and data.limit <= 0:
-            raise OrchestrationValidationError(
-                "Heartbeat limit must be greater than zero when provided.",
-            )
-
-        now = data.now or datetime.now(timezone.utc)
-        idle_before = now - timedelta(seconds=data.idle_seconds)
-        latest_runs = self._latest_anchor_runs_by_session_key()
-        requested: list[OrchestrationRun] = []
-        sessions = sorted(
-            self.session_service.list_sessions(agent_id=data.agent_id),
-            key=lambda item: item.updated_at,
-        )
-        for session in sessions:
-            if data.limit is not None and len(requested) >= data.limit:
-                break
-            if session.status.strip().lower() != "active":
-                continue
-            updated_at = session.updated_at
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
-            if updated_at > idle_before:
-                continue
-            if self._existing_inflight_run(session.id) is not None:
-                continue
-            anchor = latest_runs.get(session.id)
-            if anchor is None:
-                continue
-            requested.append(
-                self.request_heartbeat(
-                    RequestHeartbeatInput(
-                        anchor_run_id=anchor.id,
-                        reason=data.reason or "idle_session_heartbeat",
-                        idle_reply=data.idle_reply,
-                        trigger_basis="idle_session",
-                        trigger_details={
-                            "idle_seconds": data.idle_seconds,
-                            "session_updated_at": updated_at.isoformat(),
-                        },
-                        queue_policy=data.queue_policy,
-                        priority=data.priority,
-                        max_steps=data.max_steps,
-                    ),
-                ),
-            )
-        return requested
+        return self.request_coordinator.request_due_heartbeats(data)
 
     def recover_abandoned_runs(self) -> list[OrchestrationRun]:
-        recovered: dict[str, OrchestrationRun] = {
-            run.id: run for run in self.lease_manager.recover_abandoned_runs()
-        }
-        for run in self.list_runs(status=OrchestrationRunStatus.WAITING):
-            try:
-                continued = self.wait_coordinator.continue_recovery_contract(run.id)
-            except Exception:
-                logger.exception(
-                    "failed to continue stalled recovery contract",
-                    extra={"run_id": run.id},
-                )
-                continue
-            if continued.status is not run.status or continued.stage is not run.stage:
-                recovered[continued.id] = continued
-        return list(recovered.values())
+        return self.recovery_coordinator.recover_abandoned_runs()
 
     def handle_recovered_dispatch_task(
         self,
@@ -871,20 +626,16 @@ class OrchestrationApplicationService:
         orchestration_run_id: str,
         reason: str,
     ) -> OrchestrationRun | None:
-        return self.lease_manager.handle_recovered_dispatch_task(
+        return self.recovery_coordinator.handle_recovered_dispatch_task(
             orchestration_run_id=orchestration_run_id,
             reason=reason,
         )
 
     def handle_terminal_tool_run(self, tool_run_id: str) -> list[OrchestrationRun]:
-        if self.tool_resume is None:
-            raise RuntimeError("Orchestration engine is not configured.")
-        return self.tool_resume.handle_terminal_tool_run(tool_run_id)
+        return self.recovery_coordinator.handle_terminal_tool_run(tool_run_id)
 
     def _reconcile_tool_waits(self, tool_run_ids: tuple[str, ...]) -> None:
-        if self.tool_resume is None:
-            raise RuntimeError("Orchestration engine is not configured.")
-        self.tool_resume.reconcile_tool_waits(tool_run_ids)
+        self.recovery_coordinator.reconcile_tool_waits(tool_run_ids)
 
     @staticmethod
     def _result_payload_from_outcome(outcome: EngineAdvanceOutcome) -> dict[str, object]:
@@ -1054,42 +805,6 @@ class OrchestrationApplicationService:
                 payload["reason"] = resolution.reset_reason.strip()
             return payload
         return None
-
-    @staticmethod
-    def _compaction_prompt_flow_hint(
-        *,
-        reason: str | None,
-        preserve: str | None,
-    ) -> dict[str, object]:
-        payload: dict[str, object] = {"mode": "compaction"}
-        if reason is not None and reason.strip():
-            payload["reason"] = reason.strip()
-        if preserve is not None and preserve.strip():
-            payload["preserve"] = preserve.strip()
-        return payload
-
-    @staticmethod
-    def _heartbeat_prompt_flow_hint(
-        *,
-        reason: str | None,
-        idle_reply: str | None,
-    ) -> dict[str, object]:
-        payload: dict[str, object] = {"mode": "heartbeat"}
-        if reason is not None and reason.strip():
-            payload["reason"] = reason.strip()
-        if idle_reply is not None and idle_reply.strip():
-            payload["idle_reply"] = idle_reply.strip()
-        return payload
-
-    @staticmethod
-    def _memory_flush_prompt_flow_hint(
-        *,
-        reason: str | None,
-    ) -> dict[str, object]:
-        payload: dict[str, object] = {"mode": "memory_flush"}
-        if reason is not None and reason.strip():
-            payload["reason"] = reason.strip()
-        return payload
 
     def _apply_compaction_summary(self, run: OrchestrationRun) -> None:
         prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
@@ -1267,7 +982,10 @@ class OrchestrationApplicationService:
         )
         if not absolute_threshold_exceeded and not dynamic_threshold_exceeded:
             return None
-        if self._existing_pending_compaction_run(session_key) is not None:
+        if (
+            self.request_coordinator.existing_pending_compaction_run(session_key)
+            is not None
+        ):
             return None
         logger.info(
             "auto compaction requested after completed run",
@@ -1339,102 +1057,6 @@ class OrchestrationApplicationService:
             return self.llm_port.get_profile(llm_id.strip()).context_window_tokens
         except Exception:
             return None
-
-    def _existing_pending_compaction_run(self, session_key: str) -> OrchestrationRun | None:
-        if self.session_service is None:
-            return None
-        session = self.session_service.get_session(session_key)
-        compaction_payload = session.metadata.get("compaction")
-        if not isinstance(compaction_payload, dict):
-            return None
-        pending_run_id = compaction_payload.get("pending_run_id")
-        if not isinstance(pending_run_id, str) or not pending_run_id.strip():
-            return None
-        try:
-            pending_run = self.get_run(pending_run_id.strip())
-        except OrchestrationRunNotFoundError:
-            return None
-        if pending_run.status in {
-            OrchestrationRunStatus.COMPLETED,
-            OrchestrationRunStatus.FAILED,
-            OrchestrationRunStatus.CANCELLED,
-        }:
-            return None
-        return pending_run
-
-    def _latest_anchor_runs_by_session_key(self) -> dict[str, OrchestrationRun]:
-        with self.uow_factory() as uow:
-            runs = sorted(
-                uow.orchestration_runs.list(),
-                key=lambda item: item.updated_at,
-                reverse=True,
-            )
-        latest: dict[str, OrchestrationRun] = {}
-        for run in runs:
-            session_key = str(run.metadata.get("session_key", "")).strip()
-            if not session_key or session_key in latest:
-                continue
-            if run.agent_id is None or not run.agent_id.strip():
-                continue
-            if run.bulk_key is None or not run.bulk_key.strip():
-                continue
-            if run.active_session_id is None or not run.active_session_id.strip():
-                continue
-            latest[session_key] = run
-        return latest
-
-    def _existing_inflight_run(self, session_key: str) -> OrchestrationRun | None:
-        terminal_statuses = {
-            OrchestrationRunStatus.COMPLETED,
-            OrchestrationRunStatus.FAILED,
-            OrchestrationRunStatus.CANCELLED,
-        }
-        with self.uow_factory() as uow:
-            runs = uow.orchestration_runs.list()
-        for run in sorted(runs, key=lambda item: item.updated_at, reverse=True):
-            current_session_key = str(run.metadata.get("session_key", "")).strip()
-            if current_session_key != session_key:
-                continue
-            if run.status in terminal_statuses:
-                continue
-            return run
-        return None
-
-    def _merge_session_compaction_metadata(
-        self,
-        *,
-        session_key: str,
-        metadata: dict[str, object],
-        remove_keys: tuple[str, ...] = (),
-    ) -> None:
-        if self.session_service is None:
-            return
-        session = self.session_service.get_session(session_key)
-        current = session.metadata.get("compaction")
-        payload = dict(current) if isinstance(current, dict) else {}
-        payload.update(metadata)
-        for key in remove_keys:
-            payload.pop(key, None)
-        self.session_service.merge_session_metadata(
-            session_key=session_key,
-            metadata={"compaction": payload},
-            touch_activity=False,
-        )
-
-    def _clear_pending_compaction_marker(self, run: OrchestrationRun) -> None:
-        session_key = str(run.metadata.get("session_key", "")).strip()
-        if not session_key:
-            return
-        self._merge_session_compaction_metadata(
-            session_key=session_key,
-            metadata={},
-            remove_keys=(
-                "pending_run_id",
-                "requested_at",
-                "request_reason",
-                "anchor_run_id",
-            ),
-        )
 
     def _store_memory_flush_result(
         self,
