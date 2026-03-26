@@ -75,7 +75,6 @@ class RunWaitCoordinator:
     grant_agent_effect_access: Callable[..., None]
     append_approval_resolution_message: Callable[..., None]
     reconcile_tool_waits: Callable[[tuple[str, ...]], None]
-    continue_recovery_contract_callback: Callable[[str], OrchestrationRun] | None = None
 
     def wait_on_tool(self, data: "WaitOnToolInput") -> OrchestrationRun:
         with self.uow_factory() as uow:
@@ -210,8 +209,6 @@ class RunWaitCoordinator:
             request=pending_request,
             decision=data.decision,
         )
-        if self.continue_recovery_contract_callback is not None:
-            return self.continue_recovery_contract_callback(data.run_id)
         return self.continue_recovery_contract(data.run_id)
 
     def continue_recovery_contract(self, run_id: str) -> OrchestrationRun:

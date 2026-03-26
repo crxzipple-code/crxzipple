@@ -1814,9 +1814,12 @@ class OrchestrationTestCase(unittest.TestCase):
         assert pending_request is not None
 
         with patch.object(
-            self.container.orchestration_service,
-            "_continue_recovery_contract",
-            side_effect=lambda run_id: self.container.orchestration_service.get_run(run_id),
+            type(self.container.orchestration_service.wait_coordinator),
+            "continue_recovery_contract",
+            autospec=True,
+            side_effect=lambda _coordinator, run_id: (
+                self.container.orchestration_service.get_run(run_id)
+            ),
         ):
             stalled = self.container.orchestration_service.resolve_approval_request(
                 ResolveApprovalRequestInput(

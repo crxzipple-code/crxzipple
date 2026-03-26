@@ -355,7 +355,10 @@ class OrchestrationApplicationService:
                 run_id=run_id,
                 worker_id=worker_id,
             ),
-            heartbeat_run=self._heartbeat_run_for_manager,
+            heartbeat_run=lambda run_id, worker_id: self.heartbeat_run(
+                run_id,
+                worker_id=worker_id,
+            ),
             get_run=self.get_run,
             apply_compaction_summary=self._apply_compaction_summary,
             apply_memory_flush=self._apply_memory_flush,
@@ -384,9 +387,6 @@ class OrchestrationApplicationService:
                 lambda tool_run_ids: self.recovery_coordinator.reconcile_tool_waits(
                     tool_run_ids,
                 )
-            ),
-            continue_recovery_contract_callback=(
-                lambda run_id: self._continue_recovery_contract(run_id)
             ),
         )
         self.tool_resume = (
@@ -634,9 +634,6 @@ class OrchestrationApplicationService:
     def handle_terminal_tool_run(self, tool_run_id: str) -> list[OrchestrationRun]:
         return self.recovery_coordinator.handle_terminal_tool_run(tool_run_id)
 
-    def _reconcile_tool_waits(self, tool_run_ids: tuple[str, ...]) -> None:
-        self.recovery_coordinator.reconcile_tool_waits(tool_run_ids)
-
     @staticmethod
     def _result_payload_from_outcome(outcome: EngineAdvanceOutcome) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -733,9 +730,6 @@ class OrchestrationApplicationService:
             )
         return run
 
-    def _heartbeat_run_for_manager(self, run_id: str, worker_id: str) -> OrchestrationRun:
-        return self.heartbeat_run(run_id, worker_id=worker_id)
-
     def _clear_prompt_flow_hint(self, run_id: str) -> None:
         with self.uow_factory() as uow:
             run = self._get_run(uow, run_id)
@@ -765,21 +759,6 @@ class OrchestrationApplicationService:
             uow.collect(run)
             uow.commit()
             return run
-
-    def _resume_after_tool_completion(
-        self,
-        run_id: str,
-        queue_policy: OrchestrationQueuePolicy,
-        reason: str,
-    ) -> OrchestrationRun:
-        return self.wait_coordinator.resume_after_tool_completion(
-            run_id,
-            queue_policy,
-            reason,
-        )
-
-    def _continue_recovery_contract(self, run_id: str) -> OrchestrationRun:
-        return self.wait_coordinator.continue_recovery_contract(run_id)
 
     @staticmethod
     def _session_start_prompt_flow_hint(
