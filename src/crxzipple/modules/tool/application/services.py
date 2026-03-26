@@ -8,15 +8,11 @@ from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.dispatch.application import (
-    DispatchApplicationService,
-    RecoverAbandonedDispatchTasksInput,
-)
 from crxzipple.modules.tool.application.discovery import (
     ToolDiscoveryGateway,
     ToolDiscoveryProviderDescriptor,
 )
-from crxzipple.modules.tool.application.dispatch_bridge import ToolDispatchBridge
+from crxzipple.modules.tool.application.ports import ToolRunDispatchPort
 from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.modules.tool.domain.entities import Tool, ToolRun
 from crxzipple.modules.tool.domain.exceptions import (
@@ -140,8 +136,7 @@ class ToolApplicationService:
         uow_factory: Callable[[], ToolUnitOfWork],
         runtime_gateway: ToolRuntimeGateway,
         discovery_gateway: ToolDiscoveryGateway | None = None,
-        dispatch_bridge: ToolDispatchBridge | None = None,
-        dispatch_service: DispatchApplicationService | None = None,
+        dispatch_port: ToolRunDispatchPort | None = None,
         default_max_attempts: int = 3,
         worker_lease_seconds: int = 30,
         worker_heartbeat_seconds: float = 5.0,
@@ -149,8 +144,9 @@ class ToolApplicationService:
         self.uow_factory = uow_factory
         self.runtime_gateway = runtime_gateway
         self.discovery_gateway = discovery_gateway
-        self.dispatch_bridge = dispatch_bridge or ToolDispatchBridge()
-        self.dispatch_service = dispatch_service
+        if dispatch_port is None:
+            raise RuntimeError("Tool dispatch port is not configured.")
+        self.dispatch_port = dispatch_port
         self.default_max_attempts = default_max_attempts
         self.worker_lease_seconds = worker_lease_seconds
         self.worker_heartbeat_seconds = worker_heartbeat_seconds
@@ -349,17 +345,11 @@ class ToolApplicationService:
             return uow.tool_runs.list_for_tool(tool_id)
 
     def recover_abandoned_runs(self) -> list[ToolRun]:
-        if self.dispatch_service is None:
-            raise RuntimeError("Tool dispatch_service is not configured.")
-        recovered_tasks = self.dispatch_service.recover_abandoned_tasks(
-            RecoverAbandonedDispatchTasksInput(
-                owner_kind="tool_run",
-                reason=DISPATCH_LEASE_EXPIRED_REASON,
-            ),
+        recovered_ids = self.dispatch_port.recover_abandoned_run_ids(
+            reason=DISPATCH_LEASE_EXPIRED_REASON,
         )
-        if not recovered_tasks:
+        if not recovered_ids:
             return []
-        recovered_ids = [task.owner_id for task in recovered_tasks]
         with self.uow_factory() as uow:
             recovered_runs = []
             for run_id in recovered_ids:
@@ -372,17 +362,17 @@ class ToolApplicationService:
         self.recover_abandoned_runs()
 
         with self.uow_factory() as uow:
-            task = self.dispatch_bridge.claim_next_queued(
+            claim = self.dispatch_port.claim_next_queued(
                 uow.dispatch_tasks,
                 uow,
                 worker_id=worker_id,
                 lease_seconds=self.worker_lease_seconds,
             )
-            if task is None:
+            if claim is None:
                 return None
-            run = uow.tool_runs.get(task.owner_id)
+            run = uow.tool_runs.get(claim.run_id)
             if run is None:
-                raise ToolRunNotFoundError(f"Tool run '{task.owner_id}' was not found.")
+                raise ToolRunNotFoundError(f"Tool run '{claim.run_id}' was not found.")
             run.dispatch(
                 worker_id=worker_id,
                 lease_seconds=self.worker_lease_seconds,
@@ -428,7 +418,7 @@ class ToolApplicationService:
                 )
                 return run
             run.heartbeat(lease_seconds=self.worker_lease_seconds)
-            self.dispatch_bridge.heartbeat(
+            self.dispatch_port.heartbeat(
                 uow.dispatch_tasks,
                 uow,
                 run,
@@ -456,7 +446,7 @@ class ToolApplicationService:
                 run.request_cancel()
                 run.cancel()
                 if run.target.mode is ToolMode.BACKGROUND:
-                    self.dispatch_bridge.cancel(uow.dispatch_tasks, uow, run)
+                    self.dispatch_port.cancel(uow.dispatch_tasks, uow, run)
             elif run.status is ToolRunStatus.RUNNING:
                 run.request_cancel()
 
@@ -498,7 +488,7 @@ class ToolApplicationService:
                 )
                 if target.mode is ToolMode.BACKGROUND:
                     run.queue()
-                    self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+                    self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
                 uow.tool_runs.add(run)
                 uow.collect(run)
                 uow.commit()
@@ -525,7 +515,7 @@ class ToolApplicationService:
                 )
                 if target.mode is ToolMode.BACKGROUND:
                     run.queue()
-                    self.dispatch_bridge.enqueue(uow.dispatch_tasks, uow, run)
+                    self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
                 uow.tool_runs.add(run)
                 uow.collect(run)
                 uow.commit()
@@ -595,10 +585,10 @@ class ToolApplicationService:
                 )
             if succeeded_run.status is ToolRunStatus.CANCEL_REQUESTED:
                 succeeded_run.cancel()
-                self.dispatch_bridge.cancel(uow.dispatch_tasks, uow, succeeded_run)
+                self.dispatch_port.cancel(uow.dispatch_tasks, uow, succeeded_run)
             else:
                 succeeded_run.succeed(output)
-                self.dispatch_bridge.complete(uow.dispatch_tasks, uow, succeeded_run)
+                self.dispatch_port.complete(uow.dispatch_tasks, uow, succeeded_run)
             uow.tool_runs.add(succeeded_run)
             uow.collect(succeeded_run)
             uow.commit()
@@ -673,12 +663,12 @@ class ToolApplicationService:
                 return run
             if run.status is ToolRunStatus.CANCEL_REQUESTED:
                 run.cancel()
-                self.dispatch_bridge.cancel(uow.dispatch_tasks, uow, run)
+                self.dispatch_port.cancel(uow.dispatch_tasks, uow, run)
             elif run.can_retry():
                 run.requeue(reason)
             else:
                 run.fail(self._retry_exhausted_reason(reason))
-                self.dispatch_bridge.fail(uow.dispatch_tasks, uow, run)
+                self.dispatch_port.fail(uow.dispatch_tasks, uow, run)
             uow.tool_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -693,13 +683,13 @@ class ToolApplicationService:
                 )
             if failed_run.status is ToolRunStatus.CANCEL_REQUESTED:
                 failed_run.cancel()
-                self.dispatch_bridge.cancel(uow.dispatch_tasks, uow, failed_run)
+                self.dispatch_port.cancel(uow.dispatch_tasks, uow, failed_run)
             elif (
                 failed_run.target.mode is ToolMode.BACKGROUND
                 and failed_run.can_retry()
             ):
                 failed_run.requeue(message)
-                self.dispatch_bridge.requeue(
+                self.dispatch_port.requeue(
                     uow.dispatch_tasks,
                     uow,
                     failed_run,
@@ -708,7 +698,7 @@ class ToolApplicationService:
             else:
                 failed_run.fail(message)
                 if failed_run.target.mode is ToolMode.BACKGROUND:
-                    self.dispatch_bridge.fail(uow.dispatch_tasks, uow, failed_run)
+                    self.dispatch_port.fail(uow.dispatch_tasks, uow, failed_run)
             uow.tool_runs.add(failed_run)
             uow.collect(failed_run)
             uow.commit()

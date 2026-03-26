@@ -4,6 +4,10 @@ from crxzipple.modules.tool.application.discovery import (
 )
 from crxzipple.modules.tool.application.dispatch_bridge import ToolDispatchBridge
 from crxzipple.modules.tool.application.dispatch_events import ToolDispatchEventSubscriber
+from crxzipple.modules.tool.application.ports import (
+    ToolRunDispatchClaim,
+    ToolRunDispatchPort,
+)
 from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.modules.tool.application.services import (
     ExecuteToolInput,
@@ -23,5 +27,7 @@ __all__ = [
     "ToolApplicationService",
     "ToolDispatchBridge",
     "ToolDispatchEventSubscriber",
+    "ToolRunDispatchClaim",
+    "ToolRunDispatchPort",
     "ToolSpec",
 ]

@@ -5,6 +5,8 @@ from crxzipple.modules.tool.application import (
     SetToolAvailabilityInput,
     ToolApplicationService,
     ToolDiscoveryProviderDescriptor,
+    ToolRunDispatchClaim,
+    ToolRunDispatchPort,
     ToolSpec,
 )
 from crxzipple.modules.tool.domain import (
@@ -23,6 +25,7 @@ from crxzipple.modules.tool.domain import (
     ToolRunStatus,
     ToolSourceKind,
 )
+from crxzipple.modules.tool.infrastructure import ToolRunDispatchAdapter
 
 __all__ = [
     "ExecuteToolInput",
@@ -40,6 +43,9 @@ __all__ = [
     "ToolKind",
     "ToolMode",
     "ToolParameter",
+    "ToolRunDispatchAdapter",
+    "ToolRunDispatchClaim",
+    "ToolRunDispatchPort",
     "ToolRun",
     "ToolRunError",
     "ToolRunResult",

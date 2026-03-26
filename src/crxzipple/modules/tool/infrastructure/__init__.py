@@ -1,3 +1,4 @@
+from crxzipple.modules.tool.infrastructure.adapters import ToolRunDispatchAdapter
 from crxzipple.modules.tool.infrastructure.in_memory_repository import (
     InMemoryToolRepository,
     InMemoryToolRunRepository,
@@ -54,6 +55,7 @@ __all__ = [
     "SqlAlchemyToolRepository",
     "SqlAlchemyToolRunRepository",
     "SubprocessSandboxBackend",
+    "ToolRunDispatchAdapter",
     "ToolRuntimeRegistry",
     "ToolRuntimeRouter",
     "build_sandbox_backend",
