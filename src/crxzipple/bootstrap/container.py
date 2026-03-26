@@ -58,7 +58,6 @@ from crxzipple.modules.memory.infrastructure import register_builtin_memory_tool
 from crxzipple.modules.memory.infrastructure import is_memory_tool_name
 from crxzipple.modules.orchestration.application import (
     OrchestrationDispatchEventSubscriber,
-    OrchestrationDispatchBridge,
     OrchestrationApplicationService,
     OrchestrationEngine,
     OrchestrationToolEventSubscriber,
@@ -76,7 +75,6 @@ from crxzipple.modules.orchestration.infrastructure.adapters import (
 )
 from crxzipple.modules.session.application import SessionApplicationService
 from crxzipple.modules.tool.application import ToolApplicationService
-from crxzipple.modules.tool.application import ToolDispatchBridge
 from crxzipple.modules.tool.application import ToolDispatchEventSubscriber
 from crxzipple.modules.tool.infrastructure.adapters import ToolRunDispatchAdapter
 from crxzipple.modules.tool.infrastructure import (
@@ -331,7 +329,6 @@ def build_container(
             tool_runtime_gateway,
             tool_discovery_registry,
             dispatch_port=ToolRunDispatchAdapter(
-                bridge=ToolDispatchBridge(),
                 dispatch_service=dispatch_service,
             ),
             default_max_attempts=resolved_settings.tool_run_max_attempts,
@@ -367,7 +364,6 @@ def build_container(
         memory_port=memory_port,
     )
     orchestration_dispatch_port = OrchestrationRunDispatchAdapter(
-        bridge=OrchestrationDispatchBridge(),
         dispatch_service=dispatch_service,
     )
     orchestration_service = OrchestrationApplicationService(

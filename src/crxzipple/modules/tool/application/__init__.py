@@ -2,7 +2,6 @@ from crxzipple.modules.tool.application.discovery import (
     ToolDiscoveryGateway,
     ToolDiscoveryProviderDescriptor,
 )
-from crxzipple.modules.tool.application.dispatch_bridge import ToolDispatchBridge
 from crxzipple.modules.tool.application.dispatch_events import ToolDispatchEventSubscriber
 from crxzipple.modules.tool.application.ports import (
     ToolRunDispatchClaim,
@@ -25,7 +24,6 @@ __all__ = [
     "ToolDiscoveryGateway",
     "ToolDiscoveryProviderDescriptor",
     "ToolApplicationService",
-    "ToolDispatchBridge",
     "ToolDispatchEventSubscriber",
     "ToolRunDispatchClaim",
     "ToolRunDispatchPort",

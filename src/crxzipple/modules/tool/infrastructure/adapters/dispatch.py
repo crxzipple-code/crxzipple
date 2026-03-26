@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from crxzipple.modules.dispatch.application import (
     DispatchApplicationService,
     RecoverAbandonedDispatchTasksInput,
 )
-from crxzipple.modules.tool.application.dispatch_bridge import ToolDispatchBridge
 from crxzipple.modules.tool.application.ports import (
     ToolRunDispatchClaim,
     ToolRunDispatchPort,
 )
+from crxzipple.modules.tool.infrastructure.dispatchers import ToolDispatchBridge
 
 DISPATCH_OWNER_KIND = "tool_run"
 
 
 @dataclass(slots=True)
 class ToolRunDispatchAdapter(ToolRunDispatchPort):
-    bridge: ToolDispatchBridge
+    bridge: ToolDispatchBridge = field(default_factory=ToolDispatchBridge)
     dispatch_service: DispatchApplicationService | None = None
 
     def enqueue(self, dispatch_tasks, collector, run) -> None:

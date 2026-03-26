@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from crxzipple.modules.dispatch.application import (
     DispatchApplicationService,
     RecoverAbandonedDispatchTasksInput,
 )
-from crxzipple.modules.orchestration.application.dispatch_bridge import (
-    OrchestrationDispatchBridge,
-)
 from crxzipple.modules.orchestration.application.ports import (
     RunDispatchClaim,
     RunDispatchPort,
+)
+from crxzipple.modules.orchestration.infrastructure.dispatchers import (
+    OrchestrationDispatchBridge,
 )
 
 DISPATCH_OWNER_KIND = "orchestration_run"
@@ -19,7 +19,9 @@ DISPATCH_OWNER_KIND = "orchestration_run"
 
 @dataclass(slots=True)
 class OrchestrationRunDispatchAdapter(RunDispatchPort):
-    bridge: OrchestrationDispatchBridge
+    bridge: OrchestrationDispatchBridge = field(
+        default_factory=OrchestrationDispatchBridge,
+    )
     dispatch_service: DispatchApplicationService | None = None
 
     def enqueue(self, dispatch_tasks, collector, run) -> None:

@@ -12,9 +12,6 @@ from crxzipple.modules.orchestration.application.ports import (
     ToolCatalogPort,
     ToolExecutionPort,
 )
-from crxzipple.modules.orchestration.application.dispatch_bridge import (
-    OrchestrationDispatchBridge,
-)
 from crxzipple.modules.orchestration.application.dispatch_events import (
     OrchestrationDispatchEventSubscriber,
 )
@@ -77,7 +74,6 @@ __all__ = [
     "FailOrchestrationRunInput",
     "LlmPort",
     "MemoryPort",
-    "OrchestrationDispatchBridge",
     "OrchestrationDispatchEventSubscriber",
     "OrchestrationEngine",
     "OrchestrationApplicationService",
