@@ -3,6 +3,9 @@ from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
     PromptPreview,
 )
+from crxzipple.modules.orchestration.application.engine_session_recorder import (
+    OrchestrationSessionRecorder,
+)
 from crxzipple.modules.orchestration.application.ports import (
     AuthorizationPort,
     LlmPort,
@@ -78,6 +81,7 @@ __all__ = [
     "OrchestrationEngine",
     "OrchestrationApplicationService",
     "OrchestrationRouter",
+    "OrchestrationSessionRecorder",
     "OrchestrationScheduler",
     "OrchestrationUnitOfWork",
     "OrchestrationWorker",

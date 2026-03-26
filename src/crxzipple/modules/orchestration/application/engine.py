@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,17 +27,15 @@ from crxzipple.modules.orchestration.application.prompt_assembler import (
     PromptAssembler,
     PromptEnvelope,
 )
+from crxzipple.modules.orchestration.application.engine_session_recorder import (
+    OrchestrationSessionRecorder,
+)
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet, ToolResolver
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationValidationError,
     PendingApprovalRequest,
 )
-from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
-    SessionApplicationService,
-)
-from crxzipple.modules.session.domain import SessionMessageKind
 from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import (
     ToolEnvironment,
@@ -104,7 +101,7 @@ class _ToolExecutionBatchOutcome:
 @dataclass(slots=True)
 class OrchestrationEngine:
     prompt_assembler: PromptAssembler
-    session_service: SessionApplicationService
+    session_recorder: OrchestrationSessionRecorder
     llm_port: LlmPort
     tool_resolver: ToolResolver
     tool_execution_port: ToolExecutionPort
@@ -138,7 +135,10 @@ class OrchestrationEngine:
                 "Orchestration run active_session_id is required for engine execution.",
             )
 
-        user_message_id = self._ensure_inbound_message(run, session_key=session_key)
+        user_message_id = self.session_recorder.ensure_inbound_message(
+            run,
+            session_key=session_key,
+        )
         surface = self._build_prompt_surface(run)
         resolved_tools = surface.resolved_tools
         prompt = surface.prompt
@@ -180,7 +180,7 @@ class OrchestrationEngine:
             )
             if invocation.result.text is not None and invocation.result.text.strip():
                 assistant_message_ids.extend(
-                    self._append_assistant_response_message(
+                    self.session_recorder.append_assistant_response_message(
                         session_key=session_key,
                         active_session_id=prompt.active_session_id,
                         invocation_id=invocation.id,
@@ -192,7 +192,7 @@ class OrchestrationEngine:
                 )
             if skill_request_call is not None:
                 assistant_message_ids.extend(
-                    self._append_tool_call_messages(
+                    self.session_recorder.append_tool_call_messages(
                         session_key=session_key,
                         active_session_id=prompt.active_session_id,
                         invocation_id=invocation.id,
@@ -201,7 +201,7 @@ class OrchestrationEngine:
                     ),
                 )
                 tool_result_message_ids.append(
-                    self._append_skill_result_message(
+                    self.session_recorder.append_skill_result_message(
                         session_key=session_key,
                         active_session_id=prompt.active_session_id,
                         tool_call_id=invocation.result.tool_calls[0].id,
@@ -275,7 +275,7 @@ class OrchestrationEngine:
                     workspace_context_files=workspace_context_files,
                 )
             assistant_message_ids.extend(
-                self._append_assistant_response_message(
+                self.session_recorder.append_assistant_response_message(
                     session_key=session_key,
                     active_session_id=prompt.active_session_id,
                     invocation_id=invocation.id,
@@ -363,121 +363,6 @@ class OrchestrationEngine:
             )
         return self.llm_port.get_invocation(invocation_id)
 
-    def _ensure_inbound_message(
-        self,
-        run: OrchestrationRun,
-        *,
-        session_key: str,
-    ) -> str | None:
-        existing = self.session_service.get_message_by_source(
-            session_key=session_key,
-            session_id=run.active_session_id,
-            source_kind="orchestration_run",
-            source_id=run.id,
-        )
-        if existing is not None and existing.role == "user":
-            return existing.id
-        if run.inbound_instruction.content is None or not run.inbound_instruction.content.strip():
-            return None
-        message = self.session_service.append_message(
-            AppendSessionMessageInput(
-                session_key=session_key,
-                session_id=run.active_session_id,
-                role="user",
-                content=run.inbound_instruction.content,
-                source_kind="orchestration_run",
-                source_id=run.id,
-                metadata={
-                    "source": run.inbound_instruction.source,
-                    "inbound_metadata": dict(run.inbound_instruction.metadata),
-                },
-            ),
-        )
-        return message.id
-
-    def _append_assistant_response_message(
-        self,
-        *,
-        session_key: str,
-        active_session_id: str,
-        invocation_id: str,
-        response_text: str | None,
-        structured_output: object | None,
-        finish_reason: str | None,
-        usage_payload: dict[str, object] | None,
-    ) -> tuple[str, ...]:
-        if response_text is None and structured_output is None:
-            return ()
-        content_payload: dict[str, object] = {}
-        if response_text is not None:
-            content_payload["text"] = response_text
-        if structured_output is not None:
-            content_payload["structured_output"] = structured_output
-        if finish_reason is not None:
-            content_payload["finish_reason"] = finish_reason
-        if usage_payload is not None:
-            content_payload["usage"] = usage_payload
-        assistant_message = self.session_service.append_message(
-            AppendSessionMessageInput(
-                session_key=session_key,
-                session_id=active_session_id,
-                role="assistant",
-                content=response_text,
-                content_payload=content_payload,
-                source_kind="llm_invocation",
-                source_id=invocation_id,
-            ),
-        )
-        return (assistant_message.id,)
-
-    def _append_tool_call_messages(
-        self,
-        *,
-        session_key: str,
-        active_session_id: str,
-        invocation_id: str,
-        response_text: str | None,
-        tool_calls: tuple[ToolCallIntent, ...],
-    ) -> tuple[str, ...]:
-        message_ids: list[str] = []
-        if response_text is not None and response_text.strip():
-            message_ids.extend(
-                self._append_assistant_response_message(
-                    session_key=session_key,
-                    active_session_id=active_session_id,
-                    invocation_id=invocation_id,
-                    response_text=response_text,
-                    structured_output=None,
-                    finish_reason="tool_calls",
-                    usage_payload=None,
-                ),
-            )
-        for tool_call in tool_calls:
-            message = self.session_service.append_message(
-                AppendSessionMessageInput(
-                    session_key=session_key,
-                    session_id=active_session_id,
-                    role="assistant",
-                    content_payload={
-                        "type": "function_call",
-                        "call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "arguments": dict(tool_call.arguments),
-                    },
-                    source_kind="llm_invocation",
-                    source_id=invocation_id,
-                    metadata={
-                        "tool_call_id": tool_call.id,
-                        "tool_name": tool_call.name,
-                        "synthetic_skill_request": (
-                            is_skill_request_tool_name(tool_call.name)
-                        ),
-                    },
-                ),
-            )
-            message_ids.append(message.id)
-        return tuple(message_ids)
-
     def _execute_tool_calls(
         self,
         run: OrchestrationRun,
@@ -503,7 +388,7 @@ class OrchestrationEngine:
                 )
             if append_tool_call_messages:
                 tool_call_message_ids.extend(
-                    self._append_tool_call_messages(
+                    self.session_recorder.append_tool_call_messages(
                         session_key=session_key,
                         active_session_id=active_session_id,
                         invocation_id="",
@@ -660,47 +545,10 @@ class OrchestrationEngine:
         *,
         tool_runs: tuple[ToolRun, ...],
     ) -> tuple[str, ...]:
-        session_key = str(run.metadata.get("session_key", "")).strip()
-        if not session_key:
-            raise OrchestrationValidationError(
-                "Orchestration run metadata.session_key is required to append tool results.",
-            )
-        if run.active_session_id is None or not run.active_session_id.strip():
-            raise OrchestrationValidationError(
-                "Orchestration run active_session_id is required to append tool results.",
-            )
-        pending_mapping = self._pending_background_tool_mapping(run)
-        message_ids: list[str] = []
-        for tool_run in tool_runs:
-            existing = self.session_service.get_message_by_source(
-                session_key=session_key,
-                session_id=run.active_session_id,
-                source_kind="tool_run",
-                source_id=tool_run.id,
-            )
-            if existing is not None:
-                continue
-            tool_metadata = pending_mapping.get(
-                tool_run.id,
-                {
-                    "tool_call_id": tool_run.id,
-                    "tool_name": tool_run.tool_id,
-                },
-            )
-            message_id = self._append_tool_result_message(
-                session_key=session_key,
-                active_session_id=run.active_session_id,
-                tool_call=ToolCallIntent(
-                    id=tool_metadata["tool_call_id"],
-                    name=tool_metadata["tool_name"],
-                    arguments={},
-                ),
-                tool_run=tool_run,
-                source_kind="tool_run",
-                source_id=tool_run.id,
-            )
-            message_ids.append(message_id)
-        return tuple(message_ids)
+        return self.session_recorder.append_completed_background_tool_results(
+            run,
+            tool_runs=tool_runs,
+        )
 
     def _append_tool_result_message(
         self,
@@ -711,84 +559,15 @@ class OrchestrationEngine:
         tool_run: ToolRun,
         source_kind: str,
         source_id: str,
-    ) -> str:
-        payload: dict[str, object] = {
-            "tool_name": tool_call.name,
-            "tool_call_id": tool_call.id,
-            "tool_run_id": tool_run.id,
-            "status": tool_run.status.value,
-        }
-        content: str | None = None
-        if tool_run.output_payload is not None:
-            payload["output"] = tool_run.output_payload
-            content = self._stringify_payload(tool_run.output_payload)
-        if tool_run.error is not None:
-            payload["error"] = tool_run.error.to_storage()
-            content = self._stringify_payload(
-                {
-                    "message": tool_run.error.message,
-                    "code": tool_run.error.code,
-                    "details": dict(tool_run.error.details),
-                },
-            )
-        message = self.session_service.append_message(
-            AppendSessionMessageInput(
-                session_key=session_key,
-                session_id=active_session_id,
-                role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
-                content=content,
-                content_payload=payload,
-                source_kind=source_kind,
-                source_id=source_id,
-                metadata={
-                    "tool_call_id": tool_call.id,
-                    "tool_name": tool_call.name,
-                },
-            ),
+        ) -> str:
+        return self.session_recorder.append_tool_result_message(
+            session_key=session_key,
+            active_session_id=active_session_id,
+            tool_call=tool_call,
+            tool_run=tool_run,
+            source_kind=source_kind,
+            source_id=source_id,
         )
-        return message.id
-
-    def _append_skill_result_message(
-        self,
-        *,
-        session_key: str,
-        active_session_id: str,
-        tool_call_id: str,
-        skill,
-        skill_request: SkillRequestSurface,
-    ) -> str:
-        content = skill_request.render_tool_result(skill)
-        message = self.session_service.append_message(
-            AppendSessionMessageInput(
-                session_key=session_key,
-                session_id=active_session_id,
-                role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
-                content=content,
-                content_payload={
-                    "tool_name": skill_request.tool_name,
-                    "tool_call_id": tool_call_id,
-                    "skill_name": skill.name,
-                    "skill_path": skill.path,
-                    "skill_source": skill.source,
-                },
-                source_kind="skill_request",
-                source_id=skill.name,
-                metadata={
-                    "tool_call_id": tool_call_id,
-                    "tool_name": skill_request.tool_name,
-                    "skill_name": skill.name,
-                },
-            ),
-        )
-        return message.id
-
-    @staticmethod
-    def _stringify_payload(payload: object) -> str:
-        if isinstance(payload, str):
-            return payload
-        return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
     def _build_prompt_surface(
         self,
@@ -811,29 +590,3 @@ class OrchestrationEngine:
             resolved_tools=resolved_tools,
             workspace_context_files=workspace_context_files,
         )
-
-    @staticmethod
-    def _pending_background_tool_mapping(
-        run: OrchestrationRun,
-    ) -> dict[str, dict[str, str]]:
-        raw_items = run.metadata.get("pending_background_tools")
-        if not isinstance(raw_items, list):
-            return {}
-        mapping: dict[str, dict[str, str]] = {}
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            tool_run_id = item.get("tool_run_id")
-            tool_call_id = item.get("tool_call_id")
-            tool_name = item.get("tool_name")
-            if not isinstance(tool_run_id, str) or not tool_run_id.strip():
-                continue
-            if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-                continue
-            if not isinstance(tool_name, str) or not tool_name.strip():
-                continue
-            mapping[tool_run_id] = {
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-            }
-        return mapping

@@ -60,6 +60,7 @@ from crxzipple.modules.orchestration.application import (
     OrchestrationDispatchEventSubscriber,
     OrchestrationApplicationService,
     OrchestrationEngine,
+    OrchestrationSessionRecorder,
     OrchestrationToolEventSubscriber,
     OrchestrationRouter,
     PromptAssembler,
@@ -379,7 +380,9 @@ def _build_runtime_services(
     )
     orchestration_engine = OrchestrationEngine(
         prompt_assembler=prompt_assembler,
-        session_service=core_services.session_service,
+        session_recorder=OrchestrationSessionRecorder(
+            session_service=core_services.session_service,
+        ),
         llm_port=llm_port,
         tool_resolver=tool_resolver,
         tool_execution_port=tool_port,
