@@ -15,7 +15,6 @@ from crxzipple.modules.orchestration.application.ports import (
 )
 from crxzipple.modules.orchestration.application.prompting import PromptReport
 from crxzipple.modules.orchestration.application.prompting import PromptMode
-from crxzipple.modules.orchestration.application.skill_requests import SkillRequestSurface
 from crxzipple.modules.orchestration.application.prompt_assembler import (
     PromptAssembler,
     PromptEnvelope,
@@ -83,6 +82,15 @@ class _PromptSurface:
     workspace_context_files: tuple[WorkspaceContextDebugEntry, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _AdvanceContext:
+    session_key: str
+    user_message_id: str | None
+    prompt: PromptEnvelope
+    resolved_tools: ResolvedToolSet
+    workspace_context_files: tuple[WorkspaceContextDebugEntry, ...]
+
+
 @dataclass(slots=True)
 class OrchestrationEngine:
     prompt_assembler: PromptAssembler
@@ -138,15 +146,17 @@ class OrchestrationEngine:
             session_key=session_key,
         )
         surface = self._build_prompt_surface(run)
-        resolved_tools = surface.resolved_tools
-        prompt = surface.prompt
-        prompt_mode = prompt.mode
-        skill_request = prompt.skill_request
-        workspace_context_files = surface.workspace_context_files
+        context = _AdvanceContext(
+            session_key=session_key,
+            user_message_id=user_message_id,
+            prompt=surface.prompt,
+            resolved_tools=surface.resolved_tools,
+            workspace_context_files=surface.workspace_context_files,
+        )
         invocation = self.llm_invoker.invoke(
-            llm_id=prompt.llm_id,
-            messages=prompt.messages,
-            tool_schemas=prompt.tool_schemas,
+            llm_id=context.prompt.llm_id,
+            messages=context.prompt.messages,
+            tool_schemas=context.prompt.tool_schemas,
             on_llm_stream_update=on_llm_stream_update,
         )
         if invocation.result is None:
@@ -159,149 +169,181 @@ class OrchestrationEngine:
                 "LLM invocation completed without a result payload.",
             )
 
-        tool_call_names = tuple(
-            tool_call.name
-            for tool_call in invocation.result.tool_calls
-        )
-        assistant_message_ids: list[str] = []
-        tool_result_message_ids: list[str] = []
-        pending_tool_run_ids: list[str] = []
-        pending_background_tools: list[dict[str, str]] = []
-
-        if tool_call_names:
-            skill_request_call = (
-                skill_request.extract_requested_skill(
-                    invocation.result.tool_calls,
-                )
-                if skill_request is not None
-                else None
-            )
-            if invocation.result.text is not None and invocation.result.text.strip():
-                assistant_message_ids.extend(
-                    self.session_recorder.append_assistant_response_message(
-                        session_key=session_key,
-                        active_session_id=prompt.active_session_id,
-                        invocation_id=invocation.id,
-                        response_text=invocation.result.text,
-                        structured_output=None,
-                        finish_reason="tool_calls",
-                        usage_payload=None,
-                    ),
-                )
-            if skill_request_call is not None:
-                assistant_message_ids.extend(
-                    self.session_recorder.append_tool_call_messages(
-                        session_key=session_key,
-                        active_session_id=prompt.active_session_id,
-                        invocation_id=invocation.id,
-                        response_text=None,
-                        tool_calls=invocation.result.tool_calls,
-                    ),
-                )
-                tool_result_message_ids.append(
-                    self.session_recorder.append_skill_result_message(
-                        session_key=session_key,
-                        active_session_id=prompt.active_session_id,
-                        tool_call_id=invocation.result.tool_calls[0].id,
-                        skill=skill_request_call,
-                        skill_request=skill_request,
-                    ),
-                )
-                return EngineAdvanceOutcome(
-                    llm_id=prompt.llm_id,
-                    llm_invocation_id=invocation.id,
-                    response_text=invocation.result.text,
-                    user_message_id=user_message_id,
-                    assistant_message_ids=tuple(assistant_message_ids),
-                    tool_result_message_ids=tuple(tool_result_message_ids),
-                    tool_call_names=tool_call_names,
-                    prompt_report=prompt.report,
-                    workspace_context_workspace=prompt.workspace_dir,
-                    workspace_context_files=workspace_context_files,
-                    continue_loop=True,
-                )
-            execution_outcome = self.tool_executor.execute_tool_calls(
+        if invocation.result.tool_calls:
+            return self._advance_outcome_for_tool_calls(
                 run,
-                session_key=session_key,
-                active_session_id=prompt.active_session_id,
-                resolved_tools=resolved_tools,
-                tool_calls=invocation.result.tool_calls,
-                append_tool_call_messages=True,
+                context=context,
+                invocation=invocation,
             )
-            assistant_message_ids.extend(execution_outcome.tool_call_message_ids)
-            tool_result_message_ids.extend(
-                message_id
-                for message_id, _ in execution_outcome.inline_runs
+        return self._advance_outcome_for_message_only(
+            context=context,
+            invocation=invocation,
+        )
+
+    def _advance_outcome_for_tool_calls(
+        self,
+        run: OrchestrationRun,
+        *,
+        context: _AdvanceContext,
+        invocation: Any,
+    ) -> EngineAdvanceOutcome:
+        assert invocation.result is not None
+        tool_calls = invocation.result.tool_calls
+        tool_call_names = tuple(tool_call.name for tool_call in tool_calls)
+        assistant_message_ids = list(
+            self._assistant_messages_for_tool_calls(
+                context=context,
+                invocation=invocation,
             )
-            pending_tool_run_ids.extend(
-                tool_run.id
-                for _, tool_run in execution_outcome.background_runs
-            )
-            pending_background_tools.extend(
-                {
-                    "tool_run_id": tool_run.id,
-                    "tool_call_id": tool_call.id,
-                    "tool_name": tool_call.name,
-                }
-                for tool_call, tool_run in execution_outcome.background_runs
-            )
-            if execution_outcome.pending_approval_request is not None:
-                return EngineAdvanceOutcome(
-                    llm_id=prompt.llm_id,
-                    llm_invocation_id=invocation.id,
-                    response_text=invocation.result.text,
-                    user_message_id=user_message_id,
-                    assistant_message_ids=tuple(assistant_message_ids),
-                    tool_result_message_ids=tuple(tool_result_message_ids),
-                    tool_call_names=tool_call_names,
-                    pending_approval_request=execution_outcome.pending_approval_request,
-                    prompt_report=prompt.report,
-                    workspace_context_workspace=prompt.workspace_dir,
-                    workspace_context_files=workspace_context_files,
-                )
-        else:
-            if prompt_mode is PromptMode.MEMORY_FLUSH:
-                return EngineAdvanceOutcome(
-                    llm_id=prompt.llm_id,
-                    llm_invocation_id=invocation.id,
-                    response_text=invocation.result.text,
-                    user_message_id=user_message_id,
-                    tool_result_message_ids=tuple(tool_result_message_ids),
-                    tool_call_names=tool_call_names,
-                    prompt_report=prompt.report,
-                    workspace_context_workspace=prompt.workspace_dir,
-                    workspace_context_files=workspace_context_files,
-                )
+        )
+        skill_request_call = (
+            context.prompt.skill_request.extract_requested_skill(tool_calls)
+            if context.prompt.skill_request is not None
+            else None
+        )
+        if skill_request_call is not None:
             assistant_message_ids.extend(
-                self.session_recorder.append_assistant_response_message(
-                    session_key=session_key,
-                    active_session_id=prompt.active_session_id,
+                self.session_recorder.append_tool_call_messages(
+                    session_key=context.session_key,
+                    active_session_id=context.prompt.active_session_id,
                     invocation_id=invocation.id,
-                    response_text=invocation.result.text,
-                    structured_output=invocation.result.structured_output,
-                    finish_reason=invocation.result.finish_reason,
-                    usage_payload=(
-                        invocation.result.usage.to_payload()
-                        if invocation.result.usage is not None
-                        else None
-                    ),
+                    response_text=None,
+                    tool_calls=tool_calls,
                 ),
             )
+            tool_result_message_ids = (
+                self.session_recorder.append_skill_result_message(
+                    session_key=context.session_key,
+                    active_session_id=context.prompt.active_session_id,
+                    tool_call_id=tool_calls[0].id,
+                    skill=skill_request_call,
+                    skill_request=context.prompt.skill_request,
+                ),
+            )
+            return self._build_outcome(
+                context=context,
+                invocation=invocation,
+                assistant_message_ids=assistant_message_ids,
+                tool_result_message_ids=tool_result_message_ids,
+                tool_call_names=tool_call_names,
+                continue_loop=True,
+            )
 
+        execution_outcome = self.tool_executor.execute_tool_calls(
+            run,
+            session_key=context.session_key,
+            active_session_id=context.prompt.active_session_id,
+            resolved_tools=context.resolved_tools,
+            tool_calls=tool_calls,
+            append_tool_call_messages=True,
+        )
+        assistant_message_ids.extend(execution_outcome.tool_call_message_ids)
+        pending_background_tools = tuple(
+            {
+                "tool_run_id": tool_run.id,
+                "tool_call_id": tool_call.id,
+                "tool_name": tool_call.name,
+            }
+            for tool_call, tool_run in execution_outcome.background_runs
+        )
+        return self._build_outcome(
+            context=context,
+            invocation=invocation,
+            assistant_message_ids=assistant_message_ids,
+            tool_result_message_ids=tuple(
+                message_id for message_id, _ in execution_outcome.inline_runs
+            ),
+            tool_call_names=tool_call_names,
+            pending_tool_run_ids=tuple(
+                tool_run.id for _, tool_run in execution_outcome.background_runs
+            ),
+            pending_background_tools=pending_background_tools,
+            pending_approval_request=execution_outcome.pending_approval_request,
+            continue_loop=(
+                execution_outcome.pending_approval_request is None
+                and not pending_background_tools
+            ),
+        )
+
+    def _advance_outcome_for_message_only(
+        self,
+        *,
+        context: _AdvanceContext,
+        invocation: Any,
+    ) -> EngineAdvanceOutcome:
+        assert invocation.result is not None
+        if context.prompt.mode is PromptMode.MEMORY_FLUSH:
+            return self._build_outcome(
+                context=context,
+                invocation=invocation,
+            )
+        assistant_message_ids = self.session_recorder.append_assistant_response_message(
+            session_key=context.session_key,
+            active_session_id=context.prompt.active_session_id,
+            invocation_id=invocation.id,
+            response_text=invocation.result.text,
+            structured_output=invocation.result.structured_output,
+            finish_reason=invocation.result.finish_reason,
+            usage_payload=(
+                invocation.result.usage.to_payload()
+                if invocation.result.usage is not None
+                else None
+            ),
+        )
+        return self._build_outcome(
+            context=context,
+            invocation=invocation,
+            assistant_message_ids=assistant_message_ids,
+        )
+
+    def _assistant_messages_for_tool_calls(
+        self,
+        *,
+        context: _AdvanceContext,
+        invocation: Any,
+    ) -> tuple[str, ...]:
+        assert invocation.result is not None
+        if invocation.result.text is None or not invocation.result.text.strip():
+            return ()
+        return self.session_recorder.append_assistant_response_message(
+            session_key=context.session_key,
+            active_session_id=context.prompt.active_session_id,
+            invocation_id=invocation.id,
+            response_text=invocation.result.text,
+            structured_output=None,
+            finish_reason="tool_calls",
+            usage_payload=None,
+        )
+
+    def _build_outcome(
+        self,
+        *,
+        context: _AdvanceContext,
+        invocation: Any,
+        assistant_message_ids: tuple[str, ...] | list[str] = (),
+        tool_result_message_ids: tuple[str, ...] | list[str] = (),
+        tool_call_names: tuple[str, ...] = (),
+        pending_tool_run_ids: tuple[str, ...] = (),
+        pending_background_tools: tuple[dict[str, str], ...] = (),
+        pending_approval_request: PendingApprovalRequest | None = None,
+        continue_loop: bool = False,
+    ) -> EngineAdvanceOutcome:
+        assert invocation.result is not None
         return EngineAdvanceOutcome(
-            llm_id=prompt.llm_id,
+            llm_id=context.prompt.llm_id,
             llm_invocation_id=invocation.id,
             response_text=invocation.result.text,
-            user_message_id=user_message_id,
+            user_message_id=context.user_message_id,
             assistant_message_ids=tuple(assistant_message_ids),
             tool_result_message_ids=tuple(tool_result_message_ids),
             tool_call_names=tool_call_names,
-            pending_tool_run_ids=tuple(pending_tool_run_ids),
-            pending_background_tools=tuple(pending_background_tools),
-            prompt_report=prompt.report,
-            workspace_context_workspace=prompt.workspace_dir,
-            workspace_context_files=workspace_context_files,
-            continue_loop=bool(tool_call_names) and not pending_tool_run_ids,
+            pending_tool_run_ids=pending_tool_run_ids,
+            pending_background_tools=pending_background_tools,
+            pending_approval_request=pending_approval_request,
+            prompt_report=context.prompt.report,
+            workspace_context_workspace=context.prompt.workspace_dir,
+            workspace_context_files=context.workspace_context_files,
+            continue_loop=continue_loop,
         )
 
     def replay_approved_tool_call(
