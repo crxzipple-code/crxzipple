@@ -13,10 +13,6 @@ from crxzipple.modules.llm.infrastructure.persistence.repositories import (
     SqlAlchemyLlmInvocationRepository,
     SqlAlchemyLlmProfileRepository,
 )
-from crxzipple.modules.memory.infrastructure.persistence.repositories import (
-    SqlAlchemyMemoryCandidateRepository,
-    SqlAlchemyMemoryEntryRepository,
-)
 from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
     SqlAlchemyOrchestrationRunRepository,
     SqlAlchemyOrchestrationRunWaitRepository,
@@ -27,7 +23,6 @@ from crxzipple.modules.session.infrastructure.persistence.repositories import (
     SqlAlchemySessionRepository,
 )
 from crxzipple.modules.tool.infrastructure.persistence.repositories import (
-    SqlAlchemyToolRepository,
     SqlAlchemyToolRunRepository,
 )
 from crxzipple.shared.application.unit_of_work import UnitOfWork
@@ -47,7 +42,6 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
         self._session = self._session_factory()
         self.dispatch_tasks = SqlAlchemyDispatchTaskRepository(self.session)
-        self.tools = SqlAlchemyToolRepository(self.session)
         self.tool_runs = SqlAlchemyToolRunRepository(self.session)
         self.sessions = SqlAlchemySessionRepository(self.session)
         self.session_messages = SqlAlchemySessionMessageRepository(self.session)
@@ -59,8 +53,6 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.orchestration_waits = SqlAlchemyOrchestrationRunWaitRepository(
             self.session,
         )
-        self.memory_candidates = SqlAlchemyMemoryCandidateRepository(self.session)
-        self.memory_entries = SqlAlchemyMemoryEntryRepository(self.session)
         self._seen = []
         logger.debug("opened unit of work")
         return self

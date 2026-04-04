@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from crxzipple.modules.orchestration.application import (
@@ -36,7 +38,7 @@ from crxzipple.modules.session.domain import DirectSessionScope
 
 class InboundInstructionRequest(BaseModel):
     source: str
-    content: str | None = None
+    content: Any | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
     def to_value_object(self):
@@ -64,7 +66,6 @@ class DeliveryTargetRequest(BaseModel):
 
 class SessionRouteRequest(BaseModel):
     agent_id: str
-    llm_id: str
     channel: str | None = None
     chat_type: str = "direct"
     peer_id: str | None = None
@@ -81,7 +82,6 @@ class SessionRouteRequest(BaseModel):
     def to_context(self):
         return build_session_route_context(
             agent_id=self.agent_id,
-            llm_id=self.llm_id,
             channel=self.channel,
             chat_type=self.chat_type,
             peer_id=self.peer_id,
@@ -111,11 +111,12 @@ class ResetPolicyRequest(BaseModel):
 class IntakeOrchestrationRunRequest(BaseModel):
     inbound_instruction: InboundInstructionRequest
     session: SessionRouteRequest
+    llm_id: str | None = None
     delivery_target: DeliveryTargetRequest | None = None
     run_id: str | None = None
     queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.FIFO
     priority: int = 100
-    max_steps: int = 12
+    max_steps: int = 99
     metadata: dict[str, object] = Field(default_factory=dict)
     enqueue: bool = False
     touch_activity: bool = True
@@ -157,7 +158,7 @@ class IntakeOrchestrationRunRequest(BaseModel):
         return build_prepare_session_run_input(
             run_id=run_id,
             agent_id=self.session.agent_id,
-            llm_id=self.session.llm_id,
+            llm_id=self.llm_id,
             channel=self.session.channel,
             chat_type=self.session.chat_type,
             peer_id=self.session.peer_id,
@@ -296,7 +297,7 @@ class FailRunRequest(BaseModel):
 
 class InboundInstructionResponse(BaseModel):
     source: str
-    content: str | None = None
+    content: Any | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @classmethod
@@ -334,7 +335,7 @@ class OrchestrationRunResponse(BaseModel):
     id: str
     status: str
     stage: str
-    bulk_key: str | None = None
+    session_key: str | None = None
     active_session_id: str | None = None
     agent_id: str | None = None
     lane_key: str | None = None
@@ -362,7 +363,7 @@ class OrchestrationRunResponse(BaseModel):
             id=dto.id,
             status=dto.status,
             stage=dto.stage,
-            bulk_key=dto.bulk_key,
+            session_key=dto.session_key,
             active_session_id=dto.active_session_id,
             agent_id=dto.agent_id,
             lane_key=dto.lane_key,

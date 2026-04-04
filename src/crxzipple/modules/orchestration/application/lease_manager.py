@@ -6,7 +6,7 @@ import threading
 from typing import Any, Callable, Protocol
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.dispatch.domain import DispatchTaskRepository
+from crxzipple.modules.dispatch.domain import DispatchTaskRepository, DispatchTaskStatus
 from crxzipple.modules.orchestration.application.ports import (
     RunDispatchPort,
 )
@@ -73,6 +73,46 @@ class OrchestrationLeaseManager:
                 return None
             run = get_run(uow, claim.run_id)
             run.claim(worker_id=worker_id, claimed_at=claim.claimed_at)
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+            return run
+
+    def claim_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        get_run: Callable[[LeaseUnitOfWork, str], OrchestrationRun],
+    ) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            run = get_run(uow, run_id)
+            if (
+                run.status is OrchestrationRunStatus.RUNNING
+                and run.worker_id == worker_id
+            ):
+                return run
+            if run.status is not OrchestrationRunStatus.QUEUED:
+                raise RuntimeError(
+                    f"Orchestration run '{run_id}' is not queued for inline claim.",
+                )
+            task = uow.dispatch_tasks.get(run_id)
+            if task is None:
+                raise RuntimeError(
+                    f"Dispatch task '{run_id}' was not found for orchestration run.",
+                )
+            if task.status is not DispatchTaskStatus.QUEUED:
+                raise RuntimeError(
+                    f"Dispatch task '{run_id}' is not queued for inline claim.",
+                )
+            task.claim(
+                worker_id=worker_id,
+                claim_token=self._claim_token_for_worker(worker_id),
+                lease_seconds=self.worker_lease_seconds,
+            )
+            run.claim(worker_id=worker_id, claimed_at=task.claimed_at)
+            uow.dispatch_tasks.add(task)
+            uow.collect(task)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -163,7 +203,7 @@ class OrchestrationLeaseManager:
         *,
         run_id: str,
         worker_id: str,
-        heartbeat_run: Callable[[str, str], OrchestrationRun],
+        heartbeat_run: Callable[..., OrchestrationRun],
     ) -> Any:
         if self.worker_heartbeat_seconds <= 0:
             yield
@@ -173,7 +213,7 @@ class OrchestrationLeaseManager:
         def _run_heartbeat_loop() -> None:
             while not stop_event.wait(self.worker_heartbeat_seconds):
                 try:
-                    run = heartbeat_run(run_id, worker_id)
+                    run = heartbeat_run(run_id, worker_id=worker_id)
                 except Exception:
                     logger.exception(
                         "failed to heartbeat orchestration run while processing",
@@ -201,3 +241,7 @@ class OrchestrationLeaseManager:
         if normalized == DISPATCH_LEASE_EXPIRED_REASON:
             return DISPATCH_LEASE_EXHAUSTED_REASON
         return f"{normalized} (run failed after dispatch recovery)"
+
+    @staticmethod
+    def _claim_token_for_worker(worker_id: str) -> str:
+        return f"orchestration:{worker_id}"

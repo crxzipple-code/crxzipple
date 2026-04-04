@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 
+import {
+  blockDownloadUrl,
+  blockPreviewUrl,
+  extractTextContent,
+  normalizeContentBlocks,
+} from "@/lib/contentBlocks";
+import { describeRunFailure } from "@/lib/runErrors";
 import { useMarkdownRenderer } from "@/composables/useMarkdownRenderer";
 import type {
   CompactionRequestSummary,
@@ -124,6 +131,10 @@ const latestTimelineItemId = computed(() => {
   return lastItem?.id ?? null;
 });
 
+const surfacedError = computed(
+  () => props.lastError ?? describeRunFailure(props.activeTurn?.run ?? null),
+);
+
 function isToolBlock(message: SessionMessage) {
   return message.role === "tool" || message.kind.includes("tool");
 }
@@ -141,14 +152,47 @@ function archivedHistoryLabel(count: number) {
 }
 
 function messageText(message: SessionMessage) {
+  const blockText = extractTextContent(message.content_payload);
+  if (blockText && blockText.trim()) {
+    return blockText;
+  }
   if (message.content && message.content.trim()) {
     return message.content;
   }
-  const payloadText = message.content_payload.text;
-  if (typeof payloadText === "string" && payloadText.trim()) {
-    return payloadText;
+  if (messageBlocks(message).length > 0) {
+    return "";
+  }
+  if (isToolBlock(message)) {
+    return "";
   }
   return `\`\`\`json\n${JSON.stringify(message.content_payload, null, 2)}\n\`\`\``;
+}
+
+function messageBlocks(message: SessionMessage) {
+  return normalizeContentBlocks(message.content_payload);
+}
+
+function messageAttachmentBlocks(message: SessionMessage) {
+  return messageBlocks(message).filter((block) => block.type !== "text");
+}
+
+function hasMessageText(message: SessionMessage) {
+  return messageText(message).trim().length > 0;
+}
+
+function hasMessageAttachments(message: SessionMessage) {
+  return messageAttachmentBlocks(message).length > 0;
+}
+
+function attachmentLabel(block: { type: string; name?: string }) {
+  if (block.type === "image" || block.type === "image_ref") {
+    return block.name ?? "Image attachment";
+  }
+  return block.name ?? "File attachment";
+}
+
+function isImageAttachmentBlock(block: { type: string }) {
+  return block.type === "image" || block.type === "image_ref";
 }
 
 function blockTone(message: SessionMessage) {
@@ -224,23 +268,18 @@ function toolSummary(message: SessionMessage) {
     }
   }
 
-  const payloadOutput = message.content_payload.output;
-  if (typeof payloadOutput === "string" && payloadOutput.trim()) {
-    return textPreview(payloadOutput);
-  }
-  if (payloadOutput && typeof payloadOutput === "object") {
-    const maybeText = (payloadOutput as Record<string, unknown>).text;
-    if (typeof maybeText === "string" && maybeText.trim()) {
-      return textPreview(maybeText);
-    }
-    return `Output payload with ${Object.keys(payloadOutput as Record<string, unknown>).length} field(s)`;
-  }
-
   const text = messageText(message);
   if (text.trim()) {
     return textPreview(text.replace(/```[\s\S]*?```/g, "Code block"));
   }
-  return "No output";
+  const attachments = messageAttachmentBlocks(message);
+  if (attachments.length > 0) {
+    if (attachments.length === 1) {
+      return attachmentLabel(attachments[0]);
+    }
+    return `${attachments.length} attachments`;
+  }
+  return `Tool ${toolStatus(message)}`;
 }
 
 function sourceLabel(message: SessionMessage) {
@@ -323,7 +362,7 @@ async function scrollToLatest() {
 }
 
 watch(
-  () => props.conversation?.bulk_key ?? "__draft__",
+  () => props.conversation?.session_key ?? "__draft__",
   () => {
     void scrollToLatest();
   },
@@ -340,9 +379,9 @@ watch(
 
 <template>
   <section class="timeline shell">
-    <div v-if="lastError" class="timeline__error">
+    <div v-if="surfacedError" class="timeline__error">
       <strong>Turn failed</strong>
-      <p>{{ lastError }}</p>
+      <p>{{ surfacedError }}</p>
     </div>
 
     <div
@@ -472,6 +511,7 @@ watch(
               new answer or a new session.
             </p>
             <div
+              v-if="hasMessageText(item.message)"
               class="stream-block__content"
               v-html="renderMarkdown(messageText(item.message))"
             ></div>
@@ -501,9 +541,42 @@ watch(
                 <p class="tool-block__preview">{{ toolSummary(item.message) }}</p>
               </summary>
               <div
+                v-if="hasMessageText(item.message)"
                 class="stream-block__content"
                 v-html="renderMarkdown(messageText(item.message))"
               ></div>
+              <div
+                v-if="hasMessageAttachments(item.message)"
+                class="stream-block__attachments"
+              >
+                <template
+                  v-for="(block, index) in messageAttachmentBlocks(item.message)"
+                  :key="`${item.message.id}:tool-attachment:${index}`"
+                >
+                  <figure v-if="isImageAttachmentBlock(block)" class="stream-attachment stream-attachment--image">
+                    <img
+                      class="stream-attachment__image"
+                      :src="blockPreviewUrl(block)"
+                      :alt="attachmentLabel(block)"
+                    >
+                    <figcaption class="stream-attachment__caption">
+                      {{ attachmentLabel(block) }}
+                    </figcaption>
+                  </figure>
+                  <div v-else class="stream-attachment stream-attachment--file">
+                    <span class="stream-attachment__badge">File</span>
+                    <a
+                      class="stream-attachment__link"
+                      :href="blockDownloadUrl(block)"
+                      :download="block.name"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {{ attachmentLabel(block) }}
+                    </a>
+                  </div>
+                </template>
+              </div>
             </details>
           </template>
           <template v-else>
@@ -523,9 +596,42 @@ watch(
               </div>
             </div>
             <div
+              v-if="hasMessageText(item.message)"
               class="stream-block__content"
               v-html="renderMarkdown(messageText(item.message))"
             ></div>
+            <div
+              v-if="messageAttachmentBlocks(item.message).length > 0"
+              class="stream-block__attachments"
+            >
+              <template
+                v-for="(block, index) in messageAttachmentBlocks(item.message)"
+                :key="`${item.message.id}:attachment:${index}`"
+              >
+                <figure v-if="isImageAttachmentBlock(block)" class="stream-attachment stream-attachment--image">
+                  <img
+                    class="stream-attachment__image"
+                    :src="blockPreviewUrl(block)"
+                    :alt="attachmentLabel(block)"
+                  >
+                  <figcaption class="stream-attachment__caption">
+                    {{ attachmentLabel(block) }}
+                  </figcaption>
+                </figure>
+                <div v-else class="stream-attachment stream-attachment--file">
+                  <span class="stream-attachment__badge">File</span>
+                  <a
+                    class="stream-attachment__link"
+                    :href="blockDownloadUrl(block)"
+                    :download="block.name"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {{ attachmentLabel(block) }}
+                  </a>
+                </div>
+              </template>
+            </div>
           </template>
           </article>
         </template>

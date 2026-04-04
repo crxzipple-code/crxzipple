@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
-from crxzipple.modules.memory.domain import MemoryEntry
+from crxzipple.modules.memory.application import MemoryExcerpt
 from crxzipple.modules.orchestration.application.ports import MemoryPort
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 
@@ -25,23 +26,31 @@ def recall_prompt_memories(
 ) -> tuple[RecalledMemory, ...]:
     if run.agent_id is None or not run.agent_id.strip():
         return ()
-    query_text = (run.inbound_instruction.content or "").strip()
-    if not query_text:
+    context = memory_service.resolve_context(space_id=run.agent_id)
+    if context is None:
         return ()
-    entries = memory_service.recall_entries(
-        agent_id=run.agent_id,
-        query_text=query_text,
-        limit=limit,
-    )
-    return tuple(_to_recalled_memory(entry) for entry in entries)
+    memory_service.warm_context(context=context)
+    del limit
+    for path in ("MEMORY.md", "memory.md"):
+        excerpt = memory_service.get(
+            context=context,
+            path=path,
+        )
+        if excerpt is None or not excerpt.text.strip():
+            continue
+        return (_to_recalled_memory(excerpt),)
+    return ()
 
 
-def _to_recalled_memory(entry: MemoryEntry) -> RecalledMemory:
+def _to_recalled_memory(excerpt: MemoryExcerpt) -> RecalledMemory:
+    title = "Long-Term Memory"
+    if excerpt.path.strip():
+        title = Path(excerpt.path).name
     return RecalledMemory(
-        id=entry.id,
-        title=entry.title,
-        summary=entry.summary,
-        content=entry.content,
-        tags=entry.tags,
-        source_candidate_id=entry.source_candidate_id,
+        id=excerpt.path,
+        title=title,
+        summary=f"Bootstrap memory from {excerpt.path}",
+        content=excerpt.text,
+        tags=(),
+        source_candidate_id=None,
     )

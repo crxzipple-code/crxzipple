@@ -1,0 +1,100 @@
+kind: local_package
+namespace: memory
+local_tools:
+  - id: memory_search
+    name: Memory Search
+    description: Search durable memory files relevant to the current task.
+    provider_name: local_system
+    entrypoint: tools.memory.local:memory_search
+    tool_kind: function
+    parameters:
+      - name: query
+        data_type: string
+        description: Search query describing the memory you want to recall.
+        required: true
+      - name: limit
+        data_type: integer
+        description: Maximum number of memory hits to return.
+        required: false
+    tags:
+      - memory
+      - builtin
+      - system-managed
+      - scope:memory_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: memory_search
+  - id: memory_read
+    name: Memory Read
+    description: Read a cited durable memory excerpt from the current agent memory.
+    provider_name: local_system
+    entrypoint: tools.memory.local:memory_read
+    tool_kind: function
+    parameters:
+      - name: citation
+        data_type: string
+        description: Memory citation from memory_search, for example MEMORY.md:12-18 or memory/2026-03-28.md:4-9.
+        required: true
+    tags:
+      - memory
+      - builtin
+      - system-managed
+      - scope:memory_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: memory_read
+  - id: memory_write_daily
+    name: Memory Write Daily
+    description: Append a durable markdown note to the current daily memory file.
+    provider_name: local_system
+    entrypoint: tools.memory.local:memory_write_daily
+    tool_kind: function
+    parameters:
+      - name: content
+        data_type: string
+        description: Markdown content to append to today's daily memory file.
+        required: true
+    tags:
+      - memory
+      - builtin
+      - system-managed
+      - scope:memory_context
+      - surface:interactive
+      - surface:maintenance_write
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: memory_write_daily
+  - id: memory_flush_skip
+    name: Memory Flush Skip
+    description: Mark the current memory flush as intentionally skipped because there is no durable memory to keep.
+    provider_name: local_system
+    entrypoint: tools.memory.local:memory_flush_skip
+    tool_kind: function
+    parameters: []
+    tags:
+      - memory
+      - builtin
+      - system-managed
+      - scope:memory_context
+      - surface:maintenance_write
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: memory_flush_skip

@@ -16,11 +16,16 @@ describe("useRunPresentation", () => {
     const activeConversation = ref(buildConversationSummary());
     const activeTurn = ref(
       buildTurnResponse({
+        output_text: "First sentence. Second sentence. Third sentence.",
         run: {
           inbound_instruction: {
             source: "compaction",
             content: null,
             metadata: {},
+          },
+          result_payload: {
+            archived_message_count: 18,
+            output_text: "First sentence. Second sentence. Third sentence.",
           },
           metadata: {
             compaction_request: {
@@ -30,10 +35,6 @@ describe("useRunPresentation", () => {
                 estimated_total_tokens: 9700,
                 prompt_threshold_tokens: 9500,
               },
-            },
-            compaction_result: {
-              archived_message_count: 18,
-              summary: "First sentence. Second sentence. Third sentence.",
             },
           },
         },

@@ -34,7 +34,6 @@ class SqlAlchemySessionRepository:
                 id=session.id,
                 active_session_id=session.active_session_id,
                 agent_id=binding.agent_id or session.agent_id,
-                llm_id=binding.llm_id or session.llm_id,
                 status=session.status,
                 channel=session.channel,
                 chat_type=session.chat_type,
@@ -80,7 +79,6 @@ class SqlAlchemySessionRepository:
             id=model.id,
             active_session_id=model.active_session_id,
             agent_id=binding.agent_id or model.agent_id,
-            llm_id=binding.llm_id or model.llm_id,
             status=model.status,
             channel=model.channel,
             chat_type=model.chat_type,
@@ -106,7 +104,6 @@ class SqlAlchemySessionMessageRepository:
                 sequence_no=message.sequence_no,
                 role=message.role,
                 kind=message.kind.value,
-                content=message.content or "",
                 content_payload=dict(message.content_payload),
                 source_kind=message.source_kind,
                 source_id=message.source_id,
@@ -195,7 +192,6 @@ class SqlAlchemySessionMessageRepository:
             sequence_no=model.sequence_no,
             role=model.role,
             kind=SessionMessageKind(model.kind),
-            content=model.content,
             content_payload=(
                 dict(model.content_payload)
                 if isinstance(model.content_payload, dict)

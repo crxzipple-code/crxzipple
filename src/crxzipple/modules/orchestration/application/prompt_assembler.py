@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import base64
+from dataclasses import dataclass, field, replace
 
+from crxzipple.modules.artifacts.application.services import ArtifactApplicationService
+from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.agent.application import AgentApplicationService
 from crxzipple.modules.llm.domain import LlmMessage, LlmMessageRole, ToolSchema
 from crxzipple.modules.orchestration.domain import (
@@ -12,7 +15,12 @@ from crxzipple.modules.orchestration.application.memory_context import (
     RecalledMemory,
     recall_prompt_memories,
 )
+from crxzipple.modules.orchestration.application.llm_resolver import (
+    LlmResolver,
+    normalize_requested_llm_id,
+)
 from crxzipple.modules.orchestration.application.ports import LlmPort, MemoryPort
+from crxzipple.modules.orchestration.application.ports.skill import SkillCatalogPort
 from crxzipple.modules.orchestration.application.prompting import (
     PromptMode,
     PromptReport,
@@ -20,21 +28,16 @@ from crxzipple.modules.orchestration.application.prompting import (
     RunSurfacePolicy,
     apply_system_prompt_budget,
     build_agent_instruction_block,
-    build_memory_lookup_block,
     build_flow_prompt_block,
     build_recalled_memory_block,
     build_runtime_context_block,
     build_skills_catalog_block,
     build_workspace_context_block,
     estimate_text_tokens,
+    resolve_run_surface_policy,
 )
 from crxzipple.modules.orchestration.application.prompt_transcript import (
     build_prompt_transcript,
-)
-from crxzipple.modules.orchestration.application.skill_requests import SkillRequestSurface
-from crxzipple.modules.orchestration.application.skills_context import (
-    AvailableSkill,
-    load_available_skills,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet
 from crxzipple.modules.orchestration.application.workspace_context import (
@@ -47,6 +50,13 @@ from crxzipple.modules.session.application import (
 )
 from crxzipple.modules.session.domain import SessionRuntimeBinding
 from crxzipple.modules.session.domain import SessionMessageVisibility
+from crxzipple.modules.skills.application import SkillCatalogPrompt
+from crxzipple.shared.content_blocks import (
+    FILE_REF_BLOCK_TYPE,
+    IMAGE_REF_BLOCK_TYPE,
+    normalize_content_blocks,
+    text_content_block,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,9 +70,8 @@ class PromptEnvelope:
     workspace_dir: str | None = None
     context_files: tuple[PromptContextFile, ...] = ()
     recalled_memories: tuple[RecalledMemory, ...] = ()
-    available_skills: tuple[AvailableSkill, ...] = ()
+    skills_catalog: SkillCatalogPrompt | None = None
     tool_schemas: tuple[ToolSchema, ...] = ()
-    skill_request: SkillRequestSurface | None = None
     surface_policy: RunSurfacePolicy = field(default_factory=RunSurfacePolicy)
 
 
@@ -71,10 +80,17 @@ class PromptAssembler:
     agent_service: AgentApplicationService
     llm_port: LlmPort
     memory_port: MemoryPort | None
+    skill_catalog_port: SkillCatalogPort
     session_service: SessionApplicationService
+    artifact_service: ArtifactApplicationService | None = None
+    llm_resolver: LlmResolver | None = None
     system_prompt_max_chars: int = 120_000
     system_prompt_max_tokens: int = 30_000
     system_prompt_context_window_ratio: float = 0.15
+    memory_flush_transcript_max_chars: int = 120_000
+    llm_image_max_bytes: int = ArtifactApplicationService.DEFAULT_LLM_IMAGE_MAX_BYTES
+    llm_file_max_bytes: int = 4_000_000
+    llm_text_file_max_chars: int = 20_000
 
     def assemble(
         self,
@@ -100,24 +116,44 @@ class PromptAssembler:
 
         profile = self.agent_service.get_profile(run.agent_id)
         session = self.session_service.get_session(session_key)
-        active_instance = self.session_service.get_instance(run.active_session_id)
-        llm_id = self._resolve_llm_id(
-            active_instance_metadata=active_instance.metadata,
-            session_binding=session.runtime_binding(),
-            default_llm_id=profile.llm_routing_policy.default_llm_id,
+        session_binding = session.runtime_binding()
+        requested_llm_id = self._resolve_requested_llm_id(
+            run_metadata=run.metadata,
+            routing_policy=profile.llm_routing_policy,
         )
-        if not llm_id:
-            raise OrchestrationValidationError(
-                "Prompt assembly could not determine an llm_id.",
-            )
-        llm_profile = self.llm_port.get_profile(llm_id)
-
         resolved_mode = self._resolve_prompt_mode(run, mode=mode)
+
+        session_messages = self.session_service.list_messages(
+            ListSessionMessagesInput(
+                session_key=session_key,
+                active_session_only=True,
+            ),
+        )
+        filtered_session_messages = tuple(
+            message
+            for message in session_messages
+                if message.session_id == run.active_session_id
+            and message.visibility is not SessionMessageVisibility.ARCHIVED
+        )
+        transcript = build_prompt_transcript(
+            filtered_session_messages,
+            max_chars=self._transcript_max_chars_for_mode(resolved_mode),
+        )
+        llm_transcript_messages = self._materialize_artifact_refs(transcript.messages)
+        llm_selection = self._resolver().resolve(
+            requested_llm_id=requested_llm_id,
+            routing_policy=profile.llm_routing_policy,
+            input_content=_routing_input_content_from_transcript(llm_transcript_messages),
+        )
+        llm_profile = self.llm_port.get_profile(llm_selection.resolved_llm_id)
         surface_policy = self._resolve_surface_policy(resolved_mode)
         prompt_flow_hint = self._prompt_flow_hint_payload(run)
         agent_home_dir = profile.runtime_preferences.resolved_home_dir
-        workdir = profile.runtime_preferences.resolved_workdir
-        context_files = load_workspace_context_files(agent_home_dir)
+        workspace_dir = self._resolve_workspace_dir(
+            session_binding=session_binding,
+            profile=profile,
+        )
+        context_files = load_workspace_context_files(workspace_dir)
         recalled_memories = (
             recall_prompt_memories(
                 self.memory_port,
@@ -126,18 +162,13 @@ class PromptAssembler:
             if surface_policy.auto_recall_memories and self.memory_port is not None
             else ()
         )
-        available_skills = (
-            ()
-            if not (
-                surface_policy.include_skills_catalog
-                or surface_policy.include_skill_request_surface
+        skills_catalog = (
+            None
+            if not surface_policy.include_skills_catalog
+            else self.skill_catalog_port.build_prompt_catalog(
+                workspace_dir=workspace_dir,
+                surface=surface_policy.surface,
             )
-            else load_available_skills(agent_home_dir)
-        )
-        skill_request = (
-            SkillRequestSurface(available_skills)
-            if available_skills and surface_policy.include_skill_request_surface
-            else None
         )
         effective_system_max_tokens, system_budget_source = self._resolve_system_prompt_budget(
             llm_profile.context_window_tokens,
@@ -155,9 +186,9 @@ class PromptAssembler:
                     ),
                     build_runtime_context_block(
                         run,
-                        llm_id=llm_id,
+                        llm_id=llm_selection.resolved_llm_id,
                         home_dir=agent_home_dir,
-                        workdir=workdir,
+                        workspace_dir=workspace_dir,
                     ),
                     build_flow_prompt_block(
                         mode=resolved_mode,
@@ -166,18 +197,11 @@ class PromptAssembler:
                     build_workspace_context_block(
                         context_files,
                         home_dir=agent_home_dir,
-                    ),
-                    build_memory_lookup_block(
-                        self._memory_lookup_instruction(
-                            resolved_tools,
-                            include_guidance=surface_policy.include_memory_lookup_guidance,
-                        )
+                        workspace_dir=workspace_dir,
                     ),
                     build_recalled_memory_block(recalled_memories),
                     build_skills_catalog_block(
-                        available_skills
-                        if surface_policy.include_skills_catalog
-                        else ()
+                        skills_catalog if surface_policy.include_skills_catalog else None
                     ),
                 )
                 if block is not None
@@ -193,21 +217,7 @@ class PromptAssembler:
             )
             for block in system_blocks
         ]
-
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
-                session_key=session_key,
-                active_session_only=True,
-            ),
-        )
-        filtered_session_messages = tuple(
-            message
-            for message in session_messages
-            if message.session_id == run.active_session_id
-            and message.visibility is not SessionMessageVisibility.ARCHIVED
-        )
-        transcript = build_prompt_transcript(filtered_session_messages)
-        llm_messages.extend(transcript.messages)
+        llm_messages.extend(llm_transcript_messages)
         if not llm_messages:
             raise OrchestrationValidationError(
                 "Prompt assembly requires at least one llm message.",
@@ -241,27 +251,23 @@ class PromptAssembler:
             transcript_estimated_tokens=transcript.estimated_tokens,
         )
         tool_schemas = (
-            (
-                resolved_tools.schemas
-                if resolved_tools is not None and surface_policy.include_tool_schemas
-                else ()
-            )
-            + ((skill_request.schema,) if skill_request is not None else ())
+            resolved_tools.schemas
+            if resolved_tools is not None and surface_policy.include_tool_schemas
+            else ()
         )
 
         return PromptEnvelope(
-            llm_id=llm_id,
+            llm_id=llm_selection.resolved_llm_id,
             session_key=session_key,
             active_session_id=run.active_session_id,
             messages=tuple(llm_messages),
             mode=resolved_mode,
             report=report,
-            workspace_dir=agent_home_dir,
+            workspace_dir=workspace_dir,
             context_files=context_files,
             recalled_memories=recalled_memories,
-            available_skills=available_skills,
+            skills_catalog=skills_catalog,
             tool_schemas=tool_schemas,
-            skill_request=skill_request,
             surface_policy=surface_policy,
         )
 
@@ -275,37 +281,12 @@ class PromptAssembler:
 
     @staticmethod
     def _resolve_surface_policy(mode: PromptMode) -> RunSurfacePolicy:
-        maintenance_mode = mode in {
-            PromptMode.COMPACTION,
-            PromptMode.HEARTBEAT,
-            PromptMode.MEMORY_FLUSH,
-        }
-        return RunSurfacePolicy(
-            auto_recall_memories=mode in {
-                PromptMode.SESSION_START,
-            },
-            include_memory_lookup_guidance=not maintenance_mode,
-            include_skills_catalog=not maintenance_mode,
-            include_skill_request_surface=not maintenance_mode,
-            include_tool_schemas=not maintenance_mode,
-        )
+        return resolve_run_surface_policy(mode)
 
-    def _memory_lookup_instruction(
-        self,
-        resolved_tools: ResolvedToolSet | None,
-        *,
-        include_guidance: bool,
-    ) -> str | None:
-        if not include_guidance or resolved_tools is None:
-            return None
-        if not (
-            resolved_tools.by_name("memory_search") is not None
-            and resolved_tools.by_name("memory_get") is not None
-        ):
-            return None
-        if self.memory_port is None:
-            return None
-        return self.memory_port.memory_lookup_instruction()
+    def _transcript_max_chars_for_mode(self, mode: PromptMode) -> int | None:
+        if mode is PromptMode.MEMORY_FLUSH:
+            return self.memory_flush_transcript_max_chars
+        return None
 
     def _resolve_system_prompt_budget(
         self,
@@ -330,20 +311,144 @@ class PromptAssembler:
         return effective_budget, budget_source
 
     @staticmethod
-    def _resolve_llm_id(
+    def _resolve_requested_llm_id(
         *,
-        active_instance_metadata: dict[str, object],
-        session_binding: SessionRuntimeBinding,
-        default_llm_id: str | None,
+        run_metadata: dict[str, object],
+        routing_policy,
     ) -> str:
-        for candidate in (
-            SessionRuntimeBinding.from_payload(active_instance_metadata).llm_id,
-            session_binding.llm_id,
-            (default_llm_id or "").strip() or None,
-        ):
-            if candidate:
-                return candidate
-        return ""
+        requested_llm_id = (
+            str(run_metadata.get("requested_llm_id", "")).strip() or None
+            if run_metadata.get("requested_llm_id") is not None
+            else None
+        )
+        return normalize_requested_llm_id(
+            requested_llm_id=requested_llm_id,
+            routing_policy=routing_policy,
+        )
+
+    def _resolver(self) -> LlmResolver:
+        if self.llm_resolver is not None:
+            return self.llm_resolver
+        self.llm_resolver = LlmResolver(self.llm_port)
+        return self.llm_resolver
+
+    def _materialize_artifact_refs(
+        self,
+        messages: tuple[LlmMessage, ...],
+    ) -> tuple[LlmMessage, ...]:
+        if self.artifact_service is None:
+            return messages
+        materialized: list[LlmMessage] = []
+        for message in messages:
+            if (
+                isinstance(message.content, dict)
+                and message.content.get("type") == "function_call"
+            ):
+                materialized.append(message)
+                continue
+            try:
+                blocks = normalize_content_blocks(message.content)
+            except ValueError:
+                materialized.append(message)
+                continue
+            if not any(
+                block.get("type") in {IMAGE_REF_BLOCK_TYPE, FILE_REF_BLOCK_TYPE}
+                for block in blocks
+            ):
+                materialized.append(message)
+                continue
+            materialized.append(
+                replace(
+                    message,
+                    content=self._materialize_artifact_blocks(blocks),
+                ),
+            )
+        return tuple(materialized)
+
+    def _materialize_artifact_blocks(
+        self,
+        blocks: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        materialized: list[dict[str, object]] = []
+        for block in blocks:
+            block_type = str(block.get("type") or "").strip()
+            if block_type == IMAGE_REF_BLOCK_TYPE:
+                materialized.append(self._materialize_image_ref_block(block))
+                continue
+            if block_type == FILE_REF_BLOCK_TYPE:
+                materialized.append(self._materialize_file_ref_block(block))
+                continue
+            materialized.append(dict(block))
+        return materialized
+
+    def _materialize_image_ref_block(
+        self,
+        block: dict[str, object],
+    ) -> dict[str, object]:
+        artifact_id = str(block.get("artifact_id") or "").strip()
+        mime_type = str(block.get("mime_type") or "").strip()
+        if not artifact_id or not mime_type or self.artifact_service is None:
+            return text_content_block("[missing image attachment]")
+        try:
+            resolved = self.artifact_service.resolve_variant(
+                artifact_id,
+                variant=ArtifactVariant.LLM,
+            )
+        except Exception:  # noqa: BLE001
+            return text_content_block(f"[missing image attachment:{artifact_id}]")
+        raw_bytes = resolved.path.read_bytes()
+        if len(raw_bytes) > self.llm_image_max_bytes:
+            name = block.get("name")
+            label = f":{name.strip()}" if isinstance(name, str) and name.strip() else ""
+            return text_content_block(
+                f"[image attachment omitted - exceeds llm size budget{label}]",
+            )
+        return {
+            "type": "image",
+            "mime_type": mime_type,
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+        }
+
+    def _materialize_file_ref_block(
+        self,
+        block: dict[str, object],
+    ) -> dict[str, object]:
+        artifact_id = str(block.get("artifact_id") or "").strip()
+        mime_type = str(block.get("mime_type") or "").strip()
+        if not artifact_id or not mime_type or self.artifact_service is None:
+            return text_content_block("[missing file attachment]")
+        try:
+            resolved = self.artifact_service.resolve_variant(
+                artifact_id,
+                variant=ArtifactVariant.LLM,
+            )
+        except Exception:  # noqa: BLE001
+            return text_content_block(f"[missing file attachment:{artifact_id}]")
+        raw_bytes = resolved.path.read_bytes()
+        name = block.get("name")
+        normalized_name = name.strip() if isinstance(name, str) and name.strip() else None
+        if _is_text_like_file_mime_type(mime_type):
+            decoded = raw_bytes.decode("utf-8", errors="replace")
+            if len(decoded) > self.llm_text_file_max_chars:
+                decoded = (
+                    decoded[: self.llm_text_file_max_chars].rstrip()
+                    + "\n\n[file truncated for llm budget]"
+                )
+            header = f"[file:{normalized_name}]\n" if normalized_name is not None else "[file]\n"
+            return text_content_block(f"{header}{decoded}")
+        if len(raw_bytes) > self.llm_file_max_bytes:
+            label = f":{normalized_name}" if normalized_name is not None else ""
+            return text_content_block(
+                f"[file attachment omitted - exceeds llm size budget{label}]",
+            )
+        materialized = {
+            "type": "file",
+            "mime_type": mime_type,
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+        }
+        if normalized_name is not None:
+            materialized["name"] = normalized_name
+        return materialized
 
     @staticmethod
     def _resolve_prompt_mode(
@@ -368,3 +473,41 @@ class PromptAssembler:
         if not isinstance(raw_hint, dict):
             return {}
         return dict(raw_hint)
+
+    @staticmethod
+    def _resolve_workspace_dir(
+        *,
+        session_binding: SessionRuntimeBinding,
+        profile,
+    ) -> str | None:
+        for candidate in (
+            session_binding.workspace,
+            profile.runtime_preferences.resolved_home_dir,
+        ):
+            if candidate is not None and candidate.strip():
+                return candidate.strip()
+        return None
+
+
+def _routing_input_content_from_transcript(
+    messages: tuple[LlmMessage, ...],
+) -> dict[str, object] | None:
+    blocks: list[dict[str, object]] = []
+    for message in messages:
+        try:
+            normalized_blocks = normalize_content_blocks(message.content)
+        except ValueError:
+            continue
+        blocks.extend(normalized_blocks)
+    if not blocks:
+        return None
+    return {"blocks": blocks}
+
+
+def _is_text_like_file_mime_type(mime_type: str) -> bool:
+    normalized = mime_type.strip().lower()
+    return normalized in {
+        "text/plain",
+        "text/markdown",
+        "application/json",
+    }

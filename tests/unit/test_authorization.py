@@ -91,7 +91,9 @@ class AuthorizationTestCase(unittest.TestCase):
             [
                 "allow_llm_invocation",
                 "allow_safe_tool_execution",
-                "deny_memory_lookup_tools_in_system_flows",
+                "deny_tool_access_when_required_scope_missing",
+                "deny_tool_access_when_surface_mismatch",
+                "deny_tool_access_when_surface_requires_explicit_declaration",
             ],
         )
 
@@ -520,7 +522,8 @@ class AuthorizationTestCase(unittest.TestCase):
                         "required_effect_ids": [],
                         "authorization_effect_ids": ["local_tool_access"],
                         "mutates_state": False,
-                        "tags": ["system-managed"],
+                        "tags": ["system-managed", "surface:interactive"],
+                        "surface_mode": "interactive",
                     },
                 ),
                 context=AuthorizationContext(
@@ -528,6 +531,7 @@ class AuthorizationTestCase(unittest.TestCase):
                         "interface": "http",
                         "agent_id": "assistant",
                         "prompt_mode": "heartbeat",
+                        "surface": "maintenance",
                     },
                 ),
                 required_effect_ids=("local_tool_access",),
@@ -536,3 +540,148 @@ class AuthorizationTestCase(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.code, AuthorizationDecisionCode.POLICY_DENIED)
+
+    def test_check_tool_execution_returns_policy_denied_when_required_scope_is_missing(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="read",
+                    attrs={
+                        "environment": "local",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": ["workspace_read"],
+                        "authorization_effect_ids": ["workspace_read"],
+                        "mutates_state": False,
+                        "tags": ["system-managed", "scope:workspace_bound"],
+                        "scope_required": "workspace_bound",
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={
+                        "interface": "http",
+                        "agent_id": "assistant",
+                        "available_scopes": ["memory_context"],
+                    },
+                ),
+                required_effect_ids=("workspace_read",),
+            ),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.POLICY_DENIED)
+        self.assertIn(
+            "deny_tool_access_when_required_scope_missing",
+            decision.matched_policy_ids,
+        )
+
+    def test_declared_only_surface_hides_unscoped_tools_when_auth_is_enabled(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="echo",
+                    attrs={
+                        "environment": "local",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": [],
+                        "authorization_effect_ids": [],
+                        "mutates_state": False,
+                        "tags": ["builtin"],
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={
+                        "interface": "http",
+                        "agent_id": "assistant",
+                        "prompt_mode": "memory_flush",
+                        "surface": "maintenance_write",
+                        "surface_contract": "declared_only",
+                    },
+                ),
+                required_effect_ids=(),
+            ),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.POLICY_DENIED)
+        self.assertIn(
+            "deny_tool_access_when_surface_requires_explicit_declaration",
+            decision.matched_policy_ids,
+        )
+
+    def test_declared_only_surface_allows_tool_with_matching_supported_surfaces(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        decision = container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="memory_write_daily",
+                    attrs={
+                        "environment": "local",
+                        "mode": "inline",
+                        "strategy": "async",
+                        "required_effect_ids": [],
+                        "authorization_effect_ids": [],
+                        "mutates_state": False,
+                        "tags": [
+                            "system-managed",
+                            "surface:interactive",
+                            "surface:maintenance_write",
+                        ],
+                        "surface_mode": "interactive",
+                        "supported_surfaces": ["interactive", "maintenance_write"],
+                    },
+                ),
+                context=AuthorizationContext(
+                    attrs={
+                        "interface": "http",
+                        "agent_id": "assistant",
+                        "prompt_mode": "memory_flush",
+                        "surface": "maintenance_write",
+                        "surface_contract": "declared_only",
+                    },
+                ),
+                required_effect_ids=(),
+            ),
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.code, AuthorizationDecisionCode.ALLOW)

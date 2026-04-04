@@ -1,23 +1,113 @@
 <script setup lang="ts">
-import type { MemoryCandidate, MemoryEntry } from "@/types";
+import { nextTick, ref, watch } from "vue";
 
-defineProps<{
+import type { MemoryExcerpt, MemoryFileSummary, MemorySearchHit } from "@/types";
+
+const props = defineProps<{
   open: boolean;
   loading: boolean;
-  currentThreadMemoryCandidates: MemoryCandidate[];
-  otherMemoryCandidates: MemoryCandidate[];
-  entries: MemoryEntry[];
+  longTermMemory: MemoryExcerpt | null;
+  recentFiles: MemoryFileSummary[];
+  searchResults: MemorySearchHit[];
+  selectedExcerpt: MemoryExcerpt | null;
   query: string;
   formatTime: (value: string | null) => string;
 }>();
 
 const emit = defineEmits<{
   close: [];
-  approveMemoryCandidate: [candidateId: string];
-  rejectMemoryCandidate: [candidateId: string];
+  openExcerpt: [path: string, startLine?: number | null, lineCount?: number | null];
   "update:query": [value: string];
   refresh: [];
 }>();
+
+type PendingOpenRequest = {
+  path: string;
+  startLine: number | null;
+  endLine: number | null;
+};
+
+const selectedExcerptSection = ref<HTMLElement | null>(null);
+const pendingOpenRequest = ref<PendingOpenRequest | null>(null);
+
+function normalizeLineNumber(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function createPendingOpenRequest(
+  path: string,
+  startLine?: number | null,
+  lineCount?: number | null,
+): PendingOpenRequest {
+  const normalizedStartLine = normalizeLineNumber(startLine);
+  const normalizedLineCount = normalizeLineNumber(lineCount);
+  return {
+    path,
+    startLine: normalizedStartLine,
+    endLine:
+      normalizedStartLine != null && normalizedLineCount != null
+        ? normalizedStartLine + Math.max(normalizedLineCount, 1) - 1
+        : null,
+  };
+}
+
+function handleOpenExcerpt(
+  path: string,
+  startLine?: number | null,
+  lineCount?: number | null,
+) {
+  pendingOpenRequest.value = createPendingOpenRequest(path, startLine, lineCount);
+  emit("openExcerpt", path, startLine ?? null, lineCount ?? null);
+}
+
+function isActivePath(path: string) {
+  return props.selectedExcerpt?.path === path;
+}
+
+function isActiveSearchHit(hit: MemorySearchHit) {
+  const selectedExcerpt = props.selectedExcerpt;
+  if (!selectedExcerpt || selectedExcerpt.path !== hit.path) {
+    return false;
+  }
+  return !(
+    selectedExcerpt.end_line < hit.start_line ||
+    selectedExcerpt.start_line > hit.end_line
+  );
+}
+
+function actionLabel(active: boolean) {
+  return active ? "Opened" : "Open";
+}
+
+watch(
+  () => [
+    props.selectedExcerpt?.path ?? null,
+    props.selectedExcerpt?.start_line ?? null,
+    props.selectedExcerpt?.end_line ?? null,
+  ],
+  async ([path, startLine, endLine]) => {
+    const pendingRequest = pendingOpenRequest.value;
+    if (!pendingRequest || !path || pendingRequest.path !== path) {
+      return;
+    }
+    if (
+      pendingRequest.startLine != null &&
+      pendingRequest.startLine !== startLine
+    ) {
+      return;
+    }
+    if (pendingRequest.endLine != null && pendingRequest.endLine !== endLine) {
+      return;
+    }
+    pendingOpenRequest.value = null;
+    await nextTick();
+    selectedExcerptSection.value?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  },
+  { flush: "post" },
+);
 </script>
 
 <template>
@@ -26,7 +116,7 @@ const emit = defineEmits<{
       <div class="memory-panel__header">
         <div>
           <p class="eyebrow">memory</p>
-          <h3>Memory log</h3>
+          <h3>Memory files</h3>
         </div>
         <button
           class="ghost-button ghost-button--compact panel-tool-button panel-tool-button--icon memory-panel__close"
@@ -45,7 +135,7 @@ const emit = defineEmits<{
             :value="query"
             class="memory-panel__search"
             type="search"
-            placeholder="Search memory log"
+            placeholder="Search memory files"
             @input="
               $emit(
                 'update:query',
@@ -66,132 +156,129 @@ const emit = defineEmits<{
       </div>
 
       <div class="memory-panel__section">
-        <p class="eyebrow">review queue</p>
-        <div
-          v-if="
-            currentThreadMemoryCandidates.length === 0 &&
-            otherMemoryCandidates.length === 0
-          "
-          class="event-feed__empty"
-        >
-          Captured memories will appear here so you can keep or forget them later.
+        <p class="eyebrow">long-term memory</p>
+        <div v-if="!longTermMemory" class="event-feed__empty">
+          No root `MEMORY.md` file is available for this agent yet.
         </div>
-        <div v-else class="memory-inbox">
-          <section
-            v-if="currentThreadMemoryCandidates.length > 0"
-            class="memory-inbox__section"
-          >
-            <p class="memory-inbox__label">Current thread</p>
-            <article
-              v-for="candidate in currentThreadMemoryCandidates"
-              :key="candidate.id"
-              class="memory-card"
-            >
-              <div class="memory-card__copy">
-                <strong>{{ candidate.title }}</strong>
-                <p>
-                  {{
-                    candidate.summary ||
-                    "A captured memory from this thread is ready for review."
-                  }}
-                </p>
-                <div class="memory-card__meta">
-                  <span v-if="candidate.tags.length > 0">
-                    {{ candidate.tags.join(" · ") }}
-                  </span>
-                  <time>{{ formatTime(candidate.created_at) }}</time>
-                </div>
-              </div>
-              <div class="memory-card__actions">
-                <button
-                  class="ghost-button ghost-button--compact memory-card__action memory-card__action--approve"
-                  type="button"
-                  @click="$emit('approveMemoryCandidate', candidate.id)"
-                >
-                  <span class="button-glyph button-glyph--save" aria-hidden="true"></span>
-                  <span>Keep</span>
-                </button>
-                <button
-                  class="ghost-button ghost-button--compact memory-card__action memory-card__action--reject"
-                  type="button"
-                  @click="$emit('rejectMemoryCandidate', candidate.id)"
-                >
-                  <span class="button-glyph button-glyph--cancel" aria-hidden="true"></span>
-                  <span>Forget</span>
-                </button>
-              </div>
-            </article>
-          </section>
+        <article
+          v-else
+          class="memory-log__entry"
+          :class="{ 'memory-log__entry--active': isActivePath(longTermMemory.path) }"
+        >
+          <div class="memory-log__head">
+            <strong>{{ longTermMemory.path }}</strong>
+            <div class="memory-log__head-actions">
+              <button
+                class="ghost-button ghost-button--compact"
+                type="button"
+                :aria-pressed="isActivePath(longTermMemory.path)"
+                @click="handleOpenExcerpt(longTermMemory.path)"
+              >
+                {{ actionLabel(isActivePath(longTermMemory.path)) }}
+              </button>
+            </div>
+          </div>
+          <p>{{ longTermMemory.text.slice(0, 220) }}<span v-if="longTermMemory.text.length > 220">...</span></p>
+        </article>
+      </div>
 
-          <section
-            v-if="otherMemoryCandidates.length > 0"
-            class="memory-inbox__section"
+      <div class="memory-panel__section">
+        <p class="eyebrow">recent memory</p>
+        <div v-if="loading" class="event-feed__empty">
+          Loading memory...
+        </div>
+        <div v-else-if="recentFiles.length === 0" class="event-feed__empty">
+          Recent daily and archived memory files will appear here.
+        </div>
+        <div v-else class="memory-log">
+          <article
+            v-for="item in recentFiles"
+            :key="item.path"
+            class="memory-log__entry"
+            :class="{ 'memory-log__entry--active': isActivePath(item.path) }"
           >
-            <p class="memory-inbox__label">Other threads</p>
-            <article
-              v-for="candidate in otherMemoryCandidates"
-              :key="candidate.id"
-              class="memory-card"
-            >
-              <div class="memory-card__copy">
-                <strong>{{ candidate.title }}</strong>
-                <p>
-                  {{
-                    candidate.summary ||
-                    "A captured memory from another thread is ready for review."
-                  }}
-                </p>
-                <div class="memory-card__meta">
-                  <span v-if="candidate.session_key">{{ candidate.session_key }}</span>
-                  <span v-if="candidate.tags.length > 0">
-                    {{ candidate.tags.join(" · ") }}
-                  </span>
-                  <time>{{ formatTime(candidate.created_at) }}</time>
-                </div>
-              </div>
-              <div class="memory-card__actions">
+            <div class="memory-log__head">
+              <strong>{{ item.title }}</strong>
+              <div class="memory-log__head-actions">
+                <time>{{ formatTime(item.updated_at) }}</time>
                 <button
-                  class="ghost-button ghost-button--compact memory-card__action memory-card__action--approve"
+                  class="ghost-button ghost-button--compact"
                   type="button"
-                  @click="$emit('approveMemoryCandidate', candidate.id)"
+                  :aria-pressed="isActivePath(item.path)"
+                  @click="handleOpenExcerpt(item.path)"
                 >
-                  <span class="button-glyph button-glyph--save" aria-hidden="true"></span>
-                  <span>Keep</span>
-                </button>
-                <button
-                  class="ghost-button ghost-button--compact memory-card__action memory-card__action--reject"
-                  type="button"
-                  @click="$emit('rejectMemoryCandidate', candidate.id)"
-                >
-                  <span class="button-glyph button-glyph--cancel" aria-hidden="true"></span>
-                  <span>Forget</span>
+                  {{ actionLabel(isActivePath(item.path)) }}
                 </button>
               </div>
-            </article>
-          </section>
+            </div>
+            <p>{{ item.preview || item.path }}</p>
+            <div class="memory-log__meta">
+              {{ item.path }} · {{ item.kind }}
+            </div>
+          </article>
         </div>
       </div>
 
       <div class="memory-panel__section">
-        <p class="eyebrow">captured memory</p>
-        <div v-if="loading" class="event-feed__empty">
-          Loading memory...
+        <p class="eyebrow">search results</p>
+        <div v-if="!query.trim()" class="event-feed__empty">
+          Search across memory files to inspect specific notes and citations.
         </div>
-        <div v-else-if="entries.length === 0" class="event-feed__empty">
-          Captured memory entries will appear here.
+        <div v-else-if="searchResults.length === 0" class="event-feed__empty">
+          No memory files matched this query.
         </div>
         <div v-else class="memory-log">
-          <article v-for="entry in entries" :key="entry.id" class="memory-log__entry">
+          <article
+            v-for="hit in searchResults"
+            :key="`${hit.path}:${hit.start_line}:${hit.end_line}`"
+            class="memory-log__entry"
+            :class="{ 'memory-log__entry--active': isActiveSearchHit(hit) }"
+          >
             <div class="memory-log__head">
-              <strong>{{ entry.title }}</strong>
-              <time>{{ formatTime(entry.updated_at) }}</time>
+              <strong>{{ hit.path }}</strong>
+              <div class="memory-log__head-actions">
+                <button
+                  class="ghost-button ghost-button--compact"
+                  type="button"
+                  :aria-pressed="isActiveSearchHit(hit)"
+                  @click="
+                    handleOpenExcerpt(
+                      hit.path,
+                      hit.start_line,
+                      Math.max(hit.end_line - hit.start_line + 1, 1),
+                    )
+                  "
+                >
+                  {{ actionLabel(isActiveSearchHit(hit)) }}
+                </button>
+              </div>
             </div>
-            <p>{{ entry.summary || entry.content }}</p>
-            <div v-if="entry.tags.length > 0" class="memory-log__meta">
-              {{ entry.tags.join(" · ") }}
+            <p>{{ hit.snippet }}</p>
+            <div class="memory-log__meta">
+              L{{ hit.start_line }}<span v-if="hit.end_line > hit.start_line">-L{{ hit.end_line }}</span> · {{ hit.kind }}
             </div>
           </article>
         </div>
+      </div>
+
+      <div class="memory-panel__section">
+        <p class="eyebrow">selected excerpt</p>
+        <div v-if="!selectedExcerpt" class="event-feed__empty">
+          Pick a file or search hit to inspect a memory excerpt.
+        </div>
+        <article
+          v-else
+          ref="selectedExcerptSection"
+          class="memory-log__entry memory-log__entry--active memory-log__entry--selected"
+        >
+          <div class="memory-log__head">
+            <strong>{{ selectedExcerpt.path }}</strong>
+            <div class="memory-log__head-actions">
+              <span>L{{ selectedExcerpt.start_line }}<span v-if="selectedExcerpt.end_line > selectedExcerpt.start_line">-L{{ selectedExcerpt.end_line }}</span></span>
+            </div>
+          </div>
+          <pre class="memory-panel__excerpt">{{ selectedExcerpt.text }}</pre>
+        </article>
       </div>
     </div>
   </aside>

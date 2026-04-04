@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from crxzipple.modules.llm.interfaces.dto import LlmMessageDTO, ToolSchemaDTO
 from crxzipple.modules.orchestration.application import PromptPreview
@@ -16,7 +17,7 @@ from crxzipple.modules.orchestration.domain import (
 @dataclass(frozen=True, slots=True)
 class InboundInstructionDTO:
     source: str
-    content: str | None
+    content: Any | None
     metadata: dict[str, object]
 
     @classmethod
@@ -71,7 +72,7 @@ class OrchestrationRunDTO:
     id: str
     status: str
     stage: str
-    bulk_key: str | None
+    session_key: str | None
     active_session_id: str | None
     agent_id: str | None
     lane_key: str | None
@@ -99,7 +100,7 @@ class OrchestrationRunDTO:
             id=run.id,
             status=run.status.value,
             stage=run.stage.value,
-            bulk_key=run.bulk_key,
+            session_key=run.session_key,
             active_session_id=run.active_session_id,
             agent_id=run.agent_id,
             lane_key=run.lane_key,

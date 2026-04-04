@@ -1,0 +1,9 @@
+kind: openapi
+namespace: itick_market
+description: iTick market data APIs for stock and crypto quotes.
+spec: openapi.json
+timeout_seconds: 10
+default_effect_ids:
+  - market_data
+credentials:
+  TokenHeader: env:ITICK_API_TOKEN

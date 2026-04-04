@@ -1,0 +1,200 @@
+kind: local_package
+namespace: workspace
+local_tools:
+  - id: workspace_list
+    name: Workspace List
+    description: List files and directories inside the current bound workspace.
+    provider_name: local_system
+    entrypoint: tools.workspace.local:workspace_list
+    tool_kind: function
+    parameters:
+      - name: path
+        data_type: string
+        description: Optional relative file or directory path to inspect. Defaults to the workspace root.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Optional maximum number of directory entries to return.
+        required: false
+    tags:
+      - filesystem
+      - workspace
+      - builtin
+      - system-managed
+      - scope:workspace_bound
+      - surface:interactive
+    required_effect_ids:
+      - workspace_read
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: workspace_list
+  - id: workspace_search
+    name: Workspace Search
+    description: Search UTF-8 text files in the current bound workspace for matching text.
+    provider_name: local_system
+    entrypoint: tools.workspace.local:workspace_search
+    tool_kind: function
+    parameters:
+      - name: query
+        data_type: string
+        description: Text to search for inside workspace files.
+        required: true
+      - name: limit
+        data_type: integer
+        description: Optional maximum number of matches to return.
+        required: false
+      - name: path
+        data_type: string
+        description: Optional relative file or directory path to restrict the search scope.
+        required: false
+    tags:
+      - filesystem
+      - workspace
+      - builtin
+      - system-managed
+      - scope:workspace_bound
+      - surface:interactive
+    required_effect_ids:
+      - workspace_read
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: workspace_search
+  - id: read
+    name: Workspace Read
+    description: Read a UTF-8 text file from the current bound workspace using a relative path.
+    provider_name: local_system
+    entrypoint: tools.workspace.local:read
+    tool_kind: function
+    parameters:
+      - name: path
+        data_type: string
+        description: Relative path inside the current workspace.
+        required: true
+      - name: offset
+        data_type: integer
+        description: Optional 1-based starting line number.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Optional maximum number of lines to include.
+        required: false
+    tags:
+      - filesystem
+      - workspace
+      - builtin
+      - system-managed
+      - scope:workspace_bound
+      - surface:interactive
+    required_effect_ids:
+      - workspace_read
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: read
+  - id: write
+    name: Workspace Write
+    description: Write a UTF-8 text file inside the current bound workspace using a relative path.
+    provider_name: local_system
+    entrypoint: tools.workspace.local:write
+    tool_kind: function
+    parameters:
+      - name: path
+        data_type: string
+        description: Relative path inside the current workspace.
+        required: true
+      - name: content
+        data_type: string
+        description: Full UTF-8 text content to write to the target file.
+        required: true
+    tags:
+      - filesystem
+      - workspace
+      - builtin
+      - system-managed
+      - scope:workspace_bound
+      - surface:interactive
+    required_effect_ids:
+      - workspace_write
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: write
+  - id: edit
+    name: Workspace Edit
+    description: Replace one exact text match inside a UTF-8 text file in the current bound workspace.
+    provider_name: local_system
+    entrypoint: tools.workspace.local:edit
+    tool_kind: function
+    parameters:
+      - name: path
+        data_type: string
+        description: Relative path inside the current workspace.
+        required: true
+      - name: oldText
+        data_type: string
+        description: Exact existing text to replace. Must match exactly once.
+        required: true
+      - name: newText
+        data_type: string
+        description: Replacement text. May be empty to delete the matched text.
+        required: true
+    tags:
+      - filesystem
+      - workspace
+      - builtin
+      - system-managed
+      - scope:workspace_bound
+      - surface:interactive
+    required_effect_ids:
+      - workspace_write
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: edit
+  - id: apply_patch
+    name: Workspace Apply Patch
+    description: Apply a structured patch to UTF-8 text files in the current bound workspace.
+    provider_name: local_system
+    entrypoint: tools.workspace.local:apply_patch
+    tool_kind: function
+    parameters:
+      - name: input
+        data_type: string
+        description: Patch text in *** Begin Patch / *** End Patch format.
+        required: true
+    tags:
+      - filesystem
+      - workspace
+      - builtin
+      - system-managed
+      - scope:workspace_bound
+      - surface:interactive
+    required_effect_ids:
+      - workspace_write
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: apply_patch

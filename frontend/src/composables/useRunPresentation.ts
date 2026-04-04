@@ -34,8 +34,6 @@ function formatCompactionBasis(basis: string) {
   switch (basis) {
     case "prompt_budget":
       return "Auto compaction · prompt budget";
-    case "transcript_budget":
-      return "Auto compaction · transcript budget";
     case "manual":
       return "Manual compaction";
     default:
@@ -61,21 +59,11 @@ function buildCompactionDetails(details: Record<string, unknown>) {
   const items: string[] = [];
   const estimatedTotalTokens = coerceInt(details.estimated_total_tokens);
   const promptThresholdTokens = coerceInt(details.prompt_threshold_tokens);
-  const transcriptChars = coerceInt(details.transcript_chars);
-  const transcriptCharThreshold = coerceInt(details.transcript_char_threshold);
-  const transcriptTokens = coerceInt(details.transcript_estimated_tokens);
-  const transcriptTokenThreshold = coerceInt(details.transcript_token_threshold);
 
   if (estimatedTotalTokens !== null && promptThresholdTokens !== null) {
     items.push(
       `Prompt estimate ${estimatedTotalTokens} / ${promptThresholdTokens} tokens`,
     );
-  }
-  if (transcriptChars !== null && transcriptCharThreshold !== null) {
-    items.push(`Transcript ${transcriptChars} / ${transcriptCharThreshold} chars`);
-  }
-  if (transcriptTokens !== null && transcriptTokenThreshold !== null) {
-    items.push(`Transcript ${transcriptTokens} / ${transcriptTokenThreshold} tokens`);
   }
   return items;
 }
@@ -109,17 +97,20 @@ function readCompactionRequestSummary(run: TurnRun | null): CompactionRequestSum
     record.details && typeof record.details === "object"
       ? buildCompactionDetails(record.details as Record<string, unknown>)
       : [];
-  const rawResult = run.metadata.compaction_result;
-  let summaryFull: string | null = null;
-  if (rawResult && typeof rawResult === "object") {
-    const result = rawResult as Record<string, unknown>;
-    const archivedMessageCount = coerceInt(result.archived_message_count);
-    if (archivedMessageCount !== null) {
-      details.unshift(`Archived ${archivedMessageCount} messages`);
-    }
-    if (typeof result.summary === "string" && result.summary.trim()) {
-      summaryFull = result.summary.trim();
-    }
+  const resultPayload =
+    run.result_payload && typeof run.result_payload === "object"
+      ? (run.result_payload as Record<string, unknown>)
+      : null;
+  let summaryFull =
+    resultPayload && typeof resultPayload.output_text === "string" &&
+      resultPayload.output_text.trim()
+      ? resultPayload.output_text.trim()
+      : null;
+  const archivedMessageCount = resultPayload
+    ? coerceInt(resultPayload.archived_message_count)
+    : null;
+  if (archivedMessageCount !== null) {
+    details.unshift(`Archived ${archivedMessageCount} messages`);
   }
   return {
     basis,

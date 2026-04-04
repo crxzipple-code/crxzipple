@@ -33,7 +33,7 @@ class SkeletonTestCase(unittest.TestCase):
             ("tool", "session", "llm", "agent", "orchestration", "dispatch"),
         )
 
-    def test_tool_service_persists_entity_and_publishes_event(self) -> None:
+    def test_tool_service_registers_runtime_tool_and_publishes_event(self) -> None:
         tool = self.container.tool_service.register(
             RegisterToolInput(
                 id="search",
@@ -43,11 +43,7 @@ class SkeletonTestCase(unittest.TestCase):
         )
 
         self.assertEqual(tool.id, "search")
-
-        with self.container.uow_factory() as uow:
-            persisted = uow.tools.get("search")
-
-        self.assertEqual(persisted, tool)
+        self.assertEqual(self.container.tool_service.get_tool("search"), tool)
         self.assertEqual(len(self.container.event_bus.published_events), 1)
         self.assertEqual(
             self.container.event_bus.published_events[0].name,

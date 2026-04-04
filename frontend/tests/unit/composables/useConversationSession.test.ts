@@ -128,18 +128,18 @@ describe("useConversationSession", () => {
       }),
     );
 
-    await session.selectConversation(conversation.bulk_key);
+    await session.selectConversation(conversation.session_key);
 
     expect(bridge.closeTurnStream).toHaveBeenCalledTimes(1);
     expect(bridge.clearTurnEvents).toHaveBeenCalledTimes(1);
-    expect(getConversationMock).toHaveBeenCalledWith(conversation.bulk_key);
+    expect(getConversationMock).toHaveBeenCalledWith(conversation.session_key);
     expect(getConversationMessagesMock).toHaveBeenCalledWith(
-      conversation.bulk_key,
+      conversation.session_key,
       { includeArchived: true },
     );
     expect(session.activeConversation.value).toEqual(conversation);
     expect(session.messages.value).toEqual([buildSessionMessage()]);
-    expect(session.activeBulkKey.value).toBe(conversation.bulk_key);
+    expect(session.activeSessionKey.value).toBe(conversation.session_key);
     expect(selectedAgentId.value).toBe("assistant");
     expect(selectedLlmId.value).toBe("openai.gpt-5.4");
     expect(refreshMemoryPanel).toHaveBeenCalledWith("assistant");
@@ -148,6 +148,62 @@ describe("useConversationSession", () => {
       backgroundMaintenance: true,
     });
     expect(closeDeckIfCompact).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces run failure details after hydrating a failed turn", async () => {
+    const defaultAgentId = ref("crxzipple");
+    const selectedAgentId = ref<string | null>(null);
+    const selectedLlmId = ref<string | null>(null);
+    const refreshMemoryPanel = vi.fn().mockResolvedValue(undefined);
+    const refreshAgentHomeIfSafe = vi.fn().mockResolvedValue(undefined);
+    const closeDeckIfCompact = vi.fn();
+
+    const session = useConversationSession({
+      defaultAgentId,
+      selectedAgentId,
+      selectedLlmId,
+      refreshMemoryPanel,
+      refreshAgentHomeIfSafe,
+      closeDeckIfCompact,
+    });
+    const bridge = buildBridge();
+    session.bindStream(bridge);
+
+    const conversation = buildConversationSummary({
+      display_run_id: "failed-run",
+      latest_run_id: "failed-run",
+      latest_run_status: "failed",
+    });
+
+    getConversationMock.mockResolvedValue(conversation);
+    getConversationMessagesMock.mockResolvedValue([buildSessionMessage()]);
+    getTurnMock.mockResolvedValue(
+      buildTurnResponse({
+        run: {
+          id: "failed-run",
+          status: "failed",
+          stage: "failed",
+          error: {
+            message:
+              "LLM profile 'openai_codex.gpt-5.4' does not support vision input.",
+            code: "engine_failed",
+            details: {},
+          },
+          metadata: {
+            requested_llm_id: "openai_codex.gpt-5.4",
+          },
+        },
+      }),
+    );
+
+    await session.selectConversation(conversation.session_key);
+
+    expect(session.lastError.value).toContain(
+      "does not support vision input",
+    );
+    expect(session.lastError.value).toContain(
+      "Switch openai_codex.gpt-5.4 to Auto or another vision-capable model.",
+    );
   });
 
   it("creates a fresh conversation and resets session state", async () => {
@@ -169,7 +225,7 @@ describe("useConversationSession", () => {
     const bridge = buildBridge();
     session.bindStream(bridge);
 
-    session.activeBulkKey.value = "conversation:main:crxzipple:default:deck-old";
+    session.activeSessionKey.value = "agent:assistant:deck-old";
     session.activeConversation.value = buildConversationSummary();
     session.messages.value = [buildSessionMessage()];
     session.activeTurn.value = buildTurnResponse();
@@ -179,7 +235,7 @@ describe("useConversationSession", () => {
 
     expect(bridge.closeTurnStream).toHaveBeenCalledTimes(1);
     expect(bridge.clearTurnEvents).toHaveBeenCalledTimes(1);
-    expect(session.activeBulkKey.value).toBeNull();
+    expect(session.activeSessionKey.value).toBeNull();
     expect(session.activeConversation.value).toBeNull();
     expect(session.messages.value).toEqual([]);
     expect(session.activeTurn.value).toBeNull();
@@ -213,13 +269,13 @@ describe("useConversationSession", () => {
     const createdPayload = buildTurnResponse({
       run: {
         id: "run-submitted",
-        bulk_key: "conversation:main:crxzipple:default:deck-test",
+        session_key: "agent:assistant:deck-test",
       },
     });
     createTurnMock.mockResolvedValue(createdPayload);
     listConversationsMock.mockResolvedValue([
       buildConversationSummary({
-        bulk_key: "conversation:main:crxzipple:default:deck-test",
+        session_key: "agent:assistant:deck-test",
       }),
     ]);
 
@@ -228,7 +284,9 @@ describe("useConversationSession", () => {
     expect(submitted).toBe(true);
     expect(createTurnMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: "hello world",
+        content: {
+          blocks: [{ type: "text", text: "hello world" }],
+        },
         source: "web",
         agent_id: "assistant",
         llm_id: "openai.gpt-5.4-mini",
@@ -241,13 +299,99 @@ describe("useConversationSession", () => {
     expect(session.messages.value).toHaveLength(1);
     expect(session.messages.value[0]?.metadata.optimistic).toBe(true);
     expect(session.messages.value[0]?.content).toBe("hello world");
+    expect(session.messages.value[0]?.content_payload).toEqual({
+      blocks: [{ type: "text", text: "hello world" }],
+    });
     expect(session.activeTurn.value).toEqual(createdPayload);
-    expect(session.activeBulkKey.value).toBe("conversation:main:crxzipple:default:deck-test");
+    expect(session.activeSessionKey.value).toBe("agent:assistant:deck-test");
     expect(session.busy.value).toBe(true);
     expect(bridge.pushEvent).toHaveBeenCalledWith("snapshot", createdPayload);
     expect(bridge.syncPendingApprovalFromTurn).toHaveBeenCalledWith(createdPayload);
     expect(listConversationsMock).toHaveBeenCalledTimes(1);
     expect(bridge.watchTurn).toHaveBeenCalledWith("run-submitted");
+  });
+
+  it("submits attachments as structured blocks", async () => {
+    const defaultAgentId = ref("crxzipple");
+    const selectedAgentId = ref<string | null>("assistant");
+    const selectedLlmId = ref<string | null>("auto");
+    const refreshMemoryPanel = vi.fn().mockResolvedValue(undefined);
+    const refreshAgentHomeIfSafe = vi.fn().mockResolvedValue(undefined);
+    const closeDeckIfCompact = vi.fn();
+
+    const session = useConversationSession({
+      defaultAgentId,
+      selectedAgentId,
+      selectedLlmId,
+      refreshMemoryPanel,
+      refreshAgentHomeIfSafe,
+      closeDeckIfCompact,
+    });
+    const bridge = buildBridge();
+    session.bindStream(bridge);
+
+    const createdPayload = buildTurnResponse({
+      run: {
+        id: "run-with-attachment",
+        session_key: "agent:assistant:deck-test",
+      },
+    });
+    createTurnMock.mockResolvedValue(createdPayload);
+    listConversationsMock.mockResolvedValue([
+      buildConversationSummary({
+        session_key: "agent:assistant:deck-test",
+      }),
+    ]);
+
+    const submitted = await session.submitTurn("look at this", [
+      {
+        id: "attachment-1",
+        name: "ticket.png",
+        mimeType: "image/png",
+        size: 12,
+        previewUrl: "/artifacts/img_123/preview",
+        block: {
+          type: "image_ref",
+          artifact_id: "img_123",
+          mime_type: "image/png",
+          name: "ticket.png",
+          preview_url: "/artifacts/img_123/preview",
+          original_url: "/artifacts/img_123/original",
+        },
+      },
+    ]);
+
+    expect(submitted).toBe(true);
+    expect(createTurnMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: {
+          blocks: [
+            { type: "text", text: "look at this" },
+            {
+              type: "image_ref",
+              artifact_id: "img_123",
+              mime_type: "image/png",
+              name: "ticket.png",
+              preview_url: "/artifacts/img_123/preview",
+              original_url: "/artifacts/img_123/original",
+            },
+          ],
+        },
+      }),
+    );
+    expect(session.messages.value[0]?.content_payload).toEqual({
+      blocks: [
+        { type: "text", text: "look at this" },
+        {
+          type: "image_ref",
+          artifact_id: "img_123",
+          mime_type: "image/png",
+          name: "ticket.png",
+          preview_url: "/artifacts/img_123/preview",
+          original_url: "/artifacts/img_123/original",
+        },
+      ],
+    });
   });
 
   it("resolves an active approval and syncs the returned turn state", async () => {

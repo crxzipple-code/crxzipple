@@ -18,6 +18,7 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
     OpenApiSecurityScheme,
 )
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
+from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 
 
 class OpenApiRemoteInvoker:
@@ -110,8 +111,10 @@ class OpenApiRemoteInvoker:
                 f"Remote OpenAPI tool '{operation.tool_id}' could not reach {url}: {exc}",
             ) from exc
 
-        return ToolRunResult(
-            content=_decode_response_body(payload, content_type),
+        decoded_body = _decode_response_body(payload, content_type)
+        return ToolRunResult.text(
+            describe_content_for_text_fallback(decoded_body),
+            details=decoded_body,
             metadata={
                 "tool": operation.runtime_key,
                 "environment": "remote",

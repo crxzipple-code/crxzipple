@@ -14,6 +14,7 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     build_openai_tool_name_aliases,
     build_tool_call_intents,
     default_base_url,
+    ensure_image_input_supported,
     ensure_json_response,
     join_url,
     openai_chat_messages,
@@ -30,6 +31,7 @@ class OpenAIChatCompatibleAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
+        ensure_image_input_supported(profile, request.messages)
         tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
         alias_to_original = {
             alias: original

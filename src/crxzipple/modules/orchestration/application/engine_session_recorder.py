@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 from crxzipple.modules.llm.domain import ToolCallIntent
-from crxzipple.modules.orchestration.application.skill_requests import (
-    SkillRequestSurface,
-    is_skill_request_tool_name,
-)
-from crxzipple.modules.orchestration.application.skills_context import AvailableSkill
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationValidationError,
@@ -19,6 +13,10 @@ from crxzipple.modules.session.application import (
 )
 from crxzipple.modules.session.domain import SessionMessageKind
 from crxzipple.modules.tool.domain import ToolRun
+from crxzipple.shared.content_blocks import (
+    normalize_content_blocks,
+    text_content_block,
+)
 
 
 @dataclass(slots=True)
@@ -39,17 +37,15 @@ class OrchestrationSessionRecorder:
         )
         if existing is not None and existing.role == "user":
             return existing.id
-        if (
-            run.inbound_instruction.content is None
-            or not run.inbound_instruction.content.strip()
-        ):
+        inbound_blocks = normalize_content_blocks(run.inbound_instruction.content)
+        if not inbound_blocks:
             return None
         message = self.session_service.append_message(
             AppendSessionMessageInput(
                 session_key=session_key,
                 session_id=run.active_session_id,
                 role="user",
-                content=run.inbound_instruction.content,
+                content_payload={"blocks": inbound_blocks},
                 source_kind="orchestration_run",
                 source_id=run.id,
                 metadata={
@@ -75,6 +71,7 @@ class OrchestrationSessionRecorder:
             return ()
         content_payload: dict[str, object] = {}
         if response_text is not None:
+            content_payload["blocks"] = [text_content_block(response_text)]
             content_payload["text"] = response_text
         if structured_output is not None:
             content_payload["structured_output"] = structured_output
@@ -87,7 +84,6 @@ class OrchestrationSessionRecorder:
                 session_key=session_key,
                 session_id=active_session_id,
                 role="assistant",
-                content=response_text,
                 content_payload=content_payload,
                 source_kind="llm_invocation",
                 source_id=invocation_id,
@@ -134,9 +130,6 @@ class OrchestrationSessionRecorder:
                     metadata={
                         "tool_call_id": tool_call.id,
                         "tool_name": tool_call.name,
-                        "synthetic_skill_request": (
-                            is_skill_request_tool_name(tool_call.name)
-                        ),
                     },
                 ),
             )
@@ -153,73 +146,33 @@ class OrchestrationSessionRecorder:
         source_kind: str,
         source_id: str,
     ) -> str:
+        tool_result = tool_run.result
         payload: dict[str, object] = {
             "tool_name": tool_call.name,
             "tool_call_id": tool_call.id,
             "tool_run_id": tool_run.id,
             "status": tool_run.status.value,
         }
-        content: str | None = None
-        if tool_run.output_payload is not None:
-            payload["output"] = tool_run.output_payload
-            content = self._stringify_payload(tool_run.output_payload)
+        if tool_result is not None and tool_result.blocks:
+            content_blocks = [dict(block) for block in tool_result.blocks]
+            payload["content"] = content_blocks
+        if tool_result is not None and tool_result.details is not None:
+            payload["details"] = tool_result.details
         if tool_run.error is not None:
             payload["error"] = tool_run.error.to_storage()
-            content = self._stringify_payload(
-                {
-                    "message": tool_run.error.message,
-                    "code": tool_run.error.code,
-                    "details": dict(tool_run.error.details),
-                },
-            )
+            payload["content"] = [text_content_block(tool_run.error.message)]
         message = self.session_service.append_message(
             AppendSessionMessageInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
                 kind=SessionMessageKind.TOOL_RESULT,
-                content=content,
                 content_payload=payload,
                 source_kind=source_kind,
                 source_id=source_id,
                 metadata={
                     "tool_call_id": tool_call.id,
                     "tool_name": tool_call.name,
-                },
-            ),
-        )
-        return message.id
-
-    def append_skill_result_message(
-        self,
-        *,
-        session_key: str,
-        active_session_id: str,
-        tool_call_id: str,
-        skill: AvailableSkill,
-        skill_request: SkillRequestSurface,
-    ) -> str:
-        content = skill_request.render_tool_result(skill)
-        message = self.session_service.append_message(
-            AppendSessionMessageInput(
-                session_key=session_key,
-                session_id=active_session_id,
-                role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
-                content=content,
-                content_payload={
-                    "tool_name": skill_request.tool_name,
-                    "tool_call_id": tool_call_id,
-                    "skill_name": skill.name,
-                    "skill_path": skill.path,
-                    "skill_source": skill.source,
-                },
-                source_kind="skill_request",
-                source_id=skill.name,
-                metadata={
-                    "tool_call_id": tool_call_id,
-                    "tool_name": skill_request.tool_name,
-                    "skill_name": skill.name,
                 },
             ),
         )
@@ -272,12 +225,6 @@ class OrchestrationSessionRecorder:
             )
             message_ids.append(message_id)
         return tuple(message_ids)
-
-    @staticmethod
-    def _stringify_payload(payload: object) -> str:
-        if isinstance(payload, str):
-            return payload
-        return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
     @staticmethod
     def _pending_background_tool_mapping(

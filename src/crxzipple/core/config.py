@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -18,6 +19,23 @@ DEFAULT_AUTHORIZATION_POLICY_DIR = PROJECT_ROOT / "config" / "authorization_poli
 DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH = (
     PROJECT_ROOT / ".crxzipple" / "authorization_runtime.yaml"
 )
+DEFAULT_WORKSPACE_TOOL_DIR = PROJECT_ROOT / ".crxzipple" / "tools"
+DEFAULT_BUNDLED_TOOL_DIR = PROJECT_ROOT / "tools"
+DEFAULT_BROWSER_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "browser"
+DEFAULT_ARTIFACT_STORE_DIR = PROJECT_ROOT / ".crxzipple" / "artifacts"
+DEFAULT_BROWSER_DEFAULT_PROFILE_NAME = "crxzipple"
+DEFAULT_BROWSER_USER_PROFILE_NAME = "user"
+DEFAULT_BROWSER_USER_CDP_URL = "http://127.0.0.1:9222"
+DEFAULT_BROWSER_PROFILE_COLOR = "#2563EB"
+_ALLOWED_BROWSER_PROFILE_RUNTIME_MODES = {
+    "host",
+    "attached",
+    "proxy",
+    "sandbox",
+    "remote-cdp",
+}
+_ALLOWED_BROWSER_PROFILE_TRANSPORTS = {"cdp", "proxy"}
+_ALLOWED_BROWSER_PROFILE_DRIVERS = {"managed", "existing-session"}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -27,12 +45,426 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _load_memory_retrieval_backend() -> str:
+    raw = os.getenv("APP_MEMORY_RETRIEVAL_BACKEND", "keyword").strip().lower()
+    if not raw:
+        return "keyword"
+    if raw in {"keyword", "hybrid", "vector"}:
+        return raw
+    raise ValueError(
+        "APP_MEMORY_RETRIEVAL_BACKEND must be one of: keyword, hybrid, vector.",
+    )
+
+
+def _load_memory_vector_provider() -> str:
+    raw = os.getenv("APP_MEMORY_VECTOR_PROVIDER", "local").strip().lower()
+    if not raw:
+        return "local"
+    if raw in {"local", "openai_compatible"}:
+        return raw
+    raise ValueError(
+        "APP_MEMORY_VECTOR_PROVIDER must be one of: local, openai_compatible.",
+    )
+
+
+def _load_memory_vector_timeout_seconds() -> int:
+    return max(int(os.getenv("APP_MEMORY_VECTOR_TIMEOUT_SECONDS", "30")), 1)
+
+
+def _load_memory_watch_interval_seconds() -> float:
+    return max(float(os.getenv("APP_MEMORY_WATCH_INTERVAL_SECONDS", "300")), 0.0)
+
+
+def _normalize_browser_profile_name(value: str, *, label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{label} must be a non-empty profile name.")
+    if any(separator in normalized for separator in ("/", "\\")):
+        raise ValueError(f"{label} must not contain path separators.")
+    return normalized
+
+
+def _normalize_browser_profile_runtime_mode(value: str, *, label: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_BROWSER_PROFILE_RUNTIME_MODES:
+        return normalized
+    raise ValueError(
+        f"{label} must be one of: host, attached, proxy, sandbox, remote-cdp.",
+    )
+
+
+def _normalize_browser_profile_transport(value: str, *, label: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_BROWSER_PROFILE_TRANSPORTS:
+        return normalized
+    raise ValueError(f"{label} must be one of: cdp, proxy.")
+
+
+def _normalize_browser_profile_driver(value: str, *, label: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_BROWSER_PROFILE_DRIVERS:
+        return normalized
+    raise ValueError(f"{label} must be one of: managed, existing-session.")
+
+
+def _normalize_browser_profile_color(value: str | None) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return DEFAULT_BROWSER_PROFILE_COLOR
+    candidate = normalized if normalized.startswith("#") else f"#{normalized}"
+    if len(candidate) != 7:
+        return DEFAULT_BROWSER_PROFILE_COLOR
+    try:
+        int(candidate[1:], 16)
+    except ValueError:
+        return DEFAULT_BROWSER_PROFILE_COLOR
+    return candidate.upper()
+
+
+def _load_browser_proxy_base_urls() -> tuple[tuple[str, str], ...]:
+    raw = os.getenv("APP_BROWSER_PROXY_BASE_URLS", "").strip()
+    if not raw:
+        return ()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("APP_BROWSER_PROXY_BASE_URLS must decode to a JSON object.")
+    resolved: list[tuple[str, str]] = []
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(
+                "APP_BROWSER_PROXY_BASE_URLS keys must be non-empty profile names.",
+            )
+        normalized_key = key.strip()
+        if any(separator in normalized_key for separator in ("/", "\\")):
+            raise ValueError(
+                "APP_BROWSER_PROXY_BASE_URLS profile names must not contain path separators.",
+            )
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"APP_BROWSER_PROXY_BASE_URLS entry for '{normalized_key}' must be a non-empty URL string.",
+            )
+        resolved.append((normalized_key, value.strip().rstrip("/")))
+    return tuple(resolved)
+
+
+def _derive_browser_profile_runtime_mode(
+    *,
+    driver: str,
+    cdp_url: str | None,
+    runtime_mode: str | None,
+) -> str:
+    if runtime_mode is not None:
+        return _normalize_browser_profile_runtime_mode(
+            runtime_mode,
+            label="Browser profile runtime_mode",
+        )
+    if driver == "existing-session":
+        return "attached"
+    if isinstance(cdp_url, str) and cdp_url.strip():
+        parsed = urlsplit(cdp_url.strip())
+        host = (parsed.hostname or "").strip().lower()
+        if host and host not in {"127.0.0.1", "localhost", "::1"}:
+            return "remote-cdp"
+    return "host"
+
+
+def _load_browser_profile_settings() -> tuple[
+    tuple[BrowserProfileSettings, ...],
+    tuple[BrowserProfileRuntimeSettings, ...],
+]:
+    raw = os.getenv("APP_BROWSER_PROFILE_SPECS", "").strip()
+    if not raw:
+        return _ensure_default_user_browser_profile_settings(
+            (
+                BrowserProfileSettings(name=DEFAULT_BROWSER_DEFAULT_PROFILE_NAME),
+            ),
+            (),
+        )
+    payload = json.loads(raw)
+    if not isinstance(payload, list):
+        raise ValueError(
+            "APP_BROWSER_PROFILE_SPECS must decode to a JSON array of objects.",
+        )
+    resolved_profiles: list[BrowserProfileSettings] = []
+    resolved_runtime_settings: list[BrowserProfileRuntimeSettings] = []
+    seen: set[str] = set()
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}] must be a JSON object.",
+            )
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].name must be a non-empty string.",
+            )
+        name = _normalize_browser_profile_name(
+            raw_name,
+            label=f"APP_BROWSER_PROFILE_SPECS[{index}].name",
+        )
+        if name in seen:
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS contains duplicate profile '{name}'.",
+            )
+        seen.add(name)
+        raw_driver = item.get("driver")
+        if raw_driver is None:
+            driver = "managed"
+        else:
+            if not isinstance(raw_driver, str):
+                raise ValueError(
+                    f"APP_BROWSER_PROFILE_SPECS[{index}].driver must be a string.",
+                )
+            driver = _normalize_browser_profile_driver(
+                raw_driver,
+                label=f"APP_BROWSER_PROFILE_SPECS[{index}].driver",
+            )
+        raw_cdp_url = item.get("cdp_url")
+        if raw_cdp_url is not None and not isinstance(raw_cdp_url, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].cdp_url must be a string when provided.",
+            )
+        normalized_cdp_url = raw_cdp_url.strip() if isinstance(raw_cdp_url, str) else None
+        raw_runtime_mode = item.get("runtime_mode")
+        if raw_runtime_mode is not None and not isinstance(raw_runtime_mode, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].runtime_mode must be a string.",
+            )
+        runtime_mode = _derive_browser_profile_runtime_mode(
+            driver=driver,
+            cdp_url=normalized_cdp_url,
+            runtime_mode=raw_runtime_mode,
+        )
+        if runtime_mode == "attached" and driver == "managed":
+            driver = "existing-session"
+        raw_transport = item.get("transport")
+        if raw_transport is None:
+            transport = "proxy" if runtime_mode == "proxy" else "cdp"
+        else:
+            if not isinstance(raw_transport, str):
+                raise ValueError(
+                    f"APP_BROWSER_PROFILE_SPECS[{index}].transport must be a string.",
+                )
+            transport = _normalize_browser_profile_transport(
+                raw_transport,
+                label=f"APP_BROWSER_PROFILE_SPECS[{index}].transport",
+            )
+        raw_cdp_port = item.get("cdp_port")
+        if raw_cdp_port is not None and (
+            not isinstance(raw_cdp_port, int) or isinstance(raw_cdp_port, bool)
+        ):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].cdp_port must be an integer when provided.",
+            )
+        raw_user_data_dir = item.get("user_data_dir")
+        if raw_user_data_dir is not None and not isinstance(raw_user_data_dir, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].user_data_dir must be a string when provided.",
+            )
+        raw_executable_path = item.get("executable_path")
+        if raw_executable_path is not None and not isinstance(raw_executable_path, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].executable_path must be a string when provided.",
+            )
+        raw_headless = item.get("headless")
+        if raw_headless is not None and not isinstance(raw_headless, bool):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].headless must be a boolean when provided.",
+            )
+        raw_attach_only = item.get("attach_only")
+        if raw_attach_only is not None and not isinstance(raw_attach_only, bool):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].attach_only must be a boolean when provided.",
+            )
+        raw_color = item.get("color")
+        if raw_color is not None and not isinstance(raw_color, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].color must be a string when provided.",
+            )
+        resolved_profiles.append(
+            BrowserProfileSettings(
+                name=name,
+                cdp_url=normalized_cdp_url,
+                cdp_port=raw_cdp_port,
+                user_data_dir=raw_user_data_dir,
+                driver=driver,
+                attach_only=bool(raw_attach_only) if raw_attach_only is not None else False,
+                color=raw_color,
+            ),
+        )
+        resolved_runtime_settings.append(
+            BrowserProfileRuntimeSettings(
+                profile=name,
+                runtime_mode=runtime_mode,
+                transport=transport,
+                executable_path=raw_executable_path,
+                headless=raw_headless,
+            ),
+        )
+    if not resolved_profiles:
+        raise ValueError("APP_BROWSER_PROFILE_SPECS must contain at least one profile.")
+    return _ensure_default_user_browser_profile_settings(
+        tuple(resolved_profiles),
+        tuple(resolved_runtime_settings),
+    )
+
+
+def _load_tool_local_paths() -> tuple[str, ...]:
+    configured_paths = [
+        DEFAULT_WORKSPACE_TOOL_DIR,
+        DEFAULT_BUNDLED_TOOL_DIR,
+    ]
+
+    unique_paths: list[str] = []
+    seen: set[Path] = set()
+    for path in configured_paths:
+        resolved = path.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_paths.append(str(resolved))
+    return tuple(unique_paths)
+
+
 @dataclass(frozen=True, slots=True)
 class OpenApiCredentialBinding:
     scheme_name: str
     source: str | None = None
     username_source: str | None = None
     password_source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserProxyEndpointSettings:
+    profile: str
+    base_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserProfileSettings:
+    name: str
+    cdp_url: str | None = None
+    cdp_port: int | None = None
+    user_data_dir: str | None = None
+    driver: str = "managed"
+    attach_only: bool = False
+    color: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _normalize_browser_profile_name(
+                self.name,
+                label="Browser profile name",
+            ),
+        )
+        driver = _normalize_browser_profile_driver(
+            self.driver,
+            label=f"Browser profile '{self.name}' driver",
+        )
+        normalized_cdp_url = self.cdp_url.strip() if isinstance(self.cdp_url, str) else ""
+        normalized_user_data_dir = (
+            self.user_data_dir.strip()
+            if isinstance(self.user_data_dir, str)
+            else ""
+        )
+        cdp_port = self.cdp_port
+        if cdp_port is not None and cdp_port < 0:
+            raise ValueError(
+                f"Browser profile '{self.name}' cdp_port must not be negative.",
+            )
+        if cdp_port is None and normalized_cdp_url:
+            parsed = urlsplit(normalized_cdp_url)
+            if parsed.port is not None:
+                cdp_port = parsed.port
+        object.__setattr__(self, "driver", driver)
+        object.__setattr__(self, "cdp_url", normalized_cdp_url or None)
+        object.__setattr__(self, "cdp_port", cdp_port)
+        object.__setattr__(self, "user_data_dir", normalized_user_data_dir or None)
+        object.__setattr__(
+            self,
+            "color",
+            _normalize_browser_profile_color(self.color),
+        )
+        if driver == "existing-session" and not self.attach_only:
+            object.__setattr__(self, "attach_only", True)
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserProfileRuntimeSettings:
+    profile: str
+    runtime_mode: str = "host"
+    transport: str = "cdp"
+    executable_path: str | None = None
+    headless: bool | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "profile",
+            _normalize_browser_profile_name(
+                self.profile,
+                label="Browser profile runtime binding profile",
+            ),
+        )
+        runtime_mode = _normalize_browser_profile_runtime_mode(
+            self.runtime_mode,
+            label=f"Browser profile '{self.profile}' runtime_mode",
+        )
+        transport = _normalize_browser_profile_transport(
+            self.transport,
+            label=f"Browser profile '{self.profile}' transport",
+        )
+        if runtime_mode == "proxy" and transport != "proxy":
+            raise ValueError(
+                f"Browser profile '{self.profile}' must use transport 'proxy' when runtime_mode is 'proxy'.",
+            )
+        if runtime_mode != "proxy" and transport == "proxy":
+            raise ValueError(
+                f"Browser profile '{self.profile}' can only use transport 'proxy' when runtime_mode is 'proxy'.",
+            )
+        if runtime_mode == "remote-cdp" and transport != "cdp":
+            raise ValueError(
+                f"Browser profile '{self.profile}' must use transport 'cdp' when runtime_mode is 'remote-cdp'.",
+            )
+        normalized_executable_path = (
+            self.executable_path.strip()
+            if isinstance(self.executable_path, str)
+            else ""
+        )
+        object.__setattr__(self, "runtime_mode", runtime_mode)
+        object.__setattr__(self, "transport", transport)
+        object.__setattr__(self, "executable_path", normalized_executable_path or None)
+
+
+def _ensure_default_user_browser_profile_settings(
+    profiles: tuple[BrowserProfileSettings, ...],
+    runtime_settings: tuple[BrowserProfileRuntimeSettings, ...],
+) -> tuple[tuple[BrowserProfileSettings, ...], tuple[BrowserProfileRuntimeSettings, ...]]:
+    resolved_profiles = profiles
+    resolved_runtime_settings = runtime_settings
+    if not any(profile.name == DEFAULT_BROWSER_USER_PROFILE_NAME for profile in resolved_profiles):
+        resolved_profiles = resolved_profiles + (
+            BrowserProfileSettings(
+                name=DEFAULT_BROWSER_USER_PROFILE_NAME,
+                driver="existing-session",
+                cdp_url=DEFAULT_BROWSER_USER_CDP_URL,
+                attach_only=True,
+            ),
+        )
+    if not any(
+        runtime.profile == DEFAULT_BROWSER_USER_PROFILE_NAME
+        for runtime in resolved_runtime_settings
+    ):
+        resolved_runtime_settings = resolved_runtime_settings + (
+            BrowserProfileRuntimeSettings(
+                profile=DEFAULT_BROWSER_USER_PROFILE_NAME,
+                runtime_mode="attached",
+                transport="cdp",
+            ),
+        )
+    return resolved_profiles, resolved_runtime_settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -838,43 +1270,170 @@ class Settings:
     tool_mcp_providers: tuple[McpProviderSettings, ...] = ()
     llm_profiles: tuple[LlmProfileSettings, ...] = ()
     agent_profiles: tuple[AgentProfileSettings, ...] = ()
-    authorization_enabled: bool = False
+    authorization_enabled: bool = True
     authorization_policy_paths: tuple[str, ...] = ()
     authorization_runtime_policy_path: str = str(DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH)
+    memory_retrieval_backend: str = "keyword"
+    memory_vector_provider: str = "local"
+    memory_vector_model: str | None = None
+    memory_vector_base_url: str | None = None
+    memory_vector_credential_binding: str | None = None
+    memory_vector_timeout_seconds: int = 30
+    memory_watch_interval_seconds: float = 300.0
+    browser_enabled: bool = True
+    browser_profiles: tuple[BrowserProfileSettings, ...] = field(
+        default_factory=lambda: (
+            BrowserProfileSettings(name=DEFAULT_BROWSER_DEFAULT_PROFILE_NAME),
+        ),
+    )
+    browser_profile_runtime_settings: tuple[BrowserProfileRuntimeSettings, ...] = ()
+    browser_proxy_base_urls: tuple[BrowserProxyEndpointSettings, ...] = ()
+    browser_state_dir: str = str(DEFAULT_BROWSER_STATE_DIR)
+    artifact_store_dir: str = str(DEFAULT_ARTIFACT_STORE_DIR)
+    artifact_image_preview_max_dimension: int = 1024
+    artifact_image_llm_max_dimension: int = 1568
+    artifact_image_llm_max_bytes: int = 1_500_000
+    artifact_file_llm_max_bytes: int = 4_000_000
+    artifact_text_file_llm_max_chars: int = 20_000
+    tool_details_max_chars: int = 131_072
+    browser_executable_path: str | None = None
+    browser_sandbox_executable_path: str | None = None
+    browser_proxy_base_url: str | None = None
+    browser_cdp_host: str = "127.0.0.1"
+    browser_cdp_port: int = 18800
+    browser_headless: bool = False
+    browser_start_timeout_seconds: int = 10
+    browser_sandbox_docker_image: str = "python:3.11-slim"
     prompt_system_max_chars: int = 120_000
     prompt_system_max_tokens: int = 30_000
     prompt_system_context_window_ratio: float = 0.15
     orchestration_run_lease_seconds: int = 30
     orchestration_run_heartbeat_seconds: float = 5.0
     orchestration_auto_compaction_enabled: bool = True
-    orchestration_auto_compaction_transcript_chars: int = 48_000
-    orchestration_auto_compaction_transcript_tokens: int = 12_000
     orchestration_auto_compaction_reserve_tokens: int = 20_000
     orchestration_auto_compaction_soft_threshold_tokens: int = 4_000
     tool_run_max_attempts: int = 3
     tool_run_lease_seconds: int = 30
     tool_run_heartbeat_seconds: float = 5.0
 
+    def __post_init__(self) -> None:
+        profiles, runtime_settings = _ensure_default_user_browser_profile_settings(
+            self.browser_profiles,
+            self.browser_profile_runtime_settings,
+        )
+        object.__setattr__(
+            self,
+            "browser_profiles",
+            profiles,
+        )
+        object.__setattr__(
+            self,
+            "browser_profile_runtime_settings",
+            runtime_settings,
+        )
+
+    @property
+    def browser_profile_specs(self) -> tuple[BrowserProfileSettings, ...]:
+        return self.browser_profiles
+
 
 def load_settings() -> Settings:
+    browser_profiles, browser_profile_runtime_settings = _load_browser_profile_settings()
     return Settings(
         app_name=os.getenv("APP_NAME", "crxzipple"),
         environment=os.getenv("APP_ENV", "local"),
         database_url=os.getenv("APP_DATABASE_URL", "sqlite:///./crxzipple.db"),
-        tool_local_paths=tuple(
-            path.strip()
-            for path in os.getenv("APP_TOOL_LOCAL_PATHS", "").split(os.pathsep)
-            if path.strip()
-        ),
+        tool_local_paths=_load_tool_local_paths(),
         tool_openapi_providers=_load_openapi_provider_settings(),
         tool_mcp_providers=_load_mcp_provider_settings(),
         llm_profiles=_load_llm_profile_settings(),
         agent_profiles=_load_agent_profile_settings(),
-        authorization_enabled=_env_flag("APP_AUTHORIZATION_ENABLED", default=False),
+        authorization_enabled=_env_flag("APP_AUTHORIZATION_ENABLED", default=True),
         authorization_policy_paths=tuple(
             str(path) for path in _iter_authorization_policy_paths()
         ),
         authorization_runtime_policy_path=str(_authorization_runtime_policy_path()),
+        memory_retrieval_backend=_load_memory_retrieval_backend(),
+        memory_vector_provider=_load_memory_vector_provider(),
+        memory_vector_model=(
+            os.getenv("APP_MEMORY_VECTOR_MODEL", "").strip() or None
+        ),
+        memory_vector_base_url=(
+            os.getenv("APP_MEMORY_VECTOR_BASE_URL", "").strip() or None
+        ),
+        memory_vector_credential_binding=(
+            os.getenv("APP_MEMORY_VECTOR_CREDENTIAL_BINDING", "").strip() or None
+        ),
+        memory_vector_timeout_seconds=_load_memory_vector_timeout_seconds(),
+        memory_watch_interval_seconds=_load_memory_watch_interval_seconds(),
+        browser_enabled=_env_flag("APP_BROWSER_ENABLED", default=True),
+        browser_profiles=browser_profiles,
+        browser_profile_runtime_settings=browser_profile_runtime_settings,
+        browser_proxy_base_urls=tuple(
+            BrowserProxyEndpointSettings(profile=profile, base_url=base_url)
+            for profile, base_url in _load_browser_proxy_base_urls()
+        ),
+        browser_state_dir=os.getenv(
+            "APP_BROWSER_STATE_DIR",
+            str(DEFAULT_BROWSER_STATE_DIR),
+        ),
+        artifact_store_dir=os.getenv(
+            "APP_ARTIFACT_STORE_DIR",
+            str(DEFAULT_ARTIFACT_STORE_DIR),
+        ),
+        artifact_image_preview_max_dimension=max(
+            int(os.getenv("APP_ARTIFACT_IMAGE_PREVIEW_MAX_DIMENSION", "1024")),
+            1,
+        ),
+        artifact_image_llm_max_dimension=max(
+            int(os.getenv("APP_ARTIFACT_IMAGE_LLM_MAX_DIMENSION", "1568")),
+            1,
+        ),
+        artifact_image_llm_max_bytes=max(
+            int(os.getenv("APP_ARTIFACT_IMAGE_LLM_MAX_BYTES", "1500000")),
+            1,
+        ),
+        artifact_file_llm_max_bytes=max(
+            int(os.getenv("APP_ARTIFACT_FILE_LLM_MAX_BYTES", "4000000")),
+            1,
+        ),
+        artifact_text_file_llm_max_chars=max(
+            int(os.getenv("APP_ARTIFACT_TEXT_FILE_LLM_MAX_CHARS", "20000")),
+            1,
+        ),
+        tool_details_max_chars=max(
+            int(os.getenv("APP_TOOL_DETAILS_MAX_CHARS", "131072")),
+            1,
+        ),
+        browser_executable_path=(
+            os.getenv("APP_BROWSER_EXECUTABLE_PATH", "").strip() or None
+        ),
+        browser_sandbox_executable_path=(
+            os.getenv("APP_BROWSER_SANDBOX_EXECUTABLE_PATH", "").strip() or None
+        ),
+        browser_proxy_base_url=(
+            os.getenv("APP_BROWSER_PROXY_BASE_URL", "").strip() or None
+        ),
+        browser_cdp_host=os.getenv("APP_BROWSER_CDP_HOST", "127.0.0.1").strip()
+        or "127.0.0.1",
+        browser_cdp_port=max(int(os.getenv("APP_BROWSER_CDP_PORT", "18800")), 1),
+        browser_headless=_env_flag("APP_BROWSER_HEADLESS", default=False),
+        browser_start_timeout_seconds=max(
+            int(os.getenv("APP_BROWSER_START_TIMEOUT_SECONDS", "10")),
+            1,
+        ),
+        browser_sandbox_docker_image=os.getenv(
+            "APP_BROWSER_SANDBOX_DOCKER_IMAGE",
+            os.getenv(
+                "APP_SANDBOX_DOCKER_IMAGE",
+                "python:3.11-slim",
+            ),
+        ).strip()
+        or os.getenv(
+            "APP_SANDBOX_DOCKER_IMAGE",
+            "python:3.11-slim",
+        ).strip()
+        or "python:3.11-slim",
         prompt_system_max_chars=max(
             int(os.getenv("APP_PROMPT_SYSTEM_MAX_CHARS", "120000")),
             1,
@@ -898,24 +1457,6 @@ def load_settings() -> Settings:
         orchestration_auto_compaction_enabled=_env_flag(
             "APP_ORCHESTRATION_AUTO_COMPACTION_ENABLED",
             default=True,
-        ),
-        orchestration_auto_compaction_transcript_chars=max(
-            int(
-                os.getenv(
-                    "APP_ORCHESTRATION_AUTO_COMPACTION_TRANSCRIPT_CHARS",
-                    "48000",
-                ),
-            ),
-            1,
-        ),
-        orchestration_auto_compaction_transcript_tokens=max(
-            int(
-                os.getenv(
-                    "APP_ORCHESTRATION_AUTO_COMPACTION_TRANSCRIPT_TOKENS",
-                    "12000",
-                ),
-            ),
-            1,
         ),
         orchestration_auto_compaction_reserve_tokens=max(
             int(

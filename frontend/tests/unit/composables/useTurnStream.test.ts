@@ -39,8 +39,9 @@ describe("useTurnStream", () => {
       messages,
       activeTurn,
       pendingApproval,
-      activeBulkKey: ref<string | null>(null),
+      activeSessionKey: ref<string | null>(null),
       busy: ref(false),
+      lastError: ref<string | null>(null),
       activeConversation: ref(buildConversationSummary()),
       draftMainKey: ref("deck-test"),
       hydrateConversationAfterTurn: vi.fn().mockResolvedValue(undefined),
@@ -89,6 +90,7 @@ describe("useTurnStream", () => {
       buildPendingApproval(),
     );
     const busy = ref(true);
+    const lastError = ref<string | null>(null);
     const hydrateConversationAfterTurn = vi.fn().mockResolvedValue(undefined);
     const refreshConversations = vi.fn().mockResolvedValue(undefined);
 
@@ -96,8 +98,9 @@ describe("useTurnStream", () => {
       messages,
       activeTurn,
       pendingApproval,
-      activeBulkKey: ref<string | null>(null),
+      activeSessionKey: ref<string | null>(null),
       busy,
+      lastError,
       activeConversation: ref(buildConversationSummary()),
       draftMainKey: ref("deck-test"),
       hydrateConversationAfterTurn,
@@ -160,9 +163,66 @@ describe("useTurnStream", () => {
     expect(stream.streamState.value).toBe("closed");
     expect(source.close).toHaveBeenCalledTimes(1);
     expect(hydrateConversationAfterTurn).toHaveBeenCalledWith(
-      "conversation:main:crxzipple:default:deck-test",
+      "agent:assistant:deck-test",
     );
     expect(refreshConversations).not.toHaveBeenCalled();
+    expect(lastError.value).toBeNull();
+  });
+
+  it("surfaces failed run reasons to the main error state", async () => {
+    const source = { close: vi.fn() };
+    let handlers:
+      | {
+          onEvent: (event: string, payload: unknown) => Promise<void> | void;
+          onError?: (error: Event) => void;
+        }
+      | undefined;
+
+    openTurnEventsMock.mockImplementation((_runId, options) => {
+      handlers = options as typeof handlers;
+      return source as unknown as EventSource;
+    });
+
+    const lastError = ref<string | null>(null);
+    const stream = useTurnStream({
+      messages: ref<SessionMessage[]>([]),
+      activeTurn: ref<TurnResponse | null>(null),
+      pendingApproval: ref<PendingApprovalRequestPayload | null>(null),
+      activeSessionKey: ref<string | null>(null),
+      busy: ref(true),
+      lastError,
+      activeConversation: ref(buildConversationSummary()),
+      draftMainKey: ref("deck-test"),
+      hydrateConversationAfterTurn: vi.fn().mockResolvedValue(undefined),
+      refreshConversations: vi.fn().mockResolvedValue(undefined),
+    });
+
+    stream.watchTurn("run-vision-fail");
+
+    await handlers?.onEvent(
+      "failed",
+      buildTurnResponse({
+        run: {
+          id: "run-vision-fail",
+          status: "failed",
+          stage: "failed",
+          error: {
+            message:
+              "LLM profile 'openai_codex.gpt-5.4' does not support vision input.",
+            code: "engine_failed",
+            details: {},
+          },
+          metadata: {
+            requested_llm_id: "openai_codex.gpt-5.4",
+          },
+        },
+      }),
+    );
+
+    expect(lastError.value).toContain("does not support vision input");
+    expect(lastError.value).toContain(
+      "Switch openai_codex.gpt-5.4 to Auto or another vision-capable model.",
+    );
   });
 
   it("refreshes the active thread after background maintenance completes", async () => {
@@ -187,20 +247,23 @@ describe("useTurnStream", () => {
         id: "live-1",
         sequence_no: 2,
         content: "Fresh reply",
-        content_payload: { text: "Fresh reply" },
+        content_payload: {
+          blocks: [{ type: "text", text: "Fresh reply" }],
+        },
       }),
     ]);
 
     const messages = ref<SessionMessage[]>([]);
     const refreshConversations = vi.fn().mockResolvedValue(undefined);
-    const activeBulkKey = ref("conversation:main:crxzipple:default:deck-test");
+    const activeSessionKey = ref("agent:assistant:deck-test");
 
     const stream = useTurnStream({
       messages,
       activeTurn: ref<TurnResponse | null>(null),
       pendingApproval: ref<PendingApprovalRequestPayload | null>(null),
-      activeBulkKey,
+      activeSessionKey,
       busy: ref(false),
+      lastError: ref<string | null>(null),
       activeConversation: ref(buildConversationSummary()),
       draftMainKey: ref("deck-test"),
       hydrateConversationAfterTurn: vi.fn().mockResolvedValue(undefined),
@@ -229,7 +292,7 @@ describe("useTurnStream", () => {
     expect(source.close).toHaveBeenCalledTimes(1);
     expect(refreshConversations).toHaveBeenCalledTimes(1);
     expect(getConversationMessagesMock).toHaveBeenCalledWith(
-      "conversation:main:crxzipple:default:deck-test",
+      "agent:assistant:deck-test",
       { includeArchived: true },
     );
     expect(messages.value).toHaveLength(2);

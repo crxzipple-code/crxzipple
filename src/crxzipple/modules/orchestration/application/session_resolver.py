@@ -51,7 +51,6 @@ class SessionResolver:
             SyncRoutedSessionInput(
                 key_resolution=routing.key_resolution,
                 agent_id=data.context.agent_id,
-                llm_id=data.context.llm_id,
                 status=data.context.status,
                 origin=routing.origin,
                 delivery=routing.delivery,

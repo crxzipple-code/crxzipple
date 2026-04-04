@@ -377,6 +377,7 @@ class RunWaitCoordinator:
             )
         inline_message_ids = tuple(
             message_id for message_id, _ in replay_outcome.inline_runs
+            if message_id is not None
         )
         self._store_recovery_contract(
             run.id,

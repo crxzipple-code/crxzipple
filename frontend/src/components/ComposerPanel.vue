@@ -1,6 +1,10 @@
 <script setup lang="ts">
+import { ref } from "vue";
+
+import { formatAttachmentSize } from "@/lib/contentBlocks";
 import type {
   AgentProfileSummary,
+  ComposerAttachment,
   ContextMeter,
   LlmProfileSummary,
   PendingApprovalRequestPayload,
@@ -20,9 +24,10 @@ defineProps<{
   selectedAgentId: string | null;
   selectedLlmId: string | null;
   pendingApproval: PendingApprovalRequestPayload | null;
-  pendingMemoryCandidateCount: number;
+  memoryItemCount: number;
   contextMeter: ContextMeter | null;
   runFeedback: RunFeedback | null;
+  attachments: ComposerAttachment[];
 }>();
 
 const emit = defineEmits<{
@@ -36,7 +41,11 @@ const emit = defineEmits<{
   resolveApproval: [
     decision: "allow_once" | "allow_for_session" | "always_for_agent" | "deny",
   ];
+  attachFiles: [files: File[]];
+  removeAttachment: [attachmentId: string];
 }>();
+
+const fileInputRef = ref<HTMLInputElement | null>(null);
 
 function onKeydown(event: KeyboardEvent) {
   if (event.key !== "Enter" || event.isComposing) {
@@ -64,6 +73,32 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault();
     emit("submit");
   }
+}
+
+function openFilePicker() {
+  fileInputRef.value?.click();
+}
+
+function onFilesSelected(event: Event) {
+  const input = event.target as HTMLInputElement | null;
+  if (!input?.files?.length) {
+    return;
+  }
+  emit("attachFiles", Array.from(input.files));
+  input.value = "";
+}
+
+function onPaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (files.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  emit("attachFiles", files);
+}
+
+function attachmentSubtitle(attachment: ComposerAttachment) {
+  return `${attachment.mimeType} · ${formatAttachmentSize(attachment.size)}`;
 }
 </script>
 
@@ -127,10 +162,59 @@ function onKeydown(event: KeyboardEvent) {
         placeholder="Ask crxzipple to inspect, search, explain, or continue the thread..."
         @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
         @keydown="onKeydown"
+        @paste="onPaste"
       ></textarea>
+      <input
+        ref="fileInputRef"
+        class="composer__file-input"
+        type="file"
+        multiple
+        @change="onFilesSelected"
+      >
+      <div v-if="attachments.length > 0" class="composer__attachments">
+        <div
+          v-for="attachment in attachments"
+          :key="attachment.id"
+          class="composer-attachment"
+        >
+          <div
+            v-if="attachment.previewUrl"
+            class="composer-attachment__preview composer-attachment__preview--image"
+          >
+            <img :src="attachment.previewUrl" :alt="attachment.name">
+          </div>
+          <div
+            v-else
+            class="composer-attachment__preview composer-attachment__preview--file"
+            aria-hidden="true"
+          >
+            <span>FILE</span>
+          </div>
+          <div class="composer-attachment__meta">
+            <strong>{{ attachment.name }}</strong>
+            <span>{{ attachmentSubtitle(attachment) }}</span>
+          </div>
+          <button
+            class="ghost-button composer-attachment__remove"
+            type="button"
+            :disabled="busy"
+            @click="emit('removeAttachment', attachment.id)"
+          >
+            Remove
+          </button>
+        </div>
+      </div>
 
       <div class="composer__footer">
         <div class="composer__controls">
+          <button
+            class="ghost-button composer__attach-button"
+            type="button"
+            :disabled="busy"
+            @click="openFilePicker"
+          >
+            Attach
+          </button>
           <label class="composer__control">
             <select
               class="composer__select"
@@ -178,10 +262,10 @@ function onKeydown(event: KeyboardEvent) {
           {{
             busy
                 ? "Running current turn..."
-              : pendingMemoryCandidateCount > 0
-                ? `${pendingMemoryCandidateCount} memory ${
-                    pendingMemoryCandidateCount === 1 ? "item" : "items"
-                  } in review queue`
+              : memoryItemCount > 0
+                ? `${memoryItemCount} memory ${
+                    memoryItemCount === 1 ? "file" : "files"
+                  } in scope`
                 : "Enter to run"
           }}
         </p>

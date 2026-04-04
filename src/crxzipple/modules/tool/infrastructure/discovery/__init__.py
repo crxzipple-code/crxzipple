@@ -5,7 +5,6 @@ from crxzipple.modules.tool.infrastructure.discovery.filesystem import (
 from crxzipple.modules.tool.infrastructure.discovery.local_catalog import (
     LocalToolCatalog,
     LocalToolHandler,
-    register_builtin_local_tools,
 )
 from crxzipple.modules.tool.infrastructure.discovery.mcp import (
     McpDiscoveryProvider,
@@ -33,5 +32,4 @@ __all__ = [
     "OpenApiOperation",
     "ToolDiscoveryProvider",
     "ToolDiscoveryRegistry",
-    "register_builtin_local_tools",
 ]

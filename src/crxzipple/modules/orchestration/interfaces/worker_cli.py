@@ -58,7 +58,7 @@ def _parse_json_option(raw: str | None, *, option_name: str) -> dict[str, object
 def _worker_container() -> Iterator[AppContainer]:
     settings = load_settings()
     configure_logging(settings)
-    container = build_container(settings=settings)
+    container = build_container(settings=settings, enable_memory_watchers=True)
     try:
         yield container
     finally:

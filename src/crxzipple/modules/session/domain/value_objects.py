@@ -144,7 +144,6 @@ class SessionMessage(ValueObject):
     sequence_no: int
     role: str
     kind: SessionMessageKind = SessionMessageKind.MESSAGE
-    content: str | None = None
     content_payload: dict[str, Any] = field(default_factory=dict)
     source_kind: str | None = None
     source_id: str | None = None
@@ -165,11 +164,10 @@ class SessionMessage(ValueObject):
             )
         if not self.role.strip():
             raise SessionValidationError("Session message role cannot be empty.")
-        has_content = self.content is not None and self.content.strip() != ""
         has_payload = bool(self.content_payload)
-        if not has_content and not has_payload:
+        if not has_payload:
             raise SessionValidationError(
-                "Session message content or content_payload is required.",
+                "Session message content_payload is required.",
             )
         object.__setattr__(self, "content_payload", dict(self.content_payload))
         object.__setattr__(self, "metadata", dict(self.metadata))
@@ -182,7 +180,6 @@ class SessionMessage(ValueObject):
             "sequence_no": self.sequence_no,
             "role": self.role,
             "kind": self.kind.value,
-            "content": self.content,
             "content_payload": dict(self.content_payload),
             "source_kind": self.source_kind,
             "source_id": self.source_id,
@@ -195,7 +192,6 @@ class SessionMessage(ValueObject):
 @dataclass(frozen=True, slots=True)
 class SessionRouteContext(ValueObject):
     agent_id: str
-    llm_id: str
     channel: str | None = None
     chat_type: str = SessionKind.DIRECT.value
     peer_id: str | None = None
@@ -212,8 +208,6 @@ class SessionRouteContext(ValueObject):
     def __post_init__(self) -> None:
         if not self.agent_id.strip():
             raise SessionValidationError("Session route agent_id cannot be empty.")
-        if not self.llm_id.strip():
-            raise SessionValidationError("Session route llm_id cannot be empty.")
         if not self.main_key.strip():
             raise SessionValidationError("Session route main_key cannot be empty.")
         if not self.status.strip():
@@ -232,14 +226,14 @@ class SessionKeyResolution(ValueObject):
 @dataclass(frozen=True, slots=True)
 class SessionRuntimeBinding(ValueObject):
     agent_id: str | None = None
-    llm_id: str | None = None
+    workspace: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {}
         if self.agent_id is not None:
             payload["agent_id"] = self.agent_id
-        if self.llm_id is not None:
-            payload["llm_id"] = self.llm_id
+        if self.workspace is not None:
+            payload["workspace"] = self.workspace
         return payload
 
     @classmethod
@@ -252,10 +246,10 @@ class SessionRuntimeBinding(ValueObject):
         if isinstance(nested, dict):
             payload = nested
         agent_id = payload.get("agent_id")
-        llm_id = payload.get("llm_id")
+        workspace = payload.get("workspace")
         return cls(
             agent_id=str(agent_id).strip() or None if agent_id is not None else None,
-            llm_id=str(llm_id).strip() or None if llm_id is not None else None,
+            workspace=str(workspace).strip() or None if workspace is not None else None,
         )
 
 

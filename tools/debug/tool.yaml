@@ -1,0 +1,36 @@
+kind: local_package
+namespace: debug
+local_tools:
+  - id: echo
+    name: Echo
+    description: Returns the input payload for local inline execution tests.
+    provider_name: local_builtin
+    entrypoint: tools.debug.local:echo
+    tool_kind: function
+    parameters:
+      - name: message
+        data_type: string
+        description: Text to echo back.
+        required: false
+    tags:
+      - local
+      - builtin
+      - debug
+    required_effect_ids:
+      - local_tool_access
+    supported_modes:
+      - inline
+      - background
+    supported_strategies:
+      - async
+      - thread
+      - process
+    supported_environments:
+      - local
+    runtime_key: echo
+remote_runtimes:
+  - runtime_key: remote.echo
+    entrypoint: tools.debug.remote:remote_echo
+sandbox_runtimes:
+  - runtime_key: sandbox.echo
+    entrypoint: tools.debug.sandbox:sandbox_echo

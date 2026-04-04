@@ -1,69 +1,84 @@
 import { buildApiUrl, requestJson } from "@/lib/api/client";
-import type { MemoryCandidate, MemoryEntry } from "@/types";
+import type {
+  MemoryExcerpt,
+  MemoryOverview,
+  MemorySearchHit,
+} from "@/types";
 
-export function listMemoryCandidates(options?: {
-  agentId?: string | null;
-  sessionKey?: string | null;
-  runId?: string | null;
-  status?: string | null;
-  limit?: number;
+export function getMemoryOverview(options: {
+  agentId: string;
+  recentLimit?: number;
 }) {
-  const url = new URL(buildApiUrl("/memory/candidates"), window.location.origin);
-  if (options?.agentId) {
-    url.searchParams.set("agent_id", options.agentId);
+  const url = new URL(buildApiUrl("/memory/overview"), window.location.origin);
+  url.searchParams.set("agent_id", options.agentId);
+  if (typeof options.recentLimit === "number") {
+    url.searchParams.set("recent_limit", String(options.recentLimit));
   }
-  if (options?.sessionKey) {
-    url.searchParams.set("session_key", options.sessionKey);
-  }
-  if (options?.runId) {
-    url.searchParams.set("run_id", options.runId);
-  }
-  if (options?.status) {
-    url.searchParams.set("status", options.status);
-  }
-  if (typeof options?.limit === "number") {
-    url.searchParams.set("limit", String(options.limit));
-  }
-  return requestJson<MemoryCandidate[]>(
-    url.pathname + (url.search ? url.search : ""),
-  );
+  return requestJson<MemoryOverview>(url.pathname + (url.search ? url.search : ""));
 }
 
-export function approveMemoryCandidate(candidateId: string) {
-  return requestJson<MemoryEntry>(
-    `/memory/candidates/${encodeURIComponent(candidateId)}/approve`,
+export function searchMemory(options: {
+  agentId: string;
+  query: string;
+  limit?: number;
+}) {
+  const url = new URL(buildApiUrl("/memory/search"), window.location.origin);
+  url.searchParams.set("agent_id", options.agentId);
+  url.searchParams.set("query", options.query);
+  if (typeof options.limit === "number") {
+    url.searchParams.set("limit", String(options.limit));
+  }
+  return requestJson<MemorySearchHit[]>(url.pathname + (url.search ? url.search : ""));
+}
+
+export function getMemoryExcerpt(options: {
+  agentId: string;
+  path: string;
+  startLine?: number | null;
+  lineCount?: number | null;
+}) {
+  const url = new URL(buildApiUrl("/memory/excerpt"), window.location.origin);
+  url.searchParams.set("agent_id", options.agentId);
+  url.searchParams.set("path", options.path);
+  if (typeof options.startLine === "number") {
+    url.searchParams.set("start_line", String(options.startLine));
+  }
+  if (typeof options.lineCount === "number") {
+    url.searchParams.set("line_count", String(options.lineCount));
+  }
+  return requestJson<MemoryExcerpt>(url.pathname + (url.search ? url.search : ""));
+}
+
+export function writeDailyMemory(options: {
+  agentId: string;
+  content: string;
+  title?: string | null;
+}) {
+  return requestJson<{ path: string; line_start: number; line_end: number; kind: string }>(
+    "/memory/daily",
     {
       method: "POST",
+      body: JSON.stringify({
+        agent_id: options.agentId,
+        content: options.content,
+        title: options.title ?? null,
+      }),
     },
   );
 }
 
-export function rejectMemoryCandidate(candidateId: string, reason?: string) {
-  return requestJson<MemoryCandidate>(
-    `/memory/candidates/${encodeURIComponent(candidateId)}/reject`,
+export function writeLongTermMemory(options: {
+  agentId: string;
+  content: string;
+}) {
+  return requestJson<{ path: string; line_start: number; line_end: number; kind: string }>(
+    "/memory/long-term",
     {
       method: "POST",
-      body: JSON.stringify({ reason: reason ?? null }),
+      body: JSON.stringify({
+        agent_id: options.agentId,
+        content: options.content,
+      }),
     },
-  );
-}
-
-export function listMemoryEntries(options?: {
-  agentId?: string | null;
-  query?: string | null;
-  limit?: number;
-}) {
-  const url = new URL(buildApiUrl("/memory/entries"), window.location.origin);
-  if (options?.agentId) {
-    url.searchParams.set("agent_id", options.agentId);
-  }
-  if (options?.query) {
-    url.searchParams.set("query", options.query);
-  }
-  if (typeof options?.limit === "number") {
-    url.searchParams.set("limit", String(options.limit));
-  }
-  return requestJson<MemoryEntry[]>(
-    url.pathname + (url.search ? url.search : ""),
   );
 }

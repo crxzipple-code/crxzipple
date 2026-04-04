@@ -1,3 +1,5 @@
+import type { ComposerAttachment, ContentBlock } from "@/lib/contentBlocks";
+
 export interface RuntimeBinding {
   agent_id: string | null;
   llm_id: string | null;
@@ -25,6 +27,7 @@ export interface AgentProfileSummary {
     workdir: string | null;
     workspace: string | null;
     sandbox_mode: string | null;
+    memory_retrieval_backend: string | null;
     attrs: Record<string, unknown>;
   };
 }
@@ -53,7 +56,6 @@ export interface LlmProfileSummary {
 }
 
 export interface ConversationSummary {
-  bulk_key: string;
   session_key: string;
   active_session_id: string;
   title: string;
@@ -80,7 +82,9 @@ export interface SessionMessage {
   role: string;
   kind: string;
   content: string | null;
-  content_payload: Record<string, unknown>;
+  content_payload: Record<string, unknown> & {
+    blocks?: ContentBlock[];
+  };
   source_kind: string | null;
   source_id: string | null;
   visibility: string;
@@ -92,7 +96,7 @@ export interface TurnRun {
   id: string;
   status: string;
   stage: string;
-  bulk_key: string | null;
+  session_key: string | null;
   active_session_id: string | null;
   agent_id: string | null;
   lane_key: string | null;
@@ -104,7 +108,7 @@ export interface TurnRun {
   waiting_reason: string | null;
   inbound_instruction: {
     source: string;
-    content: string | null;
+    content: unknown | null;
     metadata: Record<string, unknown>;
   };
   delivery_target: Record<string, unknown> | null;
@@ -186,36 +190,38 @@ export interface ContextMeter {
   tooltip: string;
 }
 
-export interface MemoryCandidate {
-  id: string;
-  agent_id: string;
-  session_key: string | null;
-  run_id: string | null;
-  title: string;
-  content: string;
-  summary: string;
-  tags: string[];
-  metadata: Record<string, unknown>;
-  status: string;
-  created_at: string;
-  reviewed_at: string | null;
-  review_reason: string | null;
-  approved_entry_id: string | null;
+export type { ComposerAttachment, ContentBlock };
+
+export interface MemoryExcerpt {
+  path: string;
+  text: string;
+  start_line: number;
+  end_line: number;
+  kind: string;
 }
 
-export interface MemoryEntry {
-  id: string;
-  agent_id: string;
-  session_key: string | null;
-  run_id: string | null;
-  source_candidate_id: string | null;
+export interface MemoryFileSummary {
+  path: string;
+  kind: string;
   title: string;
-  content: string;
-  summary: string;
-  tags: string[];
-  metadata: Record<string, unknown>;
-  created_at: string;
+  preview: string;
   updated_at: string;
+}
+
+export interface MemorySearchHit {
+  path: string;
+  snippet: string;
+  start_line: number;
+  end_line: number;
+  score: number;
+  kind: string;
+}
+
+export interface MemoryOverview {
+  agent_id: string;
+  space_id: string;
+  long_term: MemoryExcerpt | null;
+  recent_files: MemoryFileSummary[];
 }
 
 export interface TurnApprovalRequestedEventPayload {

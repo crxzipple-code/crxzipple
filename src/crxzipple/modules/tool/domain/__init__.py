@@ -9,9 +9,10 @@ from crxzipple.modules.tool.domain.exceptions import (
     ToolRunNotFoundError,
     ToolValidationError,
 )
-from crxzipple.modules.tool.domain.repositories import ToolRepository, ToolRunRepository
+from crxzipple.modules.tool.domain.repositories import ToolRunRepository
 from crxzipple.modules.tool.domain.value_objects import (
     ToolEnvironment,
+    ToolExecutionContext,
     ToolExecutionPolicy,
     ToolExecutionSupport,
     ToolExecutionStrategy,
@@ -31,6 +32,7 @@ __all__ = [
     "ToolDiscoveryProviderNotFoundError",
     "ToolEnvironment",
     "ToolError",
+    "ToolExecutionContext",
     "ToolExecutionNotAllowedError",
     "ToolExecutionNotSupportedError",
     "ToolExecutionPolicy",
@@ -41,7 +43,6 @@ __all__ = [
     "ToolMode",
     "ToolNotFoundError",
     "ToolParameter",
-    "ToolRepository",
     "ToolRun",
     "ToolRunError",
     "ToolRunNotFoundError",

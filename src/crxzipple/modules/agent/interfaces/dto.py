@@ -92,6 +92,7 @@ class AgentRuntimePreferencesDTO:
     workdir: str | None
     workspace: str | None
     sandbox_mode: str | None
+    memory_retrieval_backend: str | None
     attrs: dict[str, object]
 
     @classmethod
@@ -104,6 +105,7 @@ class AgentRuntimePreferencesDTO:
             workdir=value.resolved_workdir,
             workspace=value.compat_workspace,
             sandbox_mode=value.sandbox_mode,
+            memory_retrieval_backend=value.memory_retrieval_backend,
             attrs=dict(value.attrs),
         )
 

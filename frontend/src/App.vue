@@ -4,6 +4,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 
 import ComposerPanel from "@/components/ComposerPanel.vue";
 import ConversationSidebar from "@/components/ConversationSidebar.vue";
 import MessageTimeline from "@/components/MessageTimeline.vue";
+import { uploadArtifact } from "@/lib/api";
 import { useAgentDirectory } from "@/composables/useAgentDirectory";
 import { useAgentHomeEditor } from "@/composables/useAgentHomeEditor";
 import { useConversationSession } from "@/composables/useConversationSession";
@@ -12,6 +13,10 @@ import { usePersistentUiState } from "@/composables/usePersistentUiState";
 import { useRunPresentation } from "@/composables/useRunPresentation";
 import { useTheme } from "@/composables/useTheme";
 import { useTurnStream } from "@/composables/useTurnStream";
+import {
+  artifactToComposerAttachment,
+  type ComposerAttachment,
+} from "@/lib/contentBlocks";
 
 const TurnInspector = defineAsyncComponent(
   () => import("@/components/TurnInspector.vue"),
@@ -25,6 +30,8 @@ const AgentHomeDrawer = defineAsyncComponent(
 
 const defaultAgentId = ref("crxzipple");
 const composer = ref("");
+const composerAttachments = ref<ComposerAttachment[]>([]);
+const uploadingComposerAttachments = ref(false);
 const { theme, toggleTitle, toggleTheme } = useTheme();
 const {
   deckOpen,
@@ -38,7 +45,7 @@ const selectedLlmId = ref<string | null>(null);
 
 const {
   conversations,
-  activeBulkKey,
+  activeSessionKey,
   activeConversation,
   messages,
   loadingConversations,
@@ -77,18 +84,17 @@ const currentMemoryAgentId = computed(
   () => activeRoute.value.agentId ?? selectedAgentId.value ?? defaultAgentId.value,
 );
 const {
-  pendingMemoryCandidates,
-  approvedMemoryEntries,
+  longTermMemory,
+  recentMemoryFiles,
+  memorySearchResults,
+  selectedMemoryExcerpt,
   memoryQuery,
   loadingMemory,
-  currentThreadMemoryCandidates,
-  otherMemoryCandidates,
+  memoryItemCount,
   refreshMemoryPanel,
-  approveMemoryCandidateById,
-  rejectMemoryCandidateById,
+  openMemoryExcerpt,
 } = useMemoryPanel({
   activeAgentId: currentMemoryAgentId,
-  activeConversation,
   lastError,
 });
 
@@ -161,8 +167,9 @@ const {
   messages,
   activeTurn,
   pendingApproval,
-  activeBulkKey,
+  activeSessionKey,
   busy,
+  lastError,
   activeConversation,
   draftMainKey: computed(() => draftRoute.value.mainKey),
   hydrateConversationAfterTurn,
@@ -217,7 +224,14 @@ async function refreshAgentHomeIfSafe(agentId?: string | null) {
 
 async function startFreshConversation() {
   composer.value = "";
+  composerAttachments.value = [];
   await createFreshConversation();
+}
+
+async function selectConversationWithComposerReset(sessionKey: string) {
+  composer.value = "";
+  composerAttachments.value = [];
+  await selectConversation(sessionKey);
 }
 
 function confirmDiscardAgentHomeChanges(reason: string) {
@@ -312,10 +326,46 @@ function toggleDeck() {
 }
 
 async function submitComposerTurn() {
-  const submitted = await submitTurn(composer.value);
+  if (uploadingComposerAttachments.value) {
+    return;
+  }
+  const submitted = await submitTurn(composer.value, composerAttachments.value);
   if (submitted) {
     composer.value = "";
+    composerAttachments.value = [];
   }
+}
+
+async function attachComposerFiles(files: File[]) {
+  if (files.length === 0) {
+    return;
+  }
+  uploadingComposerAttachments.value = true;
+  try {
+    const attachments = await Promise.all(
+      files.map(async (file) => {
+        const artifact = await uploadArtifact(file);
+        return artifactToComposerAttachment(artifact);
+      }),
+    );
+    const byId = new Map(
+      composerAttachments.value.map((attachment) => [attachment.id, attachment]),
+    );
+    for (const attachment of attachments) {
+      byId.set(attachment.id, attachment);
+    }
+    composerAttachments.value = [...byId.values()];
+  } catch (error) {
+    lastError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    uploadingComposerAttachments.value = false;
+  }
+}
+
+function removeComposerAttachment(attachmentId: string) {
+  composerAttachments.value = composerAttachments.value.filter(
+    (attachment) => attachment.id !== attachmentId,
+  );
 }
 
 function formatTime(value: string | null) {
@@ -336,7 +386,7 @@ onMounted(async () => {
   await refreshProfiles();
   await refreshConversations();
   if (conversations.value[0]) {
-    await selectConversation(conversations.value[0].bulk_key);
+    await selectConversation(conversations.value[0].session_key);
   } else {
     await createFreshConversation();
   }
@@ -368,9 +418,9 @@ onBeforeUnmount(() => {
     <ConversationSidebar
       :open="deckOpen"
       :conversations="conversations"
-      :active-bulk-key="activeBulkKey"
+      :active-session-key="activeSessionKey"
       :loading="loadingConversations"
-      @select="selectConversation"
+      @select="selectConversationWithComposerReset"
       @fresh="startFreshConversation"
       @close="deckOpen = false"
     />
@@ -457,7 +507,7 @@ onBeforeUnmount(() => {
       <ComposerPanel
         v-model="composer"
         :busy="busy"
-        :disabled="!canSubmit"
+        :disabled="!canSubmit || uploadingComposerAttachments"
         :can-compact="canCompact"
         :can-memory-flush="canMemoryFlush"
         :compaction-running="compactionRunning"
@@ -467,9 +517,10 @@ onBeforeUnmount(() => {
         :selected-agent-id="selectedAgentId"
         :selected-llm-id="selectedLlmId"
         :pending-approval="pendingApproval"
-        :pending-memory-candidate-count="pendingMemoryCandidates.length"
+        :memory-item-count="memoryItemCount"
         :context-meter="activeContextMeter"
         :run-feedback="activeRunFeedback"
+        :attachments="composerAttachments"
         @submit="submitComposerTurn"
         @cancel="cancelActiveTurn"
         @compact="requestCompaction"
@@ -477,6 +528,8 @@ onBeforeUnmount(() => {
         @resolve-approval="resolveActiveApproval"
         @select-agent="selectAgent"
         @select-llm="selectLlm"
+        @attach-files="attachComposerFiles"
+        @remove-attachment="removeComposerAttachment"
       />
     </main>
 
@@ -497,13 +550,16 @@ onBeforeUnmount(() => {
     <MemoryDrawer
       :open="memoryOpen"
       :loading="loadingMemory"
-      :current-thread-memory-candidates="currentThreadMemoryCandidates"
-      :other-memory-candidates="otherMemoryCandidates"
-      :entries="approvedMemoryEntries"
+      :long-term-memory="longTermMemory"
+      :recent-files="recentMemoryFiles"
+      :search-results="memorySearchResults"
+      :selected-excerpt="selectedMemoryExcerpt"
       :query="memoryQuery"
       :format-time="formatTime"
-      @approve-memory-candidate="approveMemoryCandidateById"
-      @reject-memory-candidate="rejectMemoryCandidateById"
+      @open-excerpt="
+        (path, startLine, lineCount) =>
+          openMemoryExcerpt(path, { startLine, lineCount })
+      "
       @update:query="memoryQuery = $event"
       @refresh="refreshMemoryPanel"
       @close="closeRightPanel"

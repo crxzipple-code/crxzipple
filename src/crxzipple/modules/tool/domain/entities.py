@@ -10,6 +10,7 @@ from crxzipple.shared.domain.events import DomainEvent
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.domain.value_objects import (
     ToolEnvironment,
+    ToolExecutionContext,
     ToolExecutionPolicy,
     ToolRunError,
     ToolRunResult,
@@ -22,6 +23,7 @@ from crxzipple.modules.tool.domain.value_objects import (
     ToolRunStatus,
     ToolSourceKind,
 )
+from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 
 
 @dataclass(kw_only=True)
@@ -103,6 +105,7 @@ class ToolRun(AggregateRoot[str]):
     target: ToolExecutionTarget
     status: ToolRunStatus = ToolRunStatus.CREATED
     input_payload: dict[str, Any] = field(default_factory=dict)
+    invocation_context_payload: dict[str, Any] | None = None
     result_payload: Any | None = None
     error_payload: str | None = None
     created_at: datetime = field(
@@ -119,6 +122,11 @@ class ToolRun(AggregateRoot[str]):
 
     def __post_init__(self) -> None:
         self.input_payload = dict(self.input_payload)
+        self.invocation_context_payload = (
+            dict(self.invocation_context_payload)
+            if self.invocation_context_payload is not None
+            else None
+        )
         if self.attempt_count < 0:
             raise ToolValidationError("Tool run attempt_count cannot be negative.")
         if self.max_attempts < 1:
@@ -141,7 +149,15 @@ class ToolRun(AggregateRoot[str]):
         result = self.result
         if result is None:
             return None
-        return result.content
+        if result.details is not None:
+            return result.details
+        if result.blocks:
+            return describe_content_for_text_fallback(result.blocks)
+        return None
+
+    @property
+    def invocation_context(self) -> ToolExecutionContext | None:
+        return ToolExecutionContext.from_payload(self.invocation_context_payload)
 
     @property
     def error_message(self) -> str | None:
@@ -165,6 +181,7 @@ class ToolRun(AggregateRoot[str]):
         run_id: str,
         tool_id: str,
         input_payload: dict[str, Any],
+        invocation_context_payload: dict[str, Any] | None = None,
         target: ToolExecutionTarget,
         max_attempts: int = 3,
     ) -> "ToolRun":
@@ -172,6 +189,7 @@ class ToolRun(AggregateRoot[str]):
             id=run_id,
             tool_id=tool_id,
             input_payload=input_payload,
+            invocation_context_payload=invocation_context_payload,
             target=target,
             max_attempts=max_attempts,
         )
@@ -253,14 +271,9 @@ class ToolRun(AggregateRoot[str]):
         self.heartbeat_at = now
         self.lease_expires_at = now + timedelta(seconds=lease_seconds)
 
-    def succeed(self, output_payload: Any | ToolRunResult) -> None:
+    def succeed(self, output_payload: ToolRunResult) -> None:
         self.status = ToolRunStatus.SUCCEEDED
-        normalized_result = (
-            output_payload
-            if isinstance(output_payload, ToolRunResult)
-            else ToolRunResult(content=output_payload)
-        )
-        self.result_payload = normalized_result.to_payload()
+        self.result_payload = output_payload.to_payload()
         self.error_payload = None
         self.completed_at = datetime.now(timezone.utc)
         self.heartbeat_at = self.completed_at

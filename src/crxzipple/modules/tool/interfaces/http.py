@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, status
@@ -10,27 +11,15 @@ from crxzipple.interfaces.authorization import authorize_tool_run
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.tool.application import (
     ExecuteToolInput,
-    RegisterToolInput,
-    RegisterToolParameterInput,
-    SetToolAvailabilityInput,
 )
 from crxzipple.modules.tool.domain import (
     ToolEnvironment,
     ToolExecutionStrategy,
-    ToolKind,
     ToolMode,
-    ToolSourceKind,
 )
 
 
 router = APIRouter()
-
-
-class ToolParameterRequest(BaseModel):
-    name: str
-    data_type: str
-    description: str = ""
-    required: bool = True
 
 
 class ToolExecutionPolicyResponse(BaseModel):
@@ -64,29 +53,6 @@ class ToolParameterResponse(BaseModel):
     required: bool
 
 
-class RegisterToolRequest(BaseModel):
-    id: str
-    name: str
-    description: str
-    kind: ToolKind = ToolKind.FUNCTION
-    parameters: list[ToolParameterRequest] = Field(default_factory=list)
-    tags: list[str] = Field(default_factory=list)
-    required_effect_ids: list[str] = Field(default_factory=list)
-    timeout_seconds: int = 30
-    requires_confirmation: bool = False
-    mutates_state: bool = False
-    supported_modes: list[ToolMode] = Field(default_factory=lambda: [ToolMode.INLINE])
-    supported_strategies: list[ToolExecutionStrategy] = Field(
-        default_factory=lambda: [ToolExecutionStrategy.ASYNC],
-    )
-    supported_environments: list[ToolEnvironment] = Field(
-        default_factory=lambda: [ToolEnvironment.LOCAL],
-    )
-    source_kind: ToolSourceKind = ToolSourceKind.MANUAL
-    runtime_key: str | None = None
-    enabled: bool = True
-
-
 class ExecuteToolRunRequest(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     mode: ToolMode = ToolMode.INLINE
@@ -108,6 +74,11 @@ class ToolResponse(BaseModel):
     source_kind: str
     runtime_key: str | None
     enabled: bool
+
+
+class ToolRootResponse(BaseModel):
+    path: str
+    exists: bool
 
 
 class ToolRunResponse(BaseModel):
@@ -133,6 +104,7 @@ class ToolRunResponse(BaseModel):
 
 class ToolRunResultResponse(BaseModel):
     content: Any | None
+    details: Any | None
     metadata: dict[str, Any]
 
 
@@ -142,40 +114,14 @@ class ToolRunErrorResponse(BaseModel):
     details: dict[str, Any]
 
 
-@router.post("", response_model=ToolResponse, status_code=status.HTTP_201_CREATED)
-def register_tool(
-    payload: RegisterToolRequest,
+@router.get("/roots", response_model=list[ToolRootResponse])
+def list_tool_roots(
     container: Annotated[AppContainer, Depends(get_container)],
-) -> ToolResponse:
-    tool = container.tool_service.register(
-        RegisterToolInput(
-            id=payload.id,
-            name=payload.name,
-            description=payload.description,
-            kind=payload.kind,
-            parameters=tuple(
-                RegisterToolParameterInput(
-                    name=parameter.name,
-                    data_type=parameter.data_type,
-                    description=parameter.description,
-                    required=parameter.required,
-                )
-                for parameter in payload.parameters
-            ),
-            tags=tuple(payload.tags),
-            required_effect_ids=tuple(payload.required_effect_ids),
-            timeout_seconds=payload.timeout_seconds,
-            requires_confirmation=payload.requires_confirmation,
-            mutates_state=payload.mutates_state,
-            supported_modes=tuple(payload.supported_modes),
-            supported_strategies=tuple(payload.supported_strategies),
-            supported_environments=tuple(payload.supported_environments),
-            source_kind=payload.source_kind,
-            runtime_key=payload.runtime_key,
-            enabled=payload.enabled,
-        ),
-    )
-    return _to_response(tool)
+) -> list[ToolRootResponse]:
+    return [
+        ToolRootResponse(path=path, exists=Path(path).exists())
+        for path in container.settings.tool_local_paths
+    ]
 
 
 @router.post("/discover-local", response_model=list[ToolResponse])
@@ -221,28 +167,6 @@ def list_tools(
         else container.tool_service.list_tools()
     )
     return [_to_response(tool) for tool in tools]
-
-
-@router.post("/{tool_id}/enable", response_model=ToolResponse)
-def enable_tool(
-    tool_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> ToolResponse:
-    tool = container.tool_service.set_availability(
-        SetToolAvailabilityInput(id=tool_id, enabled=True),
-    )
-    return _to_response(tool)
-
-
-@router.post("/{tool_id}/disable", response_model=ToolResponse)
-def disable_tool(
-    tool_id: str,
-    container: Annotated[AppContainer, Depends(get_container)],
-) -> ToolResponse:
-    tool = container.tool_service.set_availability(
-        SetToolAvailabilityInput(id=tool_id, enabled=False),
-    )
-    return _to_response(tool)
 
 
 @router.post(
@@ -355,7 +279,8 @@ def _to_run_response(tool_run) -> ToolRunResponse:
         input_payload=dict(tool_run.input_payload),
         result=(
             ToolRunResultResponse(
-                content=tool_run.result.content,
+                content=[dict(block) for block in tool_run.result.blocks],
+                details=tool_run.result.details,
                 metadata=dict(tool_run.result.metadata),
             )
             if tool_run.result is not None

@@ -29,6 +29,7 @@ from crxzipple.modules.session.domain.value_objects import (
     SessionResetPolicy,
     utcnow,
 )
+from crxzipple.shared.content_blocks import content_blocks_from_payload
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.domain.events import DomainEvent
 
@@ -37,7 +38,7 @@ from crxzipple.shared.domain.events import DomainEvent
 class EnsureSessionInput:
     key: str
     agent_id: str
-    llm_id: str
+    workspace: str | None = None
     status: str = "active"
     channel: str | None = None
     chat_type: str | None = None
@@ -51,7 +52,6 @@ class EnsureSessionInput:
 class AppendSessionMessageInput:
     session_key: str
     role: str
-    content: str | None = None
     kind: SessionMessageKind = SessionMessageKind.MESSAGE
     content_payload: dict[str, object] = field(default_factory=dict)
     source_kind: str | None = None
@@ -64,7 +64,6 @@ class AppendSessionMessageInput:
 @dataclass(frozen=True, slots=True)
 class ResetSessionInput:
     session_key: str
-    llm_id: str | None = None
     status: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     active_session_id: str | None = None
@@ -103,7 +102,7 @@ class ListSessionInstancesInput:
 class SyncRoutedSessionInput:
     key_resolution: SessionKeyResolution
     agent_id: str
-    llm_id: str
+    workspace: str | None = None
     status: str = "active"
     origin: SessionOrigin = field(default_factory=SessionOrigin)
     delivery: SessionDelivery = field(default_factory=SessionDelivery)
@@ -157,8 +156,14 @@ class SessionUnitOfWork(Protocol):
 
 
 class SessionApplicationService:
-    def __init__(self, uow_factory: Callable[[], SessionUnitOfWork]) -> None:
+    def __init__(
+        self,
+        uow_factory: Callable[[], SessionUnitOfWork],
+        *,
+        workspace_defaults_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
         self.uow_factory = uow_factory
+        self.workspace_defaults_resolver = workspace_defaults_resolver
 
     def ensure_session(self, data: EnsureSessionInput) -> Session:
         with self.uow_factory() as uow:
@@ -167,7 +172,10 @@ class SessionApplicationService:
                 session = self._build_session(
                     key=data.key,
                     agent_id=data.agent_id,
-                    llm_id=data.llm_id,
+                    workspace=self._resolve_new_session_workspace(
+                        agent_id=data.agent_id,
+                        workspace=data.workspace,
+                    ),
                     status=data.status,
                     channel=data.channel,
                     chat_type=data.chat_type,
@@ -198,13 +206,13 @@ class SessionApplicationService:
                 )
             else:
                 session.apply_updates(
-                    llm_id=data.llm_id,
                     status=data.status,
                     channel=data.channel,
                     chat_type=data.chat_type,
                     origin=data.origin,
                     delivery=data.delivery,
                     metadata=data.metadata,
+                    workspace=data.workspace,
                 )
                 self._ensure_instance_exists(
                     uow,
@@ -263,7 +271,10 @@ class SessionApplicationService:
                 session = self._build_session(
                     key=data.key_resolution.key,
                     agent_id=data.agent_id,
-                    llm_id=data.llm_id,
+                    workspace=self._resolve_new_session_workspace(
+                        agent_id=data.agent_id,
+                        workspace=data.workspace,
+                    ),
                     status=data.status,
                     channel=data.key_resolution.channel,
                     chat_type=data.key_resolution.chat_type,
@@ -313,13 +324,13 @@ class SessionApplicationService:
                 now=now,
             )
             session.apply_updates(
-                llm_id=data.llm_id,
                 status=data.status,
                 channel=data.key_resolution.channel,
                 chat_type=data.key_resolution.chat_type,
                 origin=data.origin,
                 delivery=data.delivery,
                 metadata=data.metadata,
+                workspace=data.workspace,
                 updated_at=now if data.touch_activity else session.updated_at,
             )
             if active_instance is None:
@@ -343,9 +354,9 @@ class SessionApplicationService:
                 )
                 uow.session_instances.add(active_instance)
                 session.reset(
-                    llm_id=data.llm_id,
                     status=data.status,
                     metadata=data.metadata,
+                    workspace=data.workspace,
                     happened_at=now,
                 )
                 next_sequence = (
@@ -495,8 +506,19 @@ class SessionApplicationService:
                     f"Session instance '{target_session_id}' was not found.",
                 )
             content_payload = dict(data.content_payload)
-            if not content_payload and data.content is not None and data.content.strip():
-                content_payload = {"text": data.content}
+            content_blocks = content_blocks_from_payload(content_payload)
+            is_function_call_message = (
+                data.kind is SessionMessageKind.MESSAGE
+                and content_payload.get("type") == "function_call"
+            )
+            if (
+                not content_blocks
+                and data.kind is SessionMessageKind.MESSAGE
+                and not is_function_call_message
+            ):
+                raise SessionValidationError(
+                    "Session message content_payload.blocks is required for message content.",
+                )
             message = SessionMessage(
                 id=str(uuid4()),
                 session_key=session.id,
@@ -507,7 +529,6 @@ class SessionApplicationService:
                     session_id=target_session_id,
                 ),
                 role=data.role,
-                content=data.content,
                 kind=data.kind,
                 content_payload=content_payload,
                 source_kind=data.source_kind,
@@ -643,7 +664,6 @@ class SessionApplicationService:
                 uow.session_instances.add(current_instance)
             session.reset(
                 active_session_id=data.active_session_id,
-                llm_id=data.llm_id,
                 status=data.status,
                 metadata=data.metadata,
             )
@@ -679,7 +699,7 @@ class SessionApplicationService:
         *,
         key: str,
         agent_id: str,
-        llm_id: str,
+        workspace: str | None,
         status: str,
         channel: str | None,
         chat_type: str | None,
@@ -692,10 +712,9 @@ class SessionApplicationService:
         last_reset_at: datetime | None = None,
     ) -> Session:
         timestamp = created_at or utcnow()
-        return Session(
+        session = Session(
             id=key,
             agent_id=agent_id,
-            llm_id=llm_id,
             active_session_id=active_session_id or str(uuid4()),
             status=status,
             channel=(channel.strip() or None) if channel else None,
@@ -707,6 +726,11 @@ class SessionApplicationService:
             updated_at=updated_at or timestamp,
             last_reset_at=last_reset_at or timestamp,
         )
+        session.sync_runtime_binding(
+            agent_id=agent_id,
+            workspace=workspace,
+        )
+        return session
 
     def _build_instance(
         self,
@@ -753,8 +777,8 @@ class SessionApplicationService:
         }
         if binding.agent_id is not None:
             metadata["agent_id"] = binding.agent_id
-        if binding.llm_id is not None:
-            metadata["llm_id"] = binding.llm_id
+        if binding.workspace is not None:
+            metadata["workspace"] = binding.workspace
         return metadata
 
     @staticmethod
@@ -763,8 +787,8 @@ class SessionApplicationService:
         payload: dict[str, object] = {}
         if binding.agent_id is not None:
             payload["agent_id"] = binding.agent_id
-        if binding.llm_id is not None:
-            payload["llm_id"] = binding.llm_id
+        if binding.workspace is not None:
+            payload["workspace"] = binding.workspace
         return payload
 
     def _sync_instance_runtime_binding(
@@ -774,8 +798,27 @@ class SessionApplicationService:
         session: Session,
     ) -> None:
         metadata = dict(instance.metadata)
+        metadata.pop("llm_id", None)
         metadata.update(self._build_runtime_binding_metadata(session))
         instance.metadata = metadata
+
+    def _resolve_new_session_workspace(
+        self,
+        *,
+        agent_id: str,
+        workspace: str | None,
+    ) -> str | None:
+        if workspace is not None:
+            return workspace.strip() or None
+        return self._resolve_default_workspace(agent_id)
+
+    def _resolve_default_workspace(self, agent_id: str) -> str | None:
+        if self.workspace_defaults_resolver is None:
+            return None
+        resolved = self.workspace_defaults_resolver(agent_id)
+        if resolved is None:
+            return None
+        return resolved.strip() or None
 
     def _next_instance_sequence(
         self,

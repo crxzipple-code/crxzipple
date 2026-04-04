@@ -8,7 +8,7 @@ def build_runtime_context_message(
     agent_id: str,
     llm_id: str,
     home_dir: str | None,
-    workdir: str | None,
+    workspace_dir: str | None,
 ) -> str:
     now = datetime.now().astimezone()
     lines = [
@@ -20,11 +20,21 @@ def build_runtime_context_message(
         f"- Model: {llm_id}",
         f"- Current time: {now.isoformat(timespec='seconds')}",
     ]
-    if home_dir is not None and workdir is not None and home_dir == workdir:
-        lines.append(f"- Agent home / workdir: {home_dir}")
+    normalized_home = home_dir.strip() if home_dir is not None and home_dir.strip() else None
+    normalized_workspace = (
+        workspace_dir.strip()
+        if workspace_dir is not None and workspace_dir.strip()
+        else None
+    )
+    if (
+        normalized_home is not None
+        and normalized_workspace is not None
+        and normalized_home == normalized_workspace
+    ):
+        lines.append(f"- Agent home / workspace: {normalized_home}")
     else:
-        if home_dir is not None and home_dir.strip():
-            lines.append(f"- Agent home: {home_dir.strip()}")
-        if workdir is not None and workdir.strip():
-            lines.append(f"- Workdir: {workdir.strip()}")
+        if normalized_home is not None:
+            lines.append(f"- Agent home: {normalized_home}")
+        if normalized_workspace is not None:
+            lines.append(f"- Workspace: {normalized_workspace}")
     return "\n".join(lines).strip()

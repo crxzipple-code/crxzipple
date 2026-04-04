@@ -5,6 +5,7 @@ from typing import Any
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolEnvironment,
+    ToolExecutionContext,
     ToolExecutionStrategy,
     ToolExecutionTarget,
 )
@@ -33,14 +34,27 @@ class ToolRuntimeRouter:
         tool: Tool,
         target: ToolExecutionTarget,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         if target.environment is ToolEnvironment.LOCAL:
             if target.strategy is ToolExecutionStrategy.ASYNC:
-                return await self.local_executor.execute_async(tool, arguments)
+                return await self.local_executor.execute_async(
+                    tool,
+                    arguments,
+                    execution_context=execution_context,
+                )
             if target.strategy is ToolExecutionStrategy.THREAD:
-                return await self.local_executor.execute_thread(tool, arguments)
+                return await self.local_executor.execute_thread(
+                    tool,
+                    arguments,
+                    execution_context=execution_context,
+                )
             if target.strategy is ToolExecutionStrategy.PROCESS:
-                return await self.local_executor.execute_process(tool, arguments)
+                return await self.local_executor.execute_process(
+                    tool,
+                    arguments,
+                    execution_context=execution_context,
+                )
             raise ToolExecutionNotSupportedError(
                 f"Unsupported local execution strategy '{target.strategy.value}'.",
             )
@@ -51,9 +65,17 @@ class ToolRuntimeRouter:
             )
 
         if target.environment is ToolEnvironment.SANDBOX:
-            return await self.sandbox_executor.execute_async(tool, arguments)
+            return await self.sandbox_executor.execute_async(
+                tool,
+                arguments,
+                execution_context=execution_context,
+            )
         if target.environment is ToolEnvironment.REMOTE:
-            return await self.remote_executor.execute_async(tool, arguments)
+            return await self.remote_executor.execute_async(
+                tool,
+                arguments,
+                execution_context=execution_context,
+            )
 
         raise ToolExecutionNotSupportedError(
             f"Unsupported runtime environment '{target.environment.value}'.",

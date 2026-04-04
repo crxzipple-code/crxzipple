@@ -45,7 +45,12 @@ def _not_found(
     return HTTPException(status_code=404, detail=str(exc))
 
 
-@router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=SessionResponse,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_201_CREATED,
+)
 def ensure_session(
     payload: SessionRequest,
     container: Annotated[AppContainer, Depends(get_container)],
@@ -56,7 +61,7 @@ def ensure_session(
     return SessionResponse.from_dto(SessionDTO.from_entity(session))
 
 
-@router.get("", response_model=list[SessionResponse])
+@router.get("", response_model=list[SessionResponse], response_model_exclude_none=True)
 def list_sessions(
     container: Annotated[AppContainer, Depends(get_container)],
     agent_id: Annotated[str | None, Query()] = None,
@@ -67,7 +72,11 @@ def list_sessions(
     ]
 
 
-@router.post("/resolve", response_model=ResolveSessionResponse)
+@router.post(
+    "/resolve",
+    response_model=ResolveSessionResponse,
+    response_model_exclude_none=True,
+)
 def resolve_session(
     payload: ResolveSessionRequest,
     container: Annotated[AppContainer, Depends(get_container)],
@@ -78,7 +87,11 @@ def resolve_session(
     )
 
 
-@router.get("/{session_key}", response_model=SessionResponse)
+@router.get(
+    "/{session_key}",
+    response_model=SessionResponse,
+    response_model_exclude_none=True,
+)
 def get_session(
     session_key: str,
     container: Annotated[AppContainer, Depends(get_container)],
@@ -132,6 +145,7 @@ def list_messages(
 @router.get(
     "/{session_key}/instances",
     response_model=list[SessionInstanceResponse],
+    response_model_exclude_none=True,
 )
 def list_instances(
     session_key: str,
@@ -146,7 +160,11 @@ def list_instances(
     return [SessionInstanceResponse.from_dto(SessionInstanceDTO.from_entity(item)) for item in items]
 
 
-@router.post("/{session_key}/reset", response_model=SessionResponse)
+@router.post(
+    "/{session_key}/reset",
+    response_model=SessionResponse,
+    response_model_exclude_none=True,
+)
 def reset_session(
     session_key: str,
     payload: ResetSessionRequest,

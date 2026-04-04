@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from crxzipple.modules.tool.domain import ToolExecutionContext
 
-AsyncToolHandler = Callable[[dict[str, Any]], Awaitable[Any]]
+AsyncToolHandler = Callable[..., Awaitable[Any]]
 
 
 class ToolRuntimeRegistry:

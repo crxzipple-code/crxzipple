@@ -38,17 +38,16 @@ def resolve_runtime_binding(
     *,
     runtime_binding_payload: Mapping[str, object] | None = None,
     agent_id: str | None = None,
-    llm_id: str | None = None,
     error_factory: SessionInterfaceErrorFactory,
-) -> tuple[str, str]:
+) -> SessionRuntimeBinding:
     binding = SessionRuntimeBinding.from_payload(dict(runtime_binding_payload or {}))
     resolved_agent_id = (binding.agent_id or agent_id or "").strip()
-    resolved_llm_id = (binding.llm_id or llm_id or "").strip()
     if not resolved_agent_id:
         raise error_factory("Session runtime binding agent_id is required.")
-    if not resolved_llm_id:
-        raise error_factory("Session runtime binding llm_id is required.")
-    return resolved_agent_id, resolved_llm_id
+    return SessionRuntimeBinding(
+        agent_id=resolved_agent_id,
+        workspace=binding.workspace,
+    )
 
 
 def build_session_origin(
@@ -85,7 +84,6 @@ def build_ensure_session_input(
     key: str,
     runtime_binding_payload: Mapping[str, object] | None = None,
     agent_id: str | None = None,
-    llm_id: str | None = None,
     status: str = "active",
     channel: str | None = None,
     chat_type: str | None = None,
@@ -95,16 +93,15 @@ def build_ensure_session_input(
     active_session_id: str | None = None,
     error_factory: SessionInterfaceErrorFactory,
 ) -> EnsureSessionInput:
-    resolved_agent_id, resolved_llm_id = resolve_runtime_binding(
+    binding = resolve_runtime_binding(
         runtime_binding_payload=runtime_binding_payload,
         agent_id=agent_id,
-        llm_id=llm_id,
         error_factory=error_factory,
     )
     return EnsureSessionInput(
         key=key,
-        agent_id=resolved_agent_id,
-        llm_id=resolved_llm_id,
+        agent_id=binding.agent_id or "",
+        workspace=binding.workspace,
         status=status,
         channel=channel,
         chat_type=chat_type,
@@ -118,7 +115,6 @@ def build_ensure_session_input(
 def build_resolve_session_bundle_input(
     *,
     agent_id: str,
-    llm_id: str,
     channel: str | None = None,
     chat_type: str = "direct",
     peer_id: str | None = None,
@@ -138,7 +134,6 @@ def build_resolve_session_bundle_input(
     return ResolveSessionBundleInput(
         context=SessionRouteContext(
             agent_id=agent_id,
-            llm_id=llm_id,
             channel=channel,
             chat_type=chat_type,
             peer_id=peer_id,

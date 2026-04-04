@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from crxzipple.modules.agent.domain.entities import AgentProfile
@@ -41,6 +42,7 @@ class RegisterAgentProfileInput:
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
     )
+    home_sidecar_files: dict[str, str] = field(default_factory=dict)
     tool_preferences: AgentToolPreferences = field(default_factory=AgentToolPreferences)
 
 
@@ -165,6 +167,9 @@ class AgentApplicationService:
         home_registry_lister: Callable[[str], tuple[tuple[str, str], ...]] | None = None,
         home_registry_resolver: Callable[[str, str], str | None] | None = None,
         home_registry_writer: Callable[[str, str, str], Any] | None = None,
+        home_sidecar_factory: (
+            Callable[[dict[str, object], str], dict[str, str]] | None
+        ) = None,
         home_file_reader: Callable[[str], tuple[Any, ...]] | None = None,
         home_file_writer: Callable[[str, dict[str, str]], tuple[Any, ...]] | None = None,
     ) -> None:
@@ -179,6 +184,7 @@ class AgentApplicationService:
         self.home_registry_lister = home_registry_lister
         self.home_registry_resolver = home_registry_resolver
         self.home_registry_writer = home_registry_writer
+        self.home_sidecar_factory = home_sidecar_factory
         self.home_file_reader = home_file_reader
         self.home_file_writer = home_file_writer
 
@@ -213,7 +219,11 @@ class AgentApplicationService:
                     },
                 ),
             )
-            self._persist_profile_projection_and_home(uow, profile)
+            self._persist_profile_projection_and_home(
+                uow,
+                profile,
+                home_sidecar_files=data.home_sidecar_files,
+            )
             uow.commit()
             return profile
 
@@ -256,7 +266,16 @@ class AgentApplicationService:
                         },
                     ),
                 )
-                self._persist_profile_projection_and_home(uow, profile)
+                self._persist_profile_projection_and_home(
+                    uow,
+                    profile,
+                    home_sidecar_files=data.home_sidecar_files,
+                    source_home_dir=(
+                        existing.runtime_preferences.resolved_home_dir
+                        if existing is not None
+                        else None
+                    ),
+                )
                 synced_profiles.append(profile)
 
             uow.commit()
@@ -269,6 +288,7 @@ class AgentApplicationService:
                 raise AgentNotFoundError(
                     f"Agent profile '{data.id}' was not found.",
                 )
+            previous_home_dir = profile.runtime_preferences.resolved_home_dir
             profile.apply_updates(
                 name=data.name if data.name is not _UNSET else None,
                 description=(
@@ -303,7 +323,11 @@ class AgentApplicationService:
                 ),
             )
             self._normalize_profile_runtime_preferences(profile)
-            self._persist_profile_projection_and_home(uow, profile)
+            self._persist_profile_projection_and_home(
+                uow,
+                profile,
+                source_home_dir=previous_home_dir,
+            )
             uow.commit()
             return profile
 
@@ -322,6 +346,9 @@ class AgentApplicationService:
             if profile is not None:
                 profiles.append(profile)
         return profiles
+
+    def resolve_registered_home(self, profile_id: str) -> str | None:
+        return self._resolve_registered_home(profile_id)
 
     def enable_profile(self, profile_id: str) -> AgentProfile:
         with self.uow_factory() as uow:
@@ -378,6 +405,9 @@ class AgentApplicationService:
                     home_dir=target_home_dir,
                     workdir=resolved_workdir,
                     sandbox_mode=previous_runtime_preferences.sandbox_mode,
+                    memory_retrieval_backend=(
+                        previous_runtime_preferences.memory_retrieval_backend
+                    ),
                     attrs=dict(previous_runtime_preferences.attrs),
                 ),
             )
@@ -385,7 +415,11 @@ class AgentApplicationService:
                 source_dir=source_dir,
                 target_home_dir=target_home_dir,
             )
-            self._persist_profile_projection_and_home(uow, profile)
+            self._persist_profile_projection_and_home(
+                uow,
+                profile,
+                source_home_dir=previous_runtime_preferences.resolved_home_dir,
+            )
             uow.commit()
             return MigrateAgentHomeResult(
                 profile=profile,
@@ -416,7 +450,14 @@ class AgentApplicationService:
                 home_dir=home_dir,
             )
             self._normalize_profile_runtime_preferences(updated_profile)
-            self._persist_profile_projection_and_home(uow, updated_profile)
+            self._persist_profile_projection_and_home(
+                uow,
+                updated_profile,
+                home_sidecar_files=self._build_home_sidecar_files(
+                    payload,
+                    home_dir=home_dir,
+                ),
+            )
             uow.commit()
             return SyncAgentHomeResult(
                 profile=updated_profile,
@@ -439,16 +480,24 @@ class AgentApplicationService:
                 profile=profile,
                 home_dir=data.home_dir,
             )
+            previous_home_dir = profile.runtime_preferences.resolved_home_dir
             if data.home_dir is not None and data.home_dir.strip():
                 profile.apply_updates(
                     runtime_preferences=AgentRuntimePreferences(
                         home_dir=home_dir,
                         workdir=profile.runtime_preferences.resolved_workdir or home_dir,
                         sandbox_mode=profile.runtime_preferences.sandbox_mode,
+                        memory_retrieval_backend=(
+                            profile.runtime_preferences.memory_retrieval_backend
+                        ),
                         attrs=dict(profile.runtime_preferences.attrs),
                     ),
                 )
-            self._persist_profile_projection_and_home(uow, profile)
+            self._persist_profile_projection_and_home(
+                uow,
+                profile,
+                source_home_dir=previous_home_dir,
+            )
             uow.commit()
             return ExportAgentHomeResult(
                 profile=profile,
@@ -479,6 +528,9 @@ class AgentApplicationService:
                     workdir=profile.runtime_preferences.resolved_workdir or home_dir,
                     workspace=profile.runtime_preferences.workspace,
                     sandbox_mode=profile.runtime_preferences.sandbox_mode,
+                    memory_retrieval_backend=(
+                        profile.runtime_preferences.memory_retrieval_backend
+                    ),
                     attrs=dict(profile.runtime_preferences.attrs),
                 ),
             )
@@ -520,6 +572,7 @@ class AgentApplicationService:
             workdir=resolved_workdir,
             workspace=runtime_preferences.workspace,
             sandbox_mode=runtime_preferences.sandbox_mode,
+            memory_retrieval_backend=runtime_preferences.memory_retrieval_backend,
             attrs=dict(runtime_preferences.attrs),
         )
 
@@ -574,15 +627,26 @@ class AgentApplicationService:
         self,
         uow: AgentUnitOfWork,
         profile: AgentProfile,
+        *,
+        home_sidecar_files: dict[str, str] | None = None,
+        source_home_dir: str | None = None,
     ) -> None:
         self._normalize_profile_runtime_preferences(profile)
         home_dir = self._resolve_agent_home_dir(profile=profile, home_dir=None)
         if home_dir is None:
             raise AgentValidationError(
                 f"Agent profile '{profile.id}' must define a home directory.",
-            )
+        )
         self._ensure_home_scaffold(profile)
         self._write_home_config(profile, home_dir=home_dir)
+        resolved_sidecar_files = dict(home_sidecar_files or {})
+        if (
+            not resolved_sidecar_files
+            and source_home_dir is not None
+            and not _same_home_dir(source_home_dir, home_dir)
+        ):
+            resolved_sidecar_files = self._read_home_sidecar_files(source_home_dir)
+        self._write_home_sidecars(home_dir=home_dir, files=resolved_sidecar_files)
         self._register_home(profile.id, home_dir)
         uow.collect(profile)
 
@@ -637,6 +701,35 @@ class AgentApplicationService:
             raise AgentValidationError("Agent home config writing is unavailable.")
         return self.home_config_writer(profile, home_dir)
 
+    def _write_home_sidecars(self, *, home_dir: str, files: dict[str, str]) -> Any:
+        if not files:
+            return None
+        if self.home_file_writer is None:
+            raise AgentValidationError("Agent home file writing is unavailable.")
+        try:
+            return self.home_file_writer(home_dir, files)
+        except ValueError as exc:
+            raise AgentValidationError(str(exc)) from exc
+
+    def _read_home_sidecar_files(self, home_dir: str) -> dict[str, str]:
+        if self.home_file_reader is None:
+            return {}
+        return {
+            item.name: item.content
+            for item in self.home_file_reader(home_dir)
+            if item.name.startswith(".state/") and item.exists
+        }
+
+    def _build_home_sidecar_files(
+        self,
+        payload: dict[str, object],
+        *,
+        home_dir: str,
+    ) -> dict[str, str]:
+        if self.home_sidecar_factory is None:
+            return {}
+        return dict(self.home_sidecar_factory(payload, home_dir))
+
     def _apply_home_config(
         self,
         profile: AgentProfile,
@@ -682,4 +775,14 @@ class AgentApplicationService:
                 content=item.content,
             )
             for item in written_files
+        )
+
+
+def _same_home_dir(first: str, second: str) -> bool:
+    try:
+        return Path(first).expanduser().resolve() == Path(second).expanduser().resolve()
+    except OSError:
+        return (
+            Path(first).expanduser().absolute()
+            == Path(second).expanduser().absolute()
         )

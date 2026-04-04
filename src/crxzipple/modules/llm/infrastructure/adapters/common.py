@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -11,7 +12,19 @@ from typing import Any
 import requests
 
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmMessage, ToolCallIntent, ToolSchema
+from crxzipple.modules.llm.domain.value_objects import (
+    LlmCapability,
+    LlmMessage,
+    ToolCallIntent,
+    ToolSchema,
+)
+from crxzipple.shared.content_blocks import (
+    describe_content_for_text_fallback,
+    extract_text_content,
+    has_image_content_blocks,
+    has_non_text_content_blocks,
+    normalize_content_blocks,
+)
 
 OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 OPENAI_TOOL_NAME_MAX_LENGTH = 64
@@ -153,7 +166,7 @@ def ensure_json_response(
 def coerce_text_content(value: Any) -> str:
     if isinstance(value, str):
         return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return describe_content_for_text_fallback(value)
 
 
 def parse_json_arguments(raw: Any) -> dict[str, Any]:
@@ -287,11 +300,14 @@ def openai_chat_messages(
                     "content": tool_result["output_text"],
                 },
             )
+            attachment_payload = _openai_chat_tool_attachment_message(tool_result)
+            if attachment_payload is not None:
+                payloads.append(attachment_payload)
             continue
 
         payload: dict[str, Any] = {
             "role": message.role.value,
-            "content": coerce_text_content(message.content),
+            "content": _openai_chat_message_content(message),
         }
         if message.name is not None:
             payload["name"] = message.name
@@ -330,11 +346,14 @@ def openai_response_input_items(
                     "output": tool_result["output_text"],
                 },
             )
+            attachment_payload = _openai_response_tool_attachment_message(tool_result)
+            if attachment_payload is not None:
+                payloads.append(attachment_payload)
             continue
 
         payload: dict[str, Any] = {
             "role": message.role.value,
-            "content": coerce_text_content(message.content),
+            "content": _openai_response_message_content(message),
         }
         if message.name is not None:
             payload["name"] = message.name
@@ -368,17 +387,18 @@ def anthropic_messages(messages: tuple[LlmMessage, ...]) -> list[dict[str, Any]]
                     "content": tool_result["output_text"],
                 },
             )
+            attachment_payload = _anthropic_tool_attachment_message(tool_result)
+            if attachment_payload is not None:
+                payloads.append(attachment_payload)
             continue
 
         role = "assistant" if message.role.value == "assistant" else "user"
-        block = {
-            "type": "text",
-            "text": coerce_text_content(message.content),
-        }
+        content_blocks = _anthropic_message_content(message, role=role)
         if role == "assistant":
-            _append_anthropic_assistant_block(payloads, block)
+            for block in content_blocks:
+                _append_anthropic_assistant_block(payloads, block)
         else:
-            payloads.append({"role": "user", "content": [block]})
+            payloads.append({"role": "user", "content": content_blocks})
     return payloads
 
 
@@ -408,15 +428,20 @@ def _assistant_function_call(message: LlmMessage) -> dict[str, Any] | None:
     }
 
 
-def _tool_result(message: LlmMessage) -> dict[str, str] | None:
+def _tool_result(message: LlmMessage) -> dict[str, Any] | None:
     if message.role.value != "tool":
         return None
     call_id = message.tool_call_id
     if call_id is None or not call_id.strip():
         return None
+    blocks = _message_blocks(message)
+    output_text = describe_content_for_text_fallback(blocks)
+    if not output_text.strip():
+        output_text = "Tool completed."
     return {
         "call_id": call_id.strip(),
-        "output_text": coerce_text_content(message.content),
+        "output_text": output_text,
+        "content_blocks": blocks,
     }
 
 
@@ -485,19 +510,26 @@ def gemini_contents(messages: tuple[LlmMessage, ...]) -> tuple[dict[str, Any], l
                         "id": tool_result["call_id"],
                         "name": tool_name,
                         "response": {
-                            "result": _coerce_json_like_value(message.content),
+                            "result": _coerce_json_like_value(
+                                tool_result["output_text"],
+                            ),
                         },
                     },
                 },
             )
+            attachment_parts = _gemini_tool_attachment_parts(tool_result)
+            for part in attachment_parts:
+                _append_gemini_user_text_part(contents, part)
             continue
 
         role = "model" if message.role.value == "assistant" else "user"
-        part = {"text": coerce_text_content(message.content)}
+        parts = _gemini_message_parts(message, role=role)
         if role == "model":
-            _append_gemini_model_part(contents, part)
+            for part in parts:
+                _append_gemini_model_part(contents, part)
         else:
-            _append_gemini_user_text_part(contents, part)
+            for part in parts:
+                _append_gemini_user_text_part(contents, part)
     return tuple(contents), system_parts
 
 
@@ -551,7 +583,75 @@ def _coerce_json_like_value(value: Any) -> Any:
             return json.loads(value)
         except json.JSONDecodeError:
             return value
+    if isinstance(value, dict):
+        if (
+            isinstance(value.get("data"), str)
+            and value.get("data")
+            and str(value.get("encoding", "")).strip().lower() == "base64"
+        ):
+            sanitized = {
+                str(key): _coerce_json_like_value(item)
+                for key, item in value.items()
+                if key != "data"
+            }
+            sanitized["attachment_in_blocks"] = True
+            return sanitized
+        return {
+            str(key): _coerce_json_like_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_coerce_json_like_value(item) for item in value]
     return value
+
+
+def _non_text_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [block for block in blocks if block.get("type") != "text"]
+
+
+def _openai_chat_tool_attachment_message(
+    tool_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    blocks = tool_result.get("content_blocks") or []
+    if not _non_text_blocks(blocks):
+        return None
+    return {
+        "role": "user",
+        "content": [_openai_chat_part(block) for block in blocks],
+    }
+
+
+def _openai_response_tool_attachment_message(
+    tool_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    blocks = tool_result.get("content_blocks") or []
+    if not _non_text_blocks(blocks):
+        return None
+    return {
+        "role": "user",
+        "content": [_openai_response_part(block) for block in blocks],
+    }
+
+
+def _anthropic_tool_attachment_message(
+    tool_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    blocks = tool_result.get("content_blocks") or []
+    if not _non_text_blocks(blocks):
+        return None
+    return {
+        "role": "user",
+        "content": [_anthropic_part(block) for block in blocks],
+    }
+
+
+def _gemini_tool_attachment_parts(
+    tool_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    blocks = tool_result.get("content_blocks") or []
+    if not _non_text_blocks(blocks):
+        return []
+    return [_gemini_part(block) for block in blocks]
 
 
 def build_tool_call_intents(
@@ -576,3 +676,218 @@ def build_tool_call_intents(
 
 def default_base_url(profile: LlmProfile, fallback: str) -> str:
     return profile.base_url or fallback
+
+
+def ensure_image_input_supported(
+    profile: LlmProfile,
+    messages: tuple[LlmMessage, ...],
+) -> None:
+    if not any(has_image_content_blocks(message.content) for message in messages):
+        return
+    if LlmCapability.VISION_INPUT not in profile.capabilities:
+        raise RuntimeError(
+            f"LLM profile '{profile.id}' does not support vision input.",
+        )
+
+
+def _openai_chat_message_content(message: LlmMessage) -> Any:
+    blocks = _message_blocks(message)
+    if not blocks:
+        return coerce_text_content(message.content)
+    if message.role.value == "user":
+        return [_openai_chat_part(block) for block in blocks]
+    _ensure_text_only_blocks(blocks, provider_name="OpenAI chat")
+    return extract_text_content(blocks) or ""
+
+
+def _openai_response_message_content(message: LlmMessage) -> Any:
+    blocks = _message_blocks(message)
+    if not blocks:
+        return coerce_text_content(message.content)
+    if message.role.value == "user":
+        return [_openai_response_part(block) for block in blocks]
+    _ensure_text_only_blocks(blocks, provider_name="OpenAI responses")
+    return extract_text_content(blocks) or ""
+
+
+def _anthropic_message_content(
+    message: LlmMessage,
+    *,
+    role: str,
+) -> list[dict[str, Any]]:
+    blocks = _message_blocks(message)
+    if not blocks:
+        return [{"type": "text", "text": coerce_text_content(message.content)}]
+    if role == "assistant":
+        _ensure_text_only_blocks(blocks, provider_name="Anthropic assistant")
+        return [
+            {"type": "text", "text": block["text"]}
+            for block in blocks
+            if block.get("type") == "text"
+        ]
+    return [_anthropic_part(block) for block in blocks]
+
+
+def _gemini_message_parts(
+    message: LlmMessage,
+    *,
+    role: str,
+) -> list[dict[str, Any]]:
+    blocks = _message_blocks(message)
+    if not blocks:
+        return [{"text": coerce_text_content(message.content)}]
+    if role == "model":
+        _ensure_text_only_blocks(blocks, provider_name="Gemini model")
+        return [{"text": block["text"]} for block in blocks if block.get("type") == "text"]
+    return [_gemini_part(block) for block in blocks]
+
+
+def _message_blocks(message: LlmMessage) -> list[dict[str, Any]]:
+    if isinstance(message.content, dict) and message.content.get("type") == "function_call":
+        return []
+    try:
+        return normalize_content_blocks(message.content)
+    except ValueError:
+        return []
+
+
+def _ensure_text_only_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    provider_name: str,
+) -> None:
+    if all(block.get("type") == "text" for block in blocks):
+        return
+    raise RuntimeError(
+        f"{provider_name} only supports non-text blocks on user messages.",
+    )
+
+
+def _openai_chat_part(block: dict[str, Any]) -> dict[str, Any]:
+    if block["type"] == "text":
+        return {"type": "text", "text": block["text"]}
+    if block["type"] == "image":
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": _base64_data_url(block["mime_type"], block["data"]),
+            },
+        }
+    if block["type"] == "file":
+        return {
+            "type": "file",
+            "file": {
+                "file_data": block["data"],
+                "filename": _file_block_name(block),
+            },
+        }
+    raise RuntimeError(f"OpenAI chat does not support '{block['type']}' content blocks yet.")
+
+
+def _openai_response_part(block: dict[str, Any]) -> dict[str, Any]:
+    if block["type"] == "text":
+        return {"type": "input_text", "text": block["text"]}
+    if block["type"] == "image":
+        return {
+            "type": "input_image",
+            "image_url": _base64_data_url(block["mime_type"], block["data"]),
+        }
+    if block["type"] == "file":
+        return {
+            "type": "input_file",
+            "file_data": block["data"],
+            "filename": _file_block_name(block),
+        }
+    raise RuntimeError(
+        f"OpenAI Responses does not support '{block['type']}' content blocks yet.",
+    )
+
+
+def _anthropic_part(block: dict[str, Any]) -> dict[str, Any]:
+    if block["type"] == "text":
+        return {"type": "text", "text": block["text"]}
+    if block["type"] == "image":
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": block["mime_type"],
+                "data": block["data"],
+            },
+        }
+    if block["type"] == "file":
+        if _anthropic_treats_file_as_text(str(block["mime_type"])):
+            return {
+                "type": "text",
+                "text": _anthropic_text_file_content(block),
+            }
+        if not _anthropic_supports_file_mime_type(str(block["mime_type"])):
+            raise RuntimeError(
+                "Anthropic only supports PDF and text-like file content blocks right now.",
+            )
+        return {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": block["mime_type"],
+                "data": block["data"],
+            },
+            "title": _file_block_name(block),
+        }
+    raise RuntimeError(
+        f"Anthropic does not support '{block['type']}' content blocks yet.",
+    )
+
+
+def _gemini_part(block: dict[str, Any]) -> dict[str, Any]:
+    if block["type"] == "text":
+        return {"text": block["text"]}
+    if block["type"] == "image":
+        return {
+            "inlineData": {
+                "mimeType": block["mime_type"],
+                "data": block["data"],
+            },
+        }
+    if block["type"] == "file":
+        return {
+            "inlineData": {
+                "mimeType": block["mime_type"],
+                "data": block["data"],
+            },
+        }
+    raise RuntimeError(f"Gemini does not support '{block['type']}' content blocks yet.")
+
+
+def _base64_data_url(mime_type: str, data: str) -> str:
+    return f"data:{mime_type};base64,{data}"
+
+
+def _file_block_name(block: dict[str, Any]) -> str:
+    name = block.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    mime_type = str(block.get("mime_type") or "").strip().lower()
+    if mime_type == "application/pdf":
+        return "attachment.pdf"
+    return "attachment"
+
+
+def _anthropic_supports_file_mime_type(mime_type: str) -> bool:
+    return mime_type.strip().lower() == "application/pdf"
+
+
+def _anthropic_treats_file_as_text(mime_type: str) -> bool:
+    normalized = mime_type.strip().lower()
+    return normalized in {
+        "text/plain",
+        "text/markdown",
+        "application/json",
+    }
+
+
+def _anthropic_text_file_content(block: dict[str, Any]) -> str:
+    raw_data = str(block.get("data") or "")
+    decoded = base64.b64decode(raw_data).decode("utf-8", errors="replace")
+    name = _file_block_name(block)
+    return f"[file:{name}]\n{decoded}"

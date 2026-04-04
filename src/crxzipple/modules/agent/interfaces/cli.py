@@ -20,6 +20,10 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentToolPreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
+from crxzipple.modules.orchestration.infrastructure import MemoryBindingService
+
+
+_memory_binding_service = MemoryBindingService()
 
 
 def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentProfileInput:
@@ -37,6 +41,9 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         ),
         execution_policy=AgentExecutionPolicy.from_payload(profile.execution_policy),
         runtime_preferences=AgentRuntimePreferences.from_payload(
+            profile.runtime_preferences,
+        ),
+        home_sidecar_files=_memory_binding_service.sidecar_files_from_runtime_preferences_payload(
             profile.runtime_preferences,
         ),
         tool_preferences=AgentToolPreferences.from_payload(profile.tool_preferences),
@@ -81,7 +88,7 @@ def build_cli() -> typer.Typer:
             help="Whether streaming should be enabled by default.",
         ),
         timeout_seconds: int = typer.Option(120, help="Execution timeout in seconds."),
-        max_turns: int = typer.Option(12, help="Maximum turn budget."),
+        max_turns: int = typer.Option(99, help="Maximum turn budget."),
         home_dir: str | None = typer.Option(
             None,
             help="Optional agent home directory for AGENT.md/SOUL.md/USER.md/MEMORY.md.",
@@ -97,6 +104,10 @@ def build_cli() -> typer.Typer:
         sandbox_mode: str | None = typer.Option(
             None,
             help="Optional runtime sandbox mode preference.",
+        ),
+        memory_retrieval_backend: str | None = typer.Option(
+            None,
+            help="Optional default memory retrieval backend for this agent.",
         ),
         display_name: str | None = typer.Option(
             None,
@@ -166,6 +177,7 @@ def build_cli() -> typer.Typer:
                     workdir=workdir,
                     workspace=workspace,
                     sandbox_mode=sandbox_mode,
+                    memory_retrieval_backend=memory_retrieval_backend,
                 ),
                 tool_preferences=AgentToolPreferences(
                     requested_effect_ids=tuple(requested_effect or ()),

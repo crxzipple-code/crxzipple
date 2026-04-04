@@ -42,9 +42,6 @@ def import_models() -> None:
         models as _authorization_models,
     )
     from crxzipple.modules.llm.infrastructure.persistence import models as _llm_models
-    from crxzipple.modules.memory.infrastructure.persistence import (
-        models as _memory_models,
-    )
     from crxzipple.modules.orchestration.infrastructure.persistence import (
         models as _orchestration_models,
     )
@@ -57,7 +54,6 @@ def import_models() -> None:
         _dispatch_models,
         _authorization_models,
         _llm_models,
-        _memory_models,
         _orchestration_models,
         _session_models,
         _tool_models,

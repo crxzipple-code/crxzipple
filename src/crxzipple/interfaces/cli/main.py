@@ -10,19 +10,23 @@ from crxzipple.interfaces.cli.crxzipple import chat as chat_command
 from crxzipple.interfaces.cli.crxzipple import serve as serve_command
 from crxzipple.interfaces.cli.db import build_cli as build_db_cli
 from crxzipple.modules.agent.interfaces.cli import build_cli as build_agent_cli
+from crxzipple.modules.browser.interfaces.cli import build_cli as build_browser_cli
 from crxzipple.modules.authorization.interfaces.cli import (
     build_cli as build_authorization_cli,
 )
 from crxzipple.modules.dispatch.interfaces.cli import build_cli as build_dispatch_cli
 from crxzipple.modules.authorization.domain import AuthorizationDeniedError
 from crxzipple.modules.llm.interfaces.cli import build_cli as build_llm_cli
+from crxzipple.modules.memory.interfaces.cli import build_cli as build_memory_cli
 from crxzipple.modules.orchestration.interfaces.cli import (
     build_cli as build_orchestration_cli,
 )
 from crxzipple.modules.orchestration.interfaces.worker_cli import (
     build_cli as build_orchestration_worker_cli,
 )
+from crxzipple.modules.process.interfaces.cli import build_cli as build_process_cli
 from crxzipple.modules.session.interfaces.cli import build_cli as build_session_cli
+from crxzipple.modules.skills.interfaces.cli import build_cli as build_skills_cli
 from crxzipple.modules.tool.interfaces.cli import build_cli as build_tool_cli
 from crxzipple.modules.tool.interfaces.worker_cli import build_cli as build_tool_worker_cli
 
@@ -37,12 +41,16 @@ app = typer.Typer(
 
 app.add_typer(build_tool_cli(), name="tool")
 app.add_typer(build_tool_worker_cli(), name="tool-worker")
+app.add_typer(build_browser_cli(), name="browser")
 app.add_typer(build_dispatch_cli(), name="dispatch")
 app.add_typer(build_orchestration_cli(), name="orchestration")
 app.add_typer(build_orchestration_worker_cli(), name="orchestration-worker")
 app.add_typer(build_session_cli(), name="session")
 app.add_typer(build_llm_cli(), name="llm")
+app.add_typer(build_memory_cli(), name="memory")
 app.add_typer(build_agent_cli(), name="agent")
+app.add_typer(build_process_cli(), name="process")
+app.add_typer(build_skills_cli(), name="skills")
 app.add_typer(build_authorization_cli(), name="auth")
 app.add_typer(build_db_cli(), name="db")
 

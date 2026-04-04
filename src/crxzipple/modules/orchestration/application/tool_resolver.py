@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
@@ -15,6 +16,10 @@ from crxzipple.modules.llm.domain import ToolSchema
 from crxzipple.modules.orchestration.application.ports import (
     AuthorizationPort,
     ToolCatalogPort,
+)
+from crxzipple.modules.orchestration.application.prompting import (
+    PromptMode,
+    resolve_run_surface_policy,
 )
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 from crxzipple.modules.tool.domain import (
@@ -67,7 +72,7 @@ class ResolvedToolSet:
 class ToolResolver:
     tool_catalog: ToolCatalogPort
     authorization_port: AuthorizationPort
-    tool_availability_filter: Callable[[OrchestrationRun, Tool], bool] | None = None
+    run_context_provider: Callable[[OrchestrationRun], dict[str, object]] | None = None
     default_remote_ask_effect_id: str = field(default="remote_tool_access")
     default_background_effect_id: str = field(default="background_execution")
     default_mutation_effect_id: str = field(default="state_mutation")
@@ -77,11 +82,6 @@ class ToolResolver:
         self.tool_catalog.ensure_local_system_tools_registered()
         resolved: list[ResolvedTool] = []
         for tool in self.tool_catalog.list_enabled_tools():
-            if self.tool_availability_filter is not None and not self.tool_availability_filter(
-                run,
-                tool,
-            ):
-                continue
             target = self._preferred_target(tool)
             if self._surface_is_blocked(run, tool=tool, target=target):
                 continue
@@ -95,6 +95,14 @@ class ToolResolver:
         return ResolvedToolSet(
             tools=tuple(resolved),
         )
+
+    def invocation_context_attrs(
+        self,
+        run: OrchestrationRun,
+        *,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        return self._context_attrs(run, session_key=session_key)
 
     def execution_decision(
         self,
@@ -114,40 +122,13 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs={
-                        "tool_kind": tool.kind.value,
-                        "source_kind": tool.source_kind.value,
-                        "runtime_key": tool.runtime_key,
-                        "enabled": tool.enabled,
-                        "requires_confirmation": tool.execution_policy.requires_confirmation,
-                        "mutates_state": tool.execution_policy.mutates_state,
-                        "supported_modes": [
-                            item.value for item in tool.execution_support.supported_modes
-                        ],
-                        "supported_strategies": [
-                            item.value
-                            for item in tool.execution_support.supported_strategies
-                        ],
-                        "supported_environments": [
-                            item.value
-                            for item in tool.execution_support.supported_environments
-                        ],
-                        "required_effect_ids": list(tool.required_effect_ids),
-                        "authorization_effect_ids": list(authorization_effect_ids),
-                        "mode": target.mode.value,
-                        "strategy": target.strategy.value,
-                        "environment": target.environment.value,
-                        "tags": list(tool.tags),
-                    },
+                    attrs=self._resource_attrs(tool, target=target),
                 ),
                 context=AuthorizationContext(
-                    attrs={
-                        "interface": run.inbound_instruction.source,
-                        "run_id": run.id,
-                        "session_key": str(run.metadata.get("session_key", "")).strip(),
-                        "agent_id": run.agent_id,
-                        "prompt_mode": self._prompt_mode(run),
-                    },
+                    attrs=self._context_attrs(
+                        run,
+                        session_key=str(run.metadata.get("session_key", "")).strip(),
+                    ),
                 ),
                 required_effect_ids=authorization_effect_ids,
             ),
@@ -282,41 +263,10 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs={
-                        "tool_kind": tool.kind.value,
-                        "source_kind": tool.source_kind.value,
-                        "runtime_key": tool.runtime_key,
-                        "enabled": tool.enabled,
-                        "requires_confirmation": tool.execution_policy.requires_confirmation,
-                        "mutates_state": tool.execution_policy.mutates_state,
-                        "supported_modes": [
-                            item.value for item in tool.execution_support.supported_modes
-                        ],
-                        "supported_strategies": [
-                            item.value
-                            for item in tool.execution_support.supported_strategies
-                        ],
-                        "supported_environments": [
-                            item.value
-                            for item in tool.execution_support.supported_environments
-                        ],
-                        "required_effect_ids": list(tool.required_effect_ids),
-                        "authorization_effect_ids": list(
-                            self._authorization_effect_ids(tool, target=target),
-                        ),
-                        "mode": target.mode.value,
-                        "strategy": target.strategy.value,
-                        "environment": target.environment.value,
-                        "tags": list(tool.tags),
-                    },
+                    attrs=self._resource_attrs(tool, target=target),
                 ),
                 context=AuthorizationContext(
-                    attrs={
-                        "interface": run.inbound_instruction.source,
-                        "run_id": run.id,
-                        "agent_id": run.agent_id,
-                        "prompt_mode": self._prompt_mode(run),
-                    },
+                    attrs=self._context_attrs(run),
                 ),
             ),
         )
@@ -343,23 +293,11 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs={
-                        "authorization_effect_ids": list(
-                            self._authorization_effect_ids(tool, target=target),
-                        ),
-                        "required_effect_ids": list(tool.required_effect_ids),
-                        "mode": target.mode.value,
-                        "strategy": target.strategy.value,
-                        "environment": target.environment.value,
-                        "tags": list(tool.tags),
-                    },
+                    attrs=self._resource_attrs(tool, target=target),
                 ),
                 context=AuthorizationContext(
                     attrs={
-                        "interface": run.inbound_instruction.source,
-                        "run_id": run.id,
-                        "agent_id": run.agent_id,
-                        "prompt_mode": self._prompt_mode(run),
+                        **self._context_attrs(run),
                         "requested_effect_id": effect_id,
                     },
                 ),
@@ -387,40 +325,98 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs={
-                        "authorization_effect_ids": list(
-                            self._authorization_effect_ids(tool, target=target),
-                        ),
-                        "required_effect_ids": list(tool.required_effect_ids),
-                        "mode": target.mode.value,
-                        "strategy": target.strategy.value,
-                        "environment": target.environment.value,
-                        "tags": list(tool.tags),
-                    },
+                    attrs=self._resource_attrs(tool, target=target),
                 ),
                 context=AuthorizationContext(
-                    attrs={
-                        "interface": run.inbound_instruction.source,
-                        "run_id": run.id,
-                        "agent_id": run.agent_id,
-                        "prompt_mode": self._prompt_mode(run),
-                    },
+                    attrs=self._context_attrs(run),
                 ),
             ),
         )
         return self._decision_mode(decision)
 
+    def _context_attrs(
+        self,
+        run: OrchestrationRun,
+        *,
+        session_key: str | None = None,
+    ) -> dict[str, Any]:
+        prompt_mode = self._prompt_mode(run)
+        surface_policy = resolve_run_surface_policy(prompt_mode)
+        attrs: dict[str, Any] = {
+            "interface": run.inbound_instruction.source,
+            "run_id": run.id,
+            "agent_id": run.agent_id,
+            "prompt_mode": prompt_mode.value,
+            "run_mode": prompt_mode.value,
+            "surface": surface_policy.surface,
+            "surface_contract": surface_policy.surface_contract,
+        }
+        normalized_session_key = (session_key or "").strip()
+        if normalized_session_key:
+            attrs["session_key"] = normalized_session_key
+        if self.run_context_provider is not None:
+            attrs.update(self.run_context_provider(run))
+        return attrs
+
+    def _resource_attrs(
+        self,
+        tool: Tool,
+        *,
+        target: ToolExecutionTarget,
+    ) -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "tool_kind": tool.kind.value,
+            "source_kind": tool.source_kind.value,
+            "runtime_key": tool.runtime_key,
+            "enabled": tool.enabled,
+            "requires_confirmation": tool.execution_policy.requires_confirmation,
+            "mutates_state": tool.execution_policy.mutates_state,
+            "supported_modes": [
+                item.value for item in tool.execution_support.supported_modes
+            ],
+            "supported_strategies": [
+                item.value for item in tool.execution_support.supported_strategies
+            ],
+            "supported_environments": [
+                item.value for item in tool.execution_support.supported_environments
+            ],
+            "required_effect_ids": list(tool.required_effect_ids),
+            "authorization_effect_ids": list(
+                self._authorization_effect_ids(tool, target=target),
+            ),
+            "mode": target.mode.value,
+            "strategy": target.strategy.value,
+            "environment": target.environment.value,
+            "tags": list(tool.tags),
+        }
+        scope_required = self._tag_value(tool.tags, "scope:")
+        surface_modes = self._tag_values(tool.tags, "surface:")
+        if scope_required is not None:
+            attrs["scope_required"] = scope_required
+        if surface_modes:
+            attrs["supported_surfaces"] = list(surface_modes)
+            attrs["surface_mode"] = surface_modes[0]
+        return attrs
+
     @staticmethod
-    def _prompt_mode(run: OrchestrationRun) -> str:
+    def _prompt_mode(run: OrchestrationRun) -> PromptMode:
         prompt_flow_hint = run.metadata.get("prompt_flow_hint")
         if isinstance(prompt_flow_hint, dict):
             mode = prompt_flow_hint.get("mode")
             if isinstance(mode, str) and mode.strip():
-                return mode.strip().lower()
+                return ToolResolver._coerce_prompt_mode(mode)
         raw_mode = run.metadata.get("prompt_mode")
         if isinstance(raw_mode, str) and raw_mode.strip():
-            return raw_mode.strip().lower()
-        return "normal_turn"
+            return ToolResolver._coerce_prompt_mode(raw_mode)
+        return PromptMode.NORMAL_TURN
+
+    @staticmethod
+    def _coerce_prompt_mode(raw_mode: str) -> PromptMode:
+        normalized = raw_mode.strip().lower()
+        try:
+            return PromptMode(normalized)
+        except ValueError:
+            return PromptMode.NORMAL_TURN
 
     def _check_authorization(
         self,
@@ -454,14 +450,33 @@ class ToolResolver:
         return tuple(dict.fromkeys(effect_id for effect_id in effect_ids if effect_id))
 
     @staticmethod
+    def _tag_value(tags: tuple[str, ...], prefix: str) -> str | None:
+        for tag in tags:
+            if tag.startswith(prefix):
+                value = tag.removeprefix(prefix).strip()
+                if value:
+                    return value
+        return None
+
+    @staticmethod
+    def _tag_values(tags: tuple[str, ...], prefix: str) -> tuple[str, ...]:
+        values: list[str] = []
+        for tag in tags:
+            if not tag.startswith(prefix):
+                continue
+            value = tag.removeprefix(prefix).strip()
+            if value:
+                values.append(value)
+        return tuple(dict.fromkeys(values))
+
+    @staticmethod
     def _build_schema(tool: Tool) -> ToolSchema:
         properties: dict[str, object] = {}
         required: list[str] = []
         for parameter in tool.parameters:
-            properties[parameter.name] = {
-                "type": parameter.data_type,
-                "description": parameter.description,
-            }
+            schema = ToolResolver._parameter_schema(parameter.data_type)
+            schema["description"] = parameter.description
+            properties[parameter.name] = schema
             if parameter.required:
                 required.append(parameter.name)
         input_schema: dict[str, object] = {
@@ -476,3 +491,21 @@ class ToolResolver:
             description=tool.description,
             input_schema=input_schema,
         )
+
+    @staticmethod
+    def _parameter_schema(data_type: str) -> dict[str, object]:
+        normalized = data_type.strip().lower()
+        if normalized.startswith("array[") and normalized.endswith("]"):
+            item_type = normalized[6:-1].strip() or "string"
+            return {
+                "type": "array",
+                "items": ToolResolver._parameter_schema(item_type),
+            }
+        if normalized == "array":
+            return {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        if normalized in {"string", "integer", "number", "boolean", "object", "null"}:
+            return {"type": normalized}
+        return {"type": "string"}

@@ -5,20 +5,20 @@ export function listConversations() {
   return requestJson<ConversationSummary[]>("/conversations");
 }
 
-export function getConversation(bulkKey: string) {
+export function getConversation(sessionKey: string) {
   return requestJson<ConversationSummary>(
-    `/conversations/${encodeURIComponent(bulkKey)}`,
+    `/conversations/${encodeURIComponent(sessionKey)}`,
   );
 }
 
 export function getConversationMessages(
-  bulkKey: string,
+  sessionKey: string,
   options?: {
     includeArchived?: boolean;
   },
 ) {
   const url = new URL(
-    buildApiUrl(`/conversations/${encodeURIComponent(bulkKey)}/messages`),
+    buildApiUrl(`/conversations/${encodeURIComponent(sessionKey)}/messages`),
     window.location.origin,
   );
   if (options?.includeArchived) {

@@ -19,6 +19,7 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     anthropic_tool_schema,
     coerce_text_content,
     default_base_url,
+    ensure_image_input_supported,
     ensure_json_response,
     join_url,
     parse_json_arguments,
@@ -35,6 +36,7 @@ class AnthropicMessagesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
+        ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
             profile.credential_binding,
             required=True,

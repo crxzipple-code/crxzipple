@@ -106,7 +106,10 @@ class SandboxBackendTestCase(unittest.TestCase):
 
             run_kwargs = run_mock.call_args.kwargs
             self.assertEqual(run_kwargs["timeout"], 30)
-            self.assertEqual(run_kwargs["input"], '{"message": "hello"}')
+            self.assertEqual(
+                run_kwargs["input"],
+                '{"arguments": {"message": "hello"}, "execution_context": null}',
+            )
             self.assertEqual(Path(run_kwargs["cwd"]).parent, Path(sandbox_base_dir))
 
 

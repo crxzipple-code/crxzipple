@@ -22,8 +22,10 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     build_tool_call_intents,
     coerce_text_content,
     default_base_url,
+    ensure_image_input_supported,
     is_retryable_openai_stream_exception,
     join_url,
+    openai_response_input_items,
     OPENAI_TRANSIENT_HTTP_STATUS_CODES,
     OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS,
     openai_tool_schema,
@@ -120,6 +122,7 @@ class OpenAICodexResponsesAdapter:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> requests.Response:
+        ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
             profile.credential_binding or "codex_auth_json",
             required=True,
@@ -199,84 +202,19 @@ class OpenAICodexResponsesAdapter:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for message in request.messages:
-            if message.role == LlmMessageRole.SYSTEM:
-                continue
-            assistant_tool_call = self._build_assistant_tool_call(
-                message,
-                tool_name_aliases=tool_name_aliases,
-            )
-            if assistant_tool_call is not None:
-                items.append(assistant_tool_call)
-                continue
-            tool_output = self._build_tool_output(message)
-            if tool_output is not None:
-                items.append(tool_output)
-                continue
-            role = message.role.value
-            if role not in {
-                LlmMessageRole.USER.value,
-                LlmMessageRole.ASSISTANT.value,
-            }:
-                role = LlmMessageRole.USER.value
-            items.append(
-                {
-                    "role": role,
-                    "content": coerce_text_content(message.content),
-                },
-            )
+        items = openai_response_input_items(
+            tuple(
+                message
+                for message in request.messages
+                if message.role != LlmMessageRole.SYSTEM
+            ),
+            tool_name_aliases=tool_name_aliases,
+        )
         if not items:
             raise RuntimeError(
                 "OpenAI Codex invocations require at least one non-system message.",
             )
         return items
-
-    @staticmethod
-    def _build_assistant_tool_call(
-        message: Any,
-        *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> dict[str, Any] | None:
-        if message.role != LlmMessageRole.ASSISTANT:
-            return None
-        if not isinstance(message.content, dict):
-            return None
-        if message.content.get("type") != "function_call":
-            return None
-        call_id = message.content.get("call_id") or message.tool_call_id
-        name = message.content.get("name")
-        if not isinstance(call_id, str) or not call_id.strip():
-            return None
-        if not isinstance(name, str) or not name.strip():
-            return None
-        arguments = message.content.get("arguments", {})
-        if isinstance(arguments, str):
-            arguments_text = arguments
-        else:
-            arguments_text = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-        return {
-            "type": "function_call",
-            "call_id": call_id.strip(),
-            "name": resolve_openai_tool_name(
-                name.strip(),
-                tool_name_aliases=tool_name_aliases,
-            ),
-            "arguments": arguments_text,
-        }
-
-    @staticmethod
-    def _build_tool_output(message: Any) -> dict[str, Any] | None:
-        if message.role != LlmMessageRole.TOOL:
-            return None
-        call_id = message.tool_call_id
-        if call_id is None or not call_id.strip():
-            return None
-        return {
-            "type": "function_call_output",
-            "call_id": call_id.strip(),
-            "output": coerce_text_content(message.content),
-        }
 
     @classmethod
     def _stream_sse_response(

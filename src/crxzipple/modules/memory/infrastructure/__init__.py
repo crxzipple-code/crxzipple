@@ -1,31 +1,27 @@
-from crxzipple.modules.memory.infrastructure.in_memory_repository import (
-    InMemoryMemoryCandidateRepository,
-    InMemoryMemoryEntryRepository,
+from crxzipple.modules.memory.infrastructure.indexing import FileMemoryIndexManager
+from crxzipple.modules.memory.infrastructure.storage import (
+    FileMemoryStore,
+    MarkdownMemorySourceScanner,
+    append_markdown_block,
+    ensure_storage_root,
+    is_memory_relative_path,
+    iter_memory_files,
+    memory_file_kind,
+    resolve_memory_file,
+    slugify,
 )
-from crxzipple.modules.memory.infrastructure.index_manager import (
-    WorkspaceMemoryIndexManager,
-)
-from crxzipple.modules.memory.infrastructure.tooling import (
-    MEMORY_GET_TOOL_ID,
-    MEMORY_SEARCH_TOOL_ID,
-    SYSTEM_MANAGED_TOOL_TAG,
-    inject_memory_tool_context,
-    is_memory_tool_name,
-    memory_lookup_instruction,
-    memory_tool_ids,
-    register_builtin_memory_tools,
-)
+from crxzipple.modules.memory.infrastructure.watching import MemoryWatchRegistry
 
 __all__ = [
-    "InMemoryMemoryCandidateRepository",
-    "InMemoryMemoryEntryRepository",
-    "MEMORY_GET_TOOL_ID",
-    "MEMORY_SEARCH_TOOL_ID",
-    "SYSTEM_MANAGED_TOOL_TAG",
-    "WorkspaceMemoryIndexManager",
-    "inject_memory_tool_context",
-    "is_memory_tool_name",
-    "memory_lookup_instruction",
-    "memory_tool_ids",
-    "register_builtin_memory_tools",
+    "FileMemoryIndexManager",
+    "FileMemoryStore",
+    "MarkdownMemorySourceScanner",
+    "MemoryWatchRegistry",
+    "append_markdown_block",
+    "ensure_storage_root",
+    "is_memory_relative_path",
+    "iter_memory_files",
+    "memory_file_kind",
+    "resolve_memory_file",
+    "slugify",
 ]

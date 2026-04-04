@@ -17,18 +17,60 @@
     match:
       mutates_state: false
 
-- id: deny_memory_lookup_tools_in_system_flows
-  description: Hide durable-memory lookup tools during non-conversational system flows.
+- id: deny_tool_access_when_required_scope_missing
+  description: Hide tools when the current run context does not provide the required scope.
   effect: deny
   actions:
     - tool.access_tool
     - tool.run
   resource:
     kind: tool
-    id: "memory_*"
-  context:
-    match:
-      prompt_mode:
-        - heartbeat
-        - compaction
-        - memory_flush
+  condition:
+    all:
+      - exists: resource.scope_required
+      - not:
+          contains:
+            - context.available_scopes
+            - resource.scope_required
+
+- id: deny_tool_access_when_surface_requires_explicit_declaration
+  description: Hide tools on declared-only surfaces unless the tool explicitly declares support.
+  effect: deny
+  actions:
+    - tool.access_tool
+    - tool.run
+  resource:
+    kind: tool
+  condition:
+    all:
+      - eq:
+          - context.surface_contract
+          - declared_only
+      - not:
+          any:
+            - exists: resource.supported_surfaces
+            - exists: resource.surface_mode
+
+- id: deny_tool_access_when_surface_mismatch
+  description: Hide tools whose declared surface does not match the current run surface.
+  effect: deny
+  actions:
+    - tool.access_tool
+    - tool.run
+  resource:
+    kind: tool
+  condition:
+    any:
+      - all:
+          - exists: resource.supported_surfaces
+          - not:
+              contains:
+                - resource.supported_surfaces
+                - context.surface
+      - all:
+          - not:
+              exists: resource.supported_surfaces
+          - exists: resource.surface_mode
+          - ne:
+              - resource.surface_mode
+              - context.surface

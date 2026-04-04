@@ -68,7 +68,6 @@ def build_cli() -> typer.Typer:
         ctx: typer.Context,
         session_key: str = typer.Argument(..., help="Stable session key."),
         agent_id: str | None = typer.Option(None, help="Runtime binding agent identifier."),
-        llm_id: str | None = typer.Option(None, help="Runtime binding LLM identifier."),
         status: str = typer.Option("active", help="Session status."),
         channel: str | None = typer.Option(None, help="Optional channel identifier."),
         chat_type: str | None = typer.Option(None, help="Optional chat type."),
@@ -98,12 +97,11 @@ def build_cli() -> typer.Typer:
             build_ensure_session_input(
                 key=session_key,
                 runtime_binding_payload=_parse_json_option(
-                    runtime_binding,
-                    option_name="--runtime-binding",
-                ),
-                agent_id=agent_id,
-                llm_id=llm_id,
-                status=status,
+                runtime_binding,
+                option_name="--runtime-binding",
+            ),
+            agent_id=agent_id,
+            status=status,
                 channel=channel,
                 chat_type=chat_type,
                 origin_payload=(
@@ -151,7 +149,6 @@ def build_cli() -> typer.Typer:
     def resolve_key(
         ctx: typer.Context,
         agent_id: str = typer.Argument(..., help="Agent identifier."),
-        llm_id: str = typer.Argument(..., help="LLM identifier."),
         channel: str | None = typer.Option(None, help="Optional channel identifier."),
         chat_type: str = typer.Option("direct", help="Chat type for routing."),
         peer_id: str | None = typer.Option(None, help="Optional peer identifier."),
@@ -199,7 +196,6 @@ def build_cli() -> typer.Typer:
         bundle = container.orchestration_service.resolve_session_bundle(
             build_resolve_session_bundle_input(
                 agent_id=agent_id,
-                llm_id=llm_id,
                 channel=channel,
                 chat_type=chat_type,
                 peer_id=peer_id,
@@ -227,7 +223,6 @@ def build_cli() -> typer.Typer:
         ctx: typer.Context,
         session_key: str = typer.Argument(..., help="Stable session key."),
         role: str = typer.Argument(..., help="Message role."),
-        content: str | None = typer.Argument(None, help="Message content."),
         kind: SessionMessageKind = typer.Option(
             SessionMessageKind.MESSAGE,
             help="Structured transcript message kind.",
@@ -263,7 +258,6 @@ def build_cli() -> typer.Typer:
                 AppendSessionMessageInput(
                     session_key=session_key,
                     role=role,
-                    content=content,
                     kind=kind,
                     content_payload=_parse_json_option(
                         content_payload,
@@ -322,7 +316,6 @@ def build_cli() -> typer.Typer:
     def reset_session(
         ctx: typer.Context,
         session_key: str = typer.Argument(..., help="Stable session key."),
-        llm_id: str | None = typer.Option(None, help="Optional replacement llm id."),
         status: str | None = typer.Option(None, help="Optional replacement status."),
         metadata: str | None = typer.Option(
             None,
@@ -342,7 +335,6 @@ def build_cli() -> typer.Typer:
             session = container.session_service.reset_session(
                 ResetSessionInput(
                     session_key=session_key,
-                    llm_id=llm_id,
                     status=status,
                     metadata=_parse_json_option(metadata, option_name="--metadata"),
                     active_session_id=active_session_id,

@@ -8,11 +8,7 @@ from crxzipple.modules.orchestration.application.engine_session_recorder import 
     OrchestrationSessionRecorder,
 )
 from crxzipple.modules.orchestration.application.ports import (
-    MemoryPort,
     ToolExecutionPort,
-)
-from crxzipple.modules.orchestration.application.skill_requests import (
-    is_skill_request_tool_name,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedToolSet,
@@ -26,6 +22,7 @@ from crxzipple.modules.orchestration.domain import (
 from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import (
     ToolEnvironment,
+    ToolExecutionContext,
     ToolExecutionStrategy,
     ToolExecutionTarget,
     ToolMode,
@@ -37,7 +34,7 @@ from crxzipple.modules.tool.domain import (
 @dataclass(frozen=True, slots=True)
 class ToolExecutionBatchOutcome:
     tool_call_message_ids: tuple[str, ...] = field(default_factory=tuple)
-    inline_runs: tuple[tuple[str, ToolRun], ...] = field(default_factory=tuple)
+    inline_runs: tuple[tuple[str | None, ToolRun], ...] = field(default_factory=tuple)
     background_runs: tuple[tuple[ToolCallIntent, ToolRun], ...] = field(default_factory=tuple)
     pending_approval_request: PendingApprovalRequest | None = None
 
@@ -47,7 +44,6 @@ class OrchestrationEngineToolExecutor:
     session_recorder: OrchestrationSessionRecorder
     tool_resolver: ToolResolver
     tool_execution_port: ToolExecutionPort
-    memory_port: MemoryPort | None = None
 
     def execute_tool_calls(
         self,
@@ -58,15 +54,12 @@ class OrchestrationEngineToolExecutor:
         resolved_tools: ResolvedToolSet,
         tool_calls: tuple[ToolCallIntent, ...],
         append_tool_call_messages: bool,
+        append_tool_result_messages: bool = True,
     ) -> ToolExecutionBatchOutcome:
         tool_call_message_ids: list[str] = []
-        inline_runs: list[tuple[str, ToolRun]] = []
+        inline_runs: list[tuple[str | None, ToolRun]] = []
         background_runs: list[tuple[ToolCallIntent, ToolRun]] = []
         for tool_call in tool_calls:
-            if is_skill_request_tool_name(tool_call.name):
-                raise OrchestrationValidationError(
-                    "Skill request tool calls must be handled before tool execution.",
-                )
             resolved_tool = resolved_tools.by_name(tool_call.name)
             if resolved_tool is None:
                 raise OrchestrationValidationError(
@@ -120,24 +113,30 @@ class OrchestrationEngineToolExecutor:
                 self.tool_execution_port.execute(
                     ExecuteToolInput(
                         tool_id=resolved_tool.tool.id,
-                        arguments=self._execution_arguments(run, tool_call),
+                        arguments=dict(tool_call.arguments),
                         mode=resolved_tool.target.mode,
                         strategy=resolved_tool.target.strategy,
                         environment=resolved_tool.target.environment,
+                        execution_context=self._invocation_context(
+                            run,
+                            session_key=session_key,
+                        ),
                     ),
                 ),
             )
             if tool_run.status is ToolRunStatus.QUEUED:
                 background_runs.append((tool_call, tool_run))
                 continue
-            message_id = self.session_recorder.append_tool_result_message(
-                session_key=session_key,
-                active_session_id=active_session_id,
-                tool_call=tool_call,
-                tool_run=tool_run,
-                source_kind="tool_run",
-                source_id=tool_run.id,
-            )
+            message_id: str | None = None
+            if append_tool_result_messages:
+                message_id = self.session_recorder.append_tool_result_message(
+                    session_key=session_key,
+                    active_session_id=active_session_id,
+                    tool_call=tool_call,
+                    tool_run=tool_run,
+                    source_kind="tool_run",
+                    source_id=tool_run.id,
+                )
             inline_runs.append((message_id, tool_run))
         return ToolExecutionBatchOutcome(
             tool_call_message_ids=tuple(tool_call_message_ids),
@@ -198,24 +197,20 @@ class OrchestrationEngineToolExecutor:
             append_tool_call_messages=False,
         )
 
-    def _execution_arguments(
+
+    def _invocation_context(
         self,
         run: OrchestrationRun,
-        tool_call: ToolCallIntent,
-    ) -> dict[str, object]:
-        execution_arguments = dict(tool_call.arguments)
-        if self.memory_port is None or not self.memory_port.is_memory_tool_name(
-            tool_call.name,
-        ):
-            return execution_arguments
-        if run.agent_id is None or not run.agent_id.strip():
-            raise OrchestrationValidationError(
-                "Memory lookup tools require run.agent_id.",
-            )
-        return self.memory_port.inject_tool_context(
-            execution_arguments,
-            agent_id=run.agent_id,
+        *,
+        session_key: str,
+    ) -> ToolExecutionContext | None:
+        attrs = self.tool_resolver.invocation_context_attrs(
+            run,
+            session_key=session_key,
         )
+        if not attrs:
+            return None
+        return ToolExecutionContext(attrs=attrs)
 
     @staticmethod
     def _target_from_approval_request(

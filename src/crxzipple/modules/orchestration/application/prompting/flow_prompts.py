@@ -4,9 +4,6 @@ from crxzipple.modules.orchestration.application.prompting.blocks import (
     PromptBlock,
     PromptBlockPolicy,
 )
-from crxzipple.modules.orchestration.application.memory_flush import (
-    MEMORY_FLUSH_SKIP_TOKEN,
-)
 from crxzipple.modules.orchestration.application.prompting.modes import PromptMode
 
 _FLOW_PROMPT_POLICY = PromptBlockPolicy(priority=900, max_tokens=1_500)
@@ -187,7 +184,7 @@ def _build_heartbeat_prompt(hint_payload: dict[str, object] | None) -> str:
             "If there is clear unfinished work that can move forward safely with the current context and visible tools, continue it.",
             "If there is nothing actionable right now, reply briefly with the default idle reply.",
             "Do not restart the task from scratch.",
-            "Do not request additional access, open skills, or perform broad exploratory work just because a heartbeat occurred.",
+            "Do not request additional access, read skill guidance, or perform broad exploratory work just because a heartbeat occurred.",
         ],
     )
     return "\n".join(lines).strip()
@@ -211,7 +208,7 @@ def _build_compaction_prompt(hint_payload: dict[str, object] | None) -> str:
             "Preserve open tasks, completed work, decisions, approvals, constraints, user preferences, and any important tool results.",
             "Remove repetition, incidental chatter, and details that are no longer needed to continue the work.",
             "Do not invent facts that are not present in the transcript, recalled memory, workspace context, or tool results.",
-            "Do not call tools, request additional access, or open skills during compaction.",
+            "Do not call tools, request additional access, or read skill guidance during compaction.",
         ],
     )
     return "\n".join(lines).strip()
@@ -230,9 +227,11 @@ def _build_memory_flush_prompt(hint_payload: dict[str, object] | None) -> str:
         [
             "Write only durable facts worth carrying into future sessions: decisions, constraints, stable preferences, ongoing commitments, and important project context.",
             "Do not write transient chatter, low-signal progress updates, or details that matter only for the current turn.",
-            "Output only the durable memory note body. The system will store it automatically in workspace memory.",
-            f"If there is nothing durable to record, reply exactly {MEMORY_FLUSH_SKIP_TOKEN}.",
-            "Do not call tools, request additional access, open skills, or search memory during a memory flush.",
+            "This run is only for durable memory capture. Never answer or continue the user's conversation in this run.",
+            "If there is durable memory to keep, call memory_write_daily exactly once with the markdown note body to append to today's daily memory file.",
+            "If there is nothing durable to record, call memory_flush_skip exactly once.",
+            "Do not return the memory note body directly in your assistant message.",
+            "Do not call any other tools, request additional access, read skill guidance, or search memory during a memory flush.",
         ],
     )
     return "\n".join(lines).strip()

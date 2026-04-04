@@ -3,9 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from crxzipple.shared.domain import ValueObject
+from crxzipple.shared.content_blocks import (
+    is_content_block,
+    normalize_content_blocks,
+    text_content_block,
+)
 
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 
@@ -58,30 +64,76 @@ class ToolRunStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ToolRunResult(ValueObject):
-    content: Any | None = None
+    content: Any
+    details: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        try:
+            normalized_content = _normalize_tool_run_result_blocks(self.content)
+        except ValueError as exc:
+            raise ToolValidationError(
+                str(exc),
+            ) from exc
+        object.__setattr__(self, "content", normalized_content)
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     def to_payload(self) -> Any:
-        if not self.metadata:
-            return self.content
-        return {
+        payload = {
             _TOOL_RUN_RESULT_MARKER: True,
-            "content": self.content,
-            "metadata": dict(self.metadata),
+            "content": [dict(block) for block in self.blocks],
         }
+        if self.details is not None:
+            payload["details"] = self.details
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
 
     @classmethod
     def from_payload(cls, payload: Any) -> "ToolRunResult":
         if isinstance(payload, dict) and payload.get(_TOOL_RUN_RESULT_MARKER) is True:
             metadata = payload.get("metadata")
+            content = payload.get("content")
             return cls(
-                content=payload.get("content"),
+                content=content,
+                details=payload.get("details"),
                 metadata=dict(metadata) if isinstance(metadata, dict) else {},
             )
-        return cls(content=payload)
+        raise ToolValidationError(
+            "Tool run result payload is not in the standardized serialized format.",
+        )
+
+    @classmethod
+    def structured(
+        cls,
+        *,
+        content: Any,
+        details: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "ToolRunResult":
+        return cls(
+            content=content,
+            details=details,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def text(
+        cls,
+        text: str,
+        *,
+        details: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "ToolRunResult":
+        return cls.structured(
+            details=details,
+            content=[text_content_block(text)],
+            metadata=metadata,
+        )
+
+    @property
+    def blocks(self) -> tuple[dict[str, Any], ...]:
+        return tuple(dict(block) for block in self.content)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,3 +257,47 @@ class ToolExecutionTarget(ValueObject):
     mode: ToolMode = ToolMode.INLINE
     strategy: ToolExecutionStrategy = ToolExecutionStrategy.ASYNC
     environment: ToolEnvironment = ToolEnvironment.LOCAL
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionContext(ValueObject):
+    attrs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "attrs", dict(self.attrs))
+
+    def to_payload(self) -> dict[str, Any]:
+        return dict(self.attrs)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | None) -> "ToolExecutionContext | None":
+        if payload is None:
+            return None
+        return cls(attrs=payload)
+
+    def get_str(self, key: str) -> str | None:
+        value = self.attrs.get(key)
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+
+def _normalize_tool_run_result_blocks(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ValueError(
+            "Tool run result content must be a non-empty content block sequence.",
+        )
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not is_content_block(item):
+            raise ValueError(
+                "Tool run result content must be a non-empty content block sequence.",
+            )
+        blocks = normalize_content_blocks([item])
+        normalized.extend(dict(block) for block in blocks)
+    if not normalized:
+        raise ValueError(
+            "Tool run result content must include at least one content block.",
+        )
+    return tuple(normalized)

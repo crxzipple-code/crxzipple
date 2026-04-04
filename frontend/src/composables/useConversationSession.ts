@@ -12,10 +12,17 @@ import {
   resolveTurnApproval,
 } from "@/lib/api";
 import {
+  extractTextContent,
+  type ComposerAttachment,
+  type ContentBlock,
+} from "@/lib/contentBlocks";
+import { describeRunFailure } from "@/lib/runErrors";
+import {
   createDraftRoute,
   routeFromConversation,
   routePayload,
 } from "@/lib/conversationRoute";
+import { conversationKey, turnConversationKey } from "@/lib/conversationKey";
 import type {
   ConversationRoute,
   ConversationSummary,
@@ -51,7 +58,7 @@ export function useConversationSession(options: {
   closeDeckIfCompact: () => void;
 }) {
   const conversations = ref<ConversationSummary[]>([]);
-  const activeBulkKey = ref<string | null>(null);
+  const activeSessionKey = ref<string | null>(null);
   const activeConversation = ref<ConversationSummary | null>(null);
   const messages = ref<SessionMessage[]>([]);
   const loadingConversations = ref(false);
@@ -117,8 +124,9 @@ export function useConversationSession(options: {
       status === "timed_out";
   }
 
-  function buildOptimisticUserMessage(content: string): SessionMessage {
+  function buildOptimisticUserMessage(blocks: ContentBlock[]): SessionMessage {
     const now = new Date().toISOString();
+    const textContent = extractTextContent(blocks);
     return {
       id: `local-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       session_key:
@@ -128,8 +136,8 @@ export function useConversationSession(options: {
       sequence_no: messages.value.length + 1,
       role: "user",
       kind: "message",
-      content,
-      content_payload: { text: content },
+      content: textContent,
+      content_payload: { blocks },
       source_kind: "web",
       source_id: "local-pending",
       visibility: "default",
@@ -140,25 +148,39 @@ export function useConversationSession(options: {
     };
   }
 
+  function buildComposerBlocks(
+    content: string,
+    attachments: ComposerAttachment[],
+  ): ContentBlock[] {
+    const blocks: ContentBlock[] = [];
+    if (content.trim()) {
+      blocks.push({ type: "text", text: content.trim() });
+    }
+    for (const attachment of attachments) {
+      blocks.push(attachment.block);
+    }
+    return blocks;
+  }
+
   async function refreshConversations() {
     loadingConversations.value = true;
     try {
       conversations.value = await listConversations();
-      if (activeBulkKey.value) {
+      if (activeSessionKey.value) {
         const refreshedActive = conversations.value.find(
-          (item) => item.bulk_key === activeBulkKey.value,
+          (item) => conversationKey(item) === activeSessionKey.value,
         );
         if (refreshedActive) {
           activeConversation.value = refreshedActive;
         }
       }
       if (
-        activeBulkKey.value &&
+        activeSessionKey.value &&
         !conversations.value.some(
-          (item) => item.bulk_key === activeBulkKey.value,
+          (item) => conversationKey(item) === activeSessionKey.value,
         )
       ) {
-        activeBulkKey.value = null;
+        activeSessionKey.value = null;
         activeConversation.value = null;
       }
     } finally {
@@ -166,10 +188,10 @@ export function useConversationSession(options: {
     }
   }
 
-  async function hydrateConversationAfterTurn(bulkKey: string | null) {
+  async function hydrateConversationAfterTurn(sessionKey: string | null) {
     await refreshConversations();
-    if (bulkKey) {
-      await selectConversation(bulkKey);
+    if (sessionKey) {
+      await selectConversation(sessionKey);
     } else {
       await options.refreshMemoryPanel(
         activeRoute.value.agentId ?? options.selectedAgentId.value,
@@ -193,6 +215,7 @@ export function useConversationSession(options: {
 
     const turn = await getTurn(displayRunId);
     activeTurn.value = turn;
+    lastError.value = describeRunFailure(turn.run);
     stream.syncPendingApprovalFromTurn(turn);
 
     const latestRunId = conversation.latest_run_id?.trim();
@@ -214,7 +237,7 @@ export function useConversationSession(options: {
     stream.watchTurn(displayRunId);
   }
 
-  async function selectConversation(bulkKey: string) {
+  async function selectConversation(sessionKey: string) {
     const stream = requireStream();
     stream.closeTurnStream();
     stream.clearTurnEvents();
@@ -222,12 +245,12 @@ export function useConversationSession(options: {
     lastError.value = null;
     try {
       const [conversation, history] = await Promise.all([
-        getConversation(bulkKey),
-        getConversationMessages(bulkKey, {
+        getConversation(sessionKey),
+        getConversationMessages(sessionKey, {
           includeArchived: true,
         }),
       ]);
-      activeBulkKey.value = bulkKey;
+      activeSessionKey.value = sessionKey;
       activeConversation.value = conversation;
       messages.value = history;
       pendingApproval.value = null;
@@ -259,7 +282,8 @@ export function useConversationSession(options: {
   async function createFreshConversation() {
     const stream = requireStream();
     stream.closeTurnStream();
-    activeBulkKey.value = null;
+    lastError.value = null;
+    activeSessionKey.value = null;
     activeConversation.value = null;
     messages.value = [];
     activeTurn.value = null;
@@ -276,31 +300,35 @@ export function useConversationSession(options: {
     options.closeDeckIfCompact();
   }
 
-  async function submitTurn(content: string) {
-    if (!content.trim() || busy.value) {
+  async function submitTurn(content: string, attachments: ComposerAttachment[] = []) {
+    if (busy.value) {
+      return false;
+    }
+    const blocks = buildComposerBlocks(content, attachments);
+    if (blocks.length === 0) {
       return false;
     }
     const stream = requireStream();
     lastError.value = null;
     busy.value = true;
 
-    const trimmedContent = content.trim();
     const route = activeRoute.value;
-    const optimisticMessage = buildOptimisticUserMessage(trimmedContent);
+    const optimisticMessage = buildOptimisticUserMessage(blocks);
     const previousMessages = [...messages.value];
     messages.value = [...messages.value, optimisticMessage];
 
     try {
       const payload = await createTurn({
-        content: trimmedContent,
+        content: { blocks },
         source: "web",
         ...routePayload(route),
       });
       activeTurn.value = payload;
       stream.pushEvent("snapshot", payload);
       stream.syncPendingApprovalFromTurn(payload);
-      if (payload.run.bulk_key) {
-        activeBulkKey.value = payload.run.bulk_key;
+      const sessionKey = turnConversationKey(payload.run);
+      if (sessionKey) {
+        activeSessionKey.value = sessionKey;
       }
       await refreshConversations();
       stream.watchTurn(payload.run.id);
@@ -327,7 +355,7 @@ export function useConversationSession(options: {
       stream.pushEvent("cancelled", payload);
       busy.value = false;
       stream.closeTurnStream();
-      await hydrateConversationAfterTurn(payload.run.bulk_key);
+      await hydrateConversationAfterTurn(turnConversationKey(payload.run));
     } catch (error) {
       lastError.value = error instanceof Error ? error.message : String(error);
     }
@@ -348,8 +376,9 @@ export function useConversationSession(options: {
       activeTurn.value = payload;
       stream.pushEvent("snapshot", payload);
       stream.syncPendingApprovalFromTurn(payload);
-      if (payload.run.bulk_key) {
-        activeBulkKey.value = payload.run.bulk_key;
+      const sessionKey = turnConversationKey(payload.run);
+      if (sessionKey) {
+        activeSessionKey.value = sessionKey;
       }
       await refreshConversations();
       stream.watchTurn(payload.run.id);
@@ -374,8 +403,9 @@ export function useConversationSession(options: {
       activeTurn.value = payload;
       stream.pushEvent("snapshot", payload);
       stream.syncPendingApprovalFromTurn(payload);
-      if (payload.run.bulk_key) {
-        activeBulkKey.value = payload.run.bulk_key;
+      const sessionKey = turnConversationKey(payload.run);
+      if (sessionKey) {
+        activeSessionKey.value = sessionKey;
       }
       await refreshConversations();
       stream.watchTurn(payload.run.id);
@@ -406,10 +436,10 @@ export function useConversationSession(options: {
     }
   }
 
-  return {
-    conversations,
-    activeBulkKey,
-    activeConversation,
+    return {
+      conversations,
+      activeSessionKey,
+      activeConversation,
     messages,
     loadingConversations,
     loadingMessages,

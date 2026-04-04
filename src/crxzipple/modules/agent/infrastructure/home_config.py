@@ -85,7 +85,7 @@ def profile_from_agent_home_config_payload(
     ):
         execution_payload = {
             "timeout_seconds": payload.get("timeout_seconds", 120),
-            "max_turns": payload.get("max_turns", 12),
+            "max_turns": payload.get("max_turns", 99),
         }
 
     if not runtime_payload:
@@ -94,6 +94,9 @@ def profile_from_agent_home_config_payload(
             "workdir": _optional_text(payload.get("workdir")),
             "workspace": _optional_text(payload.get("workspace")),
             "sandbox_mode": _optional_text(payload.get("sandbox_mode")),
+            "memory_retrieval_backend": _optional_text(
+                payload.get("memory_retrieval_backend"),
+            ),
             "attrs": (
                 dict(payload["attrs"])
                 if isinstance(payload.get("attrs"), dict)
@@ -106,6 +109,10 @@ def profile_from_agent_home_config_payload(
             "workdir": _optional_text(runtime_payload.get("workdir")),
             "workspace": _optional_text(runtime_payload.get("workspace")),
             "sandbox_mode": _optional_text(runtime_payload.get("sandbox_mode")),
+            "memory_retrieval_backend": (
+                _optional_text(runtime_payload.get("memory_retrieval_backend"))
+                or _optional_text(payload.get("memory_retrieval_backend"))
+            ),
             "attrs": (
                 dict(runtime_payload["attrs"])
                 if isinstance(runtime_payload.get("attrs"), dict)
@@ -224,6 +231,10 @@ def build_agent_home_config_payload(
         runtime_payload["workspace"] = profile.runtime_preferences.workspace
     if profile.runtime_preferences.sandbox_mode is not None:
         runtime_payload["sandbox_mode"] = profile.runtime_preferences.sandbox_mode
+    if profile.runtime_preferences.memory_retrieval_backend is not None:
+        runtime_payload["memory_retrieval_backend"] = (
+            profile.runtime_preferences.memory_retrieval_backend
+        )
 
     return {
         "id": profile.id,
@@ -276,6 +287,11 @@ def _merge_runtime_payload(
             _optional_text(runtime_payload.get("sandbox_mode"))
             or _optional_text(payload.get("sandbox_mode"))
             or profile.runtime_preferences.sandbox_mode
+        ),
+        "memory_retrieval_backend": (
+            _optional_text(runtime_payload.get("memory_retrieval_backend"))
+            or _optional_text(payload.get("memory_retrieval_backend"))
+            or profile.runtime_preferences.memory_retrieval_backend
         ),
         "attrs": merged_attrs,
     }

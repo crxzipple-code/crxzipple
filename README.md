@@ -12,6 +12,7 @@ A DDD-oriented Python project skeleton.
 ## Current modules
 
 - `tool`
+- `process`
 - `session`
 - `llm`
 - `agent`
@@ -29,17 +30,21 @@ PYTHONPATH=src python3 -m crxzipple.main --help
 PYTHONPATH=src python3 -m crxzipple.main db upgrade head
 PYTHONPATH=src python3 -m crxzipple.main llm sync-profiles
 PYTHONPATH=src python3 -m crxzipple.main tool providers
+PYTHONPATH=src python3 -m crxzipple.main tool roots
 PYTHONPATH=src python3 -m crxzipple.main auth policies
 PYTHONPATH=src python3 -m crxzipple.main tool discover --provider local_builtin
-APP_TOOL_LOCAL_PATHS=./local_tools PYTHONPATH=src python3 -m crxzipple.main tool discover --provider local_filesystem
-APP_TOOL_OPENAPI_PROVIDER_PATHS=./config/tool_providers PYTHONPATH=src python3 -m crxzipple.main tool discover --provider sample_api
+APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers PYTHONPATH=src python3 -m crxzipple.main tool discover --provider sample_api
 APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"]}]' PYTHONPATH=src python3 -m crxzipple.main tool discover --provider sample_mcp
 PYTHONPATH=src python3 -m crxzipple.main tool run echo --strategy thread --input '{"message":"hello from thread"}'
 PYTHONPATH=src python3 -m crxzipple.main tool run echo --strategy process --input '{"message":"hello from process"}'
 PYTHONPATH=src python3 -m crxzipple.main tool run echo --mode background --strategy process --input '{"message":"hello from background process"}'
-APP_TOOL_OPENAPI_PROVIDER_PATHS=./config/tool_providers PYTHONPATH=src python3 -m crxzipple.main tool run sample_api.search_docs --environment remote --input '{"body":{"query":"ddd","limit":3}}'
+APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process start "sleep 30" --working-directory /tmp
+APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process list
+APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process output <process-id>
+APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process terminate <process-id>
+APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process remove <process-id>
+APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers PYTHONPATH=src python3 -m crxzipple.main tool run sample_api.search_docs --environment remote --input '{"body":{"query":"ddd","limit":3}}'
 APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"]}]' PYTHONPATH=src python3 -m crxzipple.main tool run sample_mcp.echo --environment remote --input '{"message":"hello","uppercase":true}'
-APP_TOOL_LOCAL_PATHS=./local_tools PYTHONPATH=src python3 -m crxzipple.main tool run greeter --strategy process --input '{"name":"codex"}'
 ```
 
 Background tool runs are processed by a dedicated worker:
@@ -59,6 +64,13 @@ Examples:
 ```bash
 PYTHONPATH=src python3 -c "from crxzipple.interfaces.http.app import app; print(app.title)"
 PYTHONPATH=src python3 -m uvicorn crxzipple.interfaces.http.app:app --reload
+curl -X POST http://127.0.0.1:8000/processes \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"sleep 30","working_directory":"/tmp"}'
+curl http://127.0.0.1:8000/processes
+curl http://127.0.0.1:8000/processes/<process-id>/output
+curl -X POST http://127.0.0.1:8000/processes/<process-id>/terminate
+curl -X DELETE http://127.0.0.1:8000/processes/<process-id>
 ```
 
 ## Database
@@ -101,22 +113,29 @@ APP_LOG_JSON=true
 APP_TOOL_RUN_MAX_ATTEMPTS=3
 APP_TOOL_RUN_LEASE_SECONDS=30
 APP_TOOL_RUN_HEARTBEAT_SECONDS=5
-APP_TOOL_LOCAL_PATHS=./local_tools
-APP_TOOL_OPENAPI_PROVIDER_PATHS=./config/tool_providers
+APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers
 APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"],"timeout_seconds":10}]'
 APP_LLM_PROFILE_PATHS=./config/llm_profiles
 APP_AGENT_PROFILE_PATHS=./config/agent_profiles
-APP_AUTHORIZATION_ENABLED=true
+APP_AUTHORIZATION_ENABLED=false
 APP_AUTHORIZATION_POLICY_PATHS=./config/authorization_policies
 ```
 
-`APP_TOOL_LOCAL_PATHS` accepts an `os.pathsep`-separated list of directories to
-scan recursively for `tool.json` manifests.
+Bundled tool assets are governed from the repository `tools/` root. Each direct
+child is one namespace and must include `tool.yaml`.
 
-OpenAPI provider configs are loaded from `config/tool_providers/*.yaml`,
-`*.yml`, or `*.json` by default when that directory exists. Override the search
-path with `APP_TOOL_OPENAPI_PROVIDER_PATHS`, which accepts an `os.pathsep`-
-separated list of files or directories.
+Filesystem-discovered local tool extensions are still discovered from:
+
+- `.crxzipple/tools/`
+- `tools/`
+
+Place each extension in its own subdirectory with a `tool.json` manifest and
+entrypoint script.
+
+Bundled OpenAPI providers now live under `tools/<namespace>/tool.yaml` with the
+spec beside them. Set `APP_TOOL_OPENAPI_PROVIDER_PATHS` to switch to the
+explicit config/env path flow for custom provider files; the variable accepts an
+`os.pathsep`-separated list of files or directories.
 
 LLM profile configs are loaded from `config/llm_profiles/*.yaml`, `*.yml`, or
 `*.json` by default when that directory exists. Override the search path with
@@ -129,9 +148,9 @@ with `APP_AGENT_PROFILE_PATHS`.
 
 Authorization policy configs are loaded from
 `config/authorization_policies/*.yaml`, `*.yml`, or `*.json` by default when
-that directory exists. Enable ABAC enforcement with
-`APP_AUTHORIZATION_ENABLED=true`, and override the search path with
-`APP_AUTHORIZATION_POLICY_PATHS`.
+that directory exists. Authorization enforcement is enabled by default; set
+`APP_AUTHORIZATION_ENABLED=false` to disable it, and override the search path
+with `APP_AUTHORIZATION_POLICY_PATHS`.
 
 Authorization enforcement currently lives at the outer interface/orchestration
 layer. The `tool` and `llm` subsystems remain authorization-agnostic and do not
@@ -141,7 +160,8 @@ The bundled default policy set currently:
 
 - allows `llm.invoke` and `llm.stream`
 - allows `tool.run` for non-mutating tools
-- denies everything else by default once authorization is enabled
+- denies scope/surface-mismatched tools before they reach orchestration
+- denies everything else by default unless a policy or approval grants access
 
 Useful authorization commands:
 
@@ -265,7 +285,7 @@ credentials:
 Example filesystem tool layout:
 
 ```text
-local_tools/
+tools/
 └─ greeter/
    ├─ tool.json
    └─ handler.py

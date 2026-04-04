@@ -12,6 +12,7 @@ from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolEnvironment,
+    ToolExecutionContext,
     ToolExecutionPolicy,
     ToolExecutionSupport,
     ToolExecutionStrategy,
@@ -25,6 +26,9 @@ from crxzipple.modules.tool.infrastructure.discovery.local_catalog import (
     LocalToolCatalog,
     LocalToolHandler,
 )
+from crxzipple.modules.tool.infrastructure.handler_invocation import (
+    invoke_tool_handler,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,9 +36,13 @@ class FilesystemLocalToolHandler:
     module_path: str
     attribute_path: str
 
-    def __call__(self, arguments: dict[str, Any]) -> Any:
+    def __call__(
+        self,
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> Any:
         handler = _load_entrypoint(self.module_path, self.attribute_path)
-        return handler(arguments)
+        return invoke_tool_handler(handler, arguments, execution_context)
 
 
 class FilesystemLocalToolDiscoveryProvider:
@@ -54,14 +62,12 @@ class FilesystemLocalToolDiscoveryProvider:
 
     def discover_specs(self) -> list[ToolSpec]:
         specs: list[ToolSpec] = []
+        entries: list[tuple[Tool, LocalToolHandler]] = []
         for manifest_path in _iter_manifest_paths(self.root_paths):
             spec, handler = _load_manifest(manifest_path, provider_name=self.name)
-            self.catalog.register(
-                _tool_from_spec(spec),
-                handler,
-                provider_name=self.name,
-            )
+            entries.append((_tool_from_spec(spec), handler))
             specs.append(spec)
+        self.catalog.replace_provider_tools(self.name, entries)
         return specs
 
 

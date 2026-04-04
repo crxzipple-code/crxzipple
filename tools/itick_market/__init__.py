@@ -1,0 +1,1 @@
+"""iTick market OpenAPI namespace."""

@@ -156,7 +156,7 @@ class OrchestrationDispatchBridge:
             priority=run.priority,
             payload_ref=run.id,
             metadata={
-                "bulk_key": run.bulk_key,
+                "session_key": run.session_key,
                 "agent_id": run.agent_id,
             },
         )

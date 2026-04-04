@@ -56,7 +56,10 @@ class _FakeSessionUnitOfWork:
 class SessionServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.uow = _FakeSessionUnitOfWork()
-        self.service = SessionApplicationService(lambda: self.uow)
+        self.service = SessionApplicationService(
+            lambda: self.uow,
+            workspace_defaults_resolver=lambda agent_id: f"/tmp/{agent_id}-home",
+        )
         self.resolver = SessionResolver(
             session_service=self.service,
             router=OrchestrationRouter(),
@@ -67,7 +70,6 @@ class SessionServiceTestCase(unittest.TestCase):
             ResolveSessionBundleInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
-                    llm_id="openai.gpt-5.4-mini",
                     channel="webchat",
                     label="browser",
                     surface="chat",
@@ -99,7 +101,6 @@ class SessionServiceTestCase(unittest.TestCase):
             ResolveSessionBundleInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
-                    llm_id="openai.gpt-5.4-mini",
                     channel="webchat",
                     direct_scope=DirectSessionScope.MAIN,
                 ),
@@ -111,7 +112,7 @@ class SessionServiceTestCase(unittest.TestCase):
             AppendSessionMessageInput(
                 session_key=initial.resolution.resolution.key,
                 role="user",
-                content="hello",
+                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
             ),
         )
 
@@ -119,7 +120,6 @@ class SessionServiceTestCase(unittest.TestCase):
             ResolveSessionBundleInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
-                    llm_id="openai.gpt-5.4-mini",
                     channel="webchat",
                     direct_scope=DirectSessionScope.MAIN,
                 ),
@@ -148,12 +148,43 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(instances[1].id, resolved.active_instance.id)
         self.assertEqual(instances[1].status, "active")
 
+    def test_ensure_session_persists_runtime_binding_workspace(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+                workspace="/tmp/project",
+            ),
+        )
+
+        binding = session.runtime_binding()
+        self.assertEqual(binding.workspace, "/tmp/project")
+
+        instances = self.service.list_instances(
+            ListSessionInstancesInput(session_key=session.id),
+        )
+        self.assertEqual(len(instances), 1)
+        self.assertEqual(
+            instances[0].metadata["runtime_binding"]["workspace"],
+            "/tmp/project",
+        )
+
+    def test_ensure_session_defaults_workspace_to_agent_home(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+
+        binding = session.runtime_binding()
+        self.assertEqual(binding.workspace, "/tmp/assistant-home")
+
     def test_append_message_creates_structured_transcript_payload_and_sequence(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
-                llm_id="openai.gpt-5.4-mini",
             ),
         )
 
@@ -161,7 +192,7 @@ class SessionServiceTestCase(unittest.TestCase):
             AppendSessionMessageInput(
                 session_key=session.id,
                 role="user",
-                content="hello",
+                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
             ),
         )
         second = self.service.append_message(
@@ -183,10 +214,12 @@ class SessionServiceTestCase(unittest.TestCase):
         )
 
         self.assertEqual(first.sequence_no, 1)
-        self.assertEqual(first.content_payload, {"text": "hello"})
+        self.assertEqual(
+            first.content_payload,
+            {"blocks": [{"type": "text", "text": "hello"}]},
+        )
         self.assertEqual(second.sequence_no, 2)
         self.assertEqual(second.kind.value, "tool_result")
-        self.assertIsNone(second.content)
         self.assertEqual(second.content_payload["tool"], "search")
         self.assertEqual(second.source_kind, "tool_run")
         self.assertEqual(second.source_id, "run-1")
@@ -198,21 +231,20 @@ class SessionServiceTestCase(unittest.TestCase):
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
-                llm_id="openai.gpt-5.4-mini",
             ),
         )
         first = self.service.append_message(
             AppendSessionMessageInput(
                 session_key=session.id,
                 role="user",
-                content="hello",
+                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
             ),
         )
         second = self.service.append_message(
             AppendSessionMessageInput(
                 session_key=session.id,
                 role="assistant",
-                content="hi",
+                content_payload={"blocks": [{"type": "text", "text": "hi"}]},
             ),
         )
 
@@ -244,7 +276,6 @@ class SessionServiceTestCase(unittest.TestCase):
             ResolveSessionBundleInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
-                    llm_id="openai.gpt-5.4-mini",
                     channel="webchat",
                     direct_scope=DirectSessionScope.MAIN,
                 ),
@@ -258,28 +289,24 @@ class SessionServiceTestCase(unittest.TestCase):
             result.session.metadata["runtime_binding"],
             {
                 "agent_id": "assistant",
-                "llm_id": "openai.gpt-5.4-mini",
+                "workspace": "/tmp/assistant-home",
             },
         )
         self.assertEqual(
             result.active_instance.metadata["runtime_binding"],
             {
                 "agent_id": "assistant",
-                "llm_id": "openai.gpt-5.4-mini",
+                "workspace": "/tmp/assistant-home",
             },
         )
         self.assertEqual(result.active_instance.metadata["agent_id"], "assistant")
-        self.assertEqual(
-            result.active_instance.metadata["llm_id"],
-            "openai.gpt-5.4-mini",
-        )
+        self.assertNotIn("llm_id", result.active_instance.metadata)
 
     def test_list_sessions_filters_by_runtime_binding_even_if_legacy_agent_field_stale(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
-                llm_id="openai.gpt-5.4-mini",
             ),
         )
         session.agent_id = "legacy-stale-agent"
@@ -293,7 +320,6 @@ class SessionServiceTestCase(unittest.TestCase):
             ResolveSessionBundleInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
-                    llm_id="openai.gpt-5.4-mini",
                     channel="slack",
                     chat_type="group",
                     conversation_id="channel-123",
@@ -315,7 +341,6 @@ class SessionServiceTestCase(unittest.TestCase):
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
-                llm_id="openai.gpt-5.4-mini",
                 channel="webchat",
                 chat_type="direct",
             ),
@@ -326,7 +351,6 @@ class SessionServiceTestCase(unittest.TestCase):
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
-                llm_id="openai.gpt-5.4-mini",
                 channel="webchat",
                 chat_type="direct",
             ),

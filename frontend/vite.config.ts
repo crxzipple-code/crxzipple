@@ -2,6 +2,17 @@ import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import { fileURLToPath, URL } from "node:url";
 
+const apiProxy = {
+  "/health": "http://127.0.0.1:8000",
+  "/about": "http://127.0.0.1:8000",
+  "/turns": "http://127.0.0.1:8000",
+  "/conversations": "http://127.0.0.1:8000",
+  "/memory": "http://127.0.0.1:8000",
+  "/agents": "http://127.0.0.1:8000",
+  "/llms": "http://127.0.0.1:8000",
+  "/artifacts": "http://127.0.0.1:8000",
+};
+
 export default defineConfig({
   plugins: [vue()],
   build: {
@@ -37,14 +48,9 @@ export default defineConfig({
   },
   server: {
     port: 4173,
-    proxy: {
-      "/health": "http://127.0.0.1:8000",
-      "/about": "http://127.0.0.1:8000",
-      "/turns": "http://127.0.0.1:8000",
-      "/conversations": "http://127.0.0.1:8000",
-      "/memory": "http://127.0.0.1:8000",
-      "/agents": "http://127.0.0.1:8000",
-      "/llms": "http://127.0.0.1:8000",
-    },
+    proxy: apiProxy,
+  },
+  preview: {
+    proxy: apiProxy,
   },
 });

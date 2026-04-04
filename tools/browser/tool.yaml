@@ -1,0 +1,690 @@
+kind: local_package
+namespace: browser
+local_tools:
+  - id: browser_profiles
+    name: Browser Profiles
+    description: List available browser profiles, the current default profile, each profile's runtime capabilities, and lightweight diagnostics. Each profile includes `diagnostics.summary` and `diagnostics.summary_line`, with short status labels like `Ready`, `Launchable`, `Waiting for browser`, or `Bad MCP command`. The tool also returns top-level `guidance` that suggests a next action and fallback profile when the default one is not ready. Use this first when you need to choose between `crxzipple`, `user`, or a configured remote profile.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_profiles
+    tool_kind: function
+    parameters: []
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_profiles
+
+  - id: browser_profile_diagnose
+    name: Browser Profile Diagnose
+    description: Inspect one browser profile and actively probe whether it is ready, waiting for a browser/session, or failing. The result includes `diagnostics.summary`, `diagnostics.summary_line`, a detailed `diagnostics.probe` payload, and top-level `guidance` with the recommended next step or fallback profile. Use this when `user` profile attachment or login-state reuse is unclear.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_profile_diagnose
+    tool_kind: function
+    parameters:
+      - name: profile
+        data_type: string
+        description: Browser profile name to inspect.
+        required: true
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_profile_diagnose
+
+  - id: browser_control
+    name: Browser Control
+    description: Manage browser tabs and profile state. Use this for `open-tab`, `list-tabs`, `navigate`, `focus-tab`, `close-tab`, and `reset`. `open-tab` usually comes first and returns the live `target_id` for that tab. Reuse that `target_id` immediately when you truly need to address a different tab, but avoid inventing or reusing stale historical tab ids. This tool builds one `BrowserControlRequest` and sends it through the browser facade's single dispatch path.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_control
+    tool_kind: function
+    parameters:
+      - name: kind
+        data_type: string
+        description: Control kind. Must be one of `open-tab`, `list-tabs`, `navigate`, `focus-tab`, `close-tab`, or `reset`.
+        required: true
+      - name: profile
+        data_type: string
+        description: Optional browser profile name. Omit to use the current default profile.
+        required: false
+      - name: target_id
+        data_type: string
+        description: Browser tab identifier. Required for `navigate`, `focus-tab`, and `close-tab`. Use a live id returned by `open-tab` or `list-tabs`; do not invent synthetic ids.
+        required: false
+      - name: url
+        data_type: string
+        description: Convenience URL for `open-tab` and `navigate`. It is copied into `payload.url`.
+        required: false
+      - name: payload
+        data_type: object
+        description: Optional JSON object payload for advanced control arguments. Most calls should just use `url`.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_control
+
+  - id: browser_snapshot
+    name: Browser Snapshot
+    description: Inspect the current tab and produce structured browser snapshot output. Prefer `format=interactive` when you want `ref` values for later actions. `interactive` is the single ref-producing snapshot surface and supports `mode=efficient`, `mode=focused`, and `mode=wide` to trade off compactness against breadth. On Playwright-backed profiles it is snapshot-first and only falls back when snapshot extraction is unavailable. You can also request `format=role` for a role tree with refs or `format=aria` for the raw aria snapshot text. Use `selector` to scope the snapshot to a subtree and `frame_selector` to scope it to an iframe/frame subtree. When you are continuing on the same tab, prefer omitting `target_id` so the tool reuses the profile's current active tab; only pass `target_id` when you intentionally need a different live tab. This tool builds one `BrowserPageActionRequest` and sends it through the same browser facade dispatch path used by all page actions.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_snapshot
+    tool_kind: function
+    parameters:
+      - name: profile
+        data_type: string
+        description: Optional browser profile name. Omit to use the current default profile.
+        required: false
+      - name: target_id
+        data_type: string
+        description: Optional live browser tab identifier to snapshot. Prefer omitting it when you want the current active tab for the profile, and only set it when you intentionally need a different tab returned by `open-tab` or `list-tabs`.
+        required: false
+      - name: selector
+        data_type: string
+        description: Optional CSS selector root for the snapshot. When provided, `interactive`, `role`, and `aria` snapshots are scoped to that subtree instead of the whole page.
+        required: false
+      - name: format
+        data_type: string
+        description: Snapshot format. Supported values are `interactive`, `role`, `aria`, `html`, `text`, `title`, and `url`. Use `interactive` for ref-producing action-oriented snapshots with strategy modes, `role` for a readable role tree with refs, or `aria` for the raw aria snapshot text.
+        required: false
+      - name: refs_mode
+        data_type: string
+        description: Optional explicit ref view selector. Use `role` or `aria` as a clearer alternative to setting `format` directly for those two snapshot types. When provided together with `format`, it must agree with `format`.
+        required: false
+      - name: mode
+        data_type: string
+        description: Optional snapshot mode for `interactive`. It defaults to `efficient`, which turns on a more compact action-oriented view and defaults `depth` to `6` unless you override it. Use `focused` for a tighter visible/enabled subset or `wide` for the broader ref sweep.
+        required: false
+      - name: compact
+        data_type: boolean
+        description: Optional compact flag for `interactive` snapshots. When true, the role-tree view suppresses more unnamed click-oriented noise.
+        required: false
+      - name: depth
+        data_type: integer
+        description: Optional maximum role-tree depth for `interactive` snapshots. `mode=efficient` defaults this to `6`.
+        required: false
+      - name: frame_selector
+        data_type: string
+        description: Optional iframe/frame CSS selector. When provided, snapshots are scoped to that frame subtree instead of the full page, while returned refs still keep their absolute `frame_path`.
+        required: false
+      - name: overlay_source_ref
+        data_type: string
+        description: Optional trigger/input ref whose previously opened overlay should be preferred when `active_overlay=true`.
+        required: false
+      - name: overlay_source_selector
+        data_type: string
+        description: Optional trigger/input selector whose previously opened overlay should be preferred when `active_overlay=true`.
+        required: false
+      - name: active_overlay
+        data_type: boolean
+        description: Optional overlay-only flag. When true and no explicit selector root is given, the snapshot first tries to scope itself to the currently active dropdown, popup, dialog, or autocomplete surface.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Optional item limit for `interactive` snapshots. If omitted, `mode=efficient` uses a smaller default cap to keep refs manageable while `mode=focused` uses a larger one. Ignored by `html`, `text`, `title`, and `url`.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: payload
+        data_type: object
+        description: Optional JSON object payload for advanced snapshot arguments.
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_snapshot
+
+  - id: browser_click
+    name: Browser Click
+    description: Click an element on a browser tab. Prefer `ref` from `browser_snapshot`; use `selector` only as a fallback. On repeated-element pages you can narrow the search with `scope_ref`, `scope_selector`, or `ordinal`. By default this tool applies a short internal stabilization wait and then appends one focused interactive post-state snapshot when it still has a tab target. You can override that behavior with `stabilize`, `stabilize_timeout_ms`, `observe_after`, and `observe_payload`. This tool is a focused `BrowserPageActionRequest` wrapper around the shared browser facade dispatch path.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_click
+    tool_kind: function
+    parameters:
+      - name: profile
+        data_type: string
+        description: Optional browser profile name. Omit to use the current default profile.
+        required: false
+      - name: target_id
+        data_type: string
+        description: Browser tab identifier.
+        required: false
+      - name: ref
+        data_type: string
+        description: Preferred element ref returned by `browser_snapshot`.
+        required: false
+      - name: selector
+        data_type: string
+        description: CSS selector fallback when no `ref` is available.
+        required: false
+      - name: scope_ref
+        data_type: string
+        description: Optional parent/container ref that narrows selector-based clicking to a smaller region before resolving the target.
+        required: false
+      - name: scope_selector
+        data_type: string
+        description: Optional parent/container selector that narrows selector-based clicking to a smaller region before resolving the target.
+        required: false
+      - name: ordinal
+        data_type: integer
+        description: Optional zero-based candidate index for selector-based clicking when the selector matches multiple elements.
+        required: false
+      - name: button
+        data_type: string
+        description: Optional mouse button, such as `left`, `middle`, or `right`.
+        required: false
+      - name: double_click
+        data_type: boolean
+        description: Optional double-click flag.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional single-step stabilization policy. Supported values are `auto`, `navigation`, `micro`, `overlay`, and `none`.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for the internal stabilization wait.
+        required: false
+      - name: observe_after
+        data_type: string
+        description: Optional post-step observation policy. Supported values are `auto`, `interactive`, `role`, `aria`, and `none`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used by `observe_after`, for example `{ "format": "interactive", "mode": "focused" }`.'
+        required: false
+      - name: payload
+        data_type: object
+        description: Optional JSON object payload for advanced click arguments.
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_click
+
+  - id: browser_fill
+    name: Browser Fill
+    description: Fill an input, textarea, or editable control on a browser tab. Prefer `ref` from `browser_snapshot`; use `selector` only as a fallback. On repeated-element pages you can narrow the search with `scope_ref`, `scope_selector`, or `ordinal`. By default this tool applies only a light internal stabilize step and does not append a post-state snapshot; override that behavior with `stabilize`, `stabilize_timeout_ms`, `observe_after`, and `observe_payload` when the next model step needs the updated page state immediately. This tool is a focused `BrowserPageActionRequest` wrapper around the shared browser facade dispatch path.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_fill
+    tool_kind: function
+    parameters:
+      - name: profile
+        data_type: string
+        description: Optional browser profile name. Omit to use the current default profile.
+        required: false
+      - name: target_id
+        data_type: string
+        description: Browser tab identifier.
+        required: false
+      - name: ref
+        data_type: string
+        description: Preferred element ref returned by `browser_snapshot`.
+        required: false
+      - name: selector
+        data_type: string
+        description: CSS selector fallback when no `ref` is available.
+        required: false
+      - name: scope_ref
+        data_type: string
+        description: Optional parent/container ref that narrows selector-based filling to a smaller region before resolving the target.
+        required: false
+      - name: scope_selector
+        data_type: string
+        description: Optional parent/container selector that narrows selector-based filling to a smaller region before resolving the target.
+        required: false
+      - name: ordinal
+        data_type: integer
+        description: Optional zero-based candidate index for selector-based filling when the selector matches multiple elements.
+        required: false
+      - name: text
+        data_type: string
+        description: Text to fill into the element.
+        required: true
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional single-step stabilization policy. Supported values are `auto`, `navigation`, `micro`, `overlay`, and `none`.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for the internal stabilization wait.
+        required: false
+      - name: observe_after
+        data_type: string
+        description: Optional post-step observation policy. Supported values are `auto`, `interactive`, `role`, `aria`, and `none`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used by `observe_after`, for example `{ "format": "interactive", "mode": "focused" }`.'
+        required: false
+      - name: payload
+        data_type: object
+        description: Optional JSON object payload for advanced fill arguments. `text` is copied into `payload.text`.
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_fill
+
+  - id: browser_wait
+    name: Browser Wait
+    description: Wait for page conditions on a browser tab. Use exactly one primary wait mode per call, such as `selector` plus optional `state`, `text`, `text_gone`, `url`, `load_state`, `fn`, `expression`, `delay_ms`, or `time_ms`. For text-based waits you can narrow repeated matches with `scope_ref`, `scope_selector`, `exact`, or `ordinal`. By default this tool appends one focused interactive post-state snapshot after the wait completes; override that behavior with `observe_after` or `observe_payload` when needed. This tool is a focused `BrowserPageActionRequest` wrapper around the shared browser facade dispatch path.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_wait
+    tool_kind: function
+    parameters:
+      - name: profile
+        data_type: string
+        description: Optional browser profile name. Omit to use the current default profile.
+        required: false
+      - name: target_id
+        data_type: string
+        description: Browser tab identifier.
+        required: false
+      - name: selector
+        data_type: string
+        description: Optional selector to wait on. When present, the tool waits for this selector and uses `state` if provided.
+        required: false
+      - name: scope_ref
+        data_type: string
+        description: Optional parent/container ref that narrows text-based waits to a smaller region.
+        required: false
+      - name: scope_selector
+        data_type: string
+        description: Optional parent/container selector that narrows text-based waits to a smaller region.
+        required: false
+      - name: exact
+        data_type: boolean
+        description: Optional exact-match flag for text or text_gone waits. Defaults to substring matching.
+        required: false
+      - name: ordinal
+        data_type: integer
+        description: Optional zero-based candidate index for text-based waits when the same text appears multiple times.
+        required: false
+      - name: overlay_source_ref
+        data_type: string
+        description: Optional trigger/input ref whose previously opened overlay should be preferred for text-based waits.
+        required: false
+      - name: overlay_source_selector
+        data_type: string
+        description: Optional trigger/input selector whose previously opened overlay should be preferred for text-based waits.
+        required: false
+      - name: state
+        data_type: string
+        description: Optional selector wait state, such as `visible`, `attached`, or `hidden`. Only applies when `selector` is provided.
+        required: false
+      - name: text
+        data_type: string
+        description: Optional text content to wait for when you are not waiting on a selector. Useful for success banners, labels, and autocomplete results.
+        required: false
+      - name: text_gone
+        data_type: string
+        description: Optional text content to wait until it disappears from the page.
+        required: false
+      - name: url
+        data_type: string
+        description: Optional URL or glob pattern to wait for, for example `**/checkout` or `https://example.com/done`.
+        required: false
+      - name: load_state
+        data_type: string
+        description: Optional document load state, such as `load` or `domcontentloaded`.
+        required: false
+      - name: fn
+        data_type: string
+        description: Optional page predicate function or expression to wait for until it becomes truthy. Prefer this or `expression`, not both.
+        required: false
+      - name: expression
+        data_type: string
+        description: Optional page expression to wait for until it becomes truthy. This is an alias-friendly field alongside `fn`.
+        required: false
+      - name: delay_ms
+        data_type: integer
+        description: Optional fixed delay in milliseconds. Use this only when a semantic wait condition is not available.
+        required: false
+      - name: time_ms
+        data_type: integer
+        description: Optional fixed delay in milliseconds using the OpenClaw-style name. Equivalent to `delay_ms`.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional single-step stabilization policy. Supported values are `auto`, `navigation`, `micro`, `overlay`, and `none`. `wait` defaults to no extra stabilization after the main wait.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for an additional internal stabilization wait.
+        required: false
+      - name: observe_after
+        data_type: string
+        description: Optional post-step observation policy. Supported values are `auto`, `interactive`, `role`, `aria`, and `none`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used by `observe_after`, for example `{ "format": "interactive", "mode": "focused" }`.'
+        required: false
+      - name: payload
+        data_type: object
+        description: Optional JSON object payload for advanced wait arguments. Prefer the top-level `selector`, `state`, `text`, `text_gone`, `url`, `load_state`, `fn`, `expression`, `delay_ms`, and `time_ms` fields when possible.
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_wait
+
+  - id: browser
+    name: Browser Advanced
+    description: Advanced fallback browser tool for one uncommon page action. Prefer `browser_profiles`, `browser_control`, `browser_snapshot`, `browser_click`, `browser_fill`, and `browser_wait` for common single-step flows. Prefer `browser_script` when you need two or more sequential browser steps in one call. Use this tool for a single advanced page action such as `type`, `press`, `hover`, `drag`, `resize`, `scroll-into-view`, `select`, `screenshot`, `pdf`, or `evaluate`. This single-step wrapper also supports `stabilize`, `stabilize_timeout_ms`, `observe_after`, and `observe_payload` so one advanced action can include an internal wait and one trailing post-state snapshot. Prefer the dedicated top-level fields here before falling back to `payload`. It still builds one `BrowserPageActionRequest` and uses the same shared browser facade dispatch path.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_action
+    tool_kind: function
+    parameters:
+      - name: kind
+        data_type: string
+        description: Advanced page-action kind. Use `batch`, `type`, `press`, `hover`, `drag`, `resize`, `scroll-into-view`, `select`, `screenshot`, `pdf`, or `evaluate`.
+        required: true
+      - name: profile
+        data_type: string
+        description: Optional browser profile name. Omit to use the current default profile.
+        required: false
+      - name: target_id
+        data_type: string
+        description: Browser tab identifier.
+        required: false
+      - name: ref
+        data_type: string
+        description: Preferred element ref returned by `browser_snapshot`.
+        required: false
+      - name: selector
+        data_type: string
+        description: CSS selector fallback when no `ref` is available.
+        required: false
+      - name: text
+        data_type: string
+        description: Text payload for `type` or a generic text argument for advanced actions that accept one.
+        required: false
+      - name: delay_ms
+        data_type: integer
+        description: Optional typing delay in milliseconds for `type`.
+        required: false
+      - name: key
+        data_type: string
+        description: Key payload for `press`, for example `Enter`, `ArrowDown`, or `Escape`.
+        required: false
+      - name: clear_existing
+        data_type: boolean
+        description: Optional replacement-style input flag for actions that support text replacement.
+        required: false
+      - name: start_ref
+        data_type: string
+        description: Source element ref for `drag`. Preferred over selector targeting.
+        required: false
+      - name: start_selector
+        data_type: string
+        description: Source element selector for `drag` when no ref is available.
+        required: false
+      - name: end_ref
+        data_type: string
+        description: Target element ref for `drag`. Preferred over selector targeting.
+        required: false
+      - name: end_selector
+        data_type: string
+        description: Target element selector for `drag` when no ref is available.
+        required: false
+      - name: actions
+        data_type: array
+        description: Action list for `batch`. Each action object should use the same browser act fields such as `kind`, `ref`, `selector`, `text`, `width`, `height`, `fn`, and `timeout_ms`.
+        required: false
+      - name: stop_on_error
+        data_type: boolean
+        description: Optional `batch` flag. Defaults to true and stops on the first failed child action.
+        required: false
+      - name: scope_ref
+        data_type: string
+        description: Optional parent/container ref for advanced actions that need narrower selector resolution.
+        required: false
+      - name: scope_selector
+        data_type: string
+        description: Optional parent/container selector for advanced actions that need narrower selector resolution.
+        required: false
+      - name: exact
+        data_type: boolean
+        description: Optional exact-match flag for text-based advanced actions.
+        required: false
+      - name: ordinal
+        data_type: integer
+        description: Optional zero-based candidate index for repeated text or repeated selector matches.
+        required: false
+      - name: width
+        data_type: integer
+        description: Viewport width for `resize`.
+        required: false
+      - name: height
+        data_type: integer
+        description: Viewport height for `resize`.
+        required: false
+      - name: target_ref
+        data_type: string
+        description: Legacy alias for `end_ref` on `drag`.
+        required: false
+      - name: target_selector
+        data_type: string
+        description: Legacy alias for `end_selector` on `drag`.
+        required: false
+      - name: value
+        data_type: string
+        description: Single value for `select`.
+        required: false
+      - name: type
+        data_type: string
+        description: Output type for `screenshot`, for example `png` or `jpeg`.
+        required: false
+      - name: full_page
+        data_type: boolean
+        description: Full-page capture flag for `screenshot`.
+        required: false
+      - name: print_background
+        data_type: boolean
+        description: Print background flag for `pdf`.
+        required: false
+      - name: expression
+        data_type: string
+        description: JavaScript expression for `evaluate`.
+        required: false
+      - name: fn
+        data_type: string
+        description: OpenClaw-style alias for `evaluate`. Prefer `fn` when mirroring that contract; it is mapped to the same underlying page function field.
+        required: false
+      - name: arg
+        data_type: object
+        description: Optional single argument passed to `evaluate`.
+        required: false
+      - name: payload
+        data_type: object
+        description: Optional JSON object payload for the advanced page action. Prefer the top-level `text`, `delay_ms`, `key`, `clear_existing`, `start_ref`, `start_selector`, `end_ref`, `end_selector`, `target_ref`, `target_selector`, `actions`, `stop_on_error`, `scope_ref`, `scope_selector`, `exact`, `ordinal`, `width`, `height`, `value`, `type`, `full_page`, `print_background`, `expression`, `fn`, and `arg` fields when possible.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional single-step stabilization policy. Supported values are `auto`, `navigation`, `micro`, `overlay`, and `none`.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for the internal stabilization wait.
+        required: false
+      - name: observe_after
+        data_type: string
+        description: Optional post-step observation policy. Supported values are `auto`, `interactive`, `role`, `aria`, and `none`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used by `observe_after`, for example `{ "format": "interactive", "mode": "focused" }`.'
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser
+
+  - id: browser_script
+    name: Browser Script
+    description: Execute a short browser script made of ordered control and page-action steps in one tool call. Prefer this tool whenever the browser task naturally needs two or more sequential steps, for example `open-tab` then `wait`, `click` then `wait`, or `fill` then `press Enter` then `wait`. This reduces extra observe cycles because the script can return one combined result instead of forcing the model to call another browser tool after every step. Each step reuses the same browser arguments you would pass to `browser_control`, `browser_click`, `browser_fill`, `browser_wait`, `browser_snapshot`, or `browser`. If an early step resolves a `target_id` such as `open-tab`, later steps can inherit that tab automatically, so later steps usually should not repeat `target_id`. Steps can also request internal stabilization and post-step observation, so the tool can return one updated page-state tree without a separate follow-up snapshot call. When `final_observe` is provided, the tool runs one trailing `snapshot` on the current tab after the script finishes and returns that post-state in `content`. For a single-step `open-tab` or `navigate` script, prefer one final observe instead of combining it with step-level observation. When in doubt, use step-level or script-level `observe_after=interactive` so the script appends one focused interactive snapshot automatically.
+    provider_name: local_system
+    entrypoint: tools.browser.local:browser_script
+    tool_kind: function
+    parameters:
+      - name: steps
+        data_type: array
+        description: Ordered browser script steps. Each step must be an object, not a JSON string. Use an array like `[{\"kind\":\"open-tab\",\"family\":\"control\",\"url\":\"https://example.com\"},{\"kind\":\"wait\",\"load_state\":\"domcontentloaded\"}]`. Each step can include `kind`, optional `family` (`control` or `page-action`), and the same browser fields you would normally pass to `browser_control`, `browser_click`, `browser_fill`, `browser_wait`, `browser_snapshot`, or `browser`. Steps can also set `stabilize`, `stabilize_timeout_ms`, `observe_after`, and `observe_payload` to control internal wait plus post-step observation.
+        required: true
+      - name: target_id
+        data_type: string
+        description: Optional initial live browser tab identifier. If omitted, later steps can inherit `target_id` from an earlier step such as `open-tab`. Prefer inheritance over repeating or inventing tab ids.
+        required: false
+      - name: stop_on_error
+        data_type: boolean
+        description: Whether to stop at the first failed step. Defaults to true.
+        required: false
+      - name: default_stabilize
+        data_type: string
+        description: Optional script-wide default stabilization policy for steps that do not set `stabilize`. Supported values are `auto`, `navigation`, `micro`, `overlay`, and `none`.
+        required: false
+      - name: default_stabilize_timeout_ms
+        data_type: integer
+        description: Optional script-wide timeout for stabilization waits.
+        required: false
+      - name: default_observe_after
+        data_type: string
+        description: Optional script-wide default post-step observation policy for steps that do not set `observe_after`. Supported values are `auto`, `interactive`, `role`, `aria`, and `none`.
+        required: false
+      - name: default_observe_payload
+        data_type: object
+        description: Optional script-wide default snapshot payload for step-level `observe_after`, for example an interactive focused snapshot payload.
+        required: false
+      - name: final_observe
+        data_type: object
+        description: Optional trailing snapshot payload. When provided, the script runs a final `snapshot` against the current tab after all steps succeed. A typical choice is an interactive focused snapshot so the model receives one post-action page-state tree with refs.
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Convenience flag for `final_observe`. When true and `final_observe` is omitted, the script appends an `interactive` focused snapshot automatically. Prefer this for short action chains when you want the next model step to continue from the updated page state. For a single-step `open-tab` or `navigate` script, use this instead of adding another default step observation.
+        required: false
+    tags:
+      - browser
+      - builtin
+      - system-managed
+      - surface:interactive
+      - surface:macro
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: browser_script

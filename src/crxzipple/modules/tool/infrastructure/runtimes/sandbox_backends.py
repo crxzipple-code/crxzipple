@@ -10,6 +10,7 @@ import tempfile
 from typing import Any, Protocol
 
 from crxzipple.core.config import Settings
+from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 
 
 class SandboxBackend(Protocol):
@@ -18,6 +19,7 @@ class SandboxBackend(Protocol):
         runtime_key: str,
         timeout_seconds: int,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         ...
 
@@ -34,6 +36,7 @@ class SubprocessSandboxBackend:
         runtime_key: str,
         timeout_seconds: int,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         sandbox_base_dir = Path(self.settings.sandbox_base_dir)
         sandbox_base_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +47,17 @@ class SubprocessSandboxBackend:
         ) as sandbox_dir:
             result = subprocess.run(
                 [sys.executable, "-m", self._worker_module, runtime_key],
-                input=json.dumps(arguments, ensure_ascii=True),
+                input=json.dumps(
+                    {
+                        "arguments": arguments,
+                        "execution_context": (
+                            execution_context.to_payload()
+                            if execution_context is not None
+                            else None
+                        ),
+                    },
+                    ensure_ascii=True,
+                ),
                 text=True,
                 capture_output=True,
                 cwd=sandbox_dir,
@@ -69,11 +82,13 @@ class SubprocessSandboxBackend:
             "APP_SANDBOX_DOCKER_BINARY": self.settings.sandbox_docker_binary,
             "APP_SANDBOX_DOCKER_IMAGE": self.settings.sandbox_docker_image,
             "CRXZIPPLE_SANDBOX": "true",
-            "PYTHONPATH": str(self._project_src),
+            "PYTHONPATH": os.pathsep.join([str(self._project_root), str(self._project_src)]),
         }
         pythonpath = os.getenv("PYTHONPATH")
         if pythonpath:
-            env["PYTHONPATH"] = os.pathsep.join([str(self._project_src), pythonpath])
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(self._project_root), str(self._project_src), pythonpath],
+            )
         return env
 
 
@@ -89,6 +104,7 @@ class DockerSandboxBackend:
         runtime_key: str,
         timeout_seconds: int,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         if shutil.which(self.settings.sandbox_docker_binary) is None:
             raise RuntimeError(
@@ -105,7 +121,17 @@ class DockerSandboxBackend:
             command = self._build_command(runtime_key, sandbox_dir)
             result = subprocess.run(
                 command,
-                input=json.dumps(arguments, ensure_ascii=True),
+                input=json.dumps(
+                    {
+                        "arguments": arguments,
+                        "execution_context": (
+                            execution_context.to_payload()
+                            if execution_context is not None
+                            else None
+                        ),
+                    },
+                    ensure_ascii=True,
+                ),
                 text=True,
                 capture_output=True,
                 cwd=sandbox_dir,
@@ -135,7 +161,7 @@ class DockerSandboxBackend:
             "--env",
             "CRXZIPPLE_SANDBOX=true",
             "--env",
-            "PYTHONPATH=/workspace/project/src",
+            "PYTHONPATH=/workspace/project:/workspace/project/src",
             "--volume",
             f"{self._project_root}:/workspace/project:ro",
             "--volume",
@@ -173,8 +199,11 @@ def _decode_result(
         )
 
     try:
-        return json.loads(stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
             f"Sandbox execution returned invalid JSON for runtime '{runtime_key}'.",
         ) from exc
+    if isinstance(payload, dict) and payload.get("__crxzipple_tool_run_result__") is True:
+        return ToolRunResult.from_payload(payload)
+    return payload

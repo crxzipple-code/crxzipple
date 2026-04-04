@@ -11,6 +11,7 @@ _EDITABLE_FILE_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("USER.md", ("USER.md",), "markdown"),
     ("IDENTITY.md", ("IDENTITY.md",), "markdown"),
     ("MEMORY.md", ("MEMORY.md", "memory.md"), "markdown"),
+    (".state/memory-binding.json", (".state/memory-binding.json",), "json"),
 )
 
 

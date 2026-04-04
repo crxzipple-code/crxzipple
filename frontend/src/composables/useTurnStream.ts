@@ -1,6 +1,9 @@
 import { ref, type Ref } from "vue";
 
 import { getConversationMessages, openTurnEvents } from "@/lib/api";
+import { extractTextContent } from "@/lib/contentBlocks";
+import { turnConversationKey } from "@/lib/conversationKey";
+import { describeRunFailure, summarizeRunEventDetail } from "@/lib/runErrors";
 import type {
   ConversationSummary,
   PendingApprovalRequestPayload,
@@ -20,11 +23,12 @@ export function useTurnStream(options: {
   messages: Ref<SessionMessage[]>;
   activeTurn: Ref<TurnResponse | null>;
   pendingApproval: Ref<PendingApprovalRequestPayload | null>;
-  activeBulkKey: Ref<string | null>;
+  activeSessionKey: Ref<string | null>;
   busy: Ref<boolean>;
+  lastError: Ref<string | null>;
   activeConversation: Ref<ConversationSummary | null>;
   draftMainKey: Ref<string>;
-  hydrateConversationAfterTurn: (bulkKey: string | null) => Promise<void>;
+  hydrateConversationAfterTurn: (sessionKey: string | null) => Promise<void>;
   refreshConversations: () => Promise<void>;
 }) {
   const streamState = ref<"idle" | "streaming" | "closed">("idle");
@@ -38,7 +42,7 @@ export function useTurnStream(options: {
       status: payload.run.status,
       stage: payload.run.stage,
       at: payload.run.updated_at,
-      detail: payload.output_text?.slice(0, 120) ?? payload.run.status,
+      detail: summarizeRunEventDetail(payload.run, payload.output_text),
     });
     turnEvents.value = turnEvents.value.slice(0, 10);
   }
@@ -62,14 +66,10 @@ export function useTurnStream(options: {
   }
 
   function messagePreviewText(message: SessionMessage) {
-    if (message.content && message.content.trim()) {
-      return message.content.trim();
-    }
-    const payloadText = message.content_payload.text;
-    if (typeof payloadText === "string" && payloadText.trim()) {
-      return payloadText.trim();
-    }
-    return "";
+    return (
+      extractTextContent(message.content_payload) ??
+      (message.content?.trim() ? message.content.trim() : "")
+    );
   }
 
   function mergeMessage(message: SessionMessage) {
@@ -151,7 +151,10 @@ export function useTurnStream(options: {
       role: "assistant",
       kind: "message",
       content: payload.text,
-      content_payload: { text: payload.text },
+      content_payload: {
+        blocks: [{ type: "text", text: payload.text }],
+        text: payload.text,
+      },
       source_kind: "llm_stream",
       source_id: payload.invocation_id,
       visibility: "default",
@@ -167,7 +170,10 @@ export function useTurnStream(options: {
       next[existingIndex] = {
         ...next[existingIndex],
         content: payload.text,
-        content_payload: { text: payload.text },
+        content_payload: {
+          blocks: [{ type: "text", text: payload.text }],
+          text: payload.text,
+        },
         metadata: {
           ...next[existingIndex].metadata,
           optimistic: true,
@@ -243,14 +249,12 @@ export function useTurnStream(options: {
                   output_text: (payload as TurnSnapshotResponse).output_text,
                 } satisfies TurnResponse)
               : (payload as TurnResponse);
-          if (
-            turnPayload.run.bulk_key &&
-            (event === "completed" || event === "failed" || event === "cancelled")
-          ) {
+          const sessionKey = turnConversationKey(turnPayload.run);
+          if (sessionKey && (event === "completed" || event === "failed" || event === "cancelled")) {
             closeTurnStream();
             await options.refreshConversations();
-            if (options.activeBulkKey.value === turnPayload.run.bulk_key) {
-              options.messages.value = await getConversationMessages(turnPayload.run.bulk_key, {
+            if (options.activeSessionKey.value === sessionKey) {
+              options.messages.value = await getConversationMessages(sessionKey, {
                 includeArchived: true,
               });
             }
@@ -297,8 +301,9 @@ export function useTurnStream(options: {
             ? (payload as TurnSnapshotResponse)
             : turnPayload,
         );
-        if (turnPayload.run.bulk_key) {
-          options.activeBulkKey.value = turnPayload.run.bulk_key;
+        const sessionKey = turnConversationKey(turnPayload.run);
+        if (sessionKey) {
+          options.activeSessionKey.value = sessionKey;
         }
         pushEvent(event, turnPayload);
 
@@ -308,12 +313,18 @@ export function useTurnStream(options: {
         if (event === "completed" || event === "failed" || event === "cancelled") {
           options.busy.value = false;
           options.pendingApproval.value = null;
+          options.lastError.value =
+            event === "failed"
+              ? describeRunFailure(turnPayload.run) ?? "This turn failed."
+              : null;
           streamState.value = "closed";
           closeTurnStream();
-          await options.hydrateConversationAfterTurn(turnPayload.run.bulk_key);
+          await options.hydrateConversationAfterTurn(sessionKey);
         }
         if (event === "timeout") {
           options.busy.value = false;
+          options.lastError.value =
+            describeRunFailure(turnPayload.run) ?? "This turn timed out.";
           streamState.value = "closed";
         }
       },

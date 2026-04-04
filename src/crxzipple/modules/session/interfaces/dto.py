@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from crxzipple.modules.session.application.services import RoutedSessionResult
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
@@ -14,7 +15,7 @@ from crxzipple.modules.session.domain.value_objects import (
 @dataclass(frozen=True, slots=True)
 class SessionRuntimeBindingDTO:
     agent_id: str | None
-    llm_id: str | None
+    workspace: str | None
 
     @classmethod
     def from_value_object(
@@ -23,7 +24,7 @@ class SessionRuntimeBindingDTO:
     ) -> "SessionRuntimeBindingDTO":
         return cls(
             agent_id=binding.agent_id,
-            llm_id=binding.llm_id,
+            workspace=binding.workspace,
         )
 
     @classmethod
@@ -76,7 +77,6 @@ class SessionMessageDTO:
     sequence_no: int
     role: str
     kind: str
-    content: str | None
     content_payload: dict[str, object]
     source_kind: str | None
     source_id: str | None
@@ -92,7 +92,6 @@ class SessionMessageDTO:
             session_id=message.session_id,
             sequence_no=message.sequence_no,
             role=message.role,
-            content=message.content,
             kind=message.kind.value,
             content_payload=dict(message.content_payload),
             source_kind=message.source_kind,

@@ -13,6 +13,7 @@ from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import LlmResult, LlmUsage, ToolCallIntent
 from crxzipple.modules.llm.infrastructure.adapters.common import (
     default_base_url,
+    ensure_image_input_supported,
     ensure_json_response,
     gemini_contents,
     gemini_tool_schema,
@@ -29,6 +30,7 @@ class GeminiGenerateContentAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
+        ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
             profile.credential_binding,
             required=True,

@@ -78,7 +78,7 @@ def build_cli() -> typer.Typer:
             help="Queue ordering policy for this run.",
         ),
         priority: int = typer.Option(100, min=0, help="Queue priority."),
-        max_steps: int = typer.Option(12, min=1, help="Maximum step budget."),
+        max_steps: int = typer.Option(99, min=1, help="Maximum step budget."),
         enqueue: bool = typer.Option(
             False,
             "--enqueue/--no-enqueue",

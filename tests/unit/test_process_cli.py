@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+from tests.unit.cli_test_support import *
+
+
+class ProcessCliTestCase(CliModuleTestCase):
+    def test_process_cli_starts_lists_reads_and_removes_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            start_result = self.runner.invoke(
+                app,
+                [
+                    "process",
+                    "start",
+                    "printf 'hello\\n'; sleep 0.2; printf 'done\\n'",
+                    "--working-directory",
+                    tempdir,
+                    "--session-key",
+                    "agent:assistant:main",
+                ],
+                env=self.env,
+            )
+            self.assertEqual(start_result.exit_code, 0)
+            start_payload = json.loads(start_result.stdout)
+            process_id = start_payload["id"]
+
+            list_result = self.runner.invoke(
+                app,
+                ["process", "list", "--session-key", "agent:assistant:main"],
+                env=self.env,
+            )
+            self.assertEqual(list_result.exit_code, 0)
+            list_payload = json.loads(list_result.stdout)
+            self.assertEqual([item["id"] for item in list_payload], [process_id])
+
+            time.sleep(0.4)
+            output_result = self.runner.invoke(
+                app,
+                ["process", "output", process_id],
+                env=self.env,
+            )
+            self.assertEqual(output_result.exit_code, 0)
+            output_payload = json.loads(output_result.stdout)
+            self.assertIn("hello", output_payload["stdout"])
+            self.assertIn("done", output_payload["stdout"])
+
+            remove_result = self.runner.invoke(
+                app,
+                ["process", "remove", process_id],
+                env=self.env,
+            )
+            self.assertEqual(remove_result.exit_code, 0)
+            remove_payload = json.loads(remove_result.stdout)
+            self.assertTrue(remove_payload["removed"])
+
+    def test_process_cli_can_terminate_running_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            start_result = self.runner.invoke(
+                app,
+                [
+                    "process",
+                    "start",
+                    "sleep 5",
+                    "--working-directory",
+                    tempdir,
+                ],
+                env=self.env,
+            )
+            self.assertEqual(start_result.exit_code, 0)
+            process_id = json.loads(start_result.stdout)["id"]
+
+            terminate_result = self.runner.invoke(
+                app,
+                ["process", "terminate", process_id],
+                env=self.env,
+            )
+            self.assertEqual(terminate_result.exit_code, 0)
+
+            get_result = self.runner.invoke(
+                app,
+                ["process", "get", process_id],
+                env=self.env,
+            )
+            self.assertEqual(get_result.exit_code, 0)
+            get_payload = json.loads(get_result.stdout)
+            self.assertIn(get_payload["status"], {"running", "killed"})
+
+
+if __name__ == "__main__":
+    unittest.main()

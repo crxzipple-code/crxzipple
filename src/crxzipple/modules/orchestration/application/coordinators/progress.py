@@ -59,11 +59,12 @@ class RunProgressCoordinator:
     heartbeat_run: Callable[[str, str], OrchestrationRun]
     get_run: Callable[[str], OrchestrationRun]
     apply_compaction_summary: Callable[[OrchestrationRun], None]
-    apply_memory_flush: Callable[[OrchestrationRun], None]
     extract_memory_candidate: Callable[[OrchestrationRun], None]
     maybe_request_auto_compaction: Callable[[OrchestrationRun], OrchestrationRun | None]
     clear_pending_compaction_marker: Callable[[OrchestrationRun], None]
+    clear_pending_memory_flush_marker: Callable[[OrchestrationRun], None]
     is_compaction_run: Callable[[OrchestrationRun], bool]
+    is_memory_flush_run: Callable[[OrchestrationRun], bool]
 
     def process_next_queued_run(self, *, worker_id: str) -> OrchestrationRun | None:
         run = self.claim_next_queued_run(worker_id)
@@ -107,9 +108,10 @@ class RunProgressCoordinator:
             uow.collect(run)
             uow.commit()
         self.apply_compaction_summary(run)
-        self.apply_memory_flush(run)
         self.extract_memory_candidate(run)
         self.maybe_request_auto_compaction(run)
+        if self.is_memory_flush_run(run):
+            self.clear_pending_memory_flush_marker(run)
         return self.get_run(data.run_id)
 
     def fail_run(self, data: "FailOrchestrationRunInput") -> OrchestrationRun:
@@ -129,6 +131,8 @@ class RunProgressCoordinator:
             uow.commit()
         if self.is_compaction_run(run):
             self.clear_pending_compaction_marker(run)
+        if self.is_memory_flush_run(run):
+            self.clear_pending_memory_flush_marker(run)
         return run
 
     def cancel_run(
@@ -147,6 +151,8 @@ class RunProgressCoordinator:
             uow.commit()
         if self.is_compaction_run(run):
             self.clear_pending_compaction_marker(run)
+        if self.is_memory_flush_run(run):
+            self.clear_pending_memory_flush_marker(run)
         return run
 
     @staticmethod

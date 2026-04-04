@@ -8,9 +8,9 @@ from crxzipple.modules.orchestration.application.prompting.runtime_context impor
     build_runtime_context_message,
 )
 from crxzipple.modules.orchestration.application.memory_context import RecalledMemory
-from crxzipple.modules.orchestration.application.skills_context import AvailableSkill
 from crxzipple.modules.orchestration.application.workspace_context import PromptContextFile
 from crxzipple.modules.orchestration.domain import OrchestrationRun
+from crxzipple.modules.skills.application import SkillCatalogPrompt
 
 
 _AGENT_INSTRUCTION_POLICY = PromptBlockPolicy(priority=1000, max_tokens=6_000)
@@ -26,7 +26,6 @@ _RECALLED_MEMORY_POLICY = PromptBlockPolicy(
     max_tokens=3_500,
     truncate_strategy="middle",
 )
-_MEMORY_LOOKUP_POLICY = PromptBlockPolicy(priority=720, max_tokens=900)
 
 
 def build_agent_instruction_block(system_prompt: str) -> PromptBlock | None:
@@ -44,13 +43,14 @@ def build_workspace_context_block(
     context_files: tuple[PromptContextFile, ...],
     *,
     home_dir: str | None,
+    workspace_dir: str | None,
 ) -> PromptBlock | None:
     if not context_files:
         return None
     lines = [
-        "# Agent Home Context",
+        "# Workspace Context",
         "",
-        "The following agent-home files were loaded for this agent run.",
+        "The following workspace bootstrap files were loaded for this run.",
         "",
     ]
     for file in context_files:
@@ -73,7 +73,8 @@ def build_workspace_context_block(
     }
     if home_dir is not None and home_dir.strip():
         metadata["agent_home_dir"] = home_dir.strip()
-        metadata["workspace_dir"] = home_dir.strip()
+    if workspace_dir is not None and workspace_dir.strip():
+        metadata["workspace_dir"] = workspace_dir.strip()
     return PromptBlock(
         kind="project_context",
         content="\n".join(lines).strip(),
@@ -83,43 +84,14 @@ def build_workspace_context_block(
 
 
 def build_skills_catalog_block(
-    available_skills: tuple[AvailableSkill, ...],
+    catalog: SkillCatalogPrompt | None,
 ) -> PromptBlock | None:
-    if not available_skills:
+    if catalog is None:
         return None
-    lines = [
-        "# Available Skills",
-        "",
-        "The following optional skills are available for this run.",
-        "Use a skill only when it clearly matches the current task.",
-        "If you choose one, call open_skill to load its SKILL.md before following the skill-specific workflow.",
-        "Do not read every skill by default. Prefer the single most relevant skill.",
-        "",
-        "<available_skills>",
-    ]
-    for skill in available_skills:
-        lines.append(
-            f"- {skill.name}: {skill.description} (file: {skill.path})",
-        )
-    lines.extend(
-        [
-            "</available_skills>",
-        ],
-    )
     return PromptBlock(
         kind="skills_catalog",
-        content="\n".join(lines).strip(),
-        metadata={
-            "count": len(available_skills),
-            "skills": [
-                {
-                    "name": skill.name,
-                    "path": skill.path,
-                    "source": skill.source,
-                }
-                for skill in available_skills
-            ],
-        },
+        content=catalog.content,
+        metadata=dict(catalog.metadata),
         policy=_SKILLS_CATALOG_POLICY,
     )
 
@@ -173,7 +145,7 @@ def build_runtime_context_block(
     *,
     llm_id: str,
     home_dir: str | None,
-    workdir: str | None,
+    workspace_dir: str | None,
 ) -> PromptBlock | None:
     if run.agent_id is None or not run.agent_id.strip():
         return None
@@ -183,7 +155,7 @@ def build_runtime_context_block(
             agent_id=run.agent_id,
             llm_id=llm_id,
             home_dir=home_dir,
-            workdir=workdir,
+            workspace_dir=workspace_dir,
         ),
         metadata={
             "agent_id": run.agent_id,
@@ -191,23 +163,11 @@ def build_runtime_context_block(
             "agent_home_dir": home_dir.strip()
             if home_dir is not None and home_dir.strip()
             else None,
-            "workdir": workdir.strip()
-            if workdir is not None and workdir.strip()
-            else None,
             "workspace_dir": (
-                workdir.strip()
-                if workdir is not None and workdir.strip()
+                workspace_dir.strip()
+                if workspace_dir is not None and workspace_dir.strip()
                 else (home_dir.strip() if home_dir is not None and home_dir.strip() else None)
             ),
         },
         policy=_RUNTIME_CONTEXT_POLICY,
-    )
-
-def build_memory_lookup_block(instruction: str | None) -> PromptBlock | None:
-    if instruction is None or not instruction.strip():
-        return None
-    return PromptBlock(
-        kind="memory_lookup_guidance",
-        content=instruction.strip(),
-        policy=_MEMORY_LOOKUP_POLICY,
     )

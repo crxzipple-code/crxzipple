@@ -1,15 +1,16 @@
 <script setup lang="ts">
+import { conversationKey } from "@/lib/conversationKey";
 import type { ConversationSummary } from "@/types";
 
 defineProps<{
   open: boolean;
   conversations: ConversationSummary[];
-  activeBulkKey: string | null;
+  activeSessionKey: string | null;
   loading: boolean;
 }>();
 
 const emit = defineEmits<{
-  select: [bulkKey: string];
+  select: [conversationKey: string];
   fresh: [];
   close: [];
 }>();
@@ -66,12 +67,12 @@ function formatTime(value: string) {
       <div class="sidebar__list">
         <button
           v-for="conversation in conversations"
-          :key="conversation.bulk_key"
+          :key="conversationKey(conversation)"
           class="conversation-card"
-          :class="{ 'conversation-card--active': conversation.bulk_key === activeBulkKey }"
+          :class="{ 'conversation-card--active': conversationKey(conversation) === activeSessionKey }"
           type="button"
-          :aria-current="conversation.bulk_key === activeBulkKey ? 'true' : undefined"
-          @click="emit('select', conversation.bulk_key)"
+          :aria-current="conversationKey(conversation) === activeSessionKey ? 'true' : undefined"
+          @click="emit('select', conversationKey(conversation))"
         >
           <div class="conversation-card__stripe"></div>
           <div class="conversation-card__row">

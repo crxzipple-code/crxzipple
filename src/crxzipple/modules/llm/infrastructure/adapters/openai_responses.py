@@ -17,6 +17,7 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     build_openai_tool_name_aliases,
     build_tool_call_intents,
     default_base_url,
+    ensure_image_input_supported,
     is_retryable_openai_stream_exception,
     join_url,
     openai_response_input_items,
@@ -114,6 +115,7 @@ class OpenAIResponsesAdapter:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> requests.Response:
+        ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
             profile.credential_binding,
             required=profile.provider.value == "openai",

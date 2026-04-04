@@ -9,8 +9,9 @@ from crxzipple.modules.tool import ToolRunResult
 
 async def run(arguments: dict[str, Any]) -> ToolRunResult:
     name = str(arguments.get("name", "world"))
-    return ToolRunResult(
-        content={
+    return ToolRunResult.text(
+        f"hello {name}",
+        details={
             "message": f"hello {name}",
         },
         metadata={

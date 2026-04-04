@@ -8,17 +8,25 @@ import multiprocessing
 import pickle
 from typing import Any
 
+from crxzipple.modules.tool.domain import ToolExecutionContext
 from crxzipple.modules.tool.domain import Tool
 from crxzipple.modules.tool.domain.exceptions import ToolExecutionNotSupportedError
 from crxzipple.modules.tool.infrastructure.discovery import LocalToolCatalog, LocalToolHandler
+from crxzipple.modules.tool.infrastructure.handler_invocation import (
+    invoke_tool_handler,
+)
 
 
 async def _await_result(result: Awaitable[Any]) -> Any:
     return await result
 
 
-def _invoke_handler_sync(handler: LocalToolHandler, arguments: dict[str, Any]) -> Any:
-    result = handler(arguments)
+def _invoke_handler_sync(
+    handler: LocalToolHandler,
+    arguments: dict[str, Any],
+    execution_context: ToolExecutionContext | None,
+) -> Any:
+    result = invoke_tool_handler(handler, arguments, execution_context)
     if inspect.isawaitable(result):
         return asyncio.run(_await_result(result))
     return result
@@ -35,9 +43,10 @@ class LocalAsyncToolExecutor:
         self,
         tool: Tool,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         handler = self._resolve_handler(tool, strategy_label="async")
-        result = handler(arguments)
+        result = invoke_tool_handler(handler, arguments, execution_context)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -46,14 +55,21 @@ class LocalAsyncToolExecutor:
         self,
         tool: Tool,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         handler = self._resolve_handler(tool, strategy_label="thread")
-        return await asyncio.to_thread(_invoke_handler_sync, handler, arguments)
+        return await asyncio.to_thread(
+            _invoke_handler_sync,
+            handler,
+            arguments,
+            execution_context,
+        )
 
     async def execute_process(
         self,
         tool: Tool,
         arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
     ) -> Any:
         handler = self._resolve_handler(tool, strategy_label="process")
         loop = asyncio.get_running_loop()
@@ -67,6 +83,7 @@ class LocalAsyncToolExecutor:
                     _invoke_handler_sync,
                     handler,
                     arguments,
+                    execution_context,
                 )
         except (AttributeError, TypeError, pickle.PicklingError) as exc:
             raise ToolExecutionNotSupportedError(

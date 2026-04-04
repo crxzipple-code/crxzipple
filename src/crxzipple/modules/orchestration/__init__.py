@@ -49,8 +49,9 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
+    FileBackedMemoryPortAdapter,
+    FileMemoryContextResolver,
     LlmServiceAdapter,
-    MemoryServiceAdapter,
     OrchestrationRunDispatchAdapter,
     ToolServiceAdapter,
 )
@@ -68,6 +69,8 @@ __all__ = [
     "EngineAdvanceOutcome",
     "EnqueueOrchestrationRunInput",
     "FailOrchestrationRunInput",
+    "FileBackedMemoryPortAdapter",
+    "FileMemoryContextResolver",
     "InboundInstruction",
     "LlmPort",
     "MemoryPort",
@@ -96,7 +99,6 @@ __all__ = [
     "RouteOrchestrationRunInput",
     "AuthorizationServiceAdapter",
     "LlmServiceAdapter",
-    "MemoryServiceAdapter",
     "ToolServiceAdapter",
     "SessionBundle",
     "SessionResolver",

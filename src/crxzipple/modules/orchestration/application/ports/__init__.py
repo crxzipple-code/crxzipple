@@ -7,6 +7,9 @@ from crxzipple.modules.orchestration.application.ports.authorization import (
 )
 from crxzipple.modules.orchestration.application.ports.llm import LlmPort
 from crxzipple.modules.orchestration.application.ports.memory import MemoryPort
+from crxzipple.modules.orchestration.application.ports.skill import (
+    SkillCatalogPort,
+)
 from crxzipple.modules.orchestration.application.ports.tool import (
     ToolCatalogPort,
     ToolExecutionPort,
@@ -18,6 +21,7 @@ __all__ = [
     "MemoryPort",
     "RunDispatchClaim",
     "RunDispatchPort",
+    "SkillCatalogPort",
     "ToolCatalogPort",
     "ToolExecutionPort",
 ]

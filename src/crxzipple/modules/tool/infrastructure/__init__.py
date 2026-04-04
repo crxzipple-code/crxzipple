@@ -1,5 +1,4 @@
 from crxzipple.modules.tool.infrastructure.in_memory_repository import (
-    InMemoryToolRepository,
     InMemoryToolRunRepository,
 )
 from crxzipple.modules.tool.infrastructure.mcp_client import McpStdioClient
@@ -14,10 +13,8 @@ from crxzipple.modules.tool.infrastructure.discovery import (
     OpenApiOperation,
     ToolDiscoveryProvider,
     ToolDiscoveryRegistry,
-    register_builtin_local_tools,
 )
 from crxzipple.modules.tool.infrastructure.executors import LocalAsyncToolExecutor
-from crxzipple.modules.tool.infrastructure.persistence import SqlAlchemyToolRepository
 from crxzipple.modules.tool.infrastructure.persistence import SqlAlchemyToolRunRepository
 from crxzipple.modules.tool.infrastructure.runtimes import (
     DockerSandboxBackend,
@@ -29,15 +26,20 @@ from crxzipple.modules.tool.infrastructure.runtimes import (
     build_sandbox_backend,
     register_mcp_remote_handlers,
     register_openapi_remote_handlers,
-    register_builtin_remote_handlers,
-    register_builtin_sandbox_handlers,
+)
+from crxzipple.modules.tool.infrastructure.tool_packages import (
+    DEFAULT_TOOL_ROOT,
+    LocalToolBinding,
+    RuntimeToolBinding,
+    ToolNamespaceDefinition,
+    discover_tool_namespaces,
+    register_scanned_tool_packages,
 )
 
 __all__ = [
     "DockerSandboxBackend",
     "FilesystemLocalToolDiscoveryProvider",
     "FilesystemLocalToolHandler",
-    "InMemoryToolRepository",
     "InMemoryToolRunRepository",
     "LocalCatalogDiscoveryProvider",
     "LocalAsyncToolExecutor",
@@ -51,15 +53,17 @@ __all__ = [
     "ToolDiscoveryRegistry",
     "RemoteAsyncToolExecutor",
     "SandboxAsyncToolExecutor",
-    "SqlAlchemyToolRepository",
     "SqlAlchemyToolRunRepository",
     "SubprocessSandboxBackend",
     "ToolRuntimeRegistry",
     "ToolRuntimeRouter",
+    "DEFAULT_TOOL_ROOT",
+    "LocalToolBinding",
+    "RuntimeToolBinding",
+    "ToolNamespaceDefinition",
     "build_sandbox_backend",
+    "discover_tool_namespaces",
     "register_mcp_remote_handlers",
     "register_openapi_remote_handlers",
-    "register_builtin_remote_handlers",
-    "register_builtin_sandbox_handlers",
-    "register_builtin_local_tools",
+    "register_scanned_tool_packages",
 ]

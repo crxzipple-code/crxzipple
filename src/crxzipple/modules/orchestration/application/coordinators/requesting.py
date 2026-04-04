@@ -161,7 +161,7 @@ class RunRequestCoordinator:
                 anchor_run_id=data.anchor_run_id,
                 label="Memory flush",
             )
-            return self._create_requested_run(
+            run = self._create_requested_run(
                 uow,
                 anchor=anchor,
                 source="memory_flush",
@@ -180,6 +180,20 @@ class RunRequestCoordinator:
                     },
                 },
             )
+        if self.session_service is not None and trigger_basis == "pre_compaction":
+            self._merge_session_compaction_metadata(
+                session_key=anchor.session_key,
+                metadata={
+                    "pending_memory_flush_run_id": run.id,
+                    "pending_memory_flush_requested_at": run.created_at.isoformat(),
+                    "pending_memory_flush_reason": (
+                        (data.reason or "").strip() or "auto_pre_compaction_flush"
+                    ),
+                    "pending_memory_flush_basis": trigger_basis,
+                    "pending_memory_flush_anchor_run_id": anchor.run.id,
+                },
+            )
+        return run
 
     def request_due_heartbeats(
         self,
@@ -257,8 +271,27 @@ class RunRequestCoordinator:
             return None
         return pending_run
 
+    def existing_pending_memory_flush_run(
+        self,
+        session_key: str,
+    ) -> OrchestrationRun | None:
+        if self.session_service is None:
+            return None
+        session = self.session_service.get_session(session_key)
+        compaction_payload = session.metadata.get("compaction")
+        if not isinstance(compaction_payload, dict):
+            return None
+        pending_run_id = compaction_payload.get("pending_memory_flush_run_id")
+        if not isinstance(pending_run_id, str) or not pending_run_id.strip():
+            return None
+        with self.uow_factory() as uow:
+            pending_run = uow.orchestration_runs.get(pending_run_id.strip())
+        if pending_run is None or pending_run.status in _TERMINAL_RUN_STATUSES:
+            return None
+        return pending_run
+
     def clear_pending_compaction_marker(self, run: OrchestrationRun) -> None:
-        session_key = str(run.metadata.get("session_key", "")).strip()
+        session_key = run.session_key or ""
         if not session_key:
             return
         self._merge_session_compaction_metadata(
@@ -269,6 +302,22 @@ class RunRequestCoordinator:
                 "requested_at",
                 "request_reason",
                 "anchor_run_id",
+            ),
+        )
+
+    def clear_pending_memory_flush_marker(self, run: OrchestrationRun) -> None:
+        session_key = run.session_key or ""
+        if not session_key:
+            return
+        self._merge_session_compaction_metadata(
+            session_key=session_key,
+            metadata={},
+            remove_keys=(
+                "pending_memory_flush_run_id",
+                "pending_memory_flush_requested_at",
+                "pending_memory_flush_reason",
+                "pending_memory_flush_basis",
+                "pending_memory_flush_anchor_run_id",
             ),
         )
 
@@ -300,14 +349,12 @@ class RunRequestCoordinator:
         )
         run.route(
             agent_id=anchor.run.agent_id,
-            bulk_key=anchor.run.bulk_key,
             lane_key=anchor.run.lane_key,
             priority=run.priority,
             metadata=run_metadata,
         )
         run.bind_session(
             active_session_id=anchor.run.active_session_id,
-            bulk_key=anchor.run.bulk_key,
         )
         self.scheduler.enqueue(
             run,
@@ -334,10 +381,6 @@ class RunRequestCoordinator:
             raise OrchestrationValidationError(
                 f"{normalized_label} anchor run agent_id is required.",
             )
-        if anchor.bulk_key is None or not anchor.bulk_key.strip():
-            raise OrchestrationValidationError(
-                f"{normalized_label} anchor run bulk_key is required.",
-            )
         if anchor.active_session_id is None or not anchor.active_session_id.strip():
             raise OrchestrationValidationError(
                 f"{normalized_label} anchor run active_session_id is required.",
@@ -362,12 +405,10 @@ class RunRequestCoordinator:
             )
         latest: dict[str, OrchestrationRun] = {}
         for run in runs:
-            session_key = str(run.metadata.get("session_key", "")).strip()
+            session_key = run.session_key or ""
             if not session_key or session_key in latest:
                 continue
             if run.agent_id is None or not run.agent_id.strip():
-                continue
-            if run.bulk_key is None or not run.bulk_key.strip():
                 continue
             if run.active_session_id is None or not run.active_session_id.strip():
                 continue
@@ -378,7 +419,7 @@ class RunRequestCoordinator:
         with self.uow_factory() as uow:
             runs = uow.orchestration_runs.list()
         for run in sorted(runs, key=lambda item: item.updated_at, reverse=True):
-            current_session_key = str(run.metadata.get("session_key", "")).strip()
+            current_session_key = run.session_key or ""
             if current_session_key != session_key:
                 continue
             if run.status in _TERMINAL_RUN_STATUSES:

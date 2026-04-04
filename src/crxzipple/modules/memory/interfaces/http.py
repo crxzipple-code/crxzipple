@@ -8,182 +8,219 @@ from pydantic import BaseModel, Field
 from crxzipple.bootstrap import AppContainer
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.memory.application import (
-    ApproveMemoryCandidateInput,
-    ListMemoryCandidatesInput,
-    ListMemoryEntriesInput,
-    RejectMemoryCandidateInput,
+    MemoryExcerpt,
+    MemoryFileSummary,
+    MemorySearchHit,
+    MemoryWriteResult,
 )
-from crxzipple.modules.memory.domain import (
-    MemoryCandidate,
-    MemoryCandidateNotFoundError,
-    MemoryCandidateStatus,
-    MemoryEntry,
-)
-
 
 router = APIRouter()
 
 
-class MemoryCandidateResponse(BaseModel):
-    id: str
-    agent_id: str
-    session_key: str | None = None
-    run_id: str | None = None
-    title: str
-    content: str
-    summary: str
-    tags: list[str] = Field(default_factory=list)
-    metadata: dict[str, object] = Field(default_factory=dict)
-    status: str
-    created_at: str
-    reviewed_at: str | None = None
-    review_reason: str | None = None
-    approved_entry_id: str | None = None
+def _resolve_memory_context(
+    container: AppContainer,
+    agent_id: str | None,
+):
+    context = container.memory_context_resolver.resolve(agent_id)
+    if context is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No file-backed memory context is available for this agent.",
+        )
+    return context
+
+
+class MemoryExcerptResponse(BaseModel):
+    path: str
+    text: str
+    start_line: int
+    end_line: int
+    kind: str
 
     @classmethod
-    def from_entity(cls, candidate: MemoryCandidate) -> "MemoryCandidateResponse":
+    def from_entity(cls, excerpt: MemoryExcerpt) -> "MemoryExcerptResponse":
         return cls(
-            id=candidate.id,
-            agent_id=candidate.agent_id,
-            session_key=candidate.session_key,
-            run_id=candidate.run_id,
-            title=candidate.title,
-            content=candidate.content,
-            summary=candidate.summary,
-            tags=list(candidate.tags),
-            metadata=dict(candidate.metadata),
-            status=candidate.status.value,
-            created_at=candidate.created_at.isoformat(),
-            reviewed_at=(
-                candidate.reviewed_at.isoformat()
-                if candidate.reviewed_at is not None
-                else None
-            ),
-            review_reason=candidate.review_reason,
-            approved_entry_id=candidate.approved_entry_id,
+            path=excerpt.path,
+            text=excerpt.text,
+            start_line=excerpt.start_line,
+            end_line=excerpt.end_line,
+            kind=excerpt.kind,
         )
 
 
-class MemoryEntryResponse(BaseModel):
-    id: str
-    agent_id: str
-    session_key: str | None = None
-    run_id: str | None = None
-    source_candidate_id: str | None = None
+class MemoryFileSummaryResponse(BaseModel):
+    path: str
+    kind: str
     title: str
-    content: str
-    summary: str
-    tags: list[str] = Field(default_factory=list)
-    metadata: dict[str, object] = Field(default_factory=dict)
-    created_at: str
+    preview: str
     updated_at: str
 
     @classmethod
-    def from_entity(cls, entry: MemoryEntry) -> "MemoryEntryResponse":
+    def from_entity(cls, item: MemoryFileSummary) -> "MemoryFileSummaryResponse":
         return cls(
-            id=entry.id,
-            agent_id=entry.agent_id,
-            session_key=entry.session_key,
-            run_id=entry.run_id,
-            source_candidate_id=entry.source_candidate_id,
-            title=entry.title,
-            content=entry.content,
-            summary=entry.summary,
-            tags=list(entry.tags),
-            metadata=dict(entry.metadata),
-            created_at=entry.created_at.isoformat(),
-            updated_at=entry.updated_at.isoformat(),
+            path=item.path,
+            kind=item.kind,
+            title=item.title,
+            preview=item.preview,
+            updated_at=item.updated_at,
         )
 
 
-class RejectMemoryCandidateRequest(BaseModel):
-    reason: str | None = None
+class MemorySearchHitResponse(BaseModel):
+    path: str
+    snippet: str
+    start_line: int
+    end_line: int
+    score: float
+    kind: str
+
+    @classmethod
+    def from_entity(cls, item: MemorySearchHit) -> "MemorySearchHitResponse":
+        return cls(
+            path=item.path,
+            snippet=item.snippet,
+            start_line=item.start_line,
+            end_line=item.end_line,
+            score=item.score,
+            kind=item.kind,
+        )
 
 
-@router.get("/memory/candidates", response_model=list[MemoryCandidateResponse])
-def list_memory_candidates(
+class MemoryWriteResultResponse(BaseModel):
+    path: str
+    line_start: int
+    line_end: int
+    kind: str
+
+    @classmethod
+    def from_entity(cls, result: MemoryWriteResult) -> "MemoryWriteResultResponse":
+        return cls(
+            path=result.path,
+            line_start=result.line_start,
+            line_end=result.line_end,
+            kind=result.kind,
+        )
+
+
+class MemoryOverviewResponse(BaseModel):
+    agent_id: str
+    space_id: str
+    long_term: MemoryExcerptResponse | None = None
+    recent_files: list[MemoryFileSummaryResponse] = Field(default_factory=list)
+
+
+class WriteDailyMemoryRequest(BaseModel):
+    agent_id: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    title: str | None = None
+
+
+class WriteLongTermMemoryRequest(BaseModel):
+    agent_id: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+
+
+@router.get("/memory/overview", response_model=MemoryOverviewResponse)
+def get_memory_overview(
     container: Annotated[AppContainer, Depends(get_container)],
-    agent_id: str | None = None,
-    session_key: str | None = None,
-    run_id: str | None = None,
-    status_value: Annotated[str | None, Query(alias="status")] = None,
-    limit: int | None = Query(default=None, ge=1, le=100),
-) -> list[MemoryCandidateResponse]:
-    try:
-        status_filter = (
-            MemoryCandidateStatus(status_value)
-            if status_value is not None and status_value.strip()
+    agent_id: str = Query(..., min_length=1),
+    recent_limit: int = Query(default=12, ge=1, le=50),
+) -> MemoryOverviewResponse:
+    context = _resolve_memory_context(container, agent_id)
+    long_term = container.file_memory_service.get(
+        context=context,
+        path="MEMORY.md",
+    )
+    if long_term is None:
+        long_term = container.file_memory_service.get(
+            context=context,
+            path="memory.md",
+        )
+    recent_files = container.file_memory_service.list_files(
+        context=context,
+        limit=recent_limit,
+    )
+    return MemoryOverviewResponse(
+        agent_id=agent_id,
+        space_id=context.space_id,
+        long_term=(
+            MemoryExcerptResponse.from_entity(long_term)
+            if long_term is not None
             else None
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported memory candidate status '{status_value}'.",
-        ) from exc
-    items = container.memory_service.list_candidates(
-        ListMemoryCandidatesInput(
-            agent_id=agent_id,
-            session_key=session_key,
-            run_id=run_id,
-            status=status_filter,
-            limit=limit,
         ),
+        recent_files=[
+            MemoryFileSummaryResponse.from_entity(item)
+            for item in recent_files
+        ],
     )
-    return [MemoryCandidateResponse.from_entity(item) for item in items]
+
+
+@router.get("/memory/search", response_model=list[MemorySearchHitResponse])
+def search_memory(
+    container: Annotated[AppContainer, Depends(get_container)],
+    agent_id: str = Query(..., min_length=1),
+    query: str = Query(..., min_length=1),
+    limit: int = Query(default=12, ge=1, le=50),
+) -> list[MemorySearchHitResponse]:
+    context = _resolve_memory_context(container, agent_id)
+    items = container.file_memory_service.search(
+        context=context,
+        query=query,
+        limit=limit,
+    )
+    return [MemorySearchHitResponse.from_entity(item) for item in items]
+
+
+@router.get("/memory/excerpt", response_model=MemoryExcerptResponse)
+def get_memory_excerpt(
+    container: Annotated[AppContainer, Depends(get_container)],
+    agent_id: str = Query(..., min_length=1),
+    path: str = Query(..., min_length=1),
+    start_line: int | None = Query(default=None, ge=1),
+    line_count: int | None = Query(default=None, ge=1, le=500),
+) -> MemoryExcerptResponse:
+    context = _resolve_memory_context(container, agent_id)
+    excerpt = container.file_memory_service.get(
+        context=context,
+        path=path,
+        start_line=start_line,
+        line_count=line_count,
+    )
+    if excerpt is None:
+        raise HTTPException(status_code=404, detail="Memory excerpt was not found.")
+    return MemoryExcerptResponse.from_entity(excerpt)
 
 
 @router.post(
-    "/memory/candidates/{candidate_id}/approve",
-    response_model=MemoryEntryResponse,
-    status_code=status.HTTP_200_OK,
+    "/memory/daily",
+    response_model=MemoryWriteResultResponse,
+    status_code=status.HTTP_201_CREATED,
 )
-def approve_memory_candidate(
-    candidate_id: str,
+def write_daily_memory(
+    payload: WriteDailyMemoryRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> MemoryEntryResponse:
-    try:
-        entry = container.memory_service.approve_candidate(
-            ApproveMemoryCandidateInput(candidate_id=candidate_id),
-        )
-    except MemoryCandidateNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
-    return MemoryEntryResponse.from_entity(entry)
+) -> MemoryWriteResultResponse:
+    context = _resolve_memory_context(container, payload.agent_id)
+    result = container.file_memory_service.append_daily(
+        context=context,
+        content=payload.content,
+        title=payload.title,
+    )
+    return MemoryWriteResultResponse.from_entity(result)
 
 
 @router.post(
-    "/memory/candidates/{candidate_id}/reject",
-    response_model=MemoryCandidateResponse,
-    status_code=status.HTTP_200_OK,
+    "/memory/long-term",
+    response_model=MemoryWriteResultResponse,
+    status_code=status.HTTP_201_CREATED,
 )
-def reject_memory_candidate(
-    candidate_id: str,
-    payload: RejectMemoryCandidateRequest,
+def write_long_term_memory(
+    payload: WriteLongTermMemoryRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> MemoryCandidateResponse:
-    try:
-        candidate = container.memory_service.reject_candidate(
-            RejectMemoryCandidateInput(
-                candidate_id=candidate_id,
-                reason=payload.reason or "rejected",
-            ),
-        )
-    except MemoryCandidateNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
-    return MemoryCandidateResponse.from_entity(candidate)
-
-
-@router.get("/memory/entries", response_model=list[MemoryEntryResponse])
-def list_memory_entries(
-    container: Annotated[AppContainer, Depends(get_container)],
-    agent_id: str | None = None,
-    query: str | None = None,
-    limit: int | None = Query(default=None, ge=1, le=100),
-) -> list[MemoryEntryResponse]:
-    items = container.memory_service.list_entries(
-        ListMemoryEntriesInput(
-            agent_id=agent_id,
-            query=query,
-            limit=limit,
-        ),
+) -> MemoryWriteResultResponse:
+    context = _resolve_memory_context(container, payload.agent_id)
+    result = container.file_memory_service.write_long_term(
+        context=context,
+        content=payload.content,
     )
-    return [MemoryEntryResponse.from_entity(item) for item in items]
+    return MemoryWriteResultResponse.from_entity(result)

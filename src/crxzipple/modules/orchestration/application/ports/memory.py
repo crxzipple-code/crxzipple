@@ -1,47 +1,71 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from crxzipple.modules.memory.application import (
-    CreateMemoryCandidateInput,
-    RecordMemoryFlushInput,
+    MemoryExcerpt,
+    MemorySearchHit,
+    MemoryUseContext,
+    MemoryWriteResult,
 )
-from crxzipple.modules.memory.domain import MemoryCandidate, MemoryEntry
 
 
 class MemoryPort(Protocol):
-    def recall_entries(
+    def resolve_context(
         self,
         *,
-        agent_id: str,
-        query_text: str,
-        limit: int = 3,
-        search_limit: int = 25,
-    ) -> list[MemoryEntry]:
+        space_id: str | None,
+    ) -> MemoryUseContext | None:
         ...
 
-    def create_candidate(
+    def search(
         self,
-        data: CreateMemoryCandidateInput,
-    ) -> MemoryCandidate:
-        ...
-
-    def record_flush_entry(
-        self,
-        data: RecordMemoryFlushInput,
-    ) -> MemoryEntry:
-        ...
-
-    def memory_lookup_instruction(self) -> str:
-        ...
-
-    def is_memory_tool_name(self, name: str) -> bool:
-        ...
-
-    def inject_tool_context(
-        self,
-        arguments: dict[str, Any],
         *,
-        agent_id: str,
-    ) -> dict[str, Any]:
+        context: MemoryUseContext,
+        query: str,
+        limit: int = 6,
+    ) -> list[MemorySearchHit]:
+        ...
+
+    def warm_context(
+        self,
+        *,
+        context: MemoryUseContext,
+    ) -> bool:
+        ...
+
+    def get(
+        self,
+        *,
+        context: MemoryUseContext,
+        path: str,
+        start_line: int | None = None,
+        line_count: int | None = None,
+    ) -> MemoryExcerpt | None:
+        ...
+
+    def append_daily(
+        self,
+        *,
+        context: MemoryUseContext,
+        content: str,
+        title: str | None = None,
+    ) -> MemoryWriteResult:
+        ...
+
+    def write_long_term(
+        self,
+        *,
+        context: MemoryUseContext,
+        content: str,
+    ) -> MemoryWriteResult:
+        ...
+
+    def archive_session(
+        self,
+        *,
+        context: MemoryUseContext,
+        content: str,
+        slug: str | None = None,
+    ) -> MemoryWriteResult:
         ...

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from crxzipple.core.db import Base
@@ -14,11 +14,6 @@ class SessionModel(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     active_session_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
-    llm_id: Mapped[str | None] = mapped_column(
-        ForeignKey("llm_profiles.id"),
-        nullable=True,
-        index=True,
-    )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
     channel: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     chat_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -70,7 +65,6 @@ class SessionMessageModel(Base):
     sequence_no: Mapped[int] = mapped_column(Integer(), nullable=False)
     role: Mapped[str] = mapped_column(String(50), nullable=False)
     kind: Mapped[str] = mapped_column(String(50), nullable=False, default="message")
-    content: Mapped[str] = mapped_column(Text(), nullable=False)
     content_payload: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,

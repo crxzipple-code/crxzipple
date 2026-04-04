@@ -7,8 +7,9 @@ from crxzipple.modules.orchestration.infrastructure.adapters.authorization impor
 from crxzipple.modules.orchestration.infrastructure.adapters.llm import (
     LlmServiceAdapter,
 )
-from crxzipple.modules.orchestration.infrastructure.adapters.memory import (
-    MemoryServiceAdapter,
+from crxzipple.modules.orchestration.infrastructure.adapters.file_memory import (
+    FileBackedMemoryPortAdapter,
+    FileMemoryContextResolver,
 )
 from crxzipple.modules.orchestration.infrastructure.adapters.tool import (
     ToolServiceAdapter,
@@ -16,8 +17,9 @@ from crxzipple.modules.orchestration.infrastructure.adapters.tool import (
 
 __all__ = [
     "AuthorizationServiceAdapter",
+    "FileBackedMemoryPortAdapter",
+    "FileMemoryContextResolver",
     "LlmServiceAdapter",
-    "MemoryServiceAdapter",
     "OrchestrationRunDispatchAdapter",
     "ToolServiceAdapter",
 ]

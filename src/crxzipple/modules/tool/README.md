@@ -34,6 +34,7 @@ interfaces and reused by other bounded contexts such as `agent`.
 
 - Conversation or session lifecycle
 - Agent-specific orchestration rules
+- Concrete tool business logic such as workspace/file tools or debug/demo tools
 
 Those concerns should stay in other bounded contexts and reference tools by id.
 
@@ -53,7 +54,7 @@ Those concerns should stay in other bounded contexts and reference tools by id.
 - Re-running discovery now refreshes previously discovered non-manual tool
   definitions when the provider contract changes
 - Filesystem-backed local tools can now be discovered from `tool.json`
-  manifests under configured local paths and executed through the existing
+  manifests under fixed repository paths and executed through the existing
   local runtime
 - OpenAPI-backed remote tools can now be discovered through configured
   providers and executed through the `remote` runtime
@@ -75,11 +76,15 @@ Those concerns should stay in other bounded contexts and reference tools by id.
 
 ## Current provider path
 
+- bundled tool namespaces: governed from repository `tools/*/tool.yaml`
 - `local_builtin`: discovers in-process local tools from the local catalog
-- `local_filesystem`: discovers local tools from `tool.json` manifests under
-  `APP_TOOL_LOCAL_PATHS`
-- configured OpenAPI providers: discover remote HTTP tools from OpenAPI JSON
-  documents and register matching remote runtime handlers
+- `local_filesystem`: discovers local tools from `tool.json` manifests under:
+  - `.crxzipple/tools/`
+  - `tools/`
+- bundled OpenAPI namespaces: discover remote HTTP tools from
+  `tools/<namespace>/tool.yaml` + colocated spec files and register matching
+  remote runtime handlers
+- configured OpenAPI providers: explicit override path for remote HTTP tools
 - configured MCP providers: discover tools over a lightweight stdio `tools/list`
   call and invoke them through `tools/call`
 
@@ -106,7 +111,7 @@ transport negotiation.
 
 The current filesystem local provider path supports:
 
-- recursive `tool.json` discovery under configured local paths
+- recursive `tool.json` discovery under the fixed repository-local tool roots
 - `entrypoint` resolution using `<relative_file.py>:<callable>`
 - top-level callables that work with `async`, `thread`, and `process`
 - registration into the shared local runtime catalog so later CLI/HTTP/worker
@@ -114,15 +119,28 @@ The current filesystem local provider path supports:
 - returning `ToolRunResult` as the recommended handler contract for keeping
   business content separate from execution metadata
 
-Plain dict return values are still accepted for compatibility, but new local
-tools should prefer `ToolRunResult(content=..., metadata=...)`.
+Plain dict return values are no longer accepted. Tool runtimes must return
+`ToolRunResult`.
 
 Recommended local tool authoring conventions:
 
 - export a top-level callable such as `run(arguments: dict[str, Any])`
 - prefer `async def` unless the work is naturally blocking
-- keep business output in `ToolRunResult.content`
+- prefer `ToolRunResult.structured(content=..., details=..., metadata=...)` for
+  structured results that should still expose explicit model-facing content
+- prefer `ToolRunResult.text("...", details=..., metadata=...)` when the model
+  should see a curated textual rendering
+- keep model-facing multimodal content in `ToolRunResult.content`
+- keep business output in `ToolRunResult.details`
 - keep execution diagnostics in `ToolRunResult.metadata`
+- `ToolRunResult.content` is required and must be a non-empty sequence of
+  standardized content blocks
+- do not use `details` as the primary transport for images, files, or model-facing
+  textual output
+- inline `image` / `file` blocks are automatically externalized into artifact
+  refs during tool execution when the artifact service is available
+- prefer lightweight attachment refs in persisted history; inline bytes should be
+  treated as transient input to the LLM adapter, not long-term storage
 - raise regular exceptions with clear messages and let the runtime map them into
   `ToolRunError`
 - avoid mixing metadata like `process_id` or `working_directory` into

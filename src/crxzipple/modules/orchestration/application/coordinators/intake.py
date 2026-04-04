@@ -83,12 +83,14 @@ class RunIntakeCoordinator:
     def route(self, data: "RouteOrchestrationRunInput") -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
+            route_metadata = dict(data.metadata)
+            if data.session_key is not None and data.session_key.strip():
+                route_metadata.setdefault("session_key", data.session_key.strip())
             run.route(
                 agent_id=data.agent_id,
-                bulk_key=data.bulk_key,
                 lane_key=data.lane_key,
                 priority=data.priority,
-                metadata=data.metadata,
+                metadata=route_metadata,
             )
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -100,7 +102,6 @@ class RunIntakeCoordinator:
             run = self._get_run(uow, data.run_id)
             run.bind_session(
                 active_session_id=data.active_session_id,
-                bulk_key=data.bulk_key,
             )
             uow.orchestration_runs.add(run)
             uow.collect(run)
@@ -123,6 +124,11 @@ class RunIntakeCoordinator:
             return run
 
     def prepare_session_run(self, data: "PrepareSessionRunInput") -> OrchestrationRun:
+        requested_llm_id = (
+            data.requested_llm_id.strip()
+            if isinstance(data.requested_llm_id, str) and data.requested_llm_id.strip()
+            else None
+        )
         bundle = self.resolve_session_bundle(
             self.resolve_session_bundle_input_factory(
                 context=data.context,
@@ -141,20 +147,20 @@ class RunIntakeCoordinator:
             "session_key": bundle.routing.key_resolution.key,
             "session_kind": bundle.routing.key_resolution.kind.value,
         }
+        if requested_llm_id is not None:
+            route_metadata.setdefault("requested_llm_id", requested_llm_id)
         route_metadata.update(data.metadata)
 
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             run.route(
                 agent_id=data.context.agent_id,
-                bulk_key=bundle.routing.bulk_key,
                 lane_key=bundle.routing.lane_key,
                 priority=data.priority,
                 metadata=route_metadata,
             )
             run.bind_session(
                 active_session_id=bundle.active_instance.id,
-                bulk_key=bundle.routing.bulk_key,
             )
             prompt_flow_hint = self.session_start_prompt_flow_hint(bundle)
             if prompt_flow_hint is not None:

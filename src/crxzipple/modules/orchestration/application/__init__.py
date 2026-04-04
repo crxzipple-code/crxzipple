@@ -6,6 +6,13 @@ from crxzipple.modules.orchestration.application.engine import (
 from crxzipple.modules.orchestration.application.engine_llm_invoker import (
     OrchestrationEngineLlmInvoker,
 )
+from crxzipple.modules.orchestration.application.llm_resolver import (
+    AUTO_LLM_ID,
+    LlmResolver,
+    ResolvedLlmSelection,
+    is_auto_llm_id,
+    normalize_requested_llm_id,
+)
 from crxzipple.modules.orchestration.application.engine_session_recorder import (
     OrchestrationSessionRecorder,
 )
@@ -15,6 +22,7 @@ from crxzipple.modules.orchestration.application.ports import (
     MemoryPort,
     RunDispatchClaim,
     RunDispatchPort,
+    SkillCatalogPort,
     ToolCatalogPort,
     ToolExecutionPort,
 )
@@ -79,6 +87,7 @@ __all__ = [
     "EnqueueOrchestrationRunInput",
     "FailOrchestrationRunInput",
     "LlmPort",
+    "LlmResolver",
     "MemoryPort",
     "OrchestrationDispatchEventSubscriber",
     "OrchestrationEngine",
@@ -95,6 +104,7 @@ __all__ = [
     "RequestHeartbeatInput",
     "RequestMemoryFlushInput",
     "ResolveApprovalRequestInput",
+    "ResolvedLlmSelection",
     "PromptAssembler",
     "PromptEnvelope",
     "PromptPreview",
@@ -104,6 +114,7 @@ __all__ = [
     "ResumeOrchestrationRunInput",
     "RunDispatchClaim",
     "RunDispatchPort",
+    "SkillCatalogPort",
     "RouteOrchestrationRunInput",
     "SessionBundle",
     "SessionResolver",
@@ -112,6 +123,9 @@ __all__ = [
     "ToolExecutionPort",
     "OrchestrationToolEventSubscriber",
     "ToolResolver",
+    "AUTO_LLM_ID",
+    "is_auto_llm_id",
+    "normalize_requested_llm_id",
     "WaitOnToolInput",
     "WaitForConfirmationInput",
 ]

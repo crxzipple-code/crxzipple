@@ -29,14 +29,13 @@ class OrchestrationRun(AggregateRoot[str]):
     delivery_target: DeliveryTarget | None = None
     status: OrchestrationRunStatus = OrchestrationRunStatus.ACCEPTED
     stage: OrchestrationRunStage = OrchestrationRunStage.ACCEPTED
-    bulk_key: str | None = None
     active_session_id: str | None = None
     agent_id: str | None = None
     lane_key: str | None = None
     queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.FIFO
     priority: int = 100
     current_step: int = 0
-    max_steps: int = 12
+    max_steps: int = 99
     pending_tool_run_ids: tuple[str, ...] = field(default_factory=tuple)
     waiting_reason: str | None = None
     result_payload: dict[str, object] | None = None
@@ -64,8 +63,6 @@ class OrchestrationRun(AggregateRoot[str]):
             raise OrchestrationValidationError(
                 "Orchestration run max_steps must be greater than zero.",
             )
-        if self.bulk_key is not None:
-            self.bulk_key = self.bulk_key.strip() or None
         if self.active_session_id is not None:
             self.active_session_id = self.active_session_id.strip() or None
         if self.agent_id is not None:
@@ -85,6 +82,14 @@ class OrchestrationRun(AggregateRoot[str]):
         if self.result_payload is not None:
             self.result_payload = dict(self.result_payload)
 
+    @property
+    def session_key(self) -> str | None:
+        raw = self.metadata.get("session_key")
+        if not isinstance(raw, str):
+            return None
+        normalized = raw.strip()
+        return normalized or None
+
     @classmethod
     def accept(
         cls,
@@ -93,7 +98,7 @@ class OrchestrationRun(AggregateRoot[str]):
         inbound_instruction: InboundInstruction,
         delivery_target: DeliveryTarget | None = None,
         priority: int = 100,
-        max_steps: int = 12,
+        max_steps: int = 99,
         queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.FIFO,
         metadata: dict[str, object] | None = None,
     ) -> "OrchestrationRun":
@@ -121,23 +126,18 @@ class OrchestrationRun(AggregateRoot[str]):
         self,
         *,
         agent_id: str,
-        bulk_key: str,
         lane_key: str | None = None,
         priority: int | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
         normalized_agent_id = agent_id.strip()
-        normalized_bulk_key = bulk_key.strip()
         if not normalized_agent_id:
             raise OrchestrationValidationError("Orchestration run agent_id cannot be empty.")
-        if not normalized_bulk_key:
-            raise OrchestrationValidationError("Orchestration run bulk_key cannot be empty.")
         if priority is not None and priority < 0:
             raise OrchestrationValidationError(
                 "Orchestration run priority cannot be negative.",
             )
         self.agent_id = normalized_agent_id
-        self.bulk_key = normalized_bulk_key
         self.lane_key = lane_key.strip() if lane_key is not None and lane_key.strip() else self.lane_key
         if priority is not None:
             self.priority = priority
@@ -151,7 +151,7 @@ class OrchestrationRun(AggregateRoot[str]):
                 payload={
                     "run_id": self.id,
                     "agent_id": self.agent_id,
-                    "bulk_key": self.bulk_key,
+                    "session_key": self.session_key,
                     "lane_key": self.lane_key,
                 },
             ),
@@ -161,20 +161,12 @@ class OrchestrationRun(AggregateRoot[str]):
         self,
         *,
         active_session_id: str,
-        bulk_key: str | None = None,
     ) -> None:
         normalized_session_id = active_session_id.strip()
         if not normalized_session_id:
             raise OrchestrationValidationError(
                 "Orchestration run active_session_id cannot be empty.",
             )
-        if bulk_key is not None:
-            normalized_bulk_key = bulk_key.strip()
-            if not normalized_bulk_key:
-                raise OrchestrationValidationError(
-                    "Orchestration run bulk_key cannot be empty.",
-                )
-            self.bulk_key = normalized_bulk_key
         self.active_session_id = normalized_session_id
         self.stage = OrchestrationRunStage.BULK_READY
         self.updated_at = utcnow()
@@ -183,7 +175,7 @@ class OrchestrationRun(AggregateRoot[str]):
                 name="orchestration.run.bulk_ready",
                 payload={
                     "run_id": self.id,
-                    "bulk_key": self.bulk_key,
+                    "session_key": self.session_key,
                     "active_session_id": self.active_session_id,
                 },
             ),
@@ -317,6 +309,51 @@ class OrchestrationRun(AggregateRoot[str]):
         self.record_event(
             DomainEvent(
                 name="orchestration.run.advanced",
+                payload={
+                    "run_id": self.id,
+                    "worker_id": self.worker_id,
+                    "stage": self.stage.value,
+                    "current_step": self.current_step,
+                },
+            ),
+        )
+
+    def rewind_llm_attempt(
+        self,
+        *,
+        worker_id: str,
+        previous_stage: OrchestrationRunStage,
+        previous_step: int,
+        happened_at: datetime | None = None,
+    ) -> None:
+        if self.status is not OrchestrationRunStatus.RUNNING:
+            raise OrchestrationValidationError(
+                "Only running orchestration runs can rewind an llm attempt.",
+            )
+        if self.stage is not OrchestrationRunStage.LLM:
+            raise OrchestrationValidationError(
+                "Only orchestration runs in llm stage can rewind an llm attempt.",
+            )
+        if previous_step < 0:
+            raise OrchestrationValidationError(
+                "Orchestration run previous_step cannot be negative.",
+            )
+        if previous_step > self.current_step:
+            raise OrchestrationValidationError(
+                "Orchestration run previous_step cannot exceed current_step.",
+            )
+        normalized_worker_id = self._require_worker(worker_id)
+        timestamp = happened_at or utcnow()
+        self.worker_id = normalized_worker_id
+        self.stage = previous_stage
+        self.current_step = previous_step
+        self.updated_at = timestamp
+        self.waiting_reason = None
+        self.metadata.pop("llm_stream_invocation_id", None)
+        self.metadata.pop("llm_stream_text", None)
+        self.record_event(
+            DomainEvent(
+                name="orchestration.run.llm_attempt_rewound",
                 payload={
                     "run_id": self.id,
                     "worker_id": self.worker_id,

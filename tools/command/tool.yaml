@@ -1,0 +1,87 @@
+kind: local_package
+namespace: command
+local_tools:
+  - id: exec
+    name: Workspace Exec
+    description: Run a local shell command from the current bound workspace.
+    provider_name: local_system
+    entrypoint: tools.command.local:exec
+    tool_kind: function
+    parameters:
+      - name: command
+        data_type: string
+        description: Shell command to run from the bound workspace.
+        required: true
+      - name: cwd
+        data_type: string
+        description: Optional relative directory inside the workspace to use as the current working directory.
+        required: false
+      - name: timeout_seconds
+        data_type: integer
+        description: Optional command timeout in seconds.
+        required: false
+      - name: background
+        data_type: boolean
+        description: Start the command as a background process and return a process id instead of waiting for completion.
+        required: false
+    tags:
+      - command
+      - process
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - command_execution
+    timeout_seconds: 20
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: exec
+  - id: process
+    name: Background Process
+    description: Manage background commands started from the current bound workspace.
+    provider_name: local_system
+    entrypoint: tools.command.local:process
+    tool_kind: function
+    parameters:
+      - name: action
+        data_type: string
+        description: One of list, poll, log, kill, or remove.
+        required: true
+      - name: process_id
+        data_type: string
+        description: Background process identifier for poll, log, kill, or remove actions.
+        required: false
+      - name: stdout_offset
+        data_type: integer
+        description: Optional stdout offset for poll or log.
+        required: false
+      - name: stderr_offset
+        data_type: integer
+        description: Optional stderr offset for poll or log.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Optional maximum number of stdout or stderr characters to return.
+        required: false
+    tags:
+      - command
+      - process
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - command_execution
+    timeout_seconds: 20
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: process

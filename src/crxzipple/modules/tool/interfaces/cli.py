@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import typer
 
@@ -10,39 +11,17 @@ from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.tool.application import (
     ExecuteToolInput,
-    RegisterToolInput,
-    RegisterToolParameterInput,
-    SetToolAvailabilityInput,
 )
 from crxzipple.modules.tool.domain import (
     ToolEnvironment,
     ToolExecutionStrategy,
-    ToolKind,
     ToolMode,
-    ToolSourceKind,
 )
 from crxzipple.modules.tool.interfaces.dto import (
     ToolDTO,
     ToolDiscoveryProviderDTO,
     ToolRunDTO,
 )
-
-
-def _parse_parameter(definition: str, *, required: bool) -> RegisterToolParameterInput:
-    parts = definition.split(":", 2)
-    if len(parts) < 2:
-        raise typer.BadParameter(
-            "Parameter definitions must use name:type[:description].",
-        )
-
-    name, data_type = parts[0].strip(), parts[1].strip()
-    description = parts[2].strip() if len(parts) == 3 else ""
-    return RegisterToolParameterInput(
-        name=name,
-        data_type=data_type,
-        description=description,
-        required=required,
-    )
 
 
 def _parse_json_object(payload: str) -> dict[str, object]:
@@ -57,106 +36,7 @@ def _parse_json_object(payload: str) -> dict[str, object]:
 
 
 def build_cli() -> typer.Typer:
-    app = typer.Typer(help="Manage tools.", no_args_is_help=True)
-
-    @app.command("register")
-    def register_tool(
-        ctx: typer.Context,
-        tool_id: str = typer.Argument(..., help="Tool identifier."),
-        name: str = typer.Argument(..., help="Display name."),
-        description: str = typer.Argument(..., help="Tool description."),
-        kind: ToolKind = typer.Option(ToolKind.FUNCTION, "--kind", help="Tool kind."),
-        parameter: list[str] | None = typer.Option(
-            None,
-            "--parameter",
-            help="Required parameter as name:type[:description].",
-        ),
-        optional_parameter: list[str] | None = typer.Option(
-            None,
-            "--optional-parameter",
-            help="Optional parameter as name:type[:description].",
-        ),
-        tag: list[str] | None = typer.Option(None, "--tag", help="Tool classification tag."),
-        required_effect: list[str] | None = typer.Option(
-            None,
-            "--required-effect",
-            help="Required shared effect id. Repeat to declare multiple values.",
-        ),
-        timeout_seconds: int = typer.Option(
-            30,
-            "--timeout-seconds",
-            min=1,
-            help="Tool execution timeout in seconds.",
-        ),
-        requires_confirmation: bool = typer.Option(
-            False,
-            "--requires-confirmation/--no-requires-confirmation",
-            help="Whether using the tool needs a user confirmation gate.",
-        ),
-        mutates_state: bool = typer.Option(
-            False,
-            "--mutates-state/--read-only",
-            help="Whether the tool changes external state.",
-        ),
-        mode: list[ToolMode] | None = typer.Option(
-            None,
-            "--mode",
-            help="Supported execution mode. Repeat to allow multiple values.",
-        ),
-        strategy: list[ToolExecutionStrategy] | None = typer.Option(
-            None,
-            "--strategy",
-            help="Supported execution strategy. Repeat to allow multiple values.",
-        ),
-        environment: list[ToolEnvironment] | None = typer.Option(
-            None,
-            "--environment",
-            help="Supported execution environment. Repeat to allow multiple values.",
-        ),
-        source_kind: ToolSourceKind = typer.Option(
-            ToolSourceKind.MANUAL,
-            "--source-kind",
-            help="How this tool definition was registered.",
-        ),
-        runtime_key: str | None = typer.Option(
-            None,
-            "--runtime-key",
-            help="Executor-specific runtime binding.",
-        ),
-        enabled: bool = typer.Option(True, "--enabled/--disabled"),
-    ) -> None:
-        container = ensure_container(ctx)
-        parameters = [
-            _parse_parameter(item, required=True) for item in parameter or []
-        ] + [
-            _parse_parameter(item, required=False)
-            for item in optional_parameter or []
-        ]
-        tool = container.tool_service.register(
-            RegisterToolInput(
-                id=tool_id,
-                name=name,
-                description=description,
-                kind=kind,
-                parameters=tuple(parameters),
-                tags=tuple(tag or []),
-                required_effect_ids=tuple(required_effect or []),
-                timeout_seconds=timeout_seconds,
-                requires_confirmation=requires_confirmation,
-                mutates_state=mutates_state,
-                supported_modes=tuple(mode or [ToolMode.INLINE]),
-                supported_strategies=tuple(
-                    strategy or [ToolExecutionStrategy.ASYNC],
-                ),
-                supported_environments=tuple(
-                    environment or [ToolEnvironment.LOCAL],
-                ),
-                source_kind=source_kind,
-                runtime_key=runtime_key,
-                enabled=enabled,
-            ),
-        )
-        echo_data(ToolDTO.from_entity(tool))
+    app = typer.Typer(help="Inspect tools and tool runs.", no_args_is_help=True)
 
     @app.command("list")
     def list_tools(
@@ -176,27 +56,18 @@ def build_cli() -> typer.Typer:
         items = [ToolDTO.from_entity(tool) for tool in tools]
         echo_data(items)
 
-    @app.command("enable")
-    def enable_tool(
-        ctx: typer.Context,
-        tool_id: str = typer.Argument(..., help="Tool identifier."),
-    ) -> None:
+    @app.command("roots")
+    def list_tool_roots(ctx: typer.Context) -> None:
         container = ensure_container(ctx)
-        tool = container.tool_service.set_availability(
-            SetToolAvailabilityInput(id=tool_id, enabled=True),
+        echo_data(
+            [
+                {
+                    "path": path,
+                    "exists": Path(path).exists(),
+                }
+                for path in container.settings.tool_local_paths
+            ],
         )
-        echo_data(ToolDTO.from_entity(tool))
-
-    @app.command("disable")
-    def disable_tool(
-        ctx: typer.Context,
-        tool_id: str = typer.Argument(..., help="Tool identifier."),
-    ) -> None:
-        container = ensure_container(ctx)
-        tool = container.tool_service.set_availability(
-            SetToolAvailabilityInput(id=tool_id, enabled=False),
-        )
-        echo_data(ToolDTO.from_entity(tool))
 
     @app.command("discover-local")
     def discover_local_tools(ctx: typer.Context) -> None:

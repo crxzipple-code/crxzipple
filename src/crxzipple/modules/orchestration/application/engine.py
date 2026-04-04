@@ -54,6 +54,7 @@ class EngineAdvanceOutcome:
     user_message_id: str | None = None
     assistant_message_ids: tuple[str, ...] = field(default_factory=tuple)
     tool_result_message_ids: tuple[str, ...] = field(default_factory=tuple)
+    inline_tool_run_ids: tuple[str, ...] = field(default_factory=tuple)
     tool_call_names: tuple[str, ...] = field(default_factory=tuple)
     pending_tool_run_ids: tuple[str, ...] = field(default_factory=tuple)
     pending_background_tools: tuple[dict[str, str], ...] = field(default_factory=tuple)
@@ -110,7 +111,6 @@ class OrchestrationEngine:
             session_recorder=self.session_recorder,
             tool_resolver=self.tool_resolver,
             tool_execution_port=self.tool_execution_port,
-            memory_port=self.memory_port,
         )
 
     def preview_prompt(self, run: OrchestrationRun) -> PromptPreview:
@@ -157,6 +157,7 @@ class OrchestrationEngine:
             llm_id=context.prompt.llm_id,
             messages=context.prompt.messages,
             tool_schemas=context.prompt.tool_schemas,
+            require_tool_call=context.prompt.surface_policy.require_tool_call,
             on_llm_stream_update=on_llm_stream_update,
         )
         if invocation.result is None:
@@ -196,46 +197,14 @@ class OrchestrationEngine:
                 invocation=invocation,
             )
         )
-        skill_request_call = (
-            context.prompt.skill_request.extract_requested_skill(tool_calls)
-            if context.prompt.skill_request is not None
-            else None
-        )
-        if skill_request_call is not None:
-            assistant_message_ids.extend(
-                self.session_recorder.append_tool_call_messages(
-                    session_key=context.session_key,
-                    active_session_id=context.prompt.active_session_id,
-                    invocation_id=invocation.id,
-                    response_text=None,
-                    tool_calls=tool_calls,
-                ),
-            )
-            tool_result_message_ids = (
-                self.session_recorder.append_skill_result_message(
-                    session_key=context.session_key,
-                    active_session_id=context.prompt.active_session_id,
-                    tool_call_id=tool_calls[0].id,
-                    skill=skill_request_call,
-                    skill_request=context.prompt.skill_request,
-                ),
-            )
-            return self._build_outcome(
-                context=context,
-                invocation=invocation,
-                assistant_message_ids=assistant_message_ids,
-                tool_result_message_ids=tool_result_message_ids,
-                tool_call_names=tool_call_names,
-                continue_loop=True,
-            )
-
         execution_outcome = self.tool_executor.execute_tool_calls(
             run,
             session_key=context.session_key,
             active_session_id=context.prompt.active_session_id,
             resolved_tools=context.resolved_tools,
             tool_calls=tool_calls,
-            append_tool_call_messages=True,
+            append_tool_call_messages=context.prompt.surface_policy.record_tool_call_messages,
+            append_tool_result_messages=context.prompt.surface_policy.record_tool_result_messages,
         )
         assistant_message_ids.extend(execution_outcome.tool_call_message_ids)
         pending_background_tools = tuple(
@@ -253,6 +222,9 @@ class OrchestrationEngine:
             tool_result_message_ids=tuple(
                 message_id for message_id, _ in execution_outcome.inline_runs
             ),
+            inline_tool_run_ids=tuple(
+                tool_run.id for _, tool_run in execution_outcome.inline_runs
+            ),
             tool_call_names=tool_call_names,
             pending_tool_run_ids=tuple(
                 tool_run.id for _, tool_run in execution_outcome.background_runs
@@ -260,7 +232,8 @@ class OrchestrationEngine:
             pending_background_tools=pending_background_tools,
             pending_approval_request=execution_outcome.pending_approval_request,
             continue_loop=(
-                execution_outcome.pending_approval_request is None
+                context.prompt.surface_policy.auto_continue_inline_tools
+                and execution_outcome.pending_approval_request is None
                 and not pending_background_tools
             ),
         )
@@ -272,7 +245,7 @@ class OrchestrationEngine:
         invocation: Any,
     ) -> EngineAdvanceOutcome:
         assert invocation.result is not None
-        if context.prompt.mode is PromptMode.MEMORY_FLUSH:
+        if not context.prompt.surface_policy.record_assistant_messages:
             return self._build_outcome(
                 context=context,
                 invocation=invocation,
@@ -303,6 +276,8 @@ class OrchestrationEngine:
         invocation: Any,
     ) -> tuple[str, ...]:
         assert invocation.result is not None
+        if not context.prompt.surface_policy.record_assistant_messages:
+            return ()
         if invocation.result.text is None or not invocation.result.text.strip():
             return ()
         return self.session_recorder.append_assistant_response_message(
@@ -322,6 +297,7 @@ class OrchestrationEngine:
         invocation: Any,
         assistant_message_ids: tuple[str, ...] | list[str] = (),
         tool_result_message_ids: tuple[str, ...] | list[str] = (),
+        inline_tool_run_ids: tuple[str, ...] = (),
         tool_call_names: tuple[str, ...] = (),
         pending_tool_run_ids: tuple[str, ...] = (),
         pending_background_tools: tuple[dict[str, str], ...] = (),
@@ -336,6 +312,7 @@ class OrchestrationEngine:
             user_message_id=context.user_message_id,
             assistant_message_ids=tuple(assistant_message_ids),
             tool_result_message_ids=tuple(tool_result_message_ids),
+            inline_tool_run_ids=inline_tool_run_ids,
             tool_call_names=tool_call_names,
             pending_tool_run_ids=pending_tool_run_ids,
             pending_background_tools=pending_background_tools,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from typing import Any
 
 from crxzipple.modules.orchestration.application import (
     AcceptOrchestrationRunInput,
@@ -121,7 +122,7 @@ def build_reset_policy(
 def build_inbound_instruction(
     *,
     source: str,
-    content: str | None = None,
+    content: Any | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> InboundInstruction:
     return InboundInstruction(
@@ -151,7 +152,6 @@ def build_delivery_target(
 def build_session_route_context(
     *,
     agent_id: str,
-    llm_id: str,
     channel: str | None = None,
     chat_type: str = "direct",
     peer_id: str | None = None,
@@ -167,7 +167,6 @@ def build_session_route_context(
 ) -> SessionRouteContext:
     return SessionRouteContext(
         agent_id=agent_id,
-        llm_id=llm_id,
         channel=channel,
         chat_type=chat_type,
         peer_id=peer_id,
@@ -186,7 +185,7 @@ def build_session_route_context(
 def build_accept_run_input(
     *,
     source: str,
-    content: str | None = None,
+    content: Any | None = None,
     inbound_metadata: Mapping[str, object] | None = None,
     delivery_interface: str | None = None,
     delivery_address: str | None = None,
@@ -195,7 +194,7 @@ def build_accept_run_input(
     run_id: str | None = None,
     queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.FIFO,
     priority: int = 100,
-    max_steps: int = 12,
+    max_steps: int = 99,
     metadata: Mapping[str, object] | None = None,
 ) -> AcceptOrchestrationRunInput:
     return AcceptOrchestrationRunInput(
@@ -222,7 +221,7 @@ def build_prepare_session_run_input(
     *,
     run_id: str,
     agent_id: str,
-    llm_id: str,
+    llm_id: str | None,
     channel: str | None = None,
     chat_type: str = "direct",
     peer_id: str | None = None,
@@ -244,7 +243,6 @@ def build_prepare_session_run_input(
         run_id=run_id,
         context=build_session_route_context(
             agent_id=agent_id,
-            llm_id=llm_id,
             channel=channel,
             chat_type=chat_type,
             peer_id=peer_id,
@@ -258,6 +256,7 @@ def build_prepare_session_run_input(
             status=status,
             metadata=session_metadata,
         ),
+        requested_llm_id=llm_id,
         touch_activity=touch_activity,
         reset_policy=reset_policy,
         priority=priority,

@@ -7,6 +7,7 @@ from crxzipple.modules.tool.domain import ToolRunResult
 from crxzipple.modules.tool.infrastructure.discovery.mcp import McpToolDefinition
 from crxzipple.modules.tool.infrastructure.mcp_client import McpStdioClient
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
+from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 
 
 class McpRemoteInvoker:
@@ -23,8 +24,9 @@ class McpRemoteInvoker:
             tool_name=definition.tool_name,
             arguments=dict(arguments),
         )
-        return ToolRunResult(
-            content=result,
+        return ToolRunResult.text(
+            describe_content_for_text_fallback(result),
+            details=result,
             metadata={
                 "tool": definition.runtime_key,
                 "environment": "remote",

@@ -26,66 +26,84 @@ export function routeFromConversation(
   conversation: ConversationSummary,
   fallbackAgentId: string,
 ): ConversationRoute {
-  const parts = conversation.bulk_key.split(":");
+  const sessionKey = conversation.session_key.trim();
+  const parts = sessionKey ? sessionKey.split(":") : [];
   const { core, threadId } = stripThread(parts);
-  const agentId = conversation.runtime_binding.agent_id ?? fallbackAgentId;
+  const agentId = core[1] ?? conversation.runtime_binding.agent_id ?? fallbackAgentId;
 
-  if (core[0] !== "conversation") {
+  if (core[0] !== "agent") {
     return createDraftRoute(agentId);
   }
 
-  if (core[1] === "main") {
+  if (core.length === 3) {
     return {
       agentId,
       llmId: conversation.runtime_binding.llm_id,
-      channel: core[2] ?? DEFAULT_CHANNEL,
+      channel: conversation.channel ?? DEFAULT_CHANNEL,
       chatType: "direct",
-      accountId: core[3] ?? "default",
-      mainKey: core[4] ?? "main",
+      mainKey: core[2] ?? "main",
       directScope: "main",
       threadId,
     };
   }
 
-  if (core[1] === "dm") {
-    if (core.length === 4) {
-      return {
-        agentId,
-        llmId: conversation.runtime_binding.llm_id,
-        channel: DEFAULT_CHANNEL,
-        chatType: "direct",
-        accountId: core[2] ?? "default",
-        peerId: core[3] ?? null,
-        mainKey: "main",
-        directScope: "per_peer",
-        threadId,
-      };
-    }
+  if (core[2] === "dm" && core.length === 4) {
+    return {
+      agentId,
+      llmId: conversation.runtime_binding.llm_id,
+      channel: conversation.channel ?? DEFAULT_CHANNEL,
+      chatType: "direct",
+      peerId: core[3] ?? null,
+      mainKey: "main",
+      directScope: "per_peer",
+      threadId,
+    };
+  }
 
+  if (core[3] === "dm" && core.length === 5) {
+    return {
+      agentId,
+      llmId: conversation.runtime_binding.llm_id,
+      channel: core[2] ?? DEFAULT_CHANNEL,
+      chatType: "direct",
+      peerId: core[4] ?? null,
+      mainKey: "main",
+      directScope: "per_channel_peer",
+      threadId,
+    };
+  }
+
+  if (core[4] === "dm" && core.length === 6) {
     return {
       agentId,
       llmId: conversation.runtime_binding.llm_id,
       channel: core[2] ?? DEFAULT_CHANNEL,
       chatType: "direct",
       accountId: core[3] ?? "default",
-      peerId: core[4] ?? null,
+      peerId: core[5] ?? null,
       mainKey: "main",
       directScope: "per_account_channel_peer",
       threadId,
     };
   }
 
-  return {
-    agentId,
-    llmId: conversation.runtime_binding.llm_id,
-    channel: core[2] ?? DEFAULT_CHANNEL,
-    chatType: core[1] ?? "group",
-    accountId: core[3] ?? "default",
-    conversationId: core[4] ?? null,
-    mainKey: "main",
-    directScope: "main",
-    threadId,
-  };
+  if (
+    core.length === 5 &&
+    (core[3] === "group" || core[3] === "channel")
+  ) {
+    return {
+      agentId,
+      llmId: conversation.runtime_binding.llm_id,
+      channel: core[2] ?? DEFAULT_CHANNEL,
+      chatType: core[3],
+      conversationId: core[4] ?? null,
+      mainKey: "main",
+      directScope: "main",
+      threadId,
+    };
+  }
+
+  return createDraftRoute(agentId);
 }
 
 export function routePayload(route: ConversationRoute) {

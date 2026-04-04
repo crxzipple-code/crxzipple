@@ -30,14 +30,17 @@ from crxzipple.modules.session.interfaces.shared import (
 
 class SessionRuntimeBindingPayload(BaseModel):
     agent_id: str | None = None
-    llm_id: str | None = None
+    workspace: str | None = None
 
     @classmethod
     def from_dto(
         cls,
         binding: SessionRuntimeBindingDTO,
     ) -> "SessionRuntimeBindingPayload":
-        return cls(agent_id=binding.agent_id, llm_id=binding.llm_id)
+        return cls(
+            agent_id=binding.agent_id,
+            workspace=binding.workspace,
+        )
 
     def to_payload(self) -> dict[str, object]:
         return self.model_dump(exclude_none=True)
@@ -107,7 +110,6 @@ class SessionResponse(BaseModel):
 
 class AppendSessionMessageRequest(BaseModel):
     role: str
-    content: str | None = None
     kind: SessionMessageKind = SessionMessageKind.MESSAGE
     content_payload: dict[str, object] = Field(default_factory=dict)
     source_kind: str | None = None
@@ -120,7 +122,6 @@ class AppendSessionMessageRequest(BaseModel):
         return AppendSessionMessageInput(
             session_key=session_key,
             role=self.role,
-            content=self.content,
             kind=self.kind,
             content_payload=self.content_payload,
             source_kind=self.source_kind,
@@ -138,7 +139,6 @@ class SessionMessageResponse(BaseModel):
     sequence_no: int
     role: str
     kind: str
-    content: str | None = None
     content_payload: dict[str, object] = Field(default_factory=dict)
     source_kind: str | None = None
     source_id: str | None = None
@@ -155,7 +155,6 @@ class SessionMessageResponse(BaseModel):
             sequence_no=dto.sequence_no,
             role=dto.role,
             kind=dto.kind,
-            content=dto.content,
             content_payload=dto.content_payload,
             source_kind=dto.source_kind,
             source_id=dto.source_id,
@@ -206,7 +205,6 @@ class ResolveSessionPolicyRequest(BaseModel):
 
 class ResolveSessionRequest(BaseModel):
     agent_id: str
-    llm_id: str
     channel: str | None = None
     chat_type: str = "direct"
     peer_id: str | None = None
@@ -226,7 +224,6 @@ class ResolveSessionRequest(BaseModel):
     def to_input(self) -> ResolveSessionBundleInput:
         return build_resolve_session_bundle_input(
             agent_id=self.agent_id,
-            llm_id=self.llm_id,
             channel=self.channel,
             chat_type=self.chat_type,
             peer_id=self.peer_id,
@@ -276,7 +273,6 @@ class ResolveSessionResponse(BaseModel):
 
 
 class ResetSessionRequest(BaseModel):
-    llm_id: str | None = None
     status: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
     active_session_id: str | None = None
@@ -285,7 +281,6 @@ class ResetSessionRequest(BaseModel):
     def to_input(self, *, session_key: str) -> ResetSessionInput:
         return ResetSessionInput(
             session_key=session_key,
-            llm_id=self.llm_id,
             status=self.status,
             metadata=self.metadata,
             active_session_id=self.active_session_id,

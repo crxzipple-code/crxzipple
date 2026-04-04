@@ -1,117 +1,103 @@
 import { computed, ref, type Ref } from "vue";
 
 import {
-  approveMemoryCandidate,
-  listMemoryCandidates,
-  listMemoryEntries,
-  rejectMemoryCandidate,
+  getMemoryExcerpt,
+  getMemoryOverview,
+  searchMemory,
 } from "@/lib/api";
 import type {
-  ConversationSummary,
-  MemoryCandidate,
-  MemoryEntry,
+  MemoryExcerpt,
+  MemoryFileSummary,
+  MemorySearchHit,
 } from "@/types";
 
 export function useMemoryPanel(options: {
   activeAgentId: Ref<string | null>;
-  activeConversation: Ref<ConversationSummary | null>;
   lastError: Ref<string | null>;
 }) {
-  const pendingMemoryCandidates = ref<MemoryCandidate[]>([]);
-  const approvedMemoryEntries = ref<MemoryEntry[]>([]);
+  const longTermMemory = ref<MemoryExcerpt | null>(null);
+  const recentMemoryFiles = ref<MemoryFileSummary[]>([]);
+  const memorySearchResults = ref<MemorySearchHit[]>([]);
+  const selectedMemoryExcerpt = ref<MemoryExcerpt | null>(null);
+  const selectedMemoryPath = ref<string | null>(null);
   const memoryQuery = ref("");
   const loadingMemory = ref(false);
 
-  const currentSessionKey = computed(
-    () => options.activeConversation.value?.session_key ?? null,
+  const memoryItemCount = computed(
+    () => recentMemoryFiles.value.length + (longTermMemory.value ? 1 : 0),
   );
 
-  const currentThreadMemoryCandidates = computed(() => {
-    if (!currentSessionKey.value) {
-      return [];
-    }
-    return pendingMemoryCandidates.value.filter(
-      (candidate) => candidate.session_key === currentSessionKey.value,
-    );
-  });
-
-  const otherMemoryCandidates = computed(() => {
-    if (!currentSessionKey.value) {
-      return pendingMemoryCandidates.value;
-    }
-    return pendingMemoryCandidates.value.filter(
-      (candidate) => candidate.session_key !== currentSessionKey.value,
-    );
-  });
-
-  async function refreshPendingMemoryCandidates(agentId?: string | null) {
+  async function refreshMemoryPanel(agentId?: string | null) {
     const effectiveAgentId =
       agentId?.trim() || options.activeAgentId.value?.trim();
     if (!effectiveAgentId) {
-      pendingMemoryCandidates.value = [];
-      return;
-    }
-    pendingMemoryCandidates.value = await listMemoryCandidates({
-      agentId: effectiveAgentId,
-      status: "pending",
-      limit: 25,
-    });
-  }
-
-  async function refreshApprovedMemoryEntries(agentId?: string | null) {
-    const effectiveAgentId =
-      agentId?.trim() || options.activeAgentId.value?.trim();
-    if (!effectiveAgentId) {
-      approvedMemoryEntries.value = [];
+      longTermMemory.value = null;
+      recentMemoryFiles.value = [];
+      memorySearchResults.value = [];
+      selectedMemoryExcerpt.value = null;
+      selectedMemoryPath.value = null;
       return;
     }
     loadingMemory.value = true;
     try {
-      approvedMemoryEntries.value = await listMemoryEntries({
+      const [overview, hits] = await Promise.all([
+        getMemoryOverview({
+          agentId: effectiveAgentId,
+          recentLimit: 20,
+        }),
+        memoryQuery.value.trim()
+          ? searchMemory({
+              agentId: effectiveAgentId,
+              query: memoryQuery.value.trim(),
+              limit: 20,
+            })
+          : Promise.resolve([]),
+      ]);
+      longTermMemory.value = overview.long_term;
+      recentMemoryFiles.value = overview.recent_files;
+      memorySearchResults.value = hits;
+
+      const nextSelectedPath =
+        selectedMemoryPath.value ??
+        overview.long_term?.path ??
+        overview.recent_files[0]?.path ??
+        null;
+      if (!nextSelectedPath) {
+        selectedMemoryExcerpt.value = null;
+        selectedMemoryPath.value = null;
+        return;
+      }
+      await openMemoryExcerpt(nextSelectedPath, {
         agentId: effectiveAgentId,
-        query: memoryQuery.value.trim() || null,
-        limit: 20,
       });
     } finally {
       loadingMemory.value = false;
     }
   }
 
-  async function refreshMemoryPanel(agentId?: string | null) {
-    await Promise.all([
-      refreshPendingMemoryCandidates(agentId),
-      refreshApprovedMemoryEntries(agentId),
-    ]);
-  }
-
-  async function approveMemoryCandidateById(candidateId: string) {
-    const candidate = pendingMemoryCandidates.value.find(
-      (item) => item.id === candidateId,
-    );
-    if (!candidate) {
+  async function openMemoryExcerpt(
+    path: string,
+    optionsOverride?: {
+      agentId?: string | null;
+      startLine?: number | null;
+      lineCount?: number | null;
+    },
+  ) {
+    const effectiveAgentId =
+      optionsOverride?.agentId?.trim() || options.activeAgentId.value?.trim();
+    if (!effectiveAgentId) {
       return;
     }
     options.lastError.value = null;
     try {
-      await approveMemoryCandidate(candidate.id);
-      await refreshMemoryPanel(candidate.agent_id);
-    } catch (error) {
-      options.lastError.value =
-        error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function rejectMemoryCandidateById(candidateId: string) {
-    const candidate = pendingMemoryCandidates.value.find(
-      (item) => item.id === candidateId,
-    );
-    if (!candidate) {
-      return;
-    }
-    options.lastError.value = null;
-    try {
-      await rejectMemoryCandidate(candidate.id);
-      await refreshMemoryPanel(candidate.agent_id);
+      const excerpt = await getMemoryExcerpt({
+        agentId: effectiveAgentId,
+        path,
+        startLine: optionsOverride?.startLine ?? null,
+        lineCount: optionsOverride?.lineCount ?? null,
+      });
+      selectedMemoryExcerpt.value = excerpt;
+      selectedMemoryPath.value = excerpt.path;
     } catch (error) {
       options.lastError.value =
         error instanceof Error ? error.message : String(error);
@@ -119,17 +105,14 @@ export function useMemoryPanel(options: {
   }
 
   return {
-    pendingMemoryCandidates,
-    approvedMemoryEntries,
+    longTermMemory,
+    recentMemoryFiles,
+    memorySearchResults,
+    selectedMemoryExcerpt,
     memoryQuery,
     loadingMemory,
-    currentSessionKey,
-    currentThreadMemoryCandidates,
-    otherMemoryCandidates,
-    refreshPendingMemoryCandidates,
-    refreshApprovedMemoryEntries,
+    memoryItemCount,
     refreshMemoryPanel,
-    approveMemoryCandidateById,
-    rejectMemoryCandidateById,
+    openMemoryExcerpt,
   };
 }

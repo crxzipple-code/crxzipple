@@ -54,6 +54,10 @@ class AgentHomeScaffoldTestCase(unittest.TestCase):
             self.assertEqual((root / "memory.md").read_text(encoding="utf-8"), "legacy memory")
             self.assertTrue((root / "skills").is_dir())
             self.assertTrue((root / ".state").is_dir())
+            self.assertEqual(
+                (root / ".state" / "memory-binding.json").read_text(encoding="utf-8"),
+                "{}\n",
+            )
 
 
 if __name__ == "__main__":

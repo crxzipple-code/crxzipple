@@ -1,0 +1,7 @@
+kind: openapi
+namespace: open_meteo_geocoding
+description: Open-Meteo geocoding search and location lookup APIs.
+spec: openapi.json
+timeout_seconds: 10
+default_effect_ids:
+  - weather_data

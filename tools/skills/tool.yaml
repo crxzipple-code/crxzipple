@@ -1,0 +1,30 @@
+kind: local_package
+namespace: skills
+local_tools:
+  - id: skill_read
+    name: Skill Read
+    description: Read SKILL.md or another file inside a discovered skill package.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_read
+    tool_kind: function
+    parameters:
+      - name: skill
+        data_type: string
+        description: Name of the skill package to read from.
+        required: true
+      - name: path
+        data_type: string
+        description: Optional relative path inside the skill package. Defaults to the skill instructions file.
+        required: false
+    tags:
+      - skill
+      - builtin
+      - system-managed
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: skill_read

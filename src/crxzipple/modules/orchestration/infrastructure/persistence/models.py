@@ -14,7 +14,6 @@ class OrchestrationRunModel(Base):
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     stage: Mapped[str] = mapped_column(String(50), nullable=False)
-    bulk_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     active_session_id: Mapped[str | None] = mapped_column(
         String(100),
         nullable=True,
@@ -25,7 +24,7 @@ class OrchestrationRunModel(Base):
     queue_policy: Mapped[str] = mapped_column(String(50), nullable=False, default="fifo")
     priority: Mapped[int] = mapped_column(Integer(), nullable=False, default=100)
     current_step: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
-    max_steps: Mapped[int] = mapped_column(Integer(), nullable=False, default=12)
+    max_steps: Mapped[int] = mapped_column(Integer(), nullable=False, default=99)
     pending_tool_run_ids: Mapped[list[str]] = mapped_column(
         JSON(),
         nullable=False,

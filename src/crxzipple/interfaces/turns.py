@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 import time
 
 from crxzipple.modules.agent.application import AgentApplicationService
@@ -8,6 +9,7 @@ from crxzipple.modules.agent.domain.entities import AgentProfile
 from crxzipple.modules.agent.domain.exceptions import AgentNotFoundError
 from crxzipple.modules.orchestration.application import (
     EnqueueOrchestrationRunInput,
+    normalize_requested_llm_id,
     OrchestrationApplicationService,
 )
 from crxzipple.modules.orchestration.domain import (
@@ -110,9 +112,13 @@ def build_submission_options(
         if isinstance(queue_policy, OrchestrationQueuePolicy)
         else OrchestrationQueuePolicy(queue_policy)
     )
+    resolved_llm_id = normalize_requested_llm_id(
+        requested_llm_id=llm_id,
+        routing_policy=profile.llm_routing_policy,
+    )
     return TurnSubmissionOptions(
         agent_id=profile.id,
-        llm_id=llm_id or profile.llm_routing_policy.default_llm_id,
+        llm_id=resolved_llm_id,
         channel=channel,
         chat_type=chat_type,
         peer_id=peer_id,
@@ -190,7 +196,7 @@ def build_turn_options(
 def submit_turn(
     orchestration_service: OrchestrationApplicationService,
     *,
-    content: str,
+    content: Any,
     options: TurnSubmissionOptions,
 ) -> OrchestrationRun:
     accepted = orchestration_service.accept(
@@ -231,7 +237,7 @@ def run_foreground_turn(
     orchestration_service: OrchestrationApplicationService,
     tool_service: ToolApplicationService,
     *,
-    content: str,
+    content: Any,
     options: ForegroundTurnOptions,
 ) -> OrchestrationRun:
     run = submit_turn(

@@ -7,20 +7,60 @@ from crxzipple.modules.orchestration.application.prompting.modes import PromptMo
 
 @dataclass(frozen=True, slots=True)
 class RunSurfacePolicy:
+    surface: str = "interactive"
+    surface_contract: str = "default_open"
     auto_recall_memories: bool = False
-    include_memory_lookup_guidance: bool = True
     include_skills_catalog: bool = True
-    include_skill_request_surface: bool = True
     include_tool_schemas: bool = True
+    require_tool_call: bool = False
+    record_assistant_messages: bool = True
+    record_tool_call_messages: bool = True
+    record_tool_result_messages: bool = True
+    auto_continue_inline_tools: bool = True
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "surface": self.surface,
+            "surface_contract": self.surface_contract,
             "auto_recall_memories": self.auto_recall_memories,
-            "include_memory_lookup_guidance": self.include_memory_lookup_guidance,
             "include_skills_catalog": self.include_skills_catalog,
-            "include_skill_request_surface": self.include_skill_request_surface,
             "include_tool_schemas": self.include_tool_schemas,
+            "require_tool_call": self.require_tool_call,
+            "record_assistant_messages": self.record_assistant_messages,
+            "record_tool_call_messages": self.record_tool_call_messages,
+            "record_tool_result_messages": self.record_tool_result_messages,
+            "auto_continue_inline_tools": self.auto_continue_inline_tools,
         }
+
+
+def resolve_run_surface_policy(mode: PromptMode) -> RunSurfacePolicy:
+    maintenance_mode = mode in {
+        PromptMode.COMPACTION,
+        PromptMode.HEARTBEAT,
+        PromptMode.MEMORY_FLUSH,
+    }
+    surface = (
+        "maintenance_write"
+        if mode is PromptMode.MEMORY_FLUSH
+        else "maintenance"
+        if maintenance_mode
+        else "interactive"
+    )
+    surface_contract = "default_open" if surface == "interactive" else "declared_only"
+    return RunSurfacePolicy(
+        surface=surface,
+        surface_contract=surface_contract,
+        auto_recall_memories=mode in {
+            PromptMode.SESSION_START,
+        },
+        include_skills_catalog=not maintenance_mode,
+        include_tool_schemas=(mode is PromptMode.MEMORY_FLUSH or not maintenance_mode),
+        require_tool_call=mode is PromptMode.MEMORY_FLUSH,
+        record_assistant_messages=mode is not PromptMode.MEMORY_FLUSH,
+        record_tool_call_messages=mode is not PromptMode.MEMORY_FLUSH,
+        record_tool_result_messages=mode is not PromptMode.MEMORY_FLUSH,
+        auto_continue_inline_tools=mode is not PromptMode.MEMORY_FLUSH,
+    )
 
 
 @dataclass(frozen=True, slots=True)

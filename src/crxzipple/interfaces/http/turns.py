@@ -43,7 +43,7 @@ router = APIRouter()
 
 
 class CreateTurnRequest(BaseModel):
-    content: str
+    content: Any
     agent_id: str | None = None
     llm_id: str | None = None
     channel: str = "crxzipple"

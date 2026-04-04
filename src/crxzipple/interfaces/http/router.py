@@ -6,6 +6,8 @@ from crxzipple.core.config import load_settings
 from crxzipple.interfaces.http.conversations import router as conversations_router
 from crxzipple.interfaces.http.turns import router as turns_router
 from crxzipple.modules.agent.interfaces.http import router as agent_router
+from crxzipple.modules.artifacts.interfaces.http import router as artifacts_router
+from crxzipple.modules.browser.interfaces.http import router as browser_router
 from crxzipple.modules.authorization.interfaces.http import router as authorization_router
 from crxzipple.modules.dispatch.interfaces.http import router as dispatch_router
 from crxzipple.modules.llm.interfaces.http import router as llm_router
@@ -13,7 +15,9 @@ from crxzipple.modules.memory.interfaces.http import router as memory_router
 from crxzipple.modules.orchestration.interfaces.http import (
     router as orchestration_router,
 )
+from crxzipple.modules.process.interfaces.http import router as process_router
 from crxzipple.modules.session.interfaces.http import router as session_router
+from crxzipple.modules.skills.interfaces.http import router as skills_router
 from crxzipple.modules.tool.interfaces.http import router as tool_router
 
 
@@ -35,6 +39,8 @@ def about() -> dict[str, str]:
 
 
 api_router.include_router(tool_router, prefix="/tools", tags=["tools"])
+api_router.include_router(artifacts_router, prefix="/artifacts", tags=["artifacts"])
+api_router.include_router(browser_router, prefix="/browser", tags=["browser"])
 api_router.include_router(conversations_router, tags=["conversations"])
 api_router.include_router(turns_router, tags=["turns"])
 api_router.include_router(dispatch_router, prefix="/dispatch", tags=["dispatch"])
@@ -47,6 +53,8 @@ api_router.include_router(session_router, prefix="/sessions", tags=["sessions"])
 api_router.include_router(llm_router, prefix="/llms", tags=["llms"])
 api_router.include_router(memory_router, tags=["memory"])
 api_router.include_router(agent_router, prefix="/agents", tags=["agents"])
+api_router.include_router(process_router, tags=["processes"])
+api_router.include_router(skills_router, prefix="/skills", tags=["skills"])
 api_router.include_router(
     authorization_router,
     prefix="/authorization",

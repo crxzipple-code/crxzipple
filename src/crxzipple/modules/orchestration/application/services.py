@@ -8,16 +8,12 @@ from crxzipple.core.logger import get_logger
 from crxzipple.modules.agent.application import (
     AgentApplicationService,
 )
-from crxzipple.modules.memory.application import RecordMemoryFlushInput
 from crxzipple.modules.orchestration.application.coordinators import (
     RunIntakeCoordinator,
     RunProgressCoordinator,
     RunRecoveryCoordinator,
     RunRequestCoordinator,
     RunWaitCoordinator,
-)
-from crxzipple.modules.orchestration.application.memory_flush import (
-    is_memory_flush_skip_reply,
 )
 from crxzipple.modules.orchestration.application.engine import (
     EngineAdvanceOutcome,
@@ -37,10 +33,10 @@ from crxzipple.modules.orchestration.application.router import OrchestrationRout
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
 )
-from crxzipple.modules.orchestration.application.memory_candidates import (
-    extract_memory_candidate,
+from crxzipple.modules.orchestration.application.prompting import (
+    PromptMode,
+    estimate_text_tokens,
 )
-from crxzipple.modules.orchestration.application.prompting import PromptMode
 from crxzipple.modules.orchestration.application.session_resolver import (
     ResolveSessionBundleInput,
     SessionBundle,
@@ -82,6 +78,7 @@ from crxzipple.modules.session.domain import (
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
+from crxzipple.shared.content_blocks import extract_text_content
 
 logger = get_logger(__name__)
 
@@ -93,7 +90,7 @@ class AcceptOrchestrationRunInput:
     run_id: str | None = None
     queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.FIFO
     priority: int = 100
-    max_steps: int = 12
+    max_steps: int = 99
     metadata: dict[str, object] = field(default_factory=dict)
 
 
@@ -101,7 +98,7 @@ class AcceptOrchestrationRunInput:
 class RouteOrchestrationRunInput:
     run_id: str
     agent_id: str
-    bulk_key: str
+    session_key: str | None = None
     lane_key: str | None = None
     priority: int | None = None
     metadata: dict[str, object] = field(default_factory=dict)
@@ -111,7 +108,6 @@ class RouteOrchestrationRunInput:
 class BindSessionInput:
     run_id: str
     active_session_id: str
-    bulk_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +183,7 @@ class FailOrchestrationRunInput:
 class PrepareSessionRunInput:
     run_id: str
     context: SessionRouteContext
+    requested_llm_id: str | None = None
     ensure: bool = True
     touch_activity: bool = True
     reset_policy: SessionResetPolicy | None = None
@@ -294,8 +291,6 @@ class OrchestrationApplicationService:
         worker_lease_seconds: int = 30,
         worker_heartbeat_seconds: float = 5.0,
         auto_compaction_enabled: bool = True,
-        auto_compaction_transcript_chars: int = 48_000,
-        auto_compaction_transcript_tokens: int = 12_000,
         auto_compaction_reserve_tokens: int = 20_000,
         auto_compaction_soft_threshold_tokens: int = 4_000,
     ) -> None:
@@ -315,8 +310,6 @@ class OrchestrationApplicationService:
         self.worker_lease_seconds = worker_lease_seconds
         self.worker_heartbeat_seconds = worker_heartbeat_seconds
         self.auto_compaction_enabled = auto_compaction_enabled
-        self.auto_compaction_transcript_chars = auto_compaction_transcript_chars
-        self.auto_compaction_transcript_tokens = auto_compaction_transcript_tokens
         self.auto_compaction_reserve_tokens = auto_compaction_reserve_tokens
         self.auto_compaction_soft_threshold_tokens = auto_compaction_soft_threshold_tokens
         self.intake_coordinator = RunIntakeCoordinator(
@@ -361,13 +354,16 @@ class OrchestrationApplicationService:
             ),
             get_run=self.get_run,
             apply_compaction_summary=self._apply_compaction_summary,
-            apply_memory_flush=self._apply_memory_flush,
             extract_memory_candidate=self._extract_memory_candidate,
             maybe_request_auto_compaction=self._maybe_request_auto_compaction,
             clear_pending_compaction_marker=(
                 self.request_coordinator.clear_pending_compaction_marker
             ),
+            clear_pending_memory_flush_marker=(
+                self.request_coordinator.clear_pending_memory_flush_marker
+            ),
             is_compaction_run=self._is_compaction_run,
+            is_memory_flush_run=self._is_memory_flush_run,
         )
         self.wait_coordinator = RunWaitCoordinator(
             uow_factory=uow_factory,
@@ -449,6 +445,14 @@ class OrchestrationApplicationService:
             raise RuntimeError("Orchestration engine is not configured.")
         while True:
             run = self.get_run(run_id)
+            maintenance_ran, terminal_run = self._maybe_run_preflight_maintenance(
+                run=run,
+                worker_id=worker_id,
+            )
+            if terminal_run is not None:
+                return terminal_run
+            if maintenance_ran:
+                continue
             if run.current_step >= run.max_steps:
                 return self.fail_run(
                     FailOrchestrationRunInput(
@@ -460,14 +464,16 @@ class OrchestrationApplicationService:
                     ),
                 )
 
+            pre_invoke_stage = run.stage
+            pre_invoke_step = run.current_step
             self.advance_run(
                 AdvanceOrchestrationRunInput(
                     run_id=run_id,
                     worker_id=worker_id,
                     stage=OrchestrationRunStage.LLM,
                     step_increment=1,
-                ),
-            )
+                    ),
+                )
             run = self.get_run(run_id)
             try:
                 outcome = self.engine.advance_once(
@@ -480,6 +486,30 @@ class OrchestrationApplicationService:
                     ),
                 )
             except Exception as exc:
+                current_run = self.get_run(run_id)
+                if self._run_has_left_worker_control(
+                    current_run,
+                    worker_id=worker_id,
+                ):
+                    return current_run
+                if self._is_context_limit_error(exc):
+                    self._rewind_llm_attempt(
+                        run_id=run_id,
+                        worker_id=worker_id,
+                        previous_stage=pre_invoke_stage,
+                        previous_step=pre_invoke_step,
+                    )
+                    refreshed_run = self.get_run(run_id)
+                    maintenance_ran, terminal_run = self._maybe_run_preflight_maintenance(
+                        run=refreshed_run,
+                        worker_id=worker_id,
+                        force=True,
+                        failure_message=str(exc) or type(exc).__name__,
+                    )
+                    if terminal_run is not None:
+                        return terminal_run
+                    if maintenance_ran:
+                        continue
                 return self.fail_run(
                     FailOrchestrationRunInput(
                         run_id=run_id,
@@ -489,6 +519,12 @@ class OrchestrationApplicationService:
                         details={"stage": OrchestrationRunStage.LLM.value},
                     ),
                 )
+            current_run = self.get_run(run_id)
+            if self._run_has_left_worker_control(
+                current_run,
+                worker_id=worker_id,
+            ):
+                return current_run
             self._clear_prompt_flow_hint(run_id)
 
             if outcome.pending_tool_run_ids:
@@ -543,6 +579,22 @@ class OrchestrationApplicationService:
                 )
                 continue
 
+            if self._is_memory_flush_run(run) and not outcome.inline_tool_run_ids:
+                return self.fail_run(
+                    FailOrchestrationRunInput(
+                        run_id=run_id,
+                        worker_id=worker_id,
+                        message=(
+                            "Memory flush must complete by calling a maintenance tool."
+                        ),
+                        code="memory_flush_protocol_violation",
+                        details={
+                            "prompt_mode": "memory_flush",
+                            "output_text": outcome.response_text,
+                        },
+                    ),
+                )
+
             return self.complete_run(
                 CompleteOrchestrationRunInput(
                     run_id=run_id,
@@ -591,6 +643,13 @@ class OrchestrationApplicationService:
         return self.progress_coordinator.complete_run(data)
 
     def fail_run(self, data: FailOrchestrationRunInput) -> OrchestrationRun:
+        current_run = self.get_run(data.run_id)
+        if current_run.status in {
+            OrchestrationRunStatus.COMPLETED,
+            OrchestrationRunStatus.FAILED,
+            OrchestrationRunStatus.CANCELLED,
+        }:
+            return current_run
         return self.progress_coordinator.fail_run(data)
 
     def cancel_run(self, run_id: str, *, reason: str | None = None) -> OrchestrationRun:
@@ -649,6 +708,8 @@ class OrchestrationApplicationService:
             payload["assistant_message_id"] = outcome.assistant_message_ids[-1]
         if outcome.tool_result_message_ids:
             payload["tool_result_message_ids"] = list(outcome.tool_result_message_ids)
+        if outcome.inline_tool_run_ids:
+            payload["inline_tool_run_ids"] = list(outcome.inline_tool_run_ids)
         return payload
 
     @staticmethod
@@ -673,53 +734,8 @@ class OrchestrationApplicationService:
         return metadata
 
     def _extract_memory_candidate(self, run: OrchestrationRun) -> None:
-        if self.memory_port is None:
-            return
-        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
-        if prompt_mode in {
-            PromptMode.COMPACTION.value,
-            PromptMode.HEARTBEAT.value,
-            PromptMode.MEMORY_FLUSH.value,
-        }:
-            return
-        try:
-            extracted = extract_memory_candidate(
-                run,
-                result_payload=run.result_payload,
-            )
-            if extracted is None:
-                return
-            candidate = self.memory_port.create_candidate(extracted.create_input)
-            with self.uow_factory() as uow:
-                current = self._get_run(uow, run.id)
-                candidate_ids = current.metadata.get("memory_candidate_ids")
-                if isinstance(candidate_ids, list):
-                    updated_candidate_ids = [
-                        str(item)
-                        for item in candidate_ids
-                        if isinstance(item, str) and item.strip()
-                    ]
-                else:
-                    updated_candidate_ids = []
-                if candidate.id not in updated_candidate_ids:
-                    updated_candidate_ids.append(candidate.id)
-                current.metadata["memory_candidate_ids"] = updated_candidate_ids
-                current.metadata["memory_candidate_count"] = len(updated_candidate_ids)
-                current.metadata.pop("memory_candidate_error", None)
-                uow.orchestration_runs.add(current)
-                uow.commit()
-        except Exception as exc:
-            logger.exception(
-                "failed to extract memory candidate for completed run",
-                extra={"run_id": run.id},
-            )
-            with self.uow_factory() as uow:
-                current = self._get_run(uow, run.id)
-                current.metadata["memory_candidate_error"] = (
-                    str(exc) or type(exc).__name__
-                )
-                uow.orchestration_runs.add(current)
-                uow.commit()
+        del run
+        return
 
     @staticmethod
     def _get_run(uow: OrchestrationUnitOfWork, run_id: str) -> OrchestrationRun:
@@ -750,6 +766,11 @@ class OrchestrationApplicationService:
     ) -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, run_id)
+            if self._run_has_left_worker_control(
+                run,
+                worker_id=worker_id,
+            ):
+                return run
             run.sync_llm_stream(
                 worker_id=worker_id,
                 invocation_id=invocation_id,
@@ -759,6 +780,391 @@ class OrchestrationApplicationService:
             uow.collect(run)
             uow.commit()
             return run
+
+    @staticmethod
+    def _run_has_left_worker_control(
+        run: OrchestrationRun,
+        *,
+        worker_id: str,
+    ) -> bool:
+        if run.status is not OrchestrationRunStatus.RUNNING:
+            return True
+        return run.worker_id != worker_id
+
+    def _maybe_run_preflight_maintenance(
+        self,
+        *,
+        run: OrchestrationRun,
+        worker_id: str,
+        force: bool = False,
+        failure_message: str | None = None,
+    ) -> tuple[bool, OrchestrationRun | None]:
+        if not self.auto_compaction_enabled:
+            return False, None
+        if self.engine is None or self.session_service is None:
+            return False, None
+        if self._is_maintenance_mode_run(run):
+            return False, None
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if not session_key:
+            return False, None
+        preview = self._safe_preview_prompt(run)
+        trigger = self._preflight_compaction_trigger(
+            run=run,
+            preview=preview,
+            force=force,
+            failure_message=failure_message,
+        )
+        if trigger is None:
+            return False, None
+        if self._preflight_maintenance_attempted(run):
+            return False, self.fail_run(
+                FailOrchestrationRunInput(
+                    run_id=run.id,
+                    worker_id=worker_id,
+                    message=(
+                        "Prompt budget remained above the maintenance threshold "
+                        "after a recovery attempt."
+                    ),
+                    code="context_budget_unrecoverable",
+                    details=trigger,
+                ),
+            )
+        self._record_preflight_maintenance_attempt(
+            run_id=run.id,
+            step=run.current_step,
+            details=trigger,
+        )
+
+        flush_run = self.request_coordinator.existing_pending_memory_flush_run(session_key)
+        compaction_run = self.request_coordinator.existing_pending_compaction_run(session_key)
+        if flush_run is None and compaction_run is None:
+            flush_run = self.request_memory_flush(
+                RequestMemoryFlushInput(
+                    anchor_run_id=run.id,
+                    reason=str(trigger["flush_reason"]),
+                    trigger_basis="pre_compaction",
+                    trigger_details={
+                        "compaction_trigger_basis": str(trigger["trigger_basis"]),
+                        "compaction_trigger_details": dict(trigger["trigger_details"]),
+                        "compaction_reason": str(trigger["compaction_reason"]),
+                        "compaction_preserve": (
+                            "open tasks, decisions, approvals, constraints, "
+                            "and preferences"
+                        ),
+                    },
+                ),
+            )
+
+        if flush_run is not None:
+            processed_flush = self._process_requested_run_inline(
+                run_id=flush_run.id,
+                worker_id=worker_id,
+            )
+            if processed_flush.status is not OrchestrationRunStatus.COMPLETED:
+                return False, self.fail_run(
+                    FailOrchestrationRunInput(
+                        run_id=run.id,
+                        worker_id=worker_id,
+                        message=(
+                            "Preflight memory flush did not complete successfully."
+                        ),
+                        code="preflight_maintenance_failed",
+                        details={
+                            "maintenance_run_id": processed_flush.id,
+                            "maintenance_kind": "memory_flush",
+                            "maintenance_status": processed_flush.status.value,
+                            **trigger,
+                        },
+                    ),
+                )
+            compaction_run = self.request_coordinator.existing_pending_compaction_run(
+                session_key,
+            )
+
+        if compaction_run is None:
+            return False, self.fail_run(
+                FailOrchestrationRunInput(
+                    run_id=run.id,
+                    worker_id=worker_id,
+                    message=(
+                        "Preflight maintenance did not schedule a compaction run."
+                    ),
+                    code="preflight_maintenance_failed",
+                    details=trigger,
+                ),
+            )
+        processed_compaction = self._process_requested_run_inline(
+            run_id=compaction_run.id,
+            worker_id=worker_id,
+        )
+        if processed_compaction.status is not OrchestrationRunStatus.COMPLETED:
+            return False, self.fail_run(
+                FailOrchestrationRunInput(
+                    run_id=run.id,
+                    worker_id=worker_id,
+                    message="Preflight compaction did not complete successfully.",
+                    code="preflight_maintenance_failed",
+                    details={
+                        "maintenance_run_id": processed_compaction.id,
+                        "maintenance_kind": "compaction",
+                        "maintenance_status": processed_compaction.status.value,
+                        **trigger,
+                    },
+                ),
+            )
+        self._mark_preflight_maintenance_applied(
+            run_id=run.id,
+            step=run.current_step,
+            details=trigger,
+        )
+        return True, None
+
+    def _process_requested_run_inline(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+    ) -> OrchestrationRun:
+        claimed = self.lease_manager.claim_run(
+            run_id,
+            worker_id=worker_id,
+            get_run=self._get_run,
+        )
+        with self.lease_manager.heartbeat_while_processing(
+            run_id=claimed.id,
+            worker_id=worker_id,
+            heartbeat_run=self.heartbeat_run,
+        ):
+            return self.advance_once(run_id=claimed.id, worker_id=worker_id)
+
+    def _preflight_compaction_trigger(
+        self,
+        *,
+        run: OrchestrationRun,
+        preview: PromptPreview | None,
+        force: bool,
+        failure_message: str | None,
+    ) -> dict[str, object] | None:
+        metrics = self._preflight_prompt_budget_metrics(run, preview=preview)
+        trigger = self._compaction_trigger_from_metrics(
+            estimated_total_tokens=metrics["estimated_total_tokens"],
+            dynamic_threshold=metrics["prompt_threshold_tokens"],
+        )
+        if trigger is None and not force:
+            return None
+        flush_reason = "preflight_compaction_memory_flush"
+        if force:
+            flush_reason = "preflight_compaction_context_limit_recovery"
+        details = dict(metrics)
+        if failure_message is not None and failure_message.strip():
+            details["failure_message"] = failure_message.strip()
+        if trigger is None:
+            trigger = {
+                "trigger_basis": "context_limit_recovery",
+                "compaction_reason": "context_limit_recovery_after_engine_error",
+                "trigger_details": details,
+            }
+        trigger["flush_reason"] = flush_reason
+        return trigger
+
+    def _preflight_prompt_budget_metrics(
+        self,
+        run: OrchestrationRun,
+        *,
+        preview: PromptPreview | None,
+    ) -> dict[str, int | None]:
+        estimated_total_tokens = 0
+        transcript_chars = 0
+        transcript_estimated_tokens = 0
+        prompt_threshold_tokens: int | None = None
+        if preview is not None and preview.prompt_report is not None:
+            report = preview.prompt_report
+            estimated_total_tokens = (
+                report.system_estimated_tokens + report.transcript_estimated_tokens
+            )
+            transcript_chars = report.transcript_chars
+            transcript_estimated_tokens = report.transcript_estimated_tokens
+            prompt_threshold_tokens = self._auto_compaction_prompt_threshold_tokens_for_context_window(
+                report.llm_context_window_tokens,
+            )
+
+        pending_inbound_chars, pending_inbound_tokens = self._pending_inbound_prompt_metrics(
+            run,
+        )
+        return {
+            "estimated_total_tokens": estimated_total_tokens + pending_inbound_tokens,
+            "transcript_chars": transcript_chars + pending_inbound_chars,
+            "transcript_estimated_tokens": (
+                transcript_estimated_tokens + pending_inbound_tokens
+            ),
+            "prompt_threshold_tokens": prompt_threshold_tokens,
+            "pending_inbound_chars": pending_inbound_chars,
+            "pending_inbound_estimated_tokens": pending_inbound_tokens,
+        }
+
+    def _pending_inbound_prompt_metrics(
+        self,
+        run: OrchestrationRun,
+    ) -> tuple[int, int]:
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if (
+            self.session_service is None
+            or not session_key
+            or run.active_session_id is None
+            or not run.active_session_id.strip()
+        ):
+            return 0, 0
+        existing_message = self.session_service.get_message_by_source(
+            session_key=session_key,
+            session_id=run.active_session_id,
+            source_kind="orchestration_run",
+            source_id=run.id,
+        )
+        if existing_message is not None and existing_message.role == "user":
+            return 0, 0
+        content = extract_text_content(run.inbound_instruction.content)
+        if content is None or not content.strip():
+            return 0, 0
+        return len(content), estimate_text_tokens(content)
+
+    def _safe_preview_prompt(self, run: OrchestrationRun) -> PromptPreview | None:
+        if self.engine is None:
+            return None
+        try:
+            return self.engine.preview_prompt(run)
+        except Exception:
+            logger.exception(
+                "failed to build prompt preview for preflight maintenance",
+                extra={"run_id": run.id},
+            )
+            return None
+
+    def _record_preflight_maintenance_attempt(
+        self,
+        *,
+        run_id: str,
+        step: int,
+        details: dict[str, object],
+    ) -> None:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            current_payload = run.metadata.get("preflight_maintenance")
+            payload = dict(current_payload) if isinstance(current_payload, dict) else {}
+            payload["last_attempt_step"] = step
+            payload["last_attempt_details"] = dict(details)
+            run.metadata["preflight_maintenance"] = payload
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+
+    def _mark_preflight_maintenance_applied(
+        self,
+        *,
+        run_id: str,
+        step: int,
+        details: dict[str, object],
+    ) -> None:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            current_payload = run.metadata.get("preflight_maintenance")
+            payload = dict(current_payload) if isinstance(current_payload, dict) else {}
+            payload["applied_for_run"] = True
+            payload["applied_step"] = step
+            payload["applied_details"] = dict(details)
+            run.metadata["preflight_maintenance"] = payload
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+
+    @staticmethod
+    def _preflight_maintenance_attempted(run: OrchestrationRun) -> bool:
+        payload = run.metadata.get("preflight_maintenance")
+        if not isinstance(payload, dict):
+            return False
+        try:
+            return int(payload.get("last_attempt_step")) == run.current_step
+        except (TypeError, ValueError):
+            return False
+
+    def _rewind_llm_attempt(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        previous_stage: OrchestrationRunStage,
+        previous_step: int,
+    ) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            run.rewind_llm_attempt(
+                worker_id=worker_id,
+                previous_stage=previous_stage,
+                previous_step=previous_step,
+            )
+            uow.orchestration_runs.add(run)
+            uow.collect(run)
+            uow.commit()
+            return run
+
+    @staticmethod
+    def _is_context_limit_error(exc: Exception) -> bool:
+        message = (str(exc) or type(exc).__name__).strip().lower()
+        if not message:
+            return False
+        patterns = (
+            "context length",
+            "context_length",
+            "maximum context",
+            "max context",
+            "context window",
+            "too many tokens",
+            "token limit",
+            "prompt is too long",
+            "context_limit",
+        )
+        return any(pattern in message for pattern in patterns)
+
+    @staticmethod
+    def _is_maintenance_mode_run(run: OrchestrationRun) -> bool:
+        if OrchestrationApplicationService._is_memory_flush_run(run):
+            return True
+        if OrchestrationApplicationService._is_compaction_run(run):
+            return True
+        prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
+        if prompt_mode == PromptMode.HEARTBEAT.value:
+            return True
+        prompt_flow_hint = run.metadata.get("prompt_flow_hint")
+        if isinstance(prompt_flow_hint, dict):
+            raw_mode = str(prompt_flow_hint.get("mode", "")).strip().lower()
+            if raw_mode == PromptMode.HEARTBEAT.value:
+                return True
+        return False
+
+    def _compaction_trigger_from_metrics(
+        self,
+        *,
+        estimated_total_tokens: int,
+        dynamic_threshold: int | None,
+    ) -> dict[str, object] | None:
+        dynamic_threshold_exceeded = (
+            dynamic_threshold is not None
+            and estimated_total_tokens >= dynamic_threshold
+        )
+        if not dynamic_threshold_exceeded or dynamic_threshold is None:
+            return None
+        trigger_details: dict[str, object] = {
+            "estimated_total_tokens": estimated_total_tokens,
+            "prompt_threshold_tokens": dynamic_threshold,
+        }
+        return {
+            "trigger_basis": "prompt_budget",
+            "compaction_reason": (
+                "auto_compaction_prompt_budget_exceeded"
+                f":{estimated_total_tokens}/{dynamic_threshold}"
+            ),
+            "trigger_details": trigger_details,
+        }
 
     @staticmethod
     def _session_start_prompt_flow_hint(
@@ -844,89 +1250,72 @@ class OrchestrationApplicationService:
         )
         with self.uow_factory() as uow:
             persisted_run = self._get_run(uow, run.id)
-            persisted_run.metadata["compaction_result"] = {
-                "archived_message_count": archived_count,
-                "archived_through_sequence_no": cutoff_sequence_no,
-                "assistant_message_id": summary_message_id.strip(),
-                "summary": summary_text.strip(),
-                "compacted_at": (
-                    run.completed_at.isoformat()
-                    if run.completed_at is not None
-                    else run.updated_at.isoformat()
-                ),
-            }
+            updated_result_payload = dict(persisted_run.result_payload or {})
+            updated_result_payload["archived_message_count"] = archived_count
+            updated_result_payload["archived_through_sequence_no"] = cutoff_sequence_no
+            updated_result_payload["compacted_at"] = (
+                run.completed_at.isoformat()
+                if run.completed_at is not None
+                else run.updated_at.isoformat()
+            )
+            persisted_run.result_payload = updated_result_payload
             uow.orchestration_runs.add(persisted_run)
             uow.collect(persisted_run)
             uow.commit()
-
-    def _apply_memory_flush(self, run: OrchestrationRun) -> None:
-        if not self._is_memory_flush_run(run):
-            return
-        if self.memory_port is None:
-            return
-        result_payload = run.result_payload or {}
-        output_text = result_payload.get("output_text")
-        if not isinstance(output_text, str) or not output_text.strip():
-            self._store_memory_flush_result(
-                run=run,
-                payload={"skipped": True, "reason": "empty_output"},
-            )
-            return
-        normalized_output = output_text.strip()
-        if is_memory_flush_skip_reply(normalized_output):
-            self._store_memory_flush_result(
-                run=run,
-                payload={"skipped": True, "reason": "no_memory_flush"},
-            )
-            return
-        try:
-            entry = self.memory_port.record_flush_entry(
-                RecordMemoryFlushInput(
-                    agent_id=run.agent_id or "workspace",
-                    content=normalized_output,
-                    session_key=_normalized_metadata_text(run.metadata, "session_key"),
-                    run_id=run.id,
-                    metadata={
-                        "source": "memory_flush",
-                        "memory_flush_anchor_run_id": run.metadata.get(
-                            "memory_flush_anchor_run_id",
-                        ),
-                        "request": dict(
-                            run.metadata.get("memory_flush_request", {})
-                            if isinstance(run.metadata.get("memory_flush_request"), dict)
-                            else {}
-                        ),
-                    },
-                ),
-            )
-        except Exception as exc:
-            logger.exception(
-                "failed to persist memory flush result",
-                extra={"run_id": run.id},
-            )
-            self._store_memory_flush_result(
-                run=run,
-                payload={"skipped": False, "error": str(exc) or type(exc).__name__},
-            )
-            return
-        self._store_memory_flush_result(
-            run=run,
-            payload={
-                "skipped": False,
-                "entry_id": entry.id,
-                "title": entry.title,
-                "summary": entry.summary,
-                "memory_file_path": entry.metadata.get("memory_file_path"),
-                "storage_kind": entry.metadata.get("storage_kind"),
-            },
-        )
 
     def _maybe_request_auto_compaction(self, run: OrchestrationRun) -> OrchestrationRun | None:
         if not self.auto_compaction_enabled:
             return None
         if self.session_service is None:
             return None
+        if self._is_memory_flush_run(run):
+            flush_request = run.metadata.get("memory_flush_request")
+            if not isinstance(flush_request, dict):
+                return None
+            if str(flush_request.get("basis", "")).strip().lower() != "pre_compaction":
+                return None
+            session_key = str(run.metadata.get("session_key", "")).strip()
+            if not session_key:
+                return None
+            if (
+                self.request_coordinator.existing_pending_compaction_run(session_key)
+                is not None
+            ):
+                return None
+            trigger_details = flush_request.get("details")
+            if not isinstance(trigger_details, dict):
+                trigger_details = {}
+            compaction_trigger_details = trigger_details.get("compaction_trigger_details")
+            if not isinstance(compaction_trigger_details, dict):
+                compaction_trigger_details = {}
+            compaction_trigger_basis = str(
+                trigger_details.get("compaction_trigger_basis", ""),
+            ).strip() or "pre_compaction"
+            compaction_reason = (
+                str(trigger_details.get("compaction_reason", "")).strip()
+                or "auto_compaction_after_memory_flush"
+            )
+            compaction_preserve = (
+                str(trigger_details.get("compaction_preserve", "")).strip()
+                or "open tasks, decisions, approvals, constraints, and preferences"
+            )
+            logger.info(
+                "auto compaction requested after pre-compaction memory flush",
+                extra={"run_id": run.id, "session_key": session_key},
+            )
+            return self.request_compaction(
+                RequestCompactionInput(
+                    anchor_run_id=run.id,
+                    reason=compaction_reason,
+                    preserve=compaction_preserve,
+                    trigger_basis=compaction_trigger_basis,
+                    trigger_details=dict(compaction_trigger_details),
+                ),
+            )
         if self._is_compaction_run(run):
+            return None
+        preflight_payload = run.metadata.get("preflight_maintenance")
+        if isinstance(preflight_payload, dict) and preflight_payload.get("applied_for_run"):
             return None
         prompt_mode = str(run.metadata.get("prompt_mode", "")).strip().lower()
         if prompt_mode not in {
@@ -950,24 +1339,25 @@ class OrchestrationApplicationService:
         transcript_estimated_tokens = _coerce_non_negative_int(
             transcript_payload.get("estimated_tokens"),
         )
-        absolute_threshold_exceeded = (
-            transcript_chars >= self.auto_compaction_transcript_chars
-            or transcript_estimated_tokens >= self.auto_compaction_transcript_tokens
-        )
         dynamic_threshold = self._auto_compaction_prompt_threshold_tokens(run)
-        dynamic_threshold_exceeded = (
-            dynamic_threshold is not None
-            and estimated_total_tokens >= dynamic_threshold
+        trigger = self._compaction_trigger_from_metrics(
+            estimated_total_tokens=estimated_total_tokens,
+            dynamic_threshold=dynamic_threshold,
         )
-        if not absolute_threshold_exceeded and not dynamic_threshold_exceeded:
+        if trigger is None:
             return None
         if (
             self.request_coordinator.existing_pending_compaction_run(session_key)
             is not None
         ):
             return None
+        if (
+            self.request_coordinator.existing_pending_memory_flush_run(session_key)
+            is not None
+        ):
+            return None
         logger.info(
-            "auto compaction requested after completed run",
+            "auto pre-compaction memory flush requested after completed run",
             extra={
                 "run_id": run.id,
                 "session_key": session_key,
@@ -977,34 +1367,20 @@ class OrchestrationApplicationService:
                 "dynamic_threshold": dynamic_threshold,
             },
         )
-        trigger_details = {
-            "transcript_chars": transcript_chars,
-            "transcript_estimated_tokens": transcript_estimated_tokens,
-            "transcript_char_threshold": self.auto_compaction_transcript_chars,
-            "transcript_token_threshold": self.auto_compaction_transcript_tokens,
-            "estimated_total_tokens": estimated_total_tokens,
-        }
-        if dynamic_threshold is not None:
-            trigger_details["prompt_threshold_tokens"] = dynamic_threshold
-        if dynamic_threshold_exceeded and dynamic_threshold is not None:
-            trigger_basis = "prompt_budget"
-            reason = (
-                "auto_compaction_prompt_budget_exceeded"
-                f":{estimated_total_tokens}/{dynamic_threshold}"
-            )
-        else:
-            trigger_basis = "transcript_budget"
-            reason = (
-                "auto_compaction_transcript_budget_exceeded"
-                f":{transcript_estimated_tokens}"
-            )
-        return self.request_compaction(
-            RequestCompactionInput(
+        return self.request_memory_flush(
+            RequestMemoryFlushInput(
                 anchor_run_id=run.id,
-                reason=reason,
-                preserve="open tasks, decisions, approvals, constraints, and preferences",
-                trigger_basis=trigger_basis,
-                trigger_details=trigger_details,
+                reason="auto_pre_compaction_flush",
+                trigger_basis="pre_compaction",
+                trigger_details={
+                    "compaction_trigger_basis": str(trigger["trigger_basis"]),
+                    "compaction_trigger_details": dict(trigger["trigger_details"]),
+                    "compaction_reason": str(trigger["compaction_reason"]),
+                    "compaction_preserve": (
+                        "open tasks, decisions, approvals, constraints, "
+                        "and preferences"
+                    ),
+                },
             ),
         )
 
@@ -1012,7 +1388,14 @@ class OrchestrationApplicationService:
         self,
         run: OrchestrationRun,
     ) -> int | None:
-        context_window_tokens = self._context_window_tokens_for_run(run)
+        return self._auto_compaction_prompt_threshold_tokens_for_context_window(
+            self._context_window_tokens_for_run(run),
+        )
+
+    def _auto_compaction_prompt_threshold_tokens_for_context_window(
+        self,
+        context_window_tokens: int | None,
+    ) -> int | None:
         if context_window_tokens is None:
             return None
         threshold = (
@@ -1036,19 +1419,6 @@ class OrchestrationApplicationService:
             return self.llm_port.get_profile(llm_id.strip()).context_window_tokens
         except Exception:
             return None
-
-    def _store_memory_flush_result(
-        self,
-        *,
-        run: OrchestrationRun,
-        payload: dict[str, object],
-    ) -> None:
-        with self.uow_factory() as uow:
-            persisted_run = self._get_run(uow, run.id)
-            persisted_run.metadata["memory_flush_result"] = dict(payload)
-            uow.orchestration_runs.add(persisted_run)
-            uow.collect(persisted_run)
-            uow.commit()
 
     @staticmethod
     def _is_memory_flush_run(run: OrchestrationRun) -> bool:
@@ -1185,7 +1555,6 @@ class OrchestrationApplicationService:
                 session_id=run.active_session_id,
                 role="tool",
                 kind=SessionMessageKind.TOOL_RESULT,
-                content=detail,
                 content_payload={
                     "tool_name": tool_name,
                     "tool_call_id": request.request_id,

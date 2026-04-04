@@ -32,6 +32,7 @@ def ensure_agent_home_scaffold(profile: AgentProfile) -> None:
         _build_memory_markdown(profile),
         alias_paths=(root / "memory.md",),
     )
+    _write_if_missing(root / ".state" / "memory-binding.json", "{}\n")
 
 
 def _write_if_missing(
@@ -43,6 +44,8 @@ def _write_if_missing(
     if path.exists() or any(alias.exists() for alias in alias_paths):
         return
     path.write_text(content, encoding="utf-8")
+
+
 def _build_agent_markdown(profile: AgentProfile) -> str:
     lines = [
         "# AGENT.md",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from time import perf_counter
+from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi import Request
@@ -14,6 +16,19 @@ from crxzipple.modules.authorization.domain import AuthorizationDeniedError
 from crxzipple.shared.infrastructure.event_bus import EventBus
 
 logger = get_logger(__name__)
+
+
+@asynccontextmanager
+async def _container_lifespan(
+    app: FastAPI,
+    *,
+    manage_container_lifecycle: bool,
+) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        if manage_container_lifecycle:
+            app.state.container.close()
 
 
 def create_app(
@@ -31,17 +46,19 @@ def create_app(
     else:
         resolved_settings = load_settings()
     configure_logging(resolved_settings)
-    app = FastAPI(title=resolved_settings.app_name)
+    app = FastAPI(
+        title=resolved_settings.app_name,
+        lifespan=lambda app: _container_lifespan(
+            app,
+            manage_container_lifecycle=manage_container_lifecycle,
+        ),
+    )
     app.state.container = container or build_container(
         settings=resolved_settings,
         database_url=database_url,
         event_bus=event_bus,
+        enable_memory_watchers=True,
     )
-
-    if manage_container_lifecycle:
-        @app.on_event("shutdown")
-        def shutdown_container() -> None:
-            app.state.container.close()
 
     @app.exception_handler(AuthorizationDeniedError)
     async def handle_authorization_denied(

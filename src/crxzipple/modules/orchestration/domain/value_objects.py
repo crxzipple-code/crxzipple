@@ -64,13 +64,12 @@ class ApprovalDecision(StrEnum):
 @dataclass(frozen=True, slots=True)
 class InboundInstruction(ValueObject):
     source: str
-    content: str | None = None
+    content: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.source.strip():
             raise OrchestrationValidationError("Inbound instruction source cannot be empty.")
-        object.__setattr__(self, "content", self.content if self.content is None else str(self.content))
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     def to_payload(self) -> dict[str, Any]:
@@ -87,11 +86,7 @@ class InboundInstruction(ValueObject):
         payload = payload or {}
         return cls(
             source=str(payload.get("source", "")),
-            content=(
-                str(payload["content"])
-                if payload.get("content") is not None
-                else None
-            ),
+            content=payload.get("content"),
             metadata=(
                 dict(payload.get("metadata"))
                 if isinstance(payload.get("metadata"), dict)

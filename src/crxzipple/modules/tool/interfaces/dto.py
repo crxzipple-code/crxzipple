@@ -115,12 +115,14 @@ class ToolExecutionTargetDTO:
 @dataclass(frozen=True, slots=True)
 class ToolRunResultDTO:
     content: Any | None
+    details: Any | None
     metadata: dict[str, Any]
 
     @classmethod
     def from_value_object(cls, result: ToolRunResult) -> "ToolRunResultDTO":
         return cls(
-            content=result.content,
+            content=[dict(block) for block in result.blocks],
+            details=result.details,
             metadata=dict(result.metadata),
         )
 

@@ -30,9 +30,11 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentToolPreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
+from crxzipple.modules.orchestration.infrastructure import MemoryBindingService
 
 
 router = APIRouter()
+_memory_binding_service = MemoryBindingService()
 
 
 class AgentIdentityRequest(BaseModel):
@@ -58,7 +60,7 @@ class AgentLlmRoutingPolicyRequest(BaseModel):
 
 class AgentExecutionPolicyRequest(BaseModel):
     timeout_seconds: int = 120
-    max_turns: int = 12
+    max_turns: int = 99
 
 
 class AgentRuntimePreferencesRequest(BaseModel):
@@ -66,6 +68,7 @@ class AgentRuntimePreferencesRequest(BaseModel):
     workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
+    memory_retrieval_backend: str | None = None
     attrs: dict[str, object] = Field(default_factory=dict)
 
 
@@ -151,6 +154,7 @@ class AgentRuntimePreferencesResponse(BaseModel):
     workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
+    memory_retrieval_backend: str | None = None
     attrs: dict[str, object] = Field(default_factory=dict)
 
 
@@ -223,6 +227,9 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         runtime_preferences=AgentRuntimePreferences.from_payload(
             profile.runtime_preferences,
         ),
+        home_sidecar_files=_memory_binding_service.sidecar_files_from_runtime_preferences_payload(
+            profile.runtime_preferences,
+        ),
         tool_preferences=AgentToolPreferences.from_payload(profile.tool_preferences),
     )
 
@@ -232,52 +239,58 @@ def register_profile(
     payload: RegisterAgentProfileRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentProfileResponse:
-    profile = container.agent_service.register_profile(
-        RegisterAgentProfileInput(
-            id=payload.id,
-            name=payload.name,
-            description=payload.description,
-            enabled=payload.enabled,
-            identity=AgentIdentity(
-                display_name=payload.identity.display_name,
-                theme=payload.identity.theme,
-                emoji=payload.identity.emoji,
-                avatar=payload.identity.avatar,
-            ),
-            instruction_policy=AgentInstructionPolicy(
-                system_prompt=payload.instruction_policy.system_prompt,
-                response_style=payload.instruction_policy.response_style,
-                thinking_default=payload.instruction_policy.thinking_default,
-                stream_by_default=payload.instruction_policy.stream_by_default,
-            ),
-            llm_routing_policy=AgentLlmRoutingPolicy(
-                default_llm_id=payload.llm_routing_policy.default_llm_id,
-                fallback_llm_ids=tuple(payload.llm_routing_policy.fallback_llm_ids),
-                image_llm_id=payload.llm_routing_policy.image_llm_id,
-                document_llm_id=payload.llm_routing_policy.document_llm_id,
-            ),
-            execution_policy=AgentExecutionPolicy(
-                timeout_seconds=payload.execution_policy.timeout_seconds,
-                max_turns=payload.execution_policy.max_turns,
-            ),
-            runtime_preferences=AgentRuntimePreferences(
-                home_dir=payload.runtime_preferences.home_dir,
-                workdir=payload.runtime_preferences.workdir,
-                workspace=payload.runtime_preferences.workspace,
-                sandbox_mode=payload.runtime_preferences.sandbox_mode,
-                attrs=payload.runtime_preferences.attrs,
-            ),
-            tool_preferences=AgentToolPreferences(
-                requested_effect_ids=tuple(
-                    payload.tool_preferences.requested_effect_ids,
+    try:
+        profile = container.agent_service.register_profile(
+            RegisterAgentProfileInput(
+                id=payload.id,
+                name=payload.name,
+                description=payload.description,
+                enabled=payload.enabled,
+                identity=AgentIdentity(
+                    display_name=payload.identity.display_name,
+                    theme=payload.identity.theme,
+                    emoji=payload.identity.emoji,
+                    avatar=payload.identity.avatar,
                 ),
-                requested_tool_ids=tuple(payload.tool_preferences.requested_tool_ids),
-                preferred_tags=tuple(payload.tool_preferences.preferred_tags),
-                prefers_background_tools=payload.tool_preferences.prefers_background_tools,
-                prefers_mutating_tools=payload.tool_preferences.prefers_mutating_tools,
+                instruction_policy=AgentInstructionPolicy(
+                    system_prompt=payload.instruction_policy.system_prompt,
+                    response_style=payload.instruction_policy.response_style,
+                    thinking_default=payload.instruction_policy.thinking_default,
+                    stream_by_default=payload.instruction_policy.stream_by_default,
+                ),
+                llm_routing_policy=AgentLlmRoutingPolicy(
+                    default_llm_id=payload.llm_routing_policy.default_llm_id,
+                    fallback_llm_ids=tuple(payload.llm_routing_policy.fallback_llm_ids),
+                    image_llm_id=payload.llm_routing_policy.image_llm_id,
+                    document_llm_id=payload.llm_routing_policy.document_llm_id,
+                ),
+                execution_policy=AgentExecutionPolicy(
+                    timeout_seconds=payload.execution_policy.timeout_seconds,
+                    max_turns=payload.execution_policy.max_turns,
+                ),
+                runtime_preferences=AgentRuntimePreferences(
+                    home_dir=payload.runtime_preferences.home_dir,
+                    workdir=payload.runtime_preferences.workdir,
+                    workspace=payload.runtime_preferences.workspace,
+                    sandbox_mode=payload.runtime_preferences.sandbox_mode,
+                    memory_retrieval_backend=(
+                        payload.runtime_preferences.memory_retrieval_backend
+                    ),
+                    attrs=payload.runtime_preferences.attrs,
+                ),
+                tool_preferences=AgentToolPreferences(
+                    requested_effect_ids=tuple(
+                        payload.tool_preferences.requested_effect_ids,
+                    ),
+                    requested_tool_ids=tuple(payload.tool_preferences.requested_tool_ids),
+                    preferred_tags=tuple(payload.tool_preferences.preferred_tags),
+                    prefers_background_tools=payload.tool_preferences.prefers_background_tools,
+                    prefers_mutating_tools=payload.tool_preferences.prefers_mutating_tools,
+                ),
             ),
-        ),
-    )
+        )
+    except AgentValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     return _to_response(AgentProfileDTO.from_entity(profile))
 
 
@@ -481,6 +494,7 @@ def _to_response(dto: AgentProfileDTO) -> AgentProfileResponse:
             workdir=dto.runtime_preferences.workdir,
             workspace=dto.runtime_preferences.workspace,
             sandbox_mode=dto.runtime_preferences.sandbox_mode,
+            memory_retrieval_backend=dto.runtime_preferences.memory_retrieval_backend,
             attrs=dict(dto.runtime_preferences.attrs),
         ),
         tool_preferences=AgentToolPreferencesResponse(

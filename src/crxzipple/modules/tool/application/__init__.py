@@ -15,6 +15,7 @@ from crxzipple.modules.tool.application.services import (
     SetToolAvailabilityInput,
     ToolApplicationService,
 )
+from crxzipple.modules.tool.domain import ToolExecutionContext
 
 __all__ = [
     "ExecuteToolInput",
@@ -24,6 +25,7 @@ __all__ = [
     "ToolDiscoveryGateway",
     "ToolDiscoveryProviderDescriptor",
     "ToolApplicationService",
+    "ToolExecutionContext",
     "ToolDispatchEventSubscriber",
     "ToolRunDispatchClaim",
     "ToolRunDispatchPort",

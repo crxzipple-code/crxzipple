@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+import json
 import threading
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from crxzipple.core.logger import get_logger
+from crxzipple.modules.artifacts.application.services import ArtifactApplicationService
 from crxzipple.modules.tool.application.discovery import (
     ToolDiscoveryGateway,
     ToolDiscoveryProviderDescriptor,
@@ -22,11 +26,14 @@ from crxzipple.modules.tool.domain.exceptions import (
     ToolExecutionNotSupportedError,
     ToolNotFoundError,
     ToolRunNotFoundError,
+    ToolValidationError,
 )
-from crxzipple.modules.tool.domain.repositories import ToolRepository, ToolRunRepository
+from crxzipple.modules.tool.domain.repositories import ToolRunRepository
 from crxzipple.modules.tool.domain.value_objects import (
     ToolEnvironment,
+    ToolExecutionContext,
     ToolExecutionPolicy,
+    ToolRunResult,
     ToolExecutionStrategy,
     ToolExecutionSupport,
     ToolExecutionTarget,
@@ -35,6 +42,12 @@ from crxzipple.modules.tool.domain.value_objects import (
     ToolParameter,
     ToolRunStatus,
     ToolSourceKind,
+)
+from crxzipple.shared.content_blocks import (
+    FILE_BLOCK_TYPE,
+    IMAGE_BLOCK_TYPE,
+    file_ref_content_block,
+    image_ref_content_block,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.domain.events import DomainEvent
@@ -90,11 +103,11 @@ class ExecuteToolInput:
     strategy: ToolExecutionStrategy = ToolExecutionStrategy.ASYNC
     environment: ToolEnvironment = ToolEnvironment.LOCAL
     run_id: str | None = None
+    execution_context: ToolExecutionContext | None = None
 
 
 class ToolUnitOfWork(Protocol):
     dispatch_tasks: DispatchTaskRepository
-    tools: ToolRepository
     tool_runs: ToolRunRepository
 
     def __enter__(self) -> "ToolUnitOfWork":
@@ -127,19 +140,24 @@ class ToolRuntimeGateway(Protocol):
         tool: Tool,
         target: ToolExecutionTarget,
         arguments: dict[str, Any],
-    ) -> Any:
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRunResult:
         ...
 
 class ToolApplicationService:
+    DEFAULT_DETAILS_MAX_CHARS = 131_072
+
     def __init__(
         self,
         uow_factory: Callable[[], ToolUnitOfWork],
         runtime_gateway: ToolRuntimeGateway,
         discovery_gateway: ToolDiscoveryGateway | None = None,
         dispatch_port: ToolRunDispatchPort | None = None,
+        artifact_service: ArtifactApplicationService | None = None,
         default_max_attempts: int = 3,
         worker_lease_seconds: int = 30,
         worker_heartbeat_seconds: float = 5.0,
+        details_max_chars: int = DEFAULT_DETAILS_MAX_CHARS,
     ) -> None:
         self.uow_factory = uow_factory
         self.runtime_gateway = runtime_gateway
@@ -147,30 +165,34 @@ class ToolApplicationService:
         if dispatch_port is None:
             raise RuntimeError("Tool dispatch port is not configured.")
         self.dispatch_port = dispatch_port
+        self.artifact_service = artifact_service
         self.default_max_attempts = default_max_attempts
         self.worker_lease_seconds = worker_lease_seconds
         self.worker_heartbeat_seconds = worker_heartbeat_seconds
+        self.details_max_chars = max(int(details_max_chars), 1)
+        self._manual_tools: dict[str, Tool] = {}
 
     def register(self, data: RegisterToolInput) -> Tool:
-        with self.uow_factory() as uow:
-            if uow.tools.get(data.id) is not None:
-                raise ToolAlreadyExistsError(f"Tool '{data.id}' already exists.")
-
-            tool = self._build_tool(data)
-            tool.record_event(
-                DomainEvent(
-                    name="tool.registered",
-                    payload={
-                        "tool_id": tool.id,
-                        "tool_name": tool.name,
-                        "tool_kind": tool.kind.value,
-                    },
-                ),
+        if data.id in self._manual_tools:
+            raise ToolAlreadyExistsError(
+                f"Tool '{data.id}' already exists.",
             )
-            uow.tools.add(tool)
+        tool = self._build_tool(data)
+        tool.record_event(
+            DomainEvent(
+                name="tool.registered",
+                payload={
+                    "tool_id": tool.id,
+                    "tool_name": tool.name,
+                    "tool_kind": tool.kind.value,
+                },
+            ),
+        )
+        self._manual_tools[tool.id] = tool
+        with self.uow_factory() as uow:
             uow.collect(tool)
             uow.commit()
-            return tool
+        return tool
 
     def list_discovery_providers(self) -> list[ToolDiscoveryProviderDescriptor]:
         if self.discovery_gateway is None:
@@ -178,157 +200,63 @@ class ToolApplicationService:
         return self.discovery_gateway.list_providers()
 
     def discover_tools(self, *, provider_name: str | None = None) -> list[Tool]:
-        if self.discovery_gateway is None:
-            if provider_name is not None:
-                raise ToolDiscoveryProviderNotFoundError(
-                    f"Tool discovery provider '{provider_name}' is not configured.",
-                )
-            return []
-
-        provider_names = {
-            provider.name for provider in self.discovery_gateway.list_providers()
-        }
-        if provider_name is not None and provider_name not in provider_names:
-            raise ToolDiscoveryProviderNotFoundError(
-                f"Tool discovery provider '{provider_name}' was not found.",
+        specs = self._discover_specs(provider_name=provider_name)
+        runtime_tools = self._runtime_local_tool_map()
+        discovered: dict[str, Tool] = {}
+        for spec in specs:
+            discovered.setdefault(
+                spec.id,
+                runtime_tools.get(spec.id) or self._build_tool_from_spec(spec),
             )
-
-        discovered = self.discovery_gateway.discover(provider_name=provider_name)
-        registered: list[Tool] = []
-
-        with self.uow_factory() as uow:
-            changed = False
-            seen_tool_ids: set[str] = set()
-            for spec in discovered:
-                if spec.id in seen_tool_ids:
-                    continue
-                seen_tool_ids.add(spec.id)
-
-                existing = uow.tools.get(spec.id)
-                if existing is not None:
-                    if self._should_refresh_discovered_tool(existing, spec):
-                        refreshed = self._build_tool_from_spec(spec)
-                        refreshed.record_event(
-                            DomainEvent(
-                                name="tool.discovered_refreshed",
-                                payload={
-                                    "tool_id": refreshed.id,
-                                    "source_kind": refreshed.source_kind.value,
-                                    "provider_name": spec.provider_name,
-                                },
-                            ),
-                        )
-                        uow.tools.add(refreshed)
-                        uow.collect(refreshed)
-                        registered.append(refreshed)
-                        changed = True
-                    else:
-                        registered.append(existing)
-                    continue
-
-                tool = self._build_tool_from_spec(spec)
-                tool.record_event(
-                    DomainEvent(
-                        name="tool.discovered",
-                        payload={
-                            "tool_id": tool.id,
-                            "source_kind": tool.source_kind.value,
-                            "provider_name": spec.provider_name,
-                        },
-                    ),
-                )
-                uow.tools.add(tool)
-                uow.collect(tool)
-                registered.append(tool)
-                changed = True
-
-            if changed:
-                uow.commit()
-
-        return registered
+        return [discovered[tool_id] for tool_id in sorted(discovered)]
 
     def discover_local_tools(self) -> list[Tool]:
-        return self.discover_tools(provider_name="local_builtin")
+        if self.discovery_gateway is None:
+            return []
+        discovered: dict[str, Tool] = {}
+        for provider in self.discovery_gateway.list_providers():
+            if provider.source_kind is not ToolSourceKind.LOCAL_DISCOVERY:
+                continue
+            for tool in self.discover_tools(provider_name=provider.name):
+                discovered.setdefault(tool.id, tool)
+        return [discovered[tool_id] for tool_id in sorted(discovered)]
 
     def set_availability(self, data: SetToolAvailabilityInput) -> Tool:
-        with self.uow_factory() as uow:
-            tool = uow.tools.get(data.id)
+        if self._runtime_system_tool(data.id) is not None:
+            raise ToolValidationError(
+                f"Tool '{data.id}' is file-backed and cannot be enabled or disabled through the service.",
+            )
+        tool = self._manual_tools.get(data.id)
         if tool is None:
-            self.ensure_local_system_tools_registered()
-            with self.uow_factory() as uow:
-                tool = uow.tools.get(data.id)
-                if tool is None:
-                    raise ToolNotFoundError(f"Tool '{data.id}' was not found.")
-                changed = tool.enable() if data.enabled else tool.disable()
-                if changed:
-                    uow.tools.add(tool)
-                    uow.collect(tool)
-                    uow.commit()
-                return tool
+            raise ToolValidationError(
+                f"Tool '{data.id}' is not a process-local manual tool. File-backed tools should be changed at the source manifest/provider.",
+            )
         with self.uow_factory() as uow:
-            tool = uow.tools.get(data.id)
-            if tool is None:
-                raise ToolNotFoundError(f"Tool '{data.id}' was not found.")
             changed = tool.enable() if data.enabled else tool.disable()
             if changed:
-                uow.tools.add(tool)
                 uow.collect(tool)
                 uow.commit()
             return tool
 
     def list_tools(self) -> list[Tool]:
-        with self.uow_factory() as uow:
-            return uow.tools.list()
+        resolved = self._resolved_tool_map()
+        return [resolved[tool_id] for tool_id in sorted(resolved)]
 
     def list_enabled_tools(self) -> list[Tool]:
-        with self.uow_factory() as uow:
-            return uow.tools.list_enabled()
+        resolved = self._resolved_tool_map()
+        return [
+            resolved[tool_id]
+            for tool_id in sorted(resolved)
+            if resolved[tool_id].enabled
+        ]
 
     def ensure_local_system_tools_registered(self) -> tuple[Tool, ...]:
-        managed_tools = [
-            tool
-            for tool in self.runtime_gateway.list_local_tools()
-            if SYSTEM_MANAGED_TOOL_TAG in tool.tags
-        ]
-        if not managed_tools:
-            return ()
-        registered: list[Tool] = []
-        with self.uow_factory() as uow:
-            changed = False
-            for tool in managed_tools:
-                existing = uow.tools.get(tool.id)
-                if existing is not None:
-                    registered.append(existing)
-                    continue
-                spec = ToolSpec.from_tool(tool, provider_name="local_system")
-                persisted = self._build_tool_from_spec(spec)
-                persisted.record_event(
-                    DomainEvent(
-                        name="tool.system_registered",
-                        payload={
-                            "tool_id": persisted.id,
-                            "source_kind": persisted.source_kind.value,
-                        },
-                    ),
-                )
-                uow.tools.add(persisted)
-                uow.collect(persisted)
-                registered.append(persisted)
-                changed = True
-            if changed:
-                uow.commit()
-        return tuple(registered)
+        return tuple(self._runtime_system_tool_map().values())
 
     def get_tool(self, tool_id: str) -> Tool:
-        with self.uow_factory() as uow:
-            tool = uow.tools.get(tool_id)
+        tool = self._resolve_tool(tool_id)
         if tool is None:
-            self.ensure_local_system_tools_registered()
-            with self.uow_factory() as uow:
-                tool = uow.tools.get(tool_id)
-                if tool is None:
-                    raise ToolNotFoundError(f"Tool '{tool_id}' was not found.")
-                return tool
+            raise ToolNotFoundError(f"Tool '{tool_id}' was not found.")
         return tool
 
     def get_tool_run(self, run_id: str) -> ToolRun:
@@ -461,67 +389,40 @@ class ToolApplicationService:
             strategy=data.strategy,
             environment=data.environment,
         )
-
+        tool = self.get_tool(data.tool_id)
+        if not tool.enabled:
+            raise ToolExecutionNotAllowedError(
+                f"Tool '{tool.id}' is disabled and cannot be executed.",
+            )
+        if not tool.supports(target):
+            raise ToolExecutionNotSupportedError(
+                f"Tool '{tool.id}' does not support {target.mode.value}/{target.strategy.value}/{target.environment.value}.",
+            )
         with self.uow_factory() as uow:
-            tool = uow.tools.get(data.tool_id)
-        if tool is None:
-            self.ensure_local_system_tools_registered()
-            with self.uow_factory() as uow:
-                tool = uow.tools.get(data.tool_id)
-                if tool is None:
-                    raise ToolNotFoundError(f"Tool '{data.tool_id}' was not found.")
-                if not tool.enabled:
-                    raise ToolExecutionNotAllowedError(
-                        f"Tool '{tool.id}' is disabled and cannot be executed.",
-                    )
-                if not tool.supports(target):
-                    raise ToolExecutionNotSupportedError(
-                        f"Tool '{tool.id}' does not support {target.mode.value}/{target.strategy.value}/{target.environment.value}.",
-                    )
-
-                run = ToolRun.create(
-                    run_id=data.run_id or uuid4().hex,
-                    tool_id=tool.id,
-                    input_payload=dict(data.arguments),
-                    target=target,
-                    max_attempts=self.default_max_attempts,
-                )
-                if target.mode is ToolMode.BACKGROUND:
-                    run.queue()
-                    self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
-                uow.tool_runs.add(run)
-                uow.collect(run)
-                uow.commit()
-        else:
-            with self.uow_factory() as uow:
-                tool = uow.tools.get(data.tool_id)
-                if tool is None:
-                    raise ToolNotFoundError(f"Tool '{data.tool_id}' was not found.")
-                if not tool.enabled:
-                    raise ToolExecutionNotAllowedError(
-                        f"Tool '{tool.id}' is disabled and cannot be executed.",
-                    )
-                if not tool.supports(target):
-                    raise ToolExecutionNotSupportedError(
-                        f"Tool '{tool.id}' does not support {target.mode.value}/{target.strategy.value}/{target.environment.value}.",
-                    )
-
-                run = ToolRun.create(
-                    run_id=data.run_id or uuid4().hex,
-                    tool_id=tool.id,
-                    input_payload=dict(data.arguments),
-                    target=target,
-                    max_attempts=self.default_max_attempts,
-                )
-                if target.mode is ToolMode.BACKGROUND:
-                    run.queue()
-                    self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
-                uow.tool_runs.add(run)
-                uow.collect(run)
-                uow.commit()
+            run = ToolRun.create(
+                run_id=data.run_id or uuid4().hex,
+                tool_id=tool.id,
+                input_payload=dict(data.arguments),
+                invocation_context_payload=(
+                    data.execution_context.to_payload()
+                    if data.execution_context is not None
+                    else None
+                ),
+                target=target,
+                max_attempts=self.default_max_attempts,
+            )
+            if target.mode is ToolMode.BACKGROUND:
+                run.queue()
+                self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
+            uow.tool_runs.add(run)
+            uow.collect(run)
+            uow.commit()
 
         if target.mode is ToolMode.INLINE:
-            return await self._perform_run(run.id)
+            return await self._perform_run(
+                run.id,
+                execution_context=data.execution_context,
+            )
 
         if target.mode is ToolMode.BACKGROUND:
             return run
@@ -534,7 +435,12 @@ class ToolApplicationService:
     def execute_background_run(self, run_id: str) -> ToolRun:
         return asyncio.run(self._perform_run(run_id))
 
-    async def _perform_run(self, run_id: str) -> ToolRun:
+    async def _perform_run(
+        self,
+        run_id: str,
+        *,
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRun:
         with self.uow_factory() as uow:
             run = uow.tool_runs.get(run_id)
             if run is None:
@@ -550,7 +456,7 @@ class ToolApplicationService:
                 uow.commit()
                 return run
 
-            tool = uow.tools.get(run.tool_id)
+            tool = self._resolve_tool(run.tool_id)
             if tool is None:
                 raise ToolNotFoundError(f"Tool '{run.tool_id}' was not found.")
 
@@ -565,6 +471,11 @@ class ToolApplicationService:
             uow.commit()
             arguments = dict(run.input_payload)
             worker_id = run.worker_id
+            resolved_execution_context = (
+                execution_context
+                if execution_context is not None
+                else run.invocation_context
+            )
 
         try:
             output = await self._execute_with_heartbeat(
@@ -573,6 +484,7 @@ class ToolApplicationService:
                 run_id=run.id,
                 target=run.target,
                 worker_id=worker_id,
+                execution_context=resolved_execution_context,
             )
         except Exception as exc:
             return self._fail_run(run_id, str(exc))
@@ -602,11 +514,119 @@ class ToolApplicationService:
         run_id: str,
         target: ToolExecutionTarget,
         worker_id: str | None,
-    ) -> Any:
+        execution_context: ToolExecutionContext | None,
+    ) -> ToolRunResult:
         if target.mode is not ToolMode.BACKGROUND or worker_id is None:
-            return await self.runtime_gateway.execute(tool, target, arguments)
-        with self._heartbeat_while_processing(run_id=run_id, worker_id=worker_id):
-            return await self.runtime_gateway.execute(tool, target, arguments)
+            result = await self.runtime_gateway.execute(
+                tool,
+                target,
+                arguments,
+                execution_context=execution_context,
+            )
+        else:
+            with self._heartbeat_while_processing(run_id=run_id, worker_id=worker_id):
+                result = await self.runtime_gateway.execute(
+                    tool,
+                    target,
+                    arguments,
+                    execution_context=execution_context,
+                )
+        if not isinstance(result, ToolRunResult):
+            raise ToolValidationError(
+                f"Tool runtime '{tool.resolved_runtime_key()}' must return ToolRunResult.",
+            )
+        result = self._externalize_inline_attachments(result)
+        self._validate_result_details(result)
+        return result
+
+    def _externalize_inline_attachments(
+        self,
+        result: ToolRunResult,
+    ) -> ToolRunResult:
+        if self.artifact_service is None or not result.blocks:
+            return result
+        transformed_blocks: list[dict[str, Any]] = []
+        changed = False
+        for block in result.blocks:
+            block_type = str(block.get("type") or "").strip()
+            if block_type == IMAGE_BLOCK_TYPE:
+                transformed_blocks.append(self._externalize_image_block(block))
+                changed = True
+                continue
+            if block_type == FILE_BLOCK_TYPE:
+                transformed_blocks.append(self._externalize_file_block(block))
+                changed = True
+                continue
+            transformed_blocks.append(dict(block))
+        if not changed:
+            return result
+        return ToolRunResult(
+            content=transformed_blocks,
+            details=result.details,
+            metadata=result.metadata,
+        )
+
+    def _externalize_image_block(self, block: dict[str, Any]) -> dict[str, Any]:
+        data = block.get("data")
+        mime_type = block.get("mime_type")
+        if not isinstance(data, str) or not isinstance(mime_type, str):
+            return dict(block)
+        decoded = _decode_tool_attachment_bytes(data)
+        if decoded is None:
+            return dict(block)
+        name = block.get("name")
+        artifact = self.artifact_service.create_artifact(
+            data=decoded,
+            mime_type=mime_type,
+            name=name if isinstance(name, str) and name.strip() else None,
+            metadata={"source": "tool.inline_image"},
+        )
+        return image_ref_content_block(
+            artifact_id=artifact.id,
+            mime_type=artifact.mime_type,
+            name=artifact.name,
+        )
+
+    def _externalize_file_block(self, block: dict[str, Any]) -> dict[str, Any]:
+        data = block.get("data")
+        mime_type = block.get("mime_type")
+        if not isinstance(data, str) or not isinstance(mime_type, str):
+            return dict(block)
+        decoded = _decode_tool_attachment_bytes(data)
+        if decoded is None:
+            return dict(block)
+        name = block.get("name")
+        artifact = self.artifact_service.create_artifact(
+            data=decoded,
+            mime_type=mime_type,
+            name=name if isinstance(name, str) and name.strip() else None,
+            metadata={"source": "tool.inline_file"},
+        )
+        return file_ref_content_block(
+            artifact_id=artifact.id,
+            mime_type=artifact.mime_type,
+            name=artifact.name,
+        )
+
+    def _validate_result_details(self, result: ToolRunResult) -> None:
+        if result.details is None:
+            return
+        try:
+            serialized = json.dumps(
+                result.details,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except TypeError as exc:
+            raise ToolValidationError(
+                "Tool run result details must be JSON-serializable.",
+            ) from exc
+        if len(serialized) > self.details_max_chars:
+            raise ToolValidationError(
+                "Tool run result details exceed the allowed size budget "
+                f"({self.details_max_chars} chars).",
+            )
 
     @contextmanager
     def _heartbeat_while_processing(
@@ -704,6 +724,73 @@ class ToolApplicationService:
             uow.commit()
             return failed_run
 
+    def _runtime_system_tool_map(self) -> dict[str, Tool]:
+        return {
+            tool.id: tool
+            for tool in self.runtime_gateway.list_local_tools()
+            if SYSTEM_MANAGED_TOOL_TAG in tool.tags
+        }
+
+    def _runtime_local_tool_map(self) -> dict[str, Tool]:
+        self._refresh_local_extension_discovery()
+        return {
+            tool.id: tool
+            for tool in self.runtime_gateway.list_local_tools()
+        }
+
+    def _runtime_system_tool(self, tool_id: str) -> Tool | None:
+        return self._runtime_system_tool_map().get(tool_id)
+
+    def _resolved_tool_map(self) -> dict[str, Tool]:
+        runtime_tools = self._runtime_local_tool_map()
+        resolved: dict[str, Tool] = dict(runtime_tools)
+        for spec in self._discover_specs(provider_name=None):
+            resolved.setdefault(spec.id, runtime_tools.get(spec.id) or self._build_tool_from_spec(spec))
+        for tool_id, tool in self._manual_tools.items():
+            resolved[tool_id] = tool
+        return resolved
+
+    def _resolve_tool(self, tool_id: str) -> Tool | None:
+        manual_tool = self._manual_tools.get(tool_id)
+        if manual_tool is not None:
+            return manual_tool
+        runtime_tool = self._runtime_local_tool_map().get(tool_id)
+        if runtime_tool is not None:
+            return runtime_tool
+        for spec in self._discover_specs(provider_name=None):
+            if spec.id == tool_id:
+                return self._build_tool_from_spec(spec)
+        return None
+
+    def _discover_specs(
+        self,
+        *,
+        provider_name: str | None,
+    ) -> list[ToolSpec]:
+        if self.discovery_gateway is None:
+            if provider_name is not None:
+                raise ToolDiscoveryProviderNotFoundError(
+                    f"Tool discovery provider '{provider_name}' is not configured.",
+                )
+            return []
+        provider_names = {
+            provider.name for provider in self.discovery_gateway.list_providers()
+        }
+        if provider_name is not None and provider_name not in provider_names:
+            raise ToolDiscoveryProviderNotFoundError(
+                f"Tool discovery provider '{provider_name}' was not found.",
+            )
+        return self.discovery_gateway.discover(provider_name=provider_name)
+
+    def _refresh_local_extension_discovery(self) -> None:
+        if self.discovery_gateway is None:
+            return
+        provider_names = {
+            provider.name for provider in self.discovery_gateway.list_providers()
+        }
+        if "local_filesystem" in provider_names:
+            self.discovery_gateway.discover(provider_name="local_filesystem")
+
     def _build_tool(self, data: RegisterToolInput) -> Tool:
         return Tool(
             id=data.id,
@@ -777,3 +864,10 @@ class ToolApplicationService:
         if normalized == DISPATCH_LEASE_EXPIRED_REASON:
             return DISPATCH_LEASE_EXHAUSTED_REASON
         return f"{normalized} (retry budget exhausted)"
+
+
+def _decode_tool_attachment_bytes(data: str) -> bytes | None:
+    try:
+        return base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None

@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from crxzipple.modules.agent.domain.exceptions import AgentValidationError
+
+
+_VALID_MEMORY_RETRIEVAL_BACKENDS = frozenset({"keyword", "hybrid", "vector"})
+
 
 @dataclass(frozen=True, slots=True)
 class AgentIdentity:
@@ -133,7 +138,7 @@ class AgentLlmRoutingPolicy:
 @dataclass(frozen=True, slots=True)
 class AgentExecutionPolicy:
     timeout_seconds: int = 120
-    max_turns: int = 12
+    max_turns: int = 99
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -149,7 +154,7 @@ class AgentExecutionPolicy:
         payload = payload or {}
         return cls(
             timeout_seconds=int(payload.get("timeout_seconds", 120)),
-            max_turns=int(payload.get("max_turns", 12)),
+            max_turns=int(payload.get("max_turns", 99)),
         )
 
 
@@ -159,6 +164,7 @@ class AgentRuntimePreferences:
     workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
+    memory_retrieval_backend: str | None = None
     attrs: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -169,6 +175,11 @@ class AgentRuntimePreferences:
             self,
             "sandbox_mode",
             _normalize_optional_text(self.sandbox_mode),
+        )
+        object.__setattr__(
+            self,
+            "memory_retrieval_backend",
+            _normalize_memory_retrieval_backend(self.memory_retrieval_backend),
         )
         object.__setattr__(self, "attrs", dict(self.attrs))
 
@@ -194,6 +205,8 @@ class AgentRuntimePreferences:
             payload["workspace"] = self.workspace
         if self.sandbox_mode is not None:
             payload["sandbox_mode"] = self.sandbox_mode
+        if self.memory_retrieval_backend is not None:
+            payload["memory_retrieval_backend"] = self.memory_retrieval_backend
         return payload
 
     @classmethod
@@ -223,6 +236,11 @@ class AgentRuntimePreferences:
                 if payload.get("sandbox_mode") is not None
                 else None
             ),
+            memory_retrieval_backend=(
+                str(payload["memory_retrieval_backend"])
+                if payload.get("memory_retrieval_backend") is not None
+                else None
+            ),
             attrs=dict(payload.get("attrs", {}))
             if isinstance(payload.get("attrs"), dict)
             else {},
@@ -234,6 +252,16 @@ def _normalize_optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+def _normalize_memory_retrieval_backend(value: str | None) -> str | None:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        return None
+    if normalized not in _VALID_MEMORY_RETRIEVAL_BACKENDS:
+        raise AgentValidationError(
+            f"Unsupported memory_retrieval_backend '{normalized}'.",
+        )
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
