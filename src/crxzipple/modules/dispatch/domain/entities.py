@@ -12,7 +12,7 @@ from crxzipple.modules.dispatch.domain.value_objects import (
     validate_lease_seconds,
 )
 from crxzipple.shared.domain import AggregateRoot
-from crxzipple.shared.domain.events import DomainEvent
+from crxzipple.shared.domain.events import Event
 
 
 @dataclass(kw_only=True)
@@ -88,7 +88,7 @@ class DispatchTask(AggregateRoot[str]):
             metadata=metadata or {},
         )
         task.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.created",
                 payload={
                     "task_id": task.id,
@@ -128,10 +128,12 @@ class DispatchTask(AggregateRoot[str]):
         self.updated_at = timestamp
         self.completed_at = None
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.queued",
                 payload={
                     "task_id": self.id,
+                    "owner_kind": self.owner_kind,
+                    "owner_id": self.owner_id,
                     "lane_key": self.lane_key,
                     "priority": self.priority,
                     "policy": self.policy.value,
@@ -169,7 +171,7 @@ class DispatchTask(AggregateRoot[str]):
         self.error = None
         self.completed_at = None
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.claimed",
                 payload={
                     "task_id": self.id,
@@ -218,7 +220,7 @@ class DispatchTask(AggregateRoot[str]):
         self.lease_expires_at = timestamp + timedelta(seconds=validated_lease_seconds)
         self.updated_at = timestamp
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.heartbeated",
                 payload={
                     "task_id": self.id,
@@ -236,7 +238,7 @@ class DispatchTask(AggregateRoot[str]):
         self._clear_claim_state()
         self.updated_at = timestamp
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.waiting",
                 payload={
                     "task_id": self.id,
@@ -268,10 +270,12 @@ class DispatchTask(AggregateRoot[str]):
         self.queued_at = timestamp
         self.updated_at = timestamp
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.requeued",
                 payload={
                     "task_id": self.id,
+                    "owner_kind": self.owner_kind,
+                    "owner_id": self.owner_id,
                     "lane_key": self.lane_key,
                     "policy": self.policy.value,
                     "priority": self.priority,
@@ -297,7 +301,7 @@ class DispatchTask(AggregateRoot[str]):
         self.queued_at = timestamp
         self.updated_at = timestamp
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.recovered",
                 payload={
                     "task_id": self.id,
@@ -318,7 +322,7 @@ class DispatchTask(AggregateRoot[str]):
         self.error = None
         self._clear_claim_state()
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.completed",
                 payload={
                     "task_id": self.id,
@@ -336,7 +340,7 @@ class DispatchTask(AggregateRoot[str]):
         self.error = None
         self._clear_claim_state()
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.cancelled",
                 payload={
                     "task_id": self.id,
@@ -365,7 +369,7 @@ class DispatchTask(AggregateRoot[str]):
         self.completed_at = timestamp
         self._clear_claim_state()
         self.record_event(
-            DomainEvent(
+            Event(
                 name="dispatch.task.failed",
                 payload={
                     "task_id": self.id,

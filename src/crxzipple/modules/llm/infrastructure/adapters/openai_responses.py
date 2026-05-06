@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 import json
 from typing import Any
 
+import httpx
 import requests
 
 from crxzipple.modules.llm.application.adapters import (
@@ -14,10 +15,12 @@ from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import LlmResult, LlmUsage
 from crxzipple.modules.llm.infrastructure.adapters.common import (
+    async_sleep_before_openai_stream_retry,
     build_openai_tool_name_aliases,
     build_tool_call_intents,
     default_base_url,
     ensure_image_input_supported,
+    httpx_response_text,
     is_retryable_openai_stream_exception,
     join_url,
     openai_response_input_items,
@@ -28,6 +31,7 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     resolve_credential_binding,
     sleep_before_openai_stream_retry,
 )
+from crxzipple.shared.infrastructure.http import get_async_http_client
 
 
 class OpenAIResponsesAdapter:
@@ -40,6 +44,37 @@ class OpenAIResponsesAdapter:
     ) -> LlmAdapterResponse:
         completed_event: LlmStreamEvent | None = None
         for event in self.stream_invoke(profile, request):
+            if event.type == "completed":
+                completed_event = event
+        if completed_event is None:
+            raise RuntimeError(
+                f"OpenAI Responses profile '{profile.id}' did not complete.",
+            )
+        result_payload = completed_event.data.get("result")
+        if not isinstance(result_payload, dict):
+            raise RuntimeError(
+                f"OpenAI Responses profile '{profile.id}' completed without a result payload.",
+            )
+        result = LlmResult.from_payload(result_payload)
+        if result is None:
+            raise RuntimeError(
+                f"OpenAI Responses profile '{profile.id}' completed with an invalid result payload.",
+            )
+        provider_request_id = completed_event.data.get("provider_request_id")
+        return LlmAdapterResponse(
+            result=result,
+            provider_request_id=(
+                str(provider_request_id) if provider_request_id is not None else None
+            ),
+        )
+
+    async def invoke_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> LlmAdapterResponse:
+        completed_event: LlmStreamEvent | None = None
+        async for event in self.stream_invoke_async(profile, request):
             if event.type == "completed":
                 completed_event = event
         if completed_event is None:
@@ -108,6 +143,56 @@ class OpenAIResponsesAdapter:
                 if callable(close):
                     close()
 
+    async def stream_invoke_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> AsyncIterator[LlmStreamEvent]:
+        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
+        alias_to_original = {
+            alias: original
+            for original, alias in tool_name_aliases.items()
+        }
+        description = f"OpenAI Responses profile '{profile.id}'"
+        attempt = 1
+        while True:
+            emitted_output = False
+            try:
+                url, headers, payload = self._stream_request(
+                    profile,
+                    request,
+                    tool_name_aliases=tool_name_aliases,
+                )
+                client = get_async_http_client(
+                    url,
+                    timeout=profile.timeout_seconds,
+                    client_factory=httpx.AsyncClient,
+                )
+                async with client.stream(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    async for event in self._stream_sse_response_async(
+                        profile,
+                        response,
+                        description=description,
+                        tool_name_aliases=alias_to_original,
+                    ):
+                        emitted_output = True
+                        yield event
+                return
+            except Exception as exc:
+                if (
+                    emitted_output
+                    or attempt >= OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS
+                    or not is_retryable_openai_stream_exception(exc)
+                ):
+                    raise
+                await async_sleep_before_openai_stream_retry(attempt)
+                attempt += 1
+
     def _open_stream(
         self,
         profile: LlmProfile,
@@ -115,6 +200,26 @@ class OpenAIResponsesAdapter:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> requests.Response:
+        url, headers, payload = self._stream_request(
+            profile,
+            request,
+            tool_name_aliases=tool_name_aliases,
+        )
+        return requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=profile.timeout_seconds,
+            stream=True,
+        )
+
+    def _stream_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
         ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
             profile.credential_binding,
@@ -159,12 +264,10 @@ class OpenAIResponsesAdapter:
 
         payload["stream"] = True
 
-        return requests.post(
+        return (
             join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses"),
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
-            stream=True,
+            headers,
+            payload,
         )
 
     @classmethod
@@ -188,7 +291,7 @@ class OpenAIResponsesAdapter:
         current_event: str | None = None
         data_lines: list[str] = []
         sequence = 1
-        for raw_line in response.iter_lines(decode_unicode=False):
+        for raw_line in response.iter_lines(chunk_size=1, decode_unicode=False):
             if raw_line is None:
                 continue
             line = (
@@ -196,6 +299,70 @@ class OpenAIResponsesAdapter:
                 if isinstance(raw_line, bytes)
                 else str(raw_line)
             ).rstrip("\r\n")
+            if line.startswith("event: "):
+                current_event = line[7:]
+                continue
+            if line.startswith("data: "):
+                data_lines.append(line[6:])
+                continue
+            if line:
+                continue
+            event, event_completed = cls._consume_sse_event(
+                profile,
+                current_event,
+                data_lines,
+                sequence=sequence,
+                description=description,
+                tool_name_aliases=tool_name_aliases,
+            )
+            if event is not None:
+                yield event
+                sequence += 1
+            if event_completed:
+                return
+            current_event = None
+            data_lines = []
+
+        if data_lines:
+            event, event_completed = cls._consume_sse_event(
+                profile,
+                current_event,
+                data_lines,
+                sequence=sequence,
+                description=description,
+                tool_name_aliases=tool_name_aliases,
+            )
+            if event is not None:
+                yield event
+            if event_completed:
+                return
+
+        raise RuntimeError(f"{description} returned an incomplete SSE response.")
+
+    @classmethod
+    async def _stream_sse_response_async(
+        cls,
+        profile: LlmProfile,
+        response: httpx.Response,
+        *,
+        description: str,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> AsyncIterator[LlmStreamEvent]:
+        if response.status_code >= 400:
+            response_text = await httpx_response_text(response)
+            if response.status_code in OPENAI_TRANSIENT_HTTP_STATUS_CODES:
+                raise RetryableOpenAIStreamError(
+                    f"{description} failed with HTTP {response.status_code}: {response_text}",
+                )
+            raise RuntimeError(
+                f"{description} failed with HTTP {response.status_code}: {response_text}",
+            )
+
+        current_event: str | None = None
+        data_lines: list[str] = []
+        sequence = 1
+        async for line in response.aiter_lines():
+            line = line.rstrip("\r\n")
             if line.startswith("event: "):
                 current_event = line[7:]
                 continue
@@ -259,8 +426,16 @@ class OpenAIResponsesAdapter:
         if not isinstance(payload, dict):
             return None, False
 
+        resolved_event_name = (
+            event_name
+            if isinstance(event_name, str) and event_name.strip()
+            else payload.get("type")
+            if isinstance(payload.get("type"), str)
+            else None
+        )
+
         response_payload = payload.get("response")
-        if event_name == "response.completed":
+        if resolved_event_name == "response.completed":
             if isinstance(response_payload, dict):
                 response = cls._build_response(
                     profile,
@@ -293,8 +468,10 @@ class OpenAIResponsesAdapter:
                 f"{description} returned an error event: {message or payload}",
             )
 
-        if event_name == "response.output_text.delta":
+        if resolved_event_name == "response.output_text.delta":
             delta = payload.get("delta")
+            if delta is None:
+                delta = payload.get("text")
             if delta is not None:
                 return (
                     LlmStreamEvent(

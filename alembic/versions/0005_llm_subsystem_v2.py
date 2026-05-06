@@ -24,61 +24,13 @@ def upgrade() -> None:
 
     op.rename_table("llms", "llm_profiles")
 
-    with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
-        batch_op.add_column(
-            sa.Column(
-                "api_family",
-                sa.String(length=100),
-                nullable=False,
-                server_default="openai_responses",
-            ),
-        )
-        batch_op.add_column(
-            sa.Column(
-                "model_family",
-                sa.String(length=100),
-                nullable=False,
-                server_default="general",
-            ),
-        )
-        batch_op.add_column(
-            sa.Column(
-                "capabilities",
-                sa.JSON(),
-                nullable=False,
-                server_default=sa.text("'[]'"),
-            ),
-        )
-        batch_op.add_column(
-            sa.Column(
-                "default_params",
-                sa.JSON(),
-                nullable=False,
-                server_default=sa.text("'{}'"),
-            ),
-        )
-        batch_op.add_column(
-            sa.Column("base_url", sa.String(length=500), nullable=True),
-        )
-        batch_op.add_column(
-            sa.Column("credential_binding", sa.String(length=255), nullable=True),
-        )
-        batch_op.add_column(
-            sa.Column(
-                "timeout_seconds",
-                sa.Integer(),
-                nullable=False,
-                server_default="60",
-            ),
-        )
-        batch_op.add_column(
-            sa.Column(
-                "source_kind",
-                sa.String(length=100),
-                nullable=False,
-                server_default="manual",
-            ),
-        )
+    if bind.dialect.name == "postgresql":
+        for column in _llm_profile_v2_columns():
+            op.add_column("llm_profiles", column)
+    else:
+        with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
+            for column in _llm_profile_v2_columns():
+                batch_op.add_column(column)
 
     existing_profiles = bind.execute(
         sa.text("SELECT id, temperature FROM llm_profiles"),
@@ -86,14 +38,15 @@ def upgrade() -> None:
     for row in existing_profiles:
         default_params = json.dumps({"temperature": row.temperature})
         bind.execute(
-            sa.text(
-                "UPDATE llm_profiles SET default_params = :default_params WHERE id = :id",
-            ),
+            _default_params_update_stmt(bind),
             {"id": row.id, "default_params": default_params},
         )
 
-    with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
-        batch_op.drop_column("temperature")
+    if bind.dialect.name == "postgresql":
+        op.drop_column("llm_profiles", "temperature")
+    else:
+        with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
+            batch_op.drop_column("temperature")
 
     op.create_table(
         "llm_invocations",
@@ -122,15 +75,17 @@ def downgrade() -> None:
     op.drop_index("ix_llm_invocations_llm_id", table_name="llm_invocations")
     op.drop_table("llm_invocations")
 
-    with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
-        batch_op.add_column(
-            sa.Column(
-                "temperature",
-                sa.Float(),
-                nullable=False,
-                server_default="0.0",
-            ),
-        )
+    temperature_column = sa.Column(
+        "temperature",
+        sa.Float(),
+        nullable=False,
+        server_default="0.0",
+    )
+    if bind.dialect.name == "postgresql":
+        op.add_column("llm_profiles", temperature_column)
+    else:
+        with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
+            batch_op.add_column(temperature_column)
 
     existing_profiles = bind.execute(
         sa.text("SELECT id, default_params FROM llm_profiles"),
@@ -153,14 +108,73 @@ def downgrade() -> None:
             {"id": row.id, "temperature": temperature},
         )
 
-    with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
-        batch_op.drop_column("source_kind")
-        batch_op.drop_column("timeout_seconds")
-        batch_op.drop_column("credential_binding")
-        batch_op.drop_column("base_url")
-        batch_op.drop_column("default_params")
-        batch_op.drop_column("capabilities")
-        batch_op.drop_column("model_family")
-        batch_op.drop_column("api_family")
+    if bind.dialect.name == "postgresql":
+        for column_name in reversed(_llm_profile_v2_column_names()):
+            op.drop_column("llm_profiles", column_name)
+    else:
+        with op.batch_alter_table("llm_profiles", recreate="always") as batch_op:
+            for column_name in reversed(_llm_profile_v2_column_names()):
+                batch_op.drop_column(column_name)
 
     op.rename_table("llm_profiles", "llms")
+
+
+def _llm_profile_v2_columns() -> tuple[sa.Column, ...]:
+    return (
+        sa.Column(
+            "api_family",
+            sa.String(length=100),
+            nullable=False,
+            server_default="openai_responses",
+        ),
+        sa.Column(
+            "model_family",
+            sa.String(length=100),
+            nullable=False,
+            server_default="general",
+        ),
+        sa.Column(
+            "capabilities",
+            sa.JSON(),
+            nullable=False,
+            server_default=sa.text("'[]'"),
+        ),
+        sa.Column(
+            "default_params",
+            sa.JSON(),
+            nullable=False,
+            server_default=sa.text("'{}'"),
+        ),
+        sa.Column("base_url", sa.String(length=500), nullable=True),
+        sa.Column("credential_binding", sa.String(length=255), nullable=True),
+        sa.Column(
+            "timeout_seconds",
+            sa.Integer(),
+            nullable=False,
+            server_default="60",
+        ),
+        sa.Column(
+            "source_kind",
+            sa.String(length=100),
+            nullable=False,
+            server_default="manual",
+        ),
+    )
+
+
+def _llm_profile_v2_column_names() -> tuple[str, ...]:
+    return tuple(column.name for column in _llm_profile_v2_columns())
+
+
+def _default_params_update_stmt(bind: sa.Connection) -> sa.TextClause:
+    if bind.dialect.name == "postgresql":
+        return sa.text(
+            """
+            UPDATE llm_profiles
+            SET default_params = CAST(:default_params AS JSON)
+            WHERE id = :id
+            """,
+        )
+    return sa.text(
+        "UPDATE llm_profiles SET default_params = :default_params WHERE id = :id",
+    )

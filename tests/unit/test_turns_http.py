@@ -1,11 +1,116 @@
 from __future__ import annotations
 
+import asyncio
+from crxzipple.modules.llm.domain import LlmApiFamily, LlmProviderKind
+from crxzipple.modules.orchestration.domain import OrchestrationRunStatus
+from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import ToolRunResult
+from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunStatus
 
 from tests.unit.http_test_support import *
 
 
 class TurnsHttpTestCase(HttpModuleTestCase):
+    def _process_turn_ingress(self, run_id: str) -> OrchestrationRun | None:
+            return self.client.app.state.container.orchestration_scheduler_service.process_run_request(
+                run_id=run_id,
+                worker_id="http-test-scheduler",
+            )
+
+    def _process_turn_execution(self) -> OrchestrationRun | None:
+            return process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
+
+    def test_turns_endpoint_repairs_web_mojibake_for_east_asian_text(self) -> None:
+            server = SampleLlmApiServer()
+            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            server.start()
+
+            try:
+                llm_response = self.client.post(
+                    "/llms",
+                    json={
+                        "id": "local-chat",
+                        "provider": "openai_compatible",
+                        "api_family": "openai_chat_compatible",
+                        "model_name": "llama3.2",
+                        "base_url": f"{server.base_url}/v1",
+                        "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                    },
+                )
+                self.assertEqual(llm_response.status_code, 201)
+
+                with tempfile.TemporaryDirectory() as tempdir:
+                    workspace = Path(tempdir)
+                    agent_response = self.client.post(
+                        "/agents",
+                        json={
+                            "id": "crxzipple",
+                            "name": "crxzipple",
+                            "llm_routing_policy": {"default_llm_id": "local-chat"},
+                            "instruction_policy": {"system_prompt": "Be helpful."},
+                            "runtime_preferences": {"workspace": str(workspace)},
+                        },
+                    )
+                    self.assertEqual(agent_response.status_code, 201)
+
+                    expected = (
+                        "你现在可以使用 mobile 工具控制这台已连接的 Android 手机。"
+                        "先创建会话并抓取 snapshot。"
+                    )
+                    garbled = expected.encode("utf-8").decode("latin1")
+
+                    turn_response = self.client.post(
+                        "/turns",
+                        json={
+                            "content": {
+                                "blocks": [
+                                    {"type": "text", "text": garbled},
+                                ],
+                            },
+                            "agent_id": "crxzipple",
+                            "source": "web",
+                        },
+                    )
+
+                    self.assertEqual(turn_response.status_code, 202)
+                    payload = turn_response.json()
+                    self.assertEqual(
+                        payload["run"]["inbound_instruction"]["content"]["blocks"][0]["text"],
+                        expected,
+                    )
+
+                    run_id = payload["run"]["id"]
+                    scheduled = self._process_turn_ingress(run_id)
+                    self.assertIsNotNone(scheduled)
+                    processed = self._process_turn_execution()
+                    self.assertIsNotNone(processed)
+
+                    get_response = self.client.get(f"/turns/{run_id}")
+                    self.assertEqual(get_response.status_code, 200)
+                    self.assertEqual(
+                        get_response.json()["run"]["inbound_instruction"]["content"]["blocks"][0]["text"],
+                        expected,
+                    )
+
+                    session_key = get_response.json()["run"]["session_key"]
+                    history = self.client.app.state.container.session_service.list_messages(
+                        ListSessionMessagesInput(
+                            session_key=session_key,
+                            include_archived=False,
+                        ),
+                    )
+                    self.assertEqual(
+                        history[0].content_payload["blocks"][0]["text"],
+                        expected,
+                    )
+            finally:
+                if previous_token is None:
+                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                else:
+                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                server.close()
+
     def test_turns_endpoint_submits_async_turn_without_exposing_orchestration(self) -> None:
             server = SampleLlmApiServer()
             previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
@@ -55,13 +160,14 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     self.assertEqual(turn_response.status_code, 202)
                     payload = turn_response.json()
                     self.assertIsNone(payload["output_text"])
-                    self.assertEqual(payload["run"]["status"], "queued")
-                    self.assertEqual(payload["run"]["stage"], "queued")
+                    self.assertEqual(payload["run"]["status"], "accepted")
+                    self.assertEqual(payload["run"]["stage"], "accepted")
                     self.assertEqual(payload["run"]["current_step"], 0)
+                    self.assertIsNone(payload["run"]["session_key"])
 
-                    processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                        worker_id="http-test-worker",
-                    )
+                    scheduled = self._process_turn_ingress(payload["run"]["id"])
+                    self.assertIsNotNone(scheduled)
+                    processed = self._process_turn_execution()
                     self.assertIsNotNone(processed)
 
                     get_response = self.client.get(f"/turns/{payload['run']['id']}")
@@ -96,6 +202,8 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                             "agent_instruction",
                             "runtime_context",
                             "flow_prompt",
+                            "available_tools",
+                            "session_tools",
                             "project_context",
                             "skills_catalog",
                         ],
@@ -188,9 +296,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(turn_response.status_code, 202)
             run_id = turn_response.json()["run"]["id"]
 
-            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                worker_id="http-test-worker",
-            )
+            scheduled = self._process_turn_ingress(run_id)
+            self.assertIsNotNone(scheduled)
+            processed = self._process_turn_execution()
             self.assertIsNotNone(processed)
             assert processed is not None
             self.assertEqual(processed.result_payload["llm_id"], "vision-special")
@@ -244,9 +352,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(turn_response.status_code, 202)
             run_id = turn_response.json()["run"]["id"]
 
-            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                worker_id="http-test-worker",
-            )
+            scheduled = self._process_turn_ingress(run_id)
+            self.assertIsNotNone(scheduled)
+            processed = self._process_turn_execution()
             self.assertIsNotNone(processed)
 
             compact_response = self.client.post(
@@ -268,9 +376,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 "manual",
             )
 
-            compact_run = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                worker_id="http-test-worker",
-            )
+            compact_run = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
             self.assertIsNotNone(compact_run)
             assert compact_run is not None
             self.assertEqual(compact_run.metadata["prompt_mode"], "compaction")
@@ -354,9 +460,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(turn_response.status_code, 202)
             run_id = turn_response.json()["run"]["id"]
 
-            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                worker_id="http-test-worker",
-            )
+            scheduled = self._process_turn_ingress(run_id)
+            self.assertIsNotNone(scheduled)
+            processed = self._process_turn_execution()
             self.assertIsNotNone(processed)
 
             heartbeat_response = self.client.post(
@@ -377,9 +483,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 "manual",
             )
 
-            heartbeat_run = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                worker_id="http-test-worker",
-            )
+            heartbeat_run = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
             self.assertIsNotNone(heartbeat_run)
             assert heartbeat_run is not None
             self.assertEqual(heartbeat_run.metadata["prompt_mode"], "heartbeat")
@@ -441,9 +545,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(turn_response.status_code, 202)
                 run_id = turn_response.json()["run"]["id"]
 
-                processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                    worker_id="http-test-worker",
-                )
+                scheduled = self._process_turn_ingress(run_id)
+                self.assertIsNotNone(scheduled)
+                processed = self._process_turn_execution()
                 self.assertIsNotNone(processed)
 
                 flush_response = self.client.post(
@@ -464,9 +568,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     "manual",
                 )
 
-                flush_run = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                    worker_id="http-test-worker",
-                )
+                flush_run = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
                 self.assertIsNotNone(flush_run)
                 assert flush_run is not None
                 self.assertEqual(flush_run.metadata["prompt_mode"], "memory_flush")
@@ -482,7 +584,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(entries.status_code, 200)
                 self.assertEqual(len(entries.json()), 1)
 
-    def test_turn_events_emit_approval_request_and_endpoint_resumes_run(self) -> None:
+    def test_turn_approval_endpoint_resumes_waiting_run(self) -> None:
             llm_response = self.client.post(
                 "/llms",
                 json={
@@ -533,35 +635,14 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(created.status_code, 202)
             run_id = created.json()["run"]["id"]
 
-            waiting = self.client.app.state.container.orchestration_service.process_next_queued_run(
-                worker_id="http-test-worker",
-            )
+            scheduled = self._process_turn_ingress(run_id)
+            self.assertIsNotNone(scheduled)
+            waiting = self._process_turn_execution()
             self.assertIsNotNone(waiting)
             assert waiting is not None
             self.assertEqual(waiting.stage.value, "waiting_for_confirmation")
 
-            with self.client.stream("GET", f"/turns/{run_id}/events") as response:
-                self.assertEqual(response.status_code, 200)
-                event_names: list[str] = []
-                request_id: str | None = None
-                current_event: str | None = None
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    decoded = line.decode("utf-8") if isinstance(line, bytes) else line
-                    if decoded.startswith("event: "):
-                        current_event = decoded.removeprefix("event: ").strip()
-                        event_names.append(current_event)
-                        continue
-                    if decoded.startswith("data: ") and current_event == "approval_requested":
-                        payload = json.loads(decoded.removeprefix("data: "))
-                        request_id = payload["request"]["request_id"]
-                        break
-
-            self.assertIn("snapshot", event_names)
-            self.assertIn("approval_requested", event_names)
-            self.assertIsNotNone(request_id)
-            assert request_id is not None
+            request_id = waiting.metadata["pending_approval_request"]["request_id"]
 
             approval_response = self.client.post(
                 f"/turns/{run_id}/approvals/{request_id}",
@@ -619,157 +700,17 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(get_response.status_code, 200)
             self.assertEqual(get_response.json()["run"]["status"], "cancelled")
 
-    def test_turn_events_endpoint_streams_snapshot_and_completion(self) -> None:
-            server = SampleLlmApiServer()
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
-            server.start()
-
-            try:
-                llm_response = self.client.post(
-                    "/llms",
-                    json={
-                        "id": "local-chat",
-                        "provider": "openai_compatible",
-                        "api_family": "openai_chat_compatible",
-                        "model_name": "llama3.2",
-                        "base_url": f"{server.base_url}/v1",
-                        "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
-                    },
-                )
-                self.assertEqual(llm_response.status_code, 201)
-
-                agent_response = self.client.post(
-                    "/agents",
-                    json={
-                        "id": "crxzipple",
-                        "name": "crxzipple",
-                        "llm_routing_policy": {"default_llm_id": "local-chat"},
-                        "instruction_policy": {"system_prompt": "Be helpful."},
-                    },
-                )
-                self.assertEqual(agent_response.status_code, 201)
-
-                turn_response = self.client.post(
-                    "/turns",
-                    json={
-                        "content": "hello",
-                        "agent_id": "crxzipple",
-                    },
-                )
-                self.assertEqual(turn_response.status_code, 202)
-                run_id = turn_response.json()["run"]["id"]
-
-                def _process_later() -> None:
-                    time.sleep(0.1)
-                    self.client.app.state.container.orchestration_service.process_next_queued_run(
-                        worker_id="http-sse-worker",
-                    )
-
-                worker = threading.Thread(target=_process_later)
-                worker.start()
-                try:
-                    with self.client.stream(
-                        "GET",
-                        f"/turns/{run_id}/events",
-                        params={"poll_interval_seconds": 0.05, "timeout_seconds": 2.0},
-                    ) as response:
-                        body = response.read().decode("utf-8")
-                        content_type = response.headers["content-type"]
-                        status_code = response.status_code
-                finally:
-                    worker.join(timeout=1.0)
-
-                self.assertEqual(status_code, 200)
-                self.assertIn("text/event-stream", content_type)
-                self.assertIn("event: snapshot", body)
-                self.assertIn("event: message_appended", body)
-                self.assertIn("event: completed", body)
-                self.assertIn("hello from sample llm", body)
-            finally:
-                if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
-                else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
-                server.close()
-
-    def test_turn_events_endpoint_streams_llm_text_delta(self) -> None:
-            container = self.client.app.state.container
-            container.llm_adapter_registry.register(
-                LlmApiFamily.OPENAI_CODEX_RESPONSES,
-                _FakeStreamingAdapter(),
-            )
-
-            llm_response = self.client.post(
-                "/llms",
-                json={
-                    "id": "streaming-codex",
-                    "provider": LlmProviderKind.OPENAI_CODEX.value,
-                    "api_family": LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
-                    "model_name": "gpt-5-codex",
-                },
-            )
-            self.assertEqual(llm_response.status_code, 201)
-
-            agent_response = self.client.post(
-                "/agents",
-                json={
-                    "id": "crxzipple",
-                    "name": "crxzipple",
-                    "llm_routing_policy": {"default_llm_id": "streaming-codex"},
-                    "instruction_policy": {"system_prompt": "Be helpful."},
-                },
-            )
-            self.assertEqual(agent_response.status_code, 201)
-
-            turn_response = self.client.post(
-                "/turns",
-                json={
-                    "content": "hello",
-                    "agent_id": "crxzipple",
-                },
-            )
-            self.assertEqual(turn_response.status_code, 202)
-            run_id = turn_response.json()["run"]["id"]
-
-            def _process_later() -> None:
-                time.sleep(0.1)
-                container.orchestration_service.process_next_queued_run(
-                    worker_id="http-stream-worker",
-                )
-
-            worker = threading.Thread(target=_process_later)
-            worker.start()
-            try:
-                with self.client.stream(
-                    "GET",
-                    f"/turns/{run_id}/events",
-                    params={"poll_interval_seconds": 0.05, "timeout_seconds": 2.0},
-                ) as response:
-                    body = response.read().decode("utf-8")
-                    content_type = response.headers["content-type"]
-                    status_code = response.status_code
-            finally:
-                worker.join(timeout=1.0)
-
-            self.assertEqual(status_code, 200)
-            self.assertIn("text/event-stream", content_type)
-            self.assertIn("event: snapshot", body)
-            self.assertIn("event: llm_text_delta", body)
-            self.assertIn("hello from stream", body)
-            self.assertIn("event: completed", body)
-
-    def test_turn_events_endpoint_streams_tool_started_and_completed(self) -> None:
+    def test_turn_cancel_endpoint_cascades_to_spawned_child_runs_after_parent_completed(self) -> None:
             container = self.client.app.state.container
             container.llm_adapter_registry.register(
                 LlmApiFamily.OPENAI_RESPONSES,
-                _FakeInlineToolAdapter(),
+                _SequentialTextAdapter("parent complete"),
             )
 
             llm_response = self.client.post(
                 "/llms",
                 json={
-                    "id": "inline-tool-llm",
+                    "id": "session-stop-llm",
                     "provider": LlmProviderKind.OPENAI.value,
                     "api_family": LlmApiFamily.OPENAI_RESPONSES.value,
                     "model_name": "gpt-5.4-mini",
@@ -782,71 +723,69 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 json={
                     "id": "crxzipple",
                     "name": "crxzipple",
-                    "llm_routing_policy": {"default_llm_id": "inline-tool-llm"},
+                    "llm_routing_policy": {"default_llm_id": "session-stop-llm"},
                     "instruction_policy": {"system_prompt": "Be helpful."},
                 },
             )
             self.assertEqual(agent_response.status_code, 201)
 
-            tool = container.tool_service.register(
-                RegisterToolInput(
-                    id="echo",
-                    name="Echo",
-                    description="Echoes a message.",
-                    supported_modes=(ToolMode.INLINE,),
-                    runtime_key="echo",
-                ),
-            )
-
-            async def echo(arguments: dict[str, object]) -> ToolRunResult:
-                return ToolRunResult.text(
-                    str(arguments.get("message") or ""),
-                    details={"echo": arguments.get("message")},
-                )
-
-            container.local_tool_catalog.register(tool, echo)
-
             turn_response = self.client.post(
                 "/turns",
                 json={
-                    "content": "hello",
+                    "content": "parent request",
                     "agent_id": "crxzipple",
                 },
             )
             self.assertEqual(turn_response.status_code, 202)
-            run_id = turn_response.json()["run"]["id"]
+            turn_id = turn_response.json()["run"]["id"]
 
-            def _process_later() -> None:
-                time.sleep(0.1)
-                container.orchestration_service.process_next_queued_run(
-                    worker_id="http-tool-sse-worker",
-                )
+            scheduled = self._process_turn_ingress(turn_id)
+            self.assertIsNotNone(scheduled)
+            processed = self._process_turn_execution()
+            self.assertIsNotNone(processed)
+            assert processed is not None
+            self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
 
-            worker = threading.Thread(target=_process_later)
-            worker.start()
-            try:
-                with self.client.stream(
-                    "GET",
-                    f"/turns/{run_id}/events",
-                    params={"poll_interval_seconds": 0.05, "timeout_seconds": 2.0},
-                ) as response:
-                    body = response.read().decode("utf-8")
-                    content_type = response.headers["content-type"]
-                    status_code = response.status_code
-            finally:
-                worker.join(timeout=1.0)
+            session_key = processed.session_key
+            self.assertIsNotNone(session_key)
+            assert session_key is not None
 
-            self.assertEqual(status_code, 200)
-            self.assertIn("text/event-stream", content_type)
-            self.assertIn("event: snapshot", body)
-            self.assertIn("event: message_appended", body)
-            self.assertIn("event: tool_started", body)
-            self.assertIn("event: tool_completed", body)
-            self.assertIn("\"tool_name\": \"echo\"", body)
-            self.assertIn("\"tool_status\": \"succeeded\"", body)
-            self.assertIn("tool loop complete", body)
-            self.assertIn("event: completed", body)
+            spawn_tool_run = asyncio.run(
+                container.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="sessions_spawn",
+                        arguments={"text": "background child work"},
+                        execution_context=ToolExecutionContext(
+                            attrs={
+                                "session_key": session_key,
+                                "agent_id": "crxzipple",
+                                "run_id": turn_id,
+                            },
+                        ),
+                    ),
+                ),
+            )
+            self.assertEqual(spawn_tool_run.status, ToolRunStatus.SUCCEEDED)
+            child_run_id = spawn_tool_run.result.metadata["run_id"]
 
+            cancel_response = self.client.post(
+                f"/turns/{turn_id}/cancel",
+                json={"reason": "user_stopped_requester"},
+            )
+            self.assertEqual(cancel_response.status_code, 200)
+            cancel_payload = cancel_response.json()
+            self.assertEqual(cancel_payload["run"]["status"], "completed")
+            self.assertEqual(
+                cancel_payload["run"]["metadata"]["cancel_cascade"]["cancelled_run_count"],
+                1,
+            )
+            self.assertEqual(
+                cancel_payload["run"]["metadata"]["cancel_cascade"]["session_keys"],
+                [session_key, spawn_tool_run.result.metadata["child_session_key"]],
+            )
+
+            child_run = container.orchestration_run_query_service.get_run(child_run_id)
+            self.assertEqual(child_run.status, OrchestrationRunStatus.CANCELLED)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,7 @@
-from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
+from crxzipple.modules.tool.infrastructure.runtimes.registry import (
+    ToolRuntimeRegistration,
+    ToolRuntimeRegistry,
+)
 from crxzipple.modules.tool.infrastructure.runtimes.mcp_remote import (
     register_mcp_remote_handlers,
 )
@@ -23,6 +26,7 @@ __all__ = [
     "RemoteAsyncToolExecutor",
     "SandboxAsyncToolExecutor",
     "SubprocessSandboxBackend",
+    "ToolRuntimeRegistration",
     "ToolRuntimeRegistry",
     "ToolRuntimeRouter",
     "build_sandbox_backend",

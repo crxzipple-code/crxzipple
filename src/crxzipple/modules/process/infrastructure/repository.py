@@ -64,11 +64,11 @@ class FilesystemProcessSessionRepository:
             encoding="utf-8",
         )
 
-    def get(self, process_id: str) -> ProcessSession:
+    def get(self, process_id: str, *, include_output: bool = True) -> ProcessSession:
         payload = self._load_payload(process_id)
-        return self._hydrate_session(payload)
+        return self._hydrate_session(payload, include_output=include_output)
 
-    def list_all(self) -> tuple[ProcessSession, ...]:
+    def list_all(self, *, include_output: bool = True) -> tuple[ProcessSession, ...]:
         sessions: list[ProcessSession] = []
         for metadata_path in sorted(self._root_dir.glob("*/session.json")):
             try:
@@ -76,14 +76,14 @@ class FilesystemProcessSessionRepository:
             except Exception:
                 continue
             try:
-                sessions.append(self._hydrate_session(payload))
+                sessions.append(self._hydrate_session(payload, include_output=include_output))
             except Exception:
                 continue
         sessions.sort(key=lambda item: item.started_at, reverse=True)
         return tuple(sessions)
 
     def remove(self, process_id: str) -> None:
-        session_dir = self._session_dir(process_id)
+        session_dir = self._resolve_session_dir(process_id)
         if not session_dir.exists():
             raise ProcessNotFoundError(f"Process '{process_id}' was not found.")
         for child in sorted(session_dir.iterdir(), reverse=True):
@@ -114,11 +114,11 @@ class FilesystemProcessSessionRepository:
     def exit_code_path(self, process_id: str) -> Path:
         return self._exit_code_path(process_id)
 
-    def refresh(self, session: ProcessSession) -> ProcessSession:
+    def refresh(self, session: ProcessSession, *, include_output: bool = True) -> ProcessSession:
         refreshed = replace(
             session,
-            stdout=self.read_stdout(session.id),
-            stderr=self.read_stderr(session.id),
+            stdout=self.read_stdout(session.id) if include_output else "",
+            stderr=self.read_stderr(session.id) if include_output else "",
         )
         exit_code = self.read_exit_code(session.id)
         if exit_code is not None:
@@ -141,17 +141,35 @@ class FilesystemProcessSessionRepository:
     def _session_dir(self, process_id: str) -> Path:
         return self._root_dir / process_id
 
+    def _resolve_session_dir(self, process_id: str) -> Path:
+        local_dir = self._session_dir(process_id)
+        if (local_dir / "session.json").exists():
+            return local_dir
+        if Path(process_id).name != process_id:
+            return local_dir
+        try:
+            namespace_dirs = sorted(self._root_dir.parent.iterdir())
+        except OSError:
+            return local_dir
+        for namespace_dir in namespace_dirs:
+            if namespace_dir == self._root_dir or not namespace_dir.is_dir():
+                continue
+            candidate_dir = namespace_dir / process_id
+            if (candidate_dir / "session.json").exists():
+                return candidate_dir
+        return local_dir
+
     def _metadata_path(self, process_id: str) -> Path:
-        return self._session_dir(process_id) / "session.json"
+        return self._resolve_session_dir(process_id) / "session.json"
 
     def _stdout_path(self, process_id: str) -> Path:
-        return self._session_dir(process_id) / "stdout.log"
+        return self._resolve_session_dir(process_id) / "stdout.log"
 
     def _stderr_path(self, process_id: str) -> Path:
-        return self._session_dir(process_id) / "stderr.log"
+        return self._resolve_session_dir(process_id) / "stderr.log"
 
     def _exit_code_path(self, process_id: str) -> Path:
-        return self._session_dir(process_id) / "exit_code"
+        return self._resolve_session_dir(process_id) / "exit_code"
 
     def _load_payload(self, process_id: str) -> dict[str, object]:
         path = self._metadata_path(process_id)
@@ -159,7 +177,12 @@ class FilesystemProcessSessionRepository:
             raise ProcessNotFoundError(f"Process '{process_id}' was not found.")
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def _hydrate_session(self, payload: dict[str, object]) -> ProcessSession:
+    def _hydrate_session(
+        self,
+        payload: dict[str, object],
+        *,
+        include_output: bool = True,
+    ) -> ProcessSession:
         process_id = str(payload["id"])
         session = ProcessSession(
             id=process_id,
@@ -181,6 +204,8 @@ class FilesystemProcessSessionRepository:
             ended_at=_parse_datetime(payload.get("ended_at")),
             termination_requested_at=_parse_datetime(payload.get("termination_requested_at")),
         )
+        if not include_output:
+            return session
         return replace(
             session,
             stdout=self.read_stdout(process_id),

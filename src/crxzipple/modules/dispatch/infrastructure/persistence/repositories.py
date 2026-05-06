@@ -202,6 +202,48 @@ class SqlAlchemyDispatchTaskRepository:
             return None
         return self._to_entity(model)
 
+    def claim_queued(
+        self,
+        *,
+        task_id: str,
+        owner_kind: str | None = None,
+        worker_id: str,
+        claim_token: str,
+        lease_seconds: int | None = None,
+    ) -> DispatchTask | None:
+        now = utcnow()
+        filters = [
+            DispatchTaskModel.id == task_id,
+            DispatchTaskModel.status == DispatchTaskStatus.QUEUED.value,
+        ]
+        if owner_kind is not None:
+            filters.append(DispatchTaskModel.owner_kind == owner_kind)
+        updated = self.session.execute(
+            update(DispatchTaskModel)
+            .where(and_(*filters))
+            .values(
+                status=DispatchTaskStatus.CLAIMED.value,
+                claimed_by=worker_id,
+                claim_token=claim_token,
+                claimed_at=now,
+                heartbeat_at=now,
+                lease_expires_at=(
+                    now + timedelta(seconds=lease_seconds)
+                    if lease_seconds is not None
+                    else None
+                ),
+                updated_at=now,
+            ),
+        )
+        if updated.rowcount != 1:
+            return None
+
+        self.session.flush()
+        model = self.session.get(DispatchTaskModel, task_id)
+        if model is None:
+            return None
+        return self._to_entity(model)
+
     def recover_abandoned(
         self,
         *,

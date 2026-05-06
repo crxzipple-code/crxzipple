@@ -1,9 +1,65 @@
 from __future__ import annotations
 
+from crxzipple.modules.orchestration.application.intake_commands import (
+    AcceptOrchestrationRunInput,
+    EnqueueOrchestrationRunInput,
+    PrepareSessionRunInput,
+)
+from crxzipple.modules.orchestration.domain import InboundInstruction
+from crxzipple.modules.session.domain import SessionRouteContext
 from tests.unit.http_test_support import *
 
 
 class ConversationsHttpTestCase(HttpModuleTestCase):
+    def _process_turn(self, run_id: str, *, worker_id: str) -> OrchestrationRun | None:
+        _ = self.client.app.state.container.orchestration_scheduler_service.process_run_request(
+            run_id=run_id,
+            worker_id=f"{worker_id}-scheduler",
+        )
+        return process_next_orchestration_assignment(self.client.app.state.container, worker_id=worker_id)
+
+    def test_conversations_use_origin_source_label_for_subagent_sessions(self) -> None:
+        run = self.client.app.state.container.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-subagent-thread",
+                inbound_instruction=InboundInstruction(
+                    source="sessions_spawn",
+                    content="inspect this in a child session",
+                ),
+            ),
+        )
+        self.client.app.state.container.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    main_key="subagent:child-1",
+                    label="subagent",
+                    surface="session_tool",
+                ),
+            ),
+        )
+        self.client.app.state.container.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+        processed = process_next_orchestration_assignment(self.client.app.state.container, worker_id="subagent-conversation-worker")
+        self.assertIsNotNone(processed)
+        session = self.client.app.state.container.session_service.get_session(
+            "agent:assistant:subagent:child-1",
+        )
+
+        list_response = self.client.get("/conversations")
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(len(list_payload), 1)
+        self.assertEqual(list_payload[0]["session_key"], session.id)
+        self.assertEqual(list_payload[0]["source_label"], "Subagent")
+        self.assertIsNone(list_payload[0]["channel"])
+
+        get_response = self.client.get(f"/conversations/{session.id}")
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.json()["source_label"], "Subagent")
+
     def test_conversation_messages_endpoint_reads_history_by_session_key(self) -> None:
         server = SampleLlmApiServer()
         previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
@@ -44,18 +100,24 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
             )
             self.assertEqual(turn_response.status_code, 202)
             payload = turn_response.json()
-            session_key = payload["run"]["session_key"]
 
-            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            processed = self._process_turn(
+                payload["run"]["id"],
                 worker_id="http-history-worker",
             )
             self.assertIsNotNone(processed)
+            session_key = self.client.app.state.container.orchestration_run_query_service.get_run(
+                payload["run"]["id"],
+            ).session_key
+            self.assertIsNotNone(session_key)
 
             history_response = self.client.get(f"/conversations/{session_key}/messages")
             self.assertEqual(history_response.status_code, 200)
             history_payload = history_response.json()
             self.assertEqual([item["role"] for item in history_payload], ["user", "assistant"])
             self.assertNotIn("content", history_payload[0])
+            self.assertTrue(history_payload[0]["created_at"].endswith("+00:00"))
+            self.assertTrue(history_payload[1]["created_at"].endswith("+00:00"))
             self.assertEqual(
                 history_payload[0]["content_payload"],
                 {"blocks": [{"type": "text", "text": "hello"}]},
@@ -112,12 +174,16 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
                 )
                 self.assertEqual(turn_response.status_code, 202)
                 payload = turn_response.json()
-                session_key = payload["run"]["session_key"]
 
-                processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                processed = self._process_turn(
+                    payload["run"]["id"],
                     worker_id="http-conversations-worker",
                 )
                 self.assertIsNotNone(processed)
+                session_key = self.client.app.state.container.orchestration_run_query_service.get_run(
+                    payload["run"]["id"],
+                ).session_key
+                self.assertIsNotNone(session_key)
 
                 list_response = self.client.get("/conversations")
                 self.assertEqual(list_response.status_code, 200)
@@ -127,6 +193,8 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(list_payload[0]["title"], "hello")
                 self.assertEqual(list_payload[0]["latest_run_status"], "completed")
                 self.assertEqual(list_payload[0]["last_message_preview"], "hello from sample llm")
+                self.assertTrue(list_payload[0]["created_at"].endswith("+00:00"))
+                self.assertTrue(list_payload[0]["updated_at"].endswith("+00:00"))
 
                 get_response = self.client.get(f"/conversations/{session_key}")
                 self.assertEqual(get_response.status_code, 200)
@@ -134,12 +202,211 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(get_payload["session_key"], session_key)
                 self.assertEqual(get_payload["title"], "hello")
                 self.assertEqual(get_payload["latest_run_status"], "completed")
+                self.assertTrue(get_payload["created_at"].endswith("+00:00"))
+                self.assertTrue(get_payload["updated_at"].endswith("+00:00"))
             finally:
                 if previous_token is None:
                     os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
                 else:
                     os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
                 server.close()
+
+    def test_conversation_messages_endpoint_supports_after_sequence_no(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            turn_response = self.client.post(
+                "/turns",
+                json={
+                    "content": "hello",
+                    "agent_id": "crxzipple",
+                },
+            )
+            self.assertEqual(turn_response.status_code, 202)
+            payload = turn_response.json()
+
+            processed = self._process_turn(
+                payload["run"]["id"],
+                worker_id="http-history-after-sequence-worker",
+            )
+            self.assertIsNotNone(processed)
+            session_key = self.client.app.state.container.orchestration_run_query_service.get_run(
+                payload["run"]["id"],
+            ).session_key
+            self.assertIsNotNone(session_key)
+
+            history_response = self.client.get(
+                f"/conversations/{session_key}/messages?after_sequence_no=1",
+            )
+            self.assertEqual(history_response.status_code, 200)
+            history_payload = history_response.json()
+            self.assertEqual(len(history_payload), 1)
+            self.assertEqual(history_payload[0]["role"], "assistant")
+            self.assertEqual(history_payload[0]["sequence_no"], 2)
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_conversation_messages_endpoint_supports_before_sequence_no(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            for prompt in ("hello", "tell me more"):
+                turn_response = self.client.post(
+                    "/turns",
+                    json={
+                        "content": prompt,
+                        "agent_id": "crxzipple",
+                    },
+                )
+                self.assertEqual(turn_response.status_code, 202)
+                processed = self._process_turn(
+                    turn_response.json()["run"]["id"],
+                    worker_id="http-history-before-sequence-worker",
+                )
+                self.assertIsNotNone(processed)
+                session_key = self.client.app.state.container.orchestration_run_query_service.get_run(
+                    turn_response.json()["run"]["id"],
+                ).session_key
+                self.assertIsNotNone(session_key)
+
+            history_response = self.client.get(
+                f"/conversations/{session_key}/messages?before_sequence_no=3",
+            )
+            self.assertEqual(history_response.status_code, 200)
+            history_payload = history_response.json()
+            self.assertEqual([item["sequence_no"] for item in history_payload], [1, 2])
+            self.assertEqual([item["role"] for item in history_payload], ["user", "assistant"])
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
+
+    def test_conversation_runs_endpoint_lists_session_turns(self) -> None:
+        server = SampleLlmApiServer()
+        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
+        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+        server.start()
+
+        try:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "local-chat",
+                    "provider": "openai_compatible",
+                    "api_family": "openai_chat_compatible",
+                    "model_name": "llama3.2",
+                    "base_url": f"{server.base_url}/v1",
+                    "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "local-chat"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+
+            run_ids: list[str] = []
+            session_key: str | None = None
+            for prompt in ("hello", "tell me more"):
+                turn_response = self.client.post(
+                    "/turns",
+                    json={
+                        "content": prompt,
+                        "agent_id": "crxzipple",
+                    },
+                )
+                self.assertEqual(turn_response.status_code, 202)
+                run_id = turn_response.json()["run"]["id"]
+                run_ids.append(run_id)
+                processed = self._process_turn(
+                    run_id,
+                    worker_id="http-conversation-runs-worker",
+                )
+                self.assertIsNotNone(processed)
+                session_key = self.client.app.state.container.orchestration_run_query_service.get_run(
+                    run_id,
+                ).session_key
+                self.assertIsNotNone(session_key)
+
+            runs_response = self.client.get(f"/conversations/{session_key}/runs")
+            self.assertEqual(runs_response.status_code, 200)
+            runs_payload = runs_response.json()
+            self.assertEqual([item["id"] for item in runs_payload], list(reversed(run_ids)))
+            self.assertTrue(runs_payload[0]["created_at"].endswith("+00:00"))
+            self.assertEqual(runs_payload[0]["session_key"], session_key)
+        finally:
+            if previous_token is None:
+                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+            else:
+                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+            server.close()
 
     def test_conversations_use_stable_title_instead_of_latest_message_preview(self) -> None:
             server = SampleLlmApiServer()
@@ -185,7 +452,8 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
                         },
                     )
                     self.assertEqual(turn_response.status_code, 202)
-                    processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+                    processed = self._process_turn(
+                        turn_response.json()["run"]["id"],
                         worker_id="http-conversation-title-worker",
                     )
                     self.assertIsNotNone(processed)
@@ -245,7 +513,8 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
             )
             self.assertEqual(turn_response.status_code, 202)
 
-            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            processed = self._process_turn(
+                turn_response.json()["run"]["id"],
                 worker_id="http-preview-worker",
             )
             self.assertIsNotNone(processed)
@@ -297,7 +566,8 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
             )
             self.assertEqual(turn_response.status_code, 202)
 
-            processed = self.client.app.state.container.orchestration_service.process_next_queued_run(
+            processed = self._process_turn(
+                turn_response.json()["run"]["id"],
                 worker_id="http-preview-worker",
             )
             self.assertIsNotNone(processed)

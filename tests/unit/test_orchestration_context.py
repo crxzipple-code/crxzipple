@@ -4,8 +4,46 @@ import threading
 
 from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain import LlmCapability
+from crxzipple.modules.orchestration.application.observers import (
+    turn_session_live_topic,
+)
+from crxzipple.shared.domain.events import named_event_topic
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
+
+
+class _StreamingTextAdapter:
+    def __init__(self, *deltas: str) -> None:
+        self.deltas = deltas
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(
+        self,
+        _profile: object,
+        request: LlmAdapterRequest,
+    ) -> LlmAdapterResponse:
+        self.requests.append(request)
+        return LlmAdapterResponse(result=LlmResult(text="".join(self.deltas)))
+
+    def stream_invoke(
+        self,
+        _profile: object,
+        request: LlmAdapterRequest,
+    ):
+        self.requests.append(request)
+        text = ""
+        for index, delta in enumerate(self.deltas, start=1):
+            text += delta
+            yield LlmStreamEvent(
+                type="text_delta",
+                sequence=index,
+                data={"text": delta},
+            )
+        yield LlmStreamEvent(
+            type="completed",
+            sequence=len(self.deltas) + 1,
+            data={"result": LlmResult(text=text).to_payload()},
+        )
 
 
 class _BlockingStreamingAdapter:
@@ -76,13 +114,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-tool-attachment-routing",
                 inbound_instruction=InboundInstruction(source="cli", content="look"),
             ),
         )
-        run = self.container.orchestration_service.prepare_session_run(
+        run = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -103,7 +141,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 role="tool",
                 kind=SessionMessageKind.TOOL_RESULT,
                 content_payload={
-                    "tool_name": "browser",
+                    "tool_name": "browser_action",
                     "tool_call_id": "call-browser-1",
                     "status": "succeeded",
                     "output": {"ok": True},
@@ -124,13 +162,29 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 source_id="tool-run-browser-1",
                 metadata={
                     "tool_call_id": "call-browser-1",
-                    "tool_name": "browser",
+                    "tool_name": "browser_action",
                 },
             ),
         )
 
-        preview = self.container.orchestration_service.preview_prompt(run.id)
+        preview = self.container.orchestration_inspection_service.preview_prompt(run.id)
         self.assertEqual(preview.llm_id, "image-special")
+        events_service = self.container.events_service
+        assert events_service is not None
+        records = events_service.read_event_topic(
+            named_event_topic("orchestration.llm_resolved"),
+            limit=10,
+        )
+        resolver_event = next(
+            record.envelope
+            for record in records
+            if record.envelope.payload.get("run_id") == run.id
+        )
+        self.assertEqual(resolver_event.payload["status"], "resolved")
+        self.assertEqual(resolver_event.payload["requested_llm_id"], "auto")
+        self.assertEqual(resolver_event.payload["resolved_llm_id"], "image-special")
+        self.assertEqual(resolver_event.payload["strategy"], "auto-image")
+        self.assertTrue(resolver_event.payload["input_has_image"])
 
     def test_prompt_preview_materializes_image_ref_tool_attachments(self) -> None:
         self.container.llm_service.register_profile(
@@ -170,13 +224,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             name="browser-screenshot.png",
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-tool-ref-materialization",
                 inbound_instruction=InboundInstruction(source="cli", content="look"),
             ),
         )
-        run = self.container.orchestration_service.prepare_session_run(
+        run = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -197,7 +251,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 role="tool",
                 kind=SessionMessageKind.TOOL_RESULT,
                 content_payload={
-                    "tool_name": "browser",
+                    "tool_name": "browser_action",
                     "tool_call_id": "call-browser-ref-1",
                     "status": "succeeded",
                     "details": {"ok": True},
@@ -220,12 +274,12 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 source_id="tool-run-browser-ref-1",
                 metadata={
                     "tool_call_id": "call-browser-ref-1",
-                    "tool_name": "browser",
+                    "tool_name": "browser_action",
                 },
             ),
         )
 
-        preview = self.container.orchestration_service.preview_prompt(run.id)
+        preview = self.container.orchestration_inspection_service.preview_prompt(run.id)
 
         self.assertEqual(preview.llm_id, "image-special")
         tool_message = next(
@@ -239,6 +293,117 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertEqual(tool_message.content[1]["mime_type"], "image/png")
         self.assertEqual(tool_message.content[1]["data"], "ZmFrZS1wbmc=")
 
+    def test_prompt_preview_downgrades_image_ref_for_explicit_non_vision_model(self) -> None:
+        self.container.llm_service.register_profile(
+            RegisterLlmProfileInput(
+                id="text-default",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4-mini",
+            ),
+        )
+        self.container.llm_service.register_profile(
+            RegisterLlmProfileInput(
+                id="image-special",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4",
+                capabilities=(LlmCapability.VISION_INPUT,),
+            ),
+        )
+        self.container.agent_service.register_profile(
+            RegisterAgentProfileInput(
+                id="assistant",
+                name="Assistant",
+                instruction_policy=AgentInstructionPolicy(
+                    system_prompt="Be helpful and concise.",
+                ),
+                llm_routing_policy=AgentLlmRoutingPolicy(
+                    default_llm_id="text-default",
+                    image_llm_id="image-special",
+                ),
+                runtime_preferences=AgentRuntimePreferences(),
+            ),
+        )
+        artifact = self.container.artifact_service.create_artifact(
+            data=b"fake-png",
+            mime_type="image/png",
+            name="browser-screenshot.png",
+        )
+
+        run = self.container.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-tool-ref-non-vision-downgrade",
+                inbound_instruction=InboundInstruction(source="cli", content="look"),
+            ),
+        )
+        run = self.container.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+                requested_llm_id="text-default",
+            ),
+        )
+        session_key = str(run.metadata["session_key"])
+        active_session_id = run.active_session_id
+        assert active_session_id is not None
+        self.container.session_service.append_message(
+            AppendSessionMessageInput(
+                session_key=session_key,
+                session_id=active_session_id,
+                role="tool",
+                kind=SessionMessageKind.TOOL_RESULT,
+                content_payload={
+                    "tool_name": "browser_action",
+                    "tool_call_id": "call-browser-ref-2",
+                    "status": "succeeded",
+                    "details": {"ok": True},
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Browser screenshot captured.",
+                        },
+                        {
+                            "type": "image_ref",
+                            "artifact_id": artifact.id,
+                            "mime_type": "image/png",
+                            "name": "browser-screenshot.png",
+                            "preview_url": f"/artifacts/{artifact.id}/preview",
+                            "original_url": f"/artifacts/{artifact.id}/original",
+                        },
+                    ],
+                },
+                source_kind="tool_run",
+                source_id="tool-run-browser-ref-2",
+                metadata={
+                    "tool_call_id": "call-browser-ref-2",
+                    "tool_name": "browser_action",
+                },
+            ),
+        )
+
+        preview = self.container.orchestration_inspection_service.preview_prompt(run.id)
+
+        self.assertEqual(preview.llm_id, "text-default")
+        tool_message = next(
+            message for message in preview.messages if message.role.value == "tool"
+        )
+        self.assertEqual(
+            tool_message.content[0],
+            {"type": "text", "text": "Browser screenshot captured."},
+        )
+        self.assertEqual(
+            tool_message.content[1],
+            {
+                "type": "text",
+                "text": "[image attachment omitted for non-vision model:browser-screenshot.png]",
+            },
+        )
+
     def test_prompt_preview_omits_oversized_file_ref_attachments(self) -> None:
         self._register_agent_and_llm()
         artifact = self.container.artifact_service.create_artifact(
@@ -247,13 +412,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             name="huge.pdf",
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-tool-oversized-file-materialization",
                 inbound_instruction=InboundInstruction(source="cli", content="look"),
             ),
         )
-        run = self.container.orchestration_service.prepare_session_run(
+        run = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -273,7 +438,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 role="tool",
                 kind=SessionMessageKind.TOOL_RESULT,
                 content_payload={
-                    "tool_name": "browser",
+                    "tool_name": "browser_action",
                     "tool_call_id": "call-browser-file-1",
                     "status": "succeeded",
                     "details": {"ok": True},
@@ -290,12 +455,12 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 source_id="tool-run-browser-file-1",
                 metadata={
                     "tool_call_id": "call-browser-file-1",
-                    "tool_name": "browser",
+                    "tool_name": "browser_action",
                 },
             ),
         )
 
-        preview = self.container.orchestration_service.preview_prompt(run.id)
+        preview = self.container.orchestration_inspection_service.preview_prompt(run.id)
 
         tool_message = next(
             message for message in preview.messages if message.role.value == "tool"
@@ -318,13 +483,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             name="notes.md",
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-tool-text-file-materialization",
                 inbound_instruction=InboundInstruction(source="cli", content="look"),
             ),
         )
-        run = self.container.orchestration_service.prepare_session_run(
+        run = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -366,7 +531,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.container.orchestration_service.preview_prompt(run.id)
+        preview = self.container.orchestration_inspection_service.preview_prompt(run.id)
 
         tool_message = next(
             message for message in preview.messages if message.role.value == "tool"
@@ -384,13 +549,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
     def test_prompt_preview_filters_orphan_function_calls_from_transcript(self) -> None:
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-orphan-tool-call-preview",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        run = self.container.orchestration_service.prepare_session_run(
+        run = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -465,7 +630,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        preview = self.container.orchestration_service.preview_prompt(run.id)
+        preview = self.container.orchestration_inspection_service.preview_prompt(run.id)
         transcript_function_call_ids = [
             str(message.tool_call_id)
             for message in preview.messages
@@ -475,7 +640,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         ]
         self.assertEqual(transcript_function_call_ids, ["paired-call-1"])
 
-    def test_process_next_queued_run_completes_minimal_llm_loop(self) -> None:
+    def test_process_next_orchestration_assignment_completes_minimal_llm_loop(self) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -483,13 +648,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-process",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -499,11 +664,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -512,40 +677,146 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(processed.current_step, 1)
+        schema_names = sorted(schema.name for schema in adapter.requests[0].tool_schemas)
+        self.assertIn("echo", schema_names)
+        self.assertIn("read", schema_names)
+        self.assertIn("session_status", schema_names)
         assert processed.result_payload is not None
         self.assertEqual(processed.result_payload["output_text"], "hello from fake llm")
         self.assertEqual(
             processed.result_payload["llm_id"],
             "openai.gpt-5.4-mini",
         )
-        self.assertEqual(processed.worker_id, "worker-1")
 
-        self.assertEqual(len(adapter.requests), 1)
-        self.assertEqual(adapter.requests[0].messages[0].role, LlmMessageRole.SYSTEM)
-        self.assertEqual(
-            adapter.requests[0].messages[0].content,
-            "Be helpful and concise.",
+    def test_process_next_orchestration_assignment_downgrades_image_history_for_explicit_non_vision_model(
+        self,
+    ) -> None:
+        adapter = _StaticTextAdapter(text="handled without vision")
+        self.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
         )
-        self.assertEqual(adapter.requests[0].messages[1].role, LlmMessageRole.SYSTEM)
-        self.assertIn("# Runtime Context", str(adapter.requests[0].messages[1].content))
-        self.assertEqual(adapter.requests[0].messages[-1].role, LlmMessageRole.USER)
-        self.assertEqual(
-            adapter.requests[0].messages[-1].content,
-            [{"type": "text", "text": "hello"}],
-        )
-
-        session_messages = self.container.session_service.list_messages(
-            ListSessionMessagesInput(
-                session_key="agent:assistant:main",
-                active_session_only=True,
+        self.container.llm_service.register_profile(
+            RegisterLlmProfileInput(
+                id="text-default",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4-mini",
             ),
         )
-        self.assertEqual([message.role for message in session_messages], ["user", "assistant"])
-        self.assertEqual(session_messages[0].source_kind, "orchestration_run")
-        self.assertEqual(session_messages[0].source_id, run.id)
-        self.assertEqual(session_messages[1].source_kind, "llm_invocation")
+        self.container.llm_service.register_profile(
+            RegisterLlmProfileInput(
+                id="image-special",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4",
+                capabilities=(LlmCapability.VISION_INPUT,),
+            ),
+        )
+        self.container.agent_service.register_profile(
+            RegisterAgentProfileInput(
+                id="assistant",
+                name="Assistant",
+                instruction_policy=AgentInstructionPolicy(
+                    system_prompt="Be helpful and concise.",
+                ),
+                llm_routing_policy=AgentLlmRoutingPolicy(
+                    default_llm_id="text-default",
+                    image_llm_id="image-special",
+                ),
+                runtime_preferences=AgentRuntimePreferences(),
+            ),
+        )
+        artifact = self.container.artifact_service.create_artifact(
+            data=b"fake-png",
+            mime_type="image/png",
+            name="browser-screenshot.png",
+        )
 
-    def test_process_next_queued_run_scales_system_budget_to_llm_context_window(
+        run = self.container.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-process-non-vision-image-history",
+                inbound_instruction=InboundInstruction(source="cli", content="look"),
+            ),
+        )
+        run = self.container.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+                requested_llm_id="text-default",
+            ),
+        )
+        session_key = str(run.metadata["session_key"])
+        active_session_id = run.active_session_id
+        assert active_session_id is not None
+        self.container.session_service.append_message(
+            AppendSessionMessageInput(
+                session_key=session_key,
+                session_id=active_session_id,
+                role="tool",
+                kind=SessionMessageKind.TOOL_RESULT,
+                content_payload={
+                    "tool_name": "browser_action",
+                    "tool_call_id": "call-browser-ref-process-1",
+                    "status": "succeeded",
+                    "details": {"ok": True},
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Browser screenshot captured.",
+                        },
+                        {
+                            "type": "image_ref",
+                            "artifact_id": artifact.id,
+                            "mime_type": "image/png",
+                            "name": "browser-screenshot.png",
+                            "preview_url": f"/artifacts/{artifact.id}/preview",
+                            "original_url": f"/artifacts/{artifact.id}/original",
+                        },
+                    ],
+                },
+                source_kind="tool_run",
+                source_id="tool-run-browser-ref-process-1",
+                metadata={
+                    "tool_call_id": "call-browser-ref-process-1",
+                    "tool_name": "browser_action",
+                },
+            ),
+        )
+        self.container.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
+        self.assertEqual(processed.result_payload["output_text"], "handled without vision")
+        self.assertEqual(processed.result_payload["llm_id"], "text-default")
+        tool_messages = [
+            message
+            for message in adapter.requests[-1].messages
+            if message.role is LlmMessageRole.TOOL
+        ]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(
+            tool_messages[0].content[1],
+            {
+                "type": "text",
+                "text": "[image attachment omitted for non-vision model:browser-screenshot.png]",
+            },
+        )
+        self.assertEqual(len(adapter.requests), 1)
+
+    def test_process_next_orchestration_assignment_scales_system_budget_to_llm_context_window(
         self,
     ) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
@@ -574,13 +845,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-small-window-budget",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -591,11 +862,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 requested_llm_id="small-window",
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -613,7 +884,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-    def test_process_next_queued_run_injects_agents_workspace_context(self) -> None:
+    def test_process_next_orchestration_assignment_injects_agents_workspace_context(self) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -637,13 +908,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 runtime_preferences=AgentRuntimePreferences(workspace=str(workspace)),
             )
 
-            run = self.container.orchestration_service.accept(
+            run = self.container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-workspace-context",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            self.container.orchestration_service.prepare_session_run(
+            self.container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -654,11 +925,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                     requested_llm_id="openai.gpt-5.4-mini",
                 ),
             )
-            self.container.orchestration_service.enqueue(
+            self.container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
-            processed = self.container.orchestration_service.process_next_queued_run(
+            processed = process_next_orchestration_assignment(self.container,
                 worker_id="worker-1",
             )
 
@@ -676,15 +947,24 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             self.assertIn("- Agent: assistant", str(system_messages[1].content))
             self.assertIn("- Model: openai.gpt-5.4-mini", str(system_messages[1].content))
             self.assertIn("# Session Start", str(system_messages[2].content))
-            self.assertIn("# Workspace Context", str(system_messages[3].content))
-            self.assertIn("## AGENTS.md", str(system_messages[3].content))
-            self.assertIn("Follow workspace conventions.", str(system_messages[3].content))
-            self.assertIn("## SOUL.md", str(system_messages[3].content))
-            self.assertIn("Respond with calm confidence.", str(system_messages[3].content))
-            self.assertIn("## TOOLS.md", str(system_messages[3].content))
+            self.assertIn("# Available Tools", str(system_messages[3].content))
+            self.assertIn("`read`", str(system_messages[3].content))
+            self.assertIn("`memory_search`", str(system_messages[3].content))
+            self.assertIn("`sessions_send`", str(system_messages[3].content))
+            self.assertIn("Do not assume only session tools are available.", str(system_messages[3].content))
+            self.assertIn("# Session Tools", str(system_messages[4].content))
+            self.assertIn("sessions_send", str(system_messages[4].content))
+            self.assertIn("not memory recall", str(system_messages[4].content))
+            self.assertIn("Prefer `session_status` first", str(system_messages[4].content))
+            self.assertIn("# Workspace Context", str(system_messages[5].content))
+            self.assertIn("## AGENTS.md", str(system_messages[5].content))
+            self.assertIn("Follow workspace conventions.", str(system_messages[5].content))
+            self.assertIn("## SOUL.md", str(system_messages[5].content))
+            self.assertIn("Respond with calm confidence.", str(system_messages[5].content))
+            self.assertIn("## TOOLS.md", str(system_messages[5].content))
             self.assertIn(
                 "Prefer tools when grounded facts are needed.",
-                str(system_messages[3].content),
+                str(system_messages[5].content),
             )
             self.assertIn(
                 f"- Agent home / workspace: {workspace}",
@@ -698,6 +978,8 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                     "agent_instruction",
                     "runtime_context",
                     "flow_prompt",
+                    "available_tools",
+                    "session_tools",
                     "project_context",
                     "skills_catalog",
                 ],
@@ -732,7 +1014,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 [{"type": "text", "text": "hello"}],
             )
 
-    def test_process_next_queued_run_uses_session_bound_workspace_context(self) -> None:
+    def test_process_next_orchestration_assignment_uses_session_bound_workspace_context(self) -> None:
         adapter = _StaticTextAdapter(text="workspace pinned")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -753,7 +1035,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 runtime_preferences=AgentRuntimePreferences(workspace=str(first_root)),
             )
 
-            run = self.container.orchestration_service.accept(
+            run = self.container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-session-workspace-binding",
                     inbound_instruction=InboundInstruction(
@@ -764,7 +1046,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                     max_steps=3,
                 ),
             )
-            prepared = self.container.orchestration_service.prepare_session_run(
+            prepared = self.container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -782,13 +1064,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            self.container.orchestration_service.enqueue(
+            self.container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(
                     run_id=prepared.id,
                     priority=10,
                 ),
             )
-            processed = self.container.orchestration_service.process_next_queued_run(
+            processed = process_next_orchestration_assignment(self.container,
                 worker_id="worker-session-workspace",
             )
 
@@ -827,7 +1109,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 )
             )
 
-    def test_process_next_queued_run_ignores_legacy_session_llm_metadata(
+    def test_process_next_orchestration_assignment_ignores_legacy_session_llm_metadata(
         self,
     ) -> None:
         adapter = _StaticTextAdapter(text="binding-aware llm")
@@ -837,13 +1119,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-binding-llm",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        prepared = self.container.orchestration_service.prepare_session_run(
+        prepared = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -872,10 +1154,10 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             uow.session_instances.add(instance)
             uow.commit()
 
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -893,13 +1175,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-llm-failure",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -910,11 +1192,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 requested_llm_id="openai.gpt-5.4-mini",
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -927,21 +1209,21 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertIn("adapter_error", processed.error.message)
         self.assertIn("sample adapter failure", processed.error.message)
 
-    def test_process_next_queued_run_tolerates_cancelled_streaming_run(self) -> None:
-        adapter = _BlockingStreamingAdapter()
+    def test_process_next_orchestration_assignment_publishes_raw_llm_text_delta(self) -> None:
+        adapter = _StreamingTextAdapter("he", "llo")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
-                run_id="run-stream-cancelled",
+                run_id="run-stream-delta-live",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        prepared = self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -951,7 +1233,72 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        live_records = self.container.events_service.read_event_topic(
+            turn_session_live_topic(str(prepared.metadata["session_key"])),
+            limit=10,
+        )
+        live_payloads = [
+            record.envelope.payload
+            for record in live_records
+            if record.envelope.payload.get("event_name")
+            == "orchestration.run.llm_text_delta"
+        ]
+        self.assertEqual(
+            [payload.get("text") for payload in live_payloads],
+            ["", "he", "hello"],
+        )
+        self.assertEqual(
+            [payload.get("text_delta") for payload in live_payloads],
+            ["", "he", "llo"],
+        )
+        named_records = self.container.events_service.read_event_topic(
+            named_event_topic("orchestration.run.llm_text_delta"),
+            limit=10,
+        )
+        named_payloads = [
+            record.envelope.payload
+            for record in named_records
+            if record.envelope.payload.get("run_id") == run.id
+        ]
+        self.assertEqual(
+            [payload.get("text") for payload in named_payloads],
+            ["", "he", "hello"],
+        )
+
+    def test_process_next_orchestration_assignment_tolerates_cancelled_streaming_run(self) -> None:
+        adapter = _BlockingStreamingAdapter()
+        self.container.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        run = self.container.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-stream-cancelled",
+                inbound_instruction=InboundInstruction(source="cli", content="hello"),
+            ),
+        )
+        self.container.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -959,7 +1306,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         def _process() -> None:
             try:
-                outcome["run"] = self.container.orchestration_service.process_next_queued_run(
+                outcome["run"] = process_next_orchestration_assignment(self.container,
                     worker_id="worker-1",
                 )
             except Exception as exc:  # pragma: no cover - asserted below
@@ -969,7 +1316,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         worker.start()
         self.assertTrue(adapter.started.wait(timeout=2.0))
 
-        cancelled = self.container.orchestration_service.cancel_run(
+        cancelled = self.container.orchestration_cancellation_service.cancel_run(
             run.id,
             reason="user_cancelled",
         )
@@ -983,5 +1330,5 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.CANCELLED)
-        refreshed = self.container.orchestration_service.get_run(run.id)
+        refreshed = self.container.orchestration_run_query_service.get_run(run.id)
         self.assertEqual(refreshed.status, OrchestrationRunStatus.CANCELLED)

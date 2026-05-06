@@ -21,6 +21,10 @@ from crxzipple.modules.llm.infrastructure.persistence.models import (
     LlmInvocationModel,
     LlmProfileModel,
 )
+from crxzipple.shared.time import (
+    coerce_utc_datetime,
+    coerce_optional_utc_datetime,
+)
 
 
 class SqlAlchemyLlmProfileRepository:
@@ -41,6 +45,8 @@ class SqlAlchemyLlmProfileRepository:
                 base_url=profile.base_url,
                 credential_binding=profile.credential_binding,
                 timeout_seconds=profile.timeout_seconds,
+                max_concurrency=profile.max_concurrency,
+                concurrency_key=profile.concurrency_key,
                 source_kind=profile.source_kind.value,
                 enabled=profile.enabled,
             ),
@@ -74,6 +80,8 @@ class SqlAlchemyLlmProfileRepository:
             base_url=model.base_url,
             credential_binding=model.credential_binding,
             timeout_seconds=model.timeout_seconds,
+            max_concurrency=model.max_concurrency,
+            concurrency_key=model.concurrency_key,
             source_kind=LlmSourceKind(model.source_kind),
             enabled=model.enabled,
         )
@@ -122,15 +130,26 @@ class SqlAlchemyLlmInvocationRepository:
             return None
         return self._to_entity(model)
 
-    def list(self, *, llm_id: str | None = None) -> list[LlmInvocation]:
+    def list(
+        self,
+        *,
+        llm_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[LlmInvocation]:
         statement = select(LlmInvocationModel)
         if llm_id is not None:
             statement = statement.where(LlmInvocationModel.llm_id == llm_id)
+        statement = statement.order_by(
+            LlmInvocationModel.created_at.desc(),
+            LlmInvocationModel.id,
+        )
+        if offset > 0:
+            statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(max(int(limit), 0))
         models = self.session.scalars(
-            statement.order_by(
-                LlmInvocationModel.created_at.desc(),
-                LlmInvocationModel.id,
-            ),
+            statement,
         ).all()
         return [self._to_entity(model) for model in models]
 
@@ -157,7 +176,7 @@ class SqlAlchemyLlmInvocationRepository:
             result=LlmResult.from_payload(model.result_payload),
             error=LlmErrorPayload.from_payload(model.error_payload),
             provider_request_id=model.provider_request_id,
-            created_at=model.created_at,
-            started_at=model.started_at,
-            completed_at=model.completed_at,
+            created_at=coerce_utc_datetime(model.created_at),
+            started_at=coerce_optional_utc_datetime(model.started_at),
+            completed_at=coerce_optional_utc_datetime(model.completed_at),
         )

@@ -2,85 +2,36 @@
 
 ## Goal
 
-Establish a single orchestration center for all cross-subsystem coordination.
+`orchestration` is the application center for agent run coordination.
 
-The orchestration subsystem owns:
+It owns the run lifecycle that spans multiple modules:
 
 - intake normalization
-- routing
-- agent selection
-- session bulk resolution and bootstrap
-- queueing and wake-up
+- agent and model selection
+- session resolution and session bootstrap planning
+- lane-aware scheduling
+- executor assignment and recovery
 - engine advancement
 - prompt assembly
 - tool availability resolution
-- outbound delivery
+- approval and wait-state recovery
+- run observation publishing
 
-The orchestration subsystem does not own:
+It does not own the internals of the modules it coordinates:
 
-- session persistence rules
-- llm provider integration
-- tool registration or tool execution internals
-- authorization policy storage or evaluation internals
+- `session` owns conversation persistence and session message mutation.
+- `agent` owns profile data and agent policy.
+- `llm` owns provider profiles, provider adapters, and invocation details.
+- `tool` owns tool catalog, tool run records, tool workers, and tool execution details.
+- `access` and `authorization` own credential readiness and policy decisions.
+- `channels` own transport-facing runtime state and delivery.
+- `events` owns topic publish/read/wait/cursor primitives.
 
-## Boundary
+The rule is simple: orchestration may coordinate a run across modules, but it must not absorb those modules' domain logic.
 
-### Orchestration
+## Current Shape
 
-Owns all multi-subsystem coordination.
-
-### Session
-
-Owns only persistent conversation context:
-
-- `SessionBulk`
-- `Session`
-- `SessionMessage`
-
-Session does not understand interfaces, agent selection, routing, queueing, or prompt assembly.
-
-### Agent
-
-Owns profile and strategy:
-
-- system prompt defaults
-- model routing defaults
-- execution policy
-- workspace and sandbox preferences
-
-### LLM
-
-Owns:
-
-- llm profiles
-- llm invocations
-- provider adapters
-- streaming normalization
-
-### Tool
-
-Owns:
-
-- tool catalog
-- tool schemas
-- tool execution
-- `ToolRun` lifecycle
-
-### Authorization
-
-Owns authorization decisions only.
-
-## Naming
-
-Use `orchestration` as the top-level module name.
-
-Avoid `runtime` as the module name because the codebase already uses `runtime` in:
-
-- `ToolRuntimeRegistry`
-- `ToolRuntimeRouter`
-- `AgentRuntimePreferences`
-
-## Target Package Layout
+The current orchestration package is organized around an application service graph, thin public surfaces, and explicit coordinators.
 
 ```text
 src/crxzipple/modules/orchestration/
@@ -90,110 +41,148 @@ src/crxzipple/modules/orchestration/
     repositories.py
     exceptions.py
   application/
-    services.py
-    router.py
-    session_resolver.py
-    scheduler.py
+    service_graph.py
+    scheduler_service.py
+    intake_service.py
+    execution.py
     worker.py
     engine.py
+    engine_llm_invoker.py
+    engine_session_recorder.py
+    engine_tool_executor.py
     prompt_assembler.py
-    model_selector.py
+    llm_resolver.py
     tool_resolver.py
-    outbound.py
-    event_handlers.py
+    resolve_skill.py
+    maintenance.py
+    approval.py
+    cancellation.py
+    query.py
+    runtime_events.py
+    turn_submission.py
+    coordinators/
+      ingress.py
+      intake.py
+      requesting.py
+      progress.py
+      waiting.py
+      recovery.py
+      scheduler_signals.py
+    observers/
+      observation.py
+    reactions/
+      dispatch_recovery.py
+      tool_terminal.py
+    ports/
+      access.py
+      authorization.py
+      dispatch.py
+      llm.py
+      memory.py
+      runtime.py
+      skill.py
+      tool.py
   infrastructure/
+    adapters/
+    dispatchers/
     persistence/
-    queue/
   interfaces/
     http.py
     cli.py
     worker_cli.py
+    shared.py
 ```
 
-## Core Models
+Important cleanup state:
 
-### OrchestrationRun
+- There is no `OrchestrationControlService`.
+- There is no old `application/services.py` facade.
+- There is no old `application/router.py` route center.
+- There is no old `application/session_resolver.py`; session resolution is provided by the session module and used through orchestration workflows.
+- Public API/CLI/channel turn submission helpers live in `application/turn_submission.py`, not in a top-level interface helper.
 
-The single outer run aggregate.
+## Core Runtime Roles
 
-Suggested fields:
+### OrchestrationServiceGraph
 
-- `id`
-- `status`
-- `stage`
-- `bulk_key`
-- `active_session_id`
-- `agent_id`
-- `delivery_target`
-- `lane_key`
-- `priority`
-- `current_step`
-- `max_steps`
-- `pending_tool_run_ids`
-- `waiting_reason`
-- `inbound_payload`
-- `result_payload`
-- `error_payload`
-- `created_at`
-- `started_at`
-- `completed_at`
+`OrchestrationServiceGraph` wires the orchestration application. It is a composition root for orchestration services, not the old facade service.
 
-### RouteDecision
+It creates and connects:
 
-Application-level routing result.
+- `OrchestrationRunQueryService`
+- `OrchestrationIntakeService`
+- `OrchestrationSchedulerService`
+- `OrchestrationExecutorService`
+- `RunExecutionService`
+- `OrchestrationMaintenanceService`
+- `RunCancellationService`
+- `ApprovalResolutionService`
+- `ApprovalControlService`
+- run coordinators, recovery coordinators, and follow-up services
 
-Suggested fields:
+The graph may expose convenience methods for composition, but the primary runtime surfaces are the scheduler, executor, query, approval, cancellation, maintenance, and inspection services.
 
-- `agent_id`
-- `bulk_key`
-- `lane_key`
-- `priority`
-- `queue_policy`
-  Suggested values: `fifo`, `lane_jump_queue`, `jump_queue`, `resume_first`
-- `delivery_target`
-- `metadata`
+### Scheduler Service
 
-### SessionBundle
+`OrchestrationSchedulerService` is the scheduler-facing application surface.
 
-Application DTO returned by orchestration-owned session resolution.
+It accepts high-level scheduling commands and cross-process scheduler signals. It delegates actual state transitions to coordinators and publishes wake-up events when work should move forward.
 
-Suggested fields:
+It owns scheduling flow, not execution internals.
 
-- `bulk`
-- `active_session`
-- `recent_messages`
-- `resolution`
+### Executor Service
 
-This is not a new session aggregate.
+`OrchestrationExecutorService` is the executor-worker facing application surface.
 
-### PromptEnvelope
+It owns executor lease heartbeat, assignment admission, assignment processing, async assignment advancement, and executor runtime metrics. It does not decide lane semantics alone; lane safety is coordinated through scheduler/progress/lease state.
 
-The final payload passed into the llm subsystem.
+The executor exists to isolate run execution from scheduler intake and to prevent CPU-heavy work from blocking scheduler throughput. Concurrency is primarily a scheduler/executor design property, not a worker-process identity property.
 
-Suggested fields:
+### Engine
 
-- `llm_id`
-- `messages`
-- `tool_schemas`
-- `response_format`
-- `overrides`
-- `metadata`
+`OrchestrationEngine` advances one run until the next wait point or terminal state.
 
-### ResolvedToolSet
+It coordinates:
 
-The effective tool view for one run step.
+- prompt assembly
+- LLM invocation
+- inline tool execution
+- background tool submission
+- session message recording
+- result finalization
 
-Suggested fields:
+The engine does not claim queued work and does not own executor leases.
 
-- `schemas`
-- `execution_targets_by_tool`
-- `background_allowed_tools`
-- `confirmation_required_tools`
-- `hidden_policy_metadata`
+### Coordinators
 
-## State Machine
+Coordinators are the small application units that keep the service graph readable:
 
-`OrchestrationRun` owns the outer state machine:
+- `RunIngressCoordinator` records incoming run requests.
+- `RunIntakeCoordinator` routes, binds sessions, and enqueues runs.
+- `RunRequestCoordinator` creates scheduler-side requests such as heartbeats, compaction, and memory flushes.
+- `RunProgressCoordinator` moves assigned runs through running states.
+- `RunWaitCoordinator` handles approval waits, tool waits, and resume semantics.
+- `RunRecoveryCoordinator` reconciles abandoned leases and terminal tool events.
+- `RunSchedulerSignalCoordinator` records and consumes scheduler signal requests.
+
+These are not independent domain owners. They are orchestration application components.
+
+### Observers
+
+Observers convert module-local facts into orchestration-facing observation facts.
+
+Examples:
+
+- run lifecycle facts become `orchestration.run.*` observation records
+- session message facts become run/session observation records
+- tool run facts become run-level tool observation records
+- executor/runtime facts become runtime observation records
+
+This is the key reason observation belongs in orchestration: tool and LLM modules should describe their own lifecycle, while orchestration observes and translates those details into the run lifecycle seen by external callers.
+
+## Run Lifecycle
+
+The outer run state machine is owned by `OrchestrationRun`.
 
 ```text
 accepted
@@ -203,7 +192,7 @@ accepted
   -> running
   -> llm
   -> tool
-  -> waiting_on_tool
+  -> waiting_on_tool | waiting_confirmation
   -> finalizing
   -> completed | failed | cancelled
 ```
@@ -211,286 +200,97 @@ accepted
 Notes:
 
 - `queued` belongs to orchestration, not session.
-- `llm` means the engine is currently in model execution.
-- `tool` means the engine is currently handling tool execution logic.
-- `waiting_on_tool` is used only when background tool execution creates an async wait point.
-- `inline` tool execution does not end the engine step.
+- `llm` means the engine is waiting on or processing model execution.
+- `tool` means the engine is handling tool execution logic.
+- `waiting_on_tool` is used when background tool execution creates an async wait point.
+- `waiting_confirmation` is used for approval or confirmation gates.
+- Inline tool execution does not end the engine step.
+- Background tool completion wakes orchestration through scheduler/runtime events, not by directly mutating the run from inside the tool module.
 
-Inner state machines remain where they already belong:
+Inner lifecycles stay in their owning modules:
 
-- `LlmInvocation`: `created -> running -> succeeded/failed`
-- `ToolRun`: `created -> queued -> dispatching -> running -> ...`
+- LLM invocations remain LLM-owned.
+- Tool run lifecycle remains tool-owned.
+- Session messages remain session-owned.
+- Channel connection and delivery state remains channel-owned.
 
-## Components
+## Submission Flow
 
-### Router
+API, CLI, and channel runtimes normalize inbound work and submit it to orchestration through application submission helpers or scheduler ports.
 
-Responsibilities:
+Typical flow:
 
-- normalize inbound instruction
-- select agent
-- compute `bulk_key`
-- compute `lane_key`
-- choose priority and queue policy
-- build `RouteDecision`
+1. Interface or channel runtime builds normalized turn submission options.
+2. `turn_submission.py` builds orchestration input DTOs.
+3. `OrchestrationSchedulerService` records the ingress request.
+4. Intake routes the run, resolves session binding, and enqueues assignment work.
+5. Scheduler dispatch wakes available executors.
+6. Executor claims an assignment and asks the engine to advance the run.
+7. Engine advances until terminal state or a wait point.
+8. Observers publish run observation records for external listeners.
 
-### SessionResolver
+The interface layer should not create `ChannelInteraction`, bind runs, or call engine internals. Channel-specific inbound and replay behavior belongs in channel runtimes.
 
-Responsibilities:
+## Tool And Approval Flow
 
-- find or create `SessionBulk`
-- get or create active `Session`
-- perform session bootstrap
-- append session-level system events when needed
-- return `SessionBundle`
+Tool execution follows the same boundary rule.
 
-Session bootstrap means conversation bootstrap, not llm prompt assembly.
+Inline tools may execute inside the engine step if they are safe and synchronous enough for that path.
 
-### Scheduler
+Background tools are submitted to the tool module. The orchestration run records pending tool run ids and enters a wait state. Tool workers update tool-owned records and emit tool lifecycle events. Orchestration listens for terminal tool facts, reconciles pending waits, and wakes the run.
 
-Responsibilities:
+Approval is orchestration-facing but authorization-owned:
 
-- enqueue run
-- claim next runnable run
-- cancel queued run
-- requeue run
-- wake suspended run
-- enforce per-lane serialization
-
-It does not invoke llm or tools.
-
-### Worker
-
-The queue consumer.
-
-Responsibilities:
-
-- poll or claim queued orchestration runs
-- call `engine.advance(run_id)`
-- commit state transitions
-
-### Engine
-
-Responsibilities:
-
-- advance a run until the next wait point or terminal state
-- call prompt assembler
-- call model selector
-- invoke llm
-- inspect llm output
-- invoke inline tools
-- start background tool runs
-- finalize assistant output
-
-The engine does not own queue consumption.
-
-### PromptAssembler
-
-Dedicated component used by engine before every llm call.
-
-Responsibilities:
-
-- read session history
-- include current inbound message
-- include tool results from prior steps
-- include agent prompt policy
-- load workspace/bootstrap files
-- inject resolved tool schemas
-- build `PromptEnvelope`
-
-This is distinct from session bootstrap.
-
-### ModelSelector
-
-Responsibilities:
-
-- choose effective `llm_id`
-- apply agent model policy
-- apply per-run hints
-- support future fallback policy
-
-### ToolResolver
-
-Responsibilities:
-
-- read tool catalog
-- evaluate authorization
-- apply agent policy
-- apply environment and sandbox constraints
-- return `ResolvedToolSet`
-
-Tool exposure is orchestration-owned because it requires coordination between:
-
-- tool
-- authorization
-- agent
-- environment
-- session or inbound metadata
-
-### OutboundDispatcher
-
-Responsibilities:
-
-- send final or partial output back to the originating surface
-- translate orchestration results into surface-specific delivery requests
-
-## Background Tool Flow
-
-Only background tool execution should break the engine into multiple advances.
-
-Flow:
-
-1. Engine receives llm output containing tool calls.
-2. For inline tools, engine executes and continues the loop.
-3. For background tools, engine creates `ToolRun` entries and records `pending_tool_run_ids`.
-4. Engine marks the orchestration run as `waiting_on_tool` and returns.
-5. Orchestration event handlers listen for `tool.run.succeeded`, `tool.run.failed`, and `tool.run.cancelled`.
-6. When all pending tool runs reach terminal state, orchestration wakes the run.
-7. Worker claims the run again and re-enters engine advancement.
-
-Session never drives this wake-up. It is only updated with resulting facts.
-
-## Session Boundary Changes
-
-Current session code contains routing logic and agent-shaped data. The target state is smaller.
-
-Target session primitives:
-
-- `get_bulk(bulk_key)`
-- `create_bulk(bulk_key, metadata)`
-- `get_active_session(bulk_key)`
-- `activate_new_session(bulk_key, reason, metadata)`
-- `append_messages(session_id, messages)`
-- `list_messages(session_id, limit, before)`
-
-Target `SessionBulk` should prefer fields like:
-
-- `id`
-- `active_session_id`
-- `status`
-- `metadata`
-- `created_at`
-- `updated_at`
-
-Agent selection and interface-derived routing should move out of session and into orchestration.
-
-## Suggested Interfaces
-
-```python
-class OrchestrationService:
-    def accept(self, instruction: InboundInstruction) -> OrchestrationRun: ...
-    def wake(self, run_id: str, *, reason: str) -> OrchestrationRun: ...
-    def cancel(self, run_id: str) -> OrchestrationRun: ...
-
-
-class Router:
-    def route(self, instruction: InboundInstruction) -> RouteDecision: ...
-
-
-class SessionResolver:
-    def resolve(self, decision: RouteDecision, instruction: InboundInstruction) -> SessionBundle: ...
-
-
-class Scheduler:
-    def enqueue(self, run: OrchestrationRun) -> None: ...
-    def claim_next(self, *, worker_id: str) -> OrchestrationRun | None: ...
-    def wake(self, run_id: str) -> None: ...
-
-
-class Engine:
-    def advance(self, run_id: str) -> OrchestrationRun: ...
-
-
-class PromptAssembler:
-    def assemble(self, run: OrchestrationRun, bundle: SessionBundle) -> PromptEnvelope: ...
-
-
-class ToolResolver:
-    def resolve(self, run: OrchestrationRun, bundle: SessionBundle) -> ResolvedToolSet: ...
-```
+- orchestration detects a run is waiting for approval
+- authorization/access decide and persist grants according to their own rules
+- `ApprovalControlService` is a narrow approval resolution surface, not a general control facade
+- resolving approval resumes orchestration through wait/recovery coordinators
 
 ## Event Integration
 
-The existing event bus is sufficient for the first version.
+Events are the cross-runtime coordination substrate.
 
-Orchestration should subscribe to:
+Orchestration publishes or consumes:
 
-- `tool.run.succeeded`
-- `tool.run.failed`
-- `tool.run.cancelled`
-- optionally `tool.run.requeued`
+- ingress request events
+- scheduler signal request events
+- executor assignment request events
+- dispatch wake-up events
+- tool terminal events
+- run observation events
+- runtime observation events
 
-This lets orchestration wake suspended runs after background tool completion.
+The `events` module remains generic. It does not know orchestration business semantics beyond registered contracts and surfaces.
 
-## Implementation Plan
+## Boundaries
 
-### Phase 1
+Allowed dependencies:
 
-Create orchestration skeleton:
+- orchestration application may call explicit ports for session, LLM, tool, skill, access, authorization, dispatch, and memory.
+- interface layers may call orchestration public application services and DTO builders.
+- channel runtimes may submit normalized inbound work to orchestration.
+- observers may translate external module lifecycle facts into orchestration observation facts.
 
-- new module
-- `OrchestrationRun`
-- repository and persistence
-- scheduler and worker skeleton
+Disallowed dependencies:
 
-### Phase 2
+- session must not route agents, tools, channels, or queue policy.
+- tool must not claim to complete an orchestration run.
+- LLM must not claim to complete an orchestration run.
+- events must not perform orchestration decisions.
+- channel HTTP endpoints must not create orchestration runs directly when a channel runtime owns the behavior.
+- executor workers must not be the only lane safety authority; lane safety is scheduler/lease state.
 
-Extract routing out of session:
+## Acceptance Checks
 
-- move session key computation into orchestration router
-- keep session API primitive
+Healthy orchestration structure should satisfy these checks:
 
-### Phase 3
+- `OrchestrationControlService` is absent from public surfaces.
+- old facade files such as `application/services.py`, `application/router.py`, and `application/session_resolver.py` do not return.
+- run submission goes through `application/turn_submission.py` and scheduler services.
+- worker execution goes through `OrchestrationExecutorService`.
+- runtime observation is observed by orchestration observers.
+- channel delivery remains channel-owned.
+- session mutation happens through session application services.
+- memory writes remain memory-owned; orchestration uses memory through a narrow context/port.
 
-Add `SessionResolver` and session bootstrap:
-
-- find or create bulk
-- activate current session
-- return `SessionBundle`
-
-### Phase 4
-
-Add minimal engine:
-
-- prompt assembler
-- model selector
-- llm invoke
-- write final reply back to session
-
-### Phase 5
-
-Add tool coordination:
-
-- `ToolResolver`
-- inline tool loop
-- max-step guard
-
-### Phase 6
-
-Add background tool wait and wake:
-
-- pending tool ids
-- event-driven wake-up
-- worker resume path
-
-### Phase 7
-
-Migrate interfaces:
-
-- CLI entry uses orchestration
-- HTTP entry uses orchestration
-- future channels use orchestration
-
-## Migration Rule
-
-Any logic that needs more than one subsystem at the same time should move toward orchestration.
-
-Examples:
-
-- route to agent plus session bulk
-- session bootstrap plus inbound source handling
-- tool availability plus authorization plus environment
-- workspace files plus session history plus system prompt
-- background tool completion plus run resume
-
-If the logic can be explained entirely inside one subsystem, keep it there.
+This document describes the current target direction. If implementation and this document disagree, prefer updating code toward the boundary rules rather than adding compatibility shims.

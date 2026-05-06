@@ -20,6 +20,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=100),
+            existing_nullable=False,
+        )
+
     with op.batch_alter_table("session_messages") as batch_op:
         batch_op.add_column(
             sa.Column(
@@ -60,7 +70,6 @@ def upgrade() -> None:
             ),
         )
 
-    bind = op.get_bind()
     rows = bind.execute(
         sa.text(
             """
@@ -77,16 +86,7 @@ def upgrade() -> None:
         next_sequence = sequence_by_session_id.get(session_id, 0) + 1
         sequence_by_session_id[session_id] = next_sequence
         bind.execute(
-            sa.text(
-                """
-                UPDATE session_messages
-                SET sequence_no = :sequence_no,
-                    kind = :kind,
-                    content_payload = :content_payload,
-                    visibility = :visibility
-                WHERE id = :id
-                """,
-            ),
+            _message_content_update_stmt(bind),
             {
                 "id": row["id"],
                 "sequence_no": next_sequence,
@@ -105,3 +105,27 @@ def downgrade() -> None:
         batch_op.drop_column("content_payload")
         batch_op.drop_column("kind")
         batch_op.drop_column("sequence_no")
+
+
+def _message_content_update_stmt(bind: sa.Connection) -> sa.TextClause:
+    if bind.dialect.name == "postgresql":
+        return sa.text(
+            """
+            UPDATE session_messages
+            SET sequence_no = :sequence_no,
+                kind = :kind,
+                content_payload = CAST(:content_payload AS JSON),
+                visibility = :visibility
+            WHERE id = :id
+            """,
+        )
+    return sa.text(
+        """
+        UPDATE session_messages
+        SET sequence_no = :sequence_no,
+            kind = :kind,
+            content_payload = :content_payload,
+            visibility = :visibility
+        WHERE id = :id
+        """,
+    )

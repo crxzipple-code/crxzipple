@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
@@ -16,9 +17,18 @@ class SessionRepository(Protocol):
     def list(self, *, agent_id: str | None = None) -> list[Session]:
         ...
 
+    def touch_updated_at(self, *, session_key: str, updated_at: datetime) -> None:
+        ...
+
 
 class SessionMessageRepository(Protocol):
     def add(self, message: SessionMessage) -> None:
+        ...
+
+    def add_new(self, message: SessionMessage) -> None:
+        ...
+
+    def add_many_new(self, messages: tuple[SessionMessage, ...]) -> None:
         ...
 
     def get(self, message_id: str) -> SessionMessage | None:
@@ -44,6 +54,8 @@ class SessionMessageRepository(Protocol):
         session_id: str | None = None,
         limit: int | None = None,
         include_archived: bool = True,
+        after_sequence_no: int | None = None,
+        before_sequence_no: int | None = None,
     ) -> list[SessionMessage]:
         ...
 

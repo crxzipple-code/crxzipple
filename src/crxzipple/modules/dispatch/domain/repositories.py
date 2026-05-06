@@ -33,6 +33,17 @@ class DispatchTaskRepository(Protocol):
     ) -> DispatchTask | None:
         ...
 
+    def claim_queued(
+        self,
+        *,
+        task_id: str,
+        owner_kind: str | None = None,
+        worker_id: str,
+        claim_token: str,
+        lease_seconds: int | None = None,
+    ) -> DispatchTask | None:
+        ...
+
     def recover_abandoned(
         self,
         *,

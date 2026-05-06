@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import time
 from typing import Any
 
+import httpx
 import requests
 
+from crxzipple.modules.access import (
+    CredentialResolutionError,
+    CredentialResolver,
+    default_codex_auth_json_path as access_default_codex_auth_json_path,
+    load_codex_auth_json_access_token as access_load_codex_auth_json_access_token,
+)
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmCapability,
@@ -31,6 +38,7 @@ OPENAI_TOOL_NAME_MAX_LENGTH = 64
 OPENAI_TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS = 3
 OPENAI_TRANSIENT_STREAM_INITIAL_BACKOFF_SECONDS = 0.25
+_CREDENTIAL_RESOLVER = CredentialResolver()
 
 
 class RetryableOpenAIStreamError(RuntimeError):
@@ -40,7 +48,15 @@ class RetryableOpenAIStreamError(RuntimeError):
 def is_retryable_openai_stream_exception(exc: BaseException) -> bool:
     if isinstance(exc, RetryableOpenAIStreamError):
         return True
-    return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+    return isinstance(
+        exc,
+        (
+            requests.ConnectionError,
+            requests.Timeout,
+            httpx.TimeoutException,
+            httpx.TransportError,
+        ),
+    )
 
 
 def openai_stream_backoff_seconds(attempt_number: int) -> float:
@@ -53,34 +69,23 @@ def sleep_before_openai_stream_retry(attempt_number: int) -> None:
     time.sleep(openai_stream_backoff_seconds(attempt_number))
 
 
+async def async_sleep_before_openai_stream_retry(attempt_number: int) -> None:
+    await asyncio.sleep(openai_stream_backoff_seconds(attempt_number))
+
+
 def join_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 def default_codex_auth_json_path() -> Path:
-    codex_home = os.getenv("CODEX_HOME")
-    if isinstance(codex_home, str) and codex_home.strip():
-        return Path(codex_home).expanduser() / "auth.json"
-    return Path("~/.codex/auth.json").expanduser()
+    return access_default_codex_auth_json_path()
 
 
 def load_codex_auth_json_access_token(path: Path) -> str | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"invalid codex auth json at '{path}'.") from exc
-
-    if not isinstance(payload, dict):
-        return None
-    tokens = payload.get("tokens")
-    if not isinstance(tokens, dict):
-        return None
-    access_token = tokens.get("access_token")
-    if not isinstance(access_token, str) or not access_token.strip():
-        return None
-    return access_token.strip()
+        return access_load_codex_auth_json_access_token(path)
+    except CredentialResolutionError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def resolve_credential_binding(
@@ -100,47 +105,10 @@ def resolve_credential_binding(
             raise RuntimeError(f"{description} has an empty credential binding.")
         return None
 
-    if normalized.startswith("env:"):
-        env_name = normalized.removeprefix("env:").strip()
-        if not env_name:
-            raise RuntimeError(f"{description} has an invalid env credential binding.")
-        value = os.getenv(env_name)
-        if value is None or not value.strip():
-            raise RuntimeError(
-                f"{description} could not resolve env var '{env_name}'.",
-            )
-        return value.strip()
-
-    codex_binding_prefixes = (
-        "codex_auth_json:",
-        "codex-auth-json:",
-        "codex_cli:",
-        "codex-cli:",
-    )
-    if normalized in {"codex_auth_json", "codex-auth-json", "codex_cli", "codex-cli"}:
-        path = default_codex_auth_json_path()
-        token = load_codex_auth_json_access_token(path)
-        if token is None:
-            raise RuntimeError(
-                f"{description} could not resolve a Codex access token from '{path}'.",
-            )
-        return token
-    if normalized.startswith(codex_binding_prefixes):
-        binding_name, raw_path = normalized.split(":", 1)
-        del binding_name
-        path = Path(raw_path.strip()).expanduser()
-        if not raw_path.strip():
-            raise RuntimeError(
-                f"{description} has an invalid Codex auth json credential binding.",
-            )
-        token = load_codex_auth_json_access_token(path)
-        if token is None:
-            raise RuntimeError(
-                f"{description} could not resolve a Codex access token from '{path}'.",
-            )
-        return token
-
-    return normalized
+    try:
+        return _CREDENTIAL_RESOLVER.resolve(normalized, allow_literal=True)
+    except CredentialResolutionError as exc:
+        raise RuntimeError(f"{description} {exc}") from exc
 
 
 def ensure_json_response(
@@ -157,6 +125,35 @@ def ensure_json_response(
     except ValueError as exc:
         raise RuntimeError(
             f"{description} returned invalid JSON: {response.text}",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{description} returned a non-object JSON payload.")
+    return payload
+
+
+async def httpx_response_text(response: httpx.Response) -> str:
+    try:
+        return response.text
+    except httpx.ResponseNotRead:
+        body = await response.aread()
+        return body.decode("utf-8", errors="replace")
+
+
+async def ensure_async_json_response(
+    response: httpx.Response,
+    *,
+    description: str,
+) -> dict[str, Any]:
+    response_text = await httpx_response_text(response)
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"{description} failed with HTTP {response.status_code}: {response_text}",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{description} returned invalid JSON: {response_text}",
         ) from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"{description} returned a non-object JSON payload.")
@@ -239,6 +236,24 @@ def openai_tool_schema(
         ),
         "description": tool.description,
         "parameters": dict(tool.input_schema),
+    }
+
+
+def openai_chat_tool_schema(
+    tool: ToolSchema,
+    *,
+    tool_name_aliases: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": resolve_openai_tool_name(
+                tool.name,
+                tool_name_aliases=tool_name_aliases,
+            ),
+            "description": tool.description,
+            "parameters": dict(tool.input_schema),
+        },
     }
 
 

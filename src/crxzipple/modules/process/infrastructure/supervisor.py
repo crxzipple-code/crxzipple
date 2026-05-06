@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import os
 import shlex
 import signal
@@ -13,13 +12,13 @@ from crxzipple.modules.process.domain import (
     ProcessStatus,
     ProcessValidationError,
 )
-from crxzipple.modules.process.infrastructure.repository import (
-    FilesystemProcessSessionRepository,
+from crxzipple.modules.process.application.ports import (
+    ProcessSessionRepositoryPort,
 )
 
 
 class ProcessSupervisor:
-    def __init__(self, repository: FilesystemProcessSessionRepository) -> None:
+    def __init__(self, repository: ProcessSessionRepositoryPort) -> None:
         self._repository = repository
 
     def start(
@@ -65,6 +64,8 @@ class ProcessSupervisor:
 
         merged_metadata = {
             **(metadata or {}),
+            "process_store_root": str(self._repository.root_dir),
+            "session_dir": str(session_dir),
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "exit_code_path": str(exit_code_path),

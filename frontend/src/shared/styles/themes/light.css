@@ -1,0 +1,23 @@
+:root[data-theme="light"] {
+  color-scheme: light;
+  --surface-page: #f4f7fb;
+  --surface-page-gradient-start: #ffffff;
+  --surface-nav: #ffffff;
+  --surface-sidebar: #edf3f8;
+  --surface-panel: #ffffff;
+  --surface-panel-soft: #f7fafc;
+  --surface-raised: #eef4fa;
+  --surface-active: #e7e4ff;
+  --surface-input: #ffffff;
+  --surface-warning: #fff6df;
+  --surface-danger: #fff0ee;
+  --surface-success: #eaf9ef;
+  --border-subtle: #d8e2ec;
+  --border-default: #c6d4e2;
+  --border-strong: #9fb3c8;
+  --text-primary: #172331;
+  --text-secondary: #3c5065;
+  --text-muted: #6b7d90;
+  --text-placeholder: #8a98a8;
+  --shadow-color: #5b7288;
+}

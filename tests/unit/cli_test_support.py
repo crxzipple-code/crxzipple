@@ -34,7 +34,7 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0029_drop_orchestration_bulk_key"
+HEAD_REVISION = "0041_create_operations_action_audits"
 
 
 class CliModuleTestCase(unittest.TestCase):
@@ -66,6 +66,12 @@ class CliModuleTestCase(unittest.TestCase):
             "APP_TOOL_OPENAPI_PROVIDER_PATHS": os.pathsep,
             "APP_AUTHORIZATION_ENABLED": "false",
             "APP_BROWSER_STATE_DIR": str(Path(self.harness._tempdir.name) / "browser"),
+            "APP_DAEMON_STATE_DIR": str(Path(self.harness._tempdir.name) / "daemon"),
+            "APP_EVENTS_STATE_DIR": str(Path(self.harness._tempdir.name) / "events"),
+            "APP_OPERATIONS_STATE_DIR": str(
+                Path(self.harness._tempdir.name) / "operations",
+            ),
+            "APP_ALLOW_SQLITE_RUNTIME_FALLBACK": "1",
         }
 
     def tearDown(self) -> None:
@@ -73,6 +79,11 @@ class CliModuleTestCase(unittest.TestCase):
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
         self._skills_tempdir.cleanup()
+
+    def env_without_sqlite_runtime_fallback(self) -> dict[str, str]:
+        env = dict(self.env)
+        env.pop("APP_ALLOW_SQLITE_RUNTIME_FALLBACK", None)
+        return env
 
 
 __all__ = [

@@ -28,13 +28,14 @@ from crxzipple.modules.session.application import (
 from crxzipple.modules.session.domain import SessionMessageKind
 from crxzipple.modules.tool.domain import ToolRun, ToolRunStatus
 from crxzipple.shared.domain.aggregates import AggregateRoot
+from crxzipple.shared.time import format_datetime_utc
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.services import (
+    from crxzipple.modules.orchestration.application.commands import (
         ResolveApprovalRequestInput,
         ResumeOrchestrationRunInput,
         WaitForConfirmationInput,
-        WaitOnToolInput,
+        WaitAssignmentOnToolInput,
     )
 
 
@@ -75,8 +76,9 @@ class RunWaitCoordinator:
     grant_agent_effect_access: Callable[..., None]
     append_approval_resolution_message: Callable[..., None]
     reconcile_tool_waits: Callable[[tuple[str, ...]], None]
+    continue_recovery_contract_fn: Callable[[str], OrchestrationRun] | None = None
 
-    def wait_on_tool(self, data: "WaitOnToolInput") -> OrchestrationRun:
+    def wait_assignment_on_tool(self, data: "WaitAssignmentOnToolInput") -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             run.wait_on_tool(
@@ -209,7 +211,8 @@ class RunWaitCoordinator:
             request=pending_request,
             decision=data.decision,
         )
-        return self.continue_recovery_contract(data.run_id)
+        continuation = self.continue_recovery_contract_fn or self.continue_recovery_contract
+        return continuation(data.run_id)
 
     def continue_recovery_contract(self, run_id: str) -> OrchestrationRun:
         run = self.get_run(run_id)
@@ -432,7 +435,7 @@ class RunWaitCoordinator:
             {
                 **contract,
                 "state": "resumed",
-                "resumed_at": resumed.updated_at.isoformat(),
+                "resumed_at": format_datetime_utc(resumed.updated_at),
             },
         )
         return resumed

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
 import unittest
 
 from crxzipple.modules.llm.application import (
@@ -25,6 +27,8 @@ from crxzipple.modules.llm.domain import (
     ToolCallIntent,
     ToolSchema,
 )
+from crxzipple.modules.llm.domain.entities import LlmInvocation
+from crxzipple.modules.llm.interfaces.dto import LlmInvocationDTO
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
 from tests.unit.support import SqliteTestHarness
 
@@ -75,6 +79,69 @@ class _FakeStreamingLlmAdapter:
         )
 
 
+class _FakeAsyncLlmAdapter:
+    async def invoke_async(self, profile, request: LlmAdapterRequest) -> LlmAdapterResponse:  # noqa: ANN001
+        self.last_profile = profile
+        self.last_request = request
+        await asyncio.sleep(0)
+        return LlmAdapterResponse(
+            result=LlmResult(
+                text="hello from async fake adapter",
+                usage=LlmUsage(input_tokens=2, output_tokens=3, total_tokens=5),
+                finish_reason="stop",
+                metadata={"adapter": "async-fake"},
+            ),
+            provider_request_id="async-request-123",
+        )
+
+
+class _ConcurrentAsyncLlmAdapter:
+    def __init__(self) -> None:
+        self.active_count = 0
+        self.max_active_count = 0
+
+    async def invoke_async(self, profile, request: LlmAdapterRequest) -> LlmAdapterResponse:  # noqa: ANN001
+        self.active_count += 1
+        self.max_active_count = max(self.max_active_count, self.active_count)
+        try:
+            await asyncio.sleep(0.01)
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    text="limited async fake adapter",
+                    finish_reason="stop",
+                ),
+                provider_request_id="limited-async-request",
+            )
+        finally:
+            self.active_count -= 1
+
+
+class _FakeAsyncStreamingLlmAdapter:
+    async def stream_invoke_async(self, profile, request):  # noqa: ANN001
+        self.last_profile = profile
+        self.last_request = request
+        await asyncio.sleep(0)
+        yield LlmStreamEvent(
+            type="text_delta",
+            sequence=1,
+            data={"text": "async "},
+        )
+        await asyncio.sleep(0)
+        yield LlmStreamEvent(
+            type="completed",
+            sequence=2,
+            data={
+                "result": LlmResult(
+                    text="hello from async streaming adapter",
+                    usage=LlmUsage(input_tokens=3, output_tokens=4, total_tokens=7),
+                    finish_reason="completed",
+                    metadata={"adapter": "async-streaming-fake"},
+                ).to_payload(),
+                "provider_request_id": "async-stream-request-123",
+            },
+        )
+
+
 class LlmServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = SqliteTestHarness()
@@ -87,6 +154,27 @@ class LlmServiceTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.harness.close()
+
+    def test_llm_invocation_dto_serializes_naive_datetimes_as_utc(self) -> None:
+        invocation = LlmInvocation(
+            id="llm-invocation-naive-time",
+            llm_id="local-chat",
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="hello",
+                ),
+            ),
+            created_at=datetime(2026, 4, 18, 7, 0, 0),
+            started_at=datetime(2026, 4, 18, 7, 0, 1),
+            completed_at=datetime(2026, 4, 18, 7, 0, 2),
+        )
+
+        dto = LlmInvocationDTO.from_entity(invocation)
+
+        self.assertEqual(dto.created_at, "2026-04-18T07:00:00+00:00")
+        self.assertEqual(dto.started_at, "2026-04-18T07:00:01+00:00")
+        self.assertEqual(dto.completed_at, "2026-04-18T07:00:02+00:00")
 
     def test_register_profile_and_invoke_persists_new_llm_shapes(self) -> None:
         profile = self.service.register_profile(
@@ -104,8 +192,13 @@ class LlmServiceTestCase(unittest.TestCase):
                 default_params=LlmDefaults(
                     temperature=0.2,
                     max_output_tokens=512,
+                    extra_body={
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
                 ),
                 credential_binding="env:OPENAI_API_KEY",
+                max_concurrency=2,
+                concurrency_key="provider:openai",
             ),
         )
 
@@ -148,7 +241,13 @@ class LlmServiceTestCase(unittest.TestCase):
 
         self.assertEqual(fetched_profile.model_name, "gpt-5")
         self.assertEqual(fetched_profile.context_window_tokens, 128_000)
+        self.assertEqual(fetched_profile.max_concurrency, 2)
+        self.assertEqual(fetched_profile.concurrency_key, "provider:openai")
         self.assertEqual(fetched_profile.default_params.temperature, 0.2)
+        self.assertEqual(
+            fetched_profile.default_params.extra_body,
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
         self.assertEqual([item.id for item in invocation_list], [invocation.id])
 
@@ -250,3 +349,130 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(stored.status.value, "succeeded")
         self.assertEqual(stored.result.text, "hello from streaming adapter")
         self.assertEqual(stored.provider_request_id, "stream-request-123")
+
+    def test_invoke_async_uses_async_adapter_and_persists_result(self) -> None:
+        registry = LlmAdapterRegistry()
+        adapter = _FakeAsyncLlmAdapter()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, adapter)
+        service = LlmApplicationService(self.container.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="async-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4-mini",
+            ),
+        )
+
+        invocation = asyncio.run(
+            service.invoke_async(
+                InvokeLlmInput(
+                    llm_id=profile.id,
+                    messages=(
+                        LlmMessage(
+                            role=LlmMessageRole.USER,
+                            content="Say hello asynchronously.",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(invocation.status.value, "succeeded")
+        self.assertEqual(invocation.result.text, "hello from async fake adapter")
+        self.assertEqual(invocation.provider_request_id, "async-request-123")
+        self.assertEqual(adapter.last_profile.id, "async-writer")
+
+    def test_invoke_async_respects_profile_concurrency_limit(self) -> None:
+        registry = LlmAdapterRegistry()
+        adapter = _ConcurrentAsyncLlmAdapter()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, adapter)
+        service = LlmApplicationService(self.container.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="limited-async-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4-mini",
+                max_concurrency=1,
+            ),
+        )
+
+        async def _invoke_pair():
+            return await asyncio.gather(
+                service.invoke_async(
+                    InvokeLlmInput(
+                        llm_id=profile.id,
+                        messages=(
+                            LlmMessage(
+                                role=LlmMessageRole.USER,
+                                content="first",
+                            ),
+                        ),
+                        invocation_id="limited-async-1",
+                    ),
+                ),
+                service.invoke_async(
+                    InvokeLlmInput(
+                        llm_id=profile.id,
+                        messages=(
+                            LlmMessage(
+                                role=LlmMessageRole.USER,
+                                content="second",
+                            ),
+                        ),
+                        invocation_id="limited-async-2",
+                    ),
+                ),
+            )
+
+        invocations = asyncio.run(_invoke_pair())
+
+        self.assertEqual(
+            [item.status.value for item in invocations],
+            ["succeeded", "succeeded"],
+        )
+        self.assertEqual(adapter.max_active_count, 1)
+
+    def test_stream_invoke_async_emits_events_and_persists_final_result(self) -> None:
+        registry = LlmAdapterRegistry()
+        adapter = _FakeAsyncStreamingLlmAdapter()
+        registry.register(LlmApiFamily.OPENAI_CODEX_RESPONSES, adapter)
+        service = LlmApplicationService(self.container.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="async-codex",
+                provider=LlmProviderKind.OPENAI_CODEX,
+                api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+                model_name="gpt-5-codex",
+                model_family=LlmModelFamily.CODEX,
+            ),
+        )
+
+        async def _collect_events():
+            return [
+                event
+                async for event in service.stream_invoke_async(
+                    StreamLlmInput(
+                        llm_id=profile.id,
+                        messages=(
+                            LlmMessage(
+                                role=LlmMessageRole.USER,
+                                content="Say hello asynchronously.",
+                            ),
+                        ),
+                    ),
+                )
+            ]
+
+        events = asyncio.run(_collect_events())
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["invocation_started", "text_delta", "completed"],
+        )
+        self.assertEqual(events[1].data["text"], "async ")
+        stored = service.get_invocation(events[0].invocation_id)
+        self.assertEqual(stored.status.value, "succeeded")
+        self.assertEqual(stored.result.text, "hello from async streaming adapter")
+        self.assertEqual(stored.provider_request_id, "async-stream-request-123")

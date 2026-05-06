@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import signal
+from threading import Event
 from typing import Any
 
 import typer
@@ -38,6 +40,54 @@ def _profiles_payload(container, system_config=None) -> dict[str, object]:  # no
     return build_profiles_payload(container, system_config=system_config)
 
 
+def _run_host_loop(
+    container,  # noqa: ANN001
+    *,
+    profile_name: str,
+    poll_interval_seconds: float,
+    max_cycles: int | None = None,
+    stop_event: Event | None = None,
+) -> int:
+    completed_cycles = 0
+    stopper = stop_event or Event()
+    while not stopper.is_set():
+        container.browser_facade.execute(
+            BrowserControlRequest(
+                profile_name=profile_name,
+                kind="list-tabs",
+            )
+        )
+        completed_cycles += 1
+        if max_cycles is not None and completed_cycles >= max_cycles:
+            break
+        stopper.wait(poll_interval_seconds)
+    return completed_cycles
+
+
+def _run_mcp_loop(
+    container,  # noqa: ANN001
+    *,
+    profile_name: str,
+    poll_interval_seconds: float,
+    max_cycles: int | None = None,
+    stop_event: Event | None = None,
+) -> int:
+    completed_cycles = 0
+    stopper = stop_event or Event()
+    while not stopper.is_set():
+        container.browser_facade.execute(
+            BrowserControlRequest(
+                profile_name=profile_name,
+                kind="list-tabs",
+            )
+        )
+        completed_cycles += 1
+        if max_cycles is not None and completed_cycles >= max_cycles:
+            break
+        stopper.wait(poll_interval_seconds)
+    return completed_cycles
+
+
 def _resolve_profile_update_kwargs(
     *,
     driver: str | None,
@@ -69,6 +119,8 @@ def _resolve_profile_update_kwargs(
 def build_cli() -> typer.Typer:
     app = typer.Typer(help="Control browser profiles and page actions.", no_args_is_help=True)
     profile_app = typer.Typer(help="Manage browser profiles.", no_args_is_help=True)
+    host_app = typer.Typer(help="Run managed browser host processes.", no_args_is_help=True)
+    mcp_app = typer.Typer(help="Run Chrome MCP capability processes.", no_args_is_help=True)
 
     @app.command("profiles")
     def list_profiles(ctx: typer.Context) -> None:
@@ -182,6 +234,93 @@ def build_cli() -> typer.Typer:
         except BrowserValidationError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
+    @host_app.command("run")
+    def run_host(
+        ctx: typer.Context,
+        profile: str | None = typer.Option(None, "--profile", help="Browser profile name."),
+        poll_interval_seconds: float = typer.Option(
+            5.0,
+            "--poll-interval-seconds",
+            min=0.1,
+            help="Idle wait time between managed browser health cycles.",
+        ),
+        max_cycles: int | None = typer.Option(
+            None,
+            "--max-cycles",
+            min=1,
+            help="Optional maximum health cycles before exiting.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        container.browser_cdp_control.terminate_owned_processes_on_close = True
+        resolved_profile = profile or _default_profile(container)
+        stop_event = Event()
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def _request_stop(signum, frame) -> None:  # noqa: ANN001
+            del signum, frame
+            stop_event.set()
+
+        try:
+            signal.signal(signal.SIGINT, _request_stop)
+            signal.signal(signal.SIGTERM, _request_stop)
+            _run_host_loop(
+                container,
+                profile_name=resolved_profile,
+                poll_interval_seconds=poll_interval_seconds,
+                max_cycles=max_cycles,
+                stop_event=stop_event,
+            )
+        except BrowserValidationError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
+            signal.signal(signal.SIGTERM, previous_sigterm)
+
+    @mcp_app.command("run")
+    def run_mcp(
+        ctx: typer.Context,
+        profile: str | None = typer.Option(None, "--profile", help="Browser profile name."),
+        poll_interval_seconds: float = typer.Option(
+            5.0,
+            "--poll-interval-seconds",
+            min=0.1,
+            help="Idle wait time between Chrome MCP health cycles.",
+        ),
+        max_cycles: int | None = typer.Option(
+            None,
+            "--max-cycles",
+            min=1,
+            help="Optional maximum health cycles before exiting.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        resolved_profile = profile or _default_profile(container)
+        stop_event = Event()
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def _request_stop(signum, frame) -> None:  # noqa: ANN001
+            del signum, frame
+            stop_event.set()
+
+        try:
+            signal.signal(signal.SIGINT, _request_stop)
+            signal.signal(signal.SIGTERM, _request_stop)
+            _run_mcp_loop(
+                container,
+                profile_name=resolved_profile,
+                poll_interval_seconds=poll_interval_seconds,
+                max_cycles=max_cycles,
+                stop_event=stop_event,
+            )
+        except BrowserValidationError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
+            signal.signal(signal.SIGTERM, previous_sigterm)
+
     @app.command("control")
     def execute_control(
         ctx: typer.Context,
@@ -235,5 +374,7 @@ def build_cli() -> typer.Typer:
         echo_data(container.browser_result_serializer.serialize(result))
 
     app.add_typer(profile_app, name="profile")
+    app.add_typer(host_app, name="host")
+    app.add_typer(mcp_app, name="mcp")
 
     return app

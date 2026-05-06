@@ -25,12 +25,26 @@ class DbCliTestCase(CliModuleTestCase):
                         row[1]
                         for row in connection.execute("PRAGMA table_info(session_messages)")
                     }
+                    session_columns = {
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(sessions)")
+                    }
+                    orchestration_run_columns = {
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(orchestration_runs)")
+                    }
+                    orchestration_run_indexes = {
+                        row[1]
+                        for row in connection.execute("PRAGMA index_list(orchestration_runs)")
+                    }
                     revision = connection.execute(
                         "SELECT version_num FROM alembic_version",
                     ).fetchone()
 
                 self.assertNotIn("tools", tables)
                 self.assertIn("tool_runs", tables)
+                self.assertIn("tool_run_assignments", tables)
+                self.assertIn("tool_workers", tables)
                 self.assertIn("sessions", tables)
                 self.assertIn("session_messages", tables)
                 self.assertIn("session_instances", tables)
@@ -44,6 +58,15 @@ class DbCliTestCase(CliModuleTestCase):
                         "source_id",
                         "visibility",
                     }.issubset(message_columns),
+                )
+                self.assertIn("reply_payload", session_columns)
+                self.assertNotIn("delivery_payload", session_columns)
+                self.assertIn("reply_target_payload", orchestration_run_columns)
+                self.assertNotIn("delivery_target_payload", orchestration_run_columns)
+                self.assertIn("lane_lock_key", orchestration_run_columns)
+                self.assertIn(
+                    "uq_orchestration_runs_active_lane",
+                    orchestration_run_indexes,
                 )
                 self.assertEqual(revision[0], HEAD_REVISION)
 
@@ -86,6 +109,8 @@ class DbCliTestCase(CliModuleTestCase):
 
                 self.assertNotIn("tools", tables)
                 self.assertNotIn("tool_runs", tables)
+                self.assertNotIn("tool_run_assignments", tables)
+                self.assertNotIn("tool_workers", tables)
                 self.assertNotIn("sessions", tables)
                 self.assertNotIn("session_messages", tables)
                 self.assertNotIn("session_instances", tables)

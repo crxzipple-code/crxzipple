@@ -16,8 +16,14 @@ class LlmServiceAdapter(LlmPort):
     def invoke(self, data):
         return self.service.invoke(data)
 
+    async def invoke_async(self, data):
+        return await self.service.invoke_async(data)
+
     def stream_invoke(self, data):
         return self.service.stream_invoke(data)
+
+    def stream_invoke_async(self, data):
+        return self.service.stream_invoke_async(data)
 
     def get_invocation(self, invocation_id: str):
         return self.service.get_invocation(invocation_id)

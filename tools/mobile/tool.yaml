@@ -1,0 +1,470 @@
+kind: local_package
+namespace: mobile
+local_tools:
+  - id: mobile_devices
+    name: Mobile Devices
+    description: List connected Android devices visible through adb. Use this first to inspect whether a real device or emulator is online before issuing mobile actions.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_devices
+    tool_kind: function
+    parameters: []
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_devices
+
+  - id: mobile_snapshot
+    name: Mobile Snapshot
+    description: Read the current Android screen through adb-backed UI dumping. The backend resolves the current device state internally and returns refs that are bound to the latest snapshot generation. By default this returns the combined `interactive_text` view so the model receives both a tree with reusable refs and a plain-text excerpt in one response. Override `format` only when you explicitly want `interactive`, `tree`, or `text` alone.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_snapshot
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name. Omit to use the default mobile device.
+        required: false
+      - name: format
+        data_type: string
+        description: Optional snapshot format override. Supported values are `interactive`, `tree`, `text`, and `interactive_text`. Omit this field to use the default combined `interactive_text` view.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_snapshot
+
+  - id: mobile_tap
+    name: Mobile Tap
+    description: Tap an Android UI target. Prefer `ref` from `mobile_snapshot`; use `selector` as a fallback when no ref is available. By default this tool performs a brief `micro` stabilize wait and then appends one trailing `interactive_text` snapshot so the model receives the updated mobile page state without spending another observe cycle. Set `stabilize=none` to skip the wait, or set `observe_after=false` to skip the trailing snapshot.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_tap
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name.
+        required: false
+      - name: ref
+        data_type: string
+        description: Preferred mobile ref from `mobile_snapshot`.
+        required: false
+      - name: selector
+        data_type: string
+        description: Fallback UI selector string, for example `xpath=...`, `id=...`, or `accessibility_id=...`.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional post-action stabilization policy. Supported values are `micro`, `none`, and `auto`. Defaults to `micro` for taps.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for post-action stabilization.
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Optional flag to disable or force the default post-action snapshot. Defaults to `true`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used for the trailing post-action snapshot, for example `{ "format": "interactive_text" }`.'
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_tap
+
+  - id: mobile_type
+    name: Mobile Type
+    description: Type text into a specific Android input control. Provide `ref` from `mobile_snapshot` whenever possible; use `selector` only as a fallback. One of `ref` or `selector` is required. By default this tool performs a brief `micro` stabilize wait and then appends one trailing `interactive_text` snapshot so the model sees the updated page state immediately. Set `stabilize=none` to skip the wait, or set `observe_after=false` to skip the trailing snapshot.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_type
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name.
+        required: false
+      - name: ref
+        data_type: string
+        description: Preferred target ref from `mobile_snapshot`. Required unless `selector` is provided.
+        required: false
+      - name: selector
+        data_type: string
+        description: Fallback target selector string. Required unless `ref` is provided.
+        required: false
+      - name: text
+        data_type: string
+        description: Text to type into the target control.
+        required: true
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional post-action stabilization policy. Supported values are `micro`, `none`, and `auto`. Defaults to `micro` for typing.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for post-action stabilization.
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Optional flag to disable or force the default post-action snapshot. Defaults to `true`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used for the trailing post-action snapshot, for example `{ "format": "interactive_text" }`.'
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_type
+
+  - id: mobile_swipe
+    name: Mobile Swipe
+    description: "Swipe on Android using explicit coordinates or a direction. Use `ref` to scope the swipe region, or omit it to swipe across the full screen. By default this tool performs a brief `micro` stabilize wait and then appends one trailing `interactive_text` snapshot so the model can see the updated page state immediately. Set `stabilize=none` to skip the wait, or set `observe_after=false` to skip the trailing snapshot."
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_swipe
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name.
+        required: false
+      - name: ref
+        data_type: string
+        description: Optional mobile ref from `mobile_snapshot` to scope the swipe region.
+        required: false
+      - name: selector
+        data_type: string
+        description: Fallback UI selector string.
+        required: false
+      - name: direction
+        data_type: string
+        description: "Directional swipe shortcut: `up`, `down`, `left`, or `right`."
+        required: false
+      - name: start_x
+        data_type: integer
+        description: Explicit swipe start X coordinate.
+        required: false
+      - name: start_y
+        data_type: integer
+        description: Explicit swipe start Y coordinate.
+        required: false
+      - name: end_x
+        data_type: integer
+        description: Explicit swipe end X coordinate.
+        required: false
+      - name: end_y
+        data_type: integer
+        description: Explicit swipe end Y coordinate.
+        required: false
+      - name: duration_ms
+        data_type: integer
+        description: Optional swipe duration in milliseconds.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional post-action stabilization policy. Supported values are `micro`, `none`, and `auto`. Defaults to `micro` for swipes.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for post-action stabilization.
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Optional flag to disable or force the default post-action snapshot. Defaults to `true`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used for the trailing post-action snapshot, for example `{ "format": "interactive_text" }`.'
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_swipe
+
+  - id: mobile_press
+    name: Mobile Press
+    description: Press an Android keycode. Use `key` for common names such as `TAB`, `ENTER`, `BACK`, or `HOME`, or set `keycode` explicitly. By default this tool performs a brief `micro` stabilize wait and then appends one trailing `interactive_text` snapshot so the model can inspect the updated mobile state immediately. Set `stabilize=none` to skip the wait, or set `observe_after=false` to skip the trailing snapshot.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_press
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name.
+        required: false
+      - name: key
+        data_type: string
+        description: Named Android key such as `TAB`, `ENTER`, `BACK`, or `HOME`.
+        required: false
+      - name: keycode
+        data_type: integer
+        description: Explicit Android keycode.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional post-action stabilization policy. Supported values are `micro`, `none`, and `auto`. Defaults to `micro` for key presses.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for post-action stabilization.
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Optional flag to disable or force the default post-action snapshot. Defaults to `true`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used for the trailing post-action snapshot, for example `{ "format": "interactive_text" }`.'
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_press
+
+  - id: mobile_wait
+    name: Mobile Wait
+    description: Wait on Android UI state using a selector, text match, or fixed delay. By default this tool appends one trailing `interactive_text` snapshot after the wait completes so the model can continue from the updated page state without another observe call. Optional stabilization is available, but defaults to `none` because the wait itself already serves as the primary timing control.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_wait
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name.
+        required: false
+      - name: selector
+        data_type: string
+        description: Optional UI selector string to wait for.
+        required: false
+      - name: text
+        data_type: string
+        description: Optional text to wait for in the XML page source.
+        required: false
+      - name: delay_ms
+        data_type: integer
+        description: Optional fixed delay in milliseconds.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+      - name: stabilize
+        data_type: string
+        description: Optional post-action stabilization policy. Supported values are `micro`, `none`, and `auto`. Defaults to `none` for waits.
+        required: false
+      - name: stabilize_timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for post-action stabilization.
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Optional flag to disable or force the default post-action snapshot. Defaults to `true`.
+        required: false
+      - name: observe_payload
+        data_type: object
+        description: 'Optional snapshot payload used for the trailing post-action snapshot, for example `{ "format": "interactive_text" }`.'
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_wait
+
+  - id: mobile_screenshot
+    name: Mobile Screenshot
+    description: Capture the current Android screen. The screenshot is externalized into an artifact and returned as an image attachment for the model and UI.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_screenshot
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds.
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: false
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_screenshot
+
+  - id: mobile_script
+    name: Mobile Script
+    description: Execute a short ordered Android interaction script in one tool call. Prefer this when the mobile flow naturally needs two or more sequential action steps such as `tap` then `type` then `press`. Tool scripts are action-only; lifecycle controls stay on the mobile API/CLI for debugging. Each step must be an object, not a JSON string, although the runtime will try to recover common stringified-step mistakes. Use `final_observe` or `observe_after=true` to append one trailing `snapshot` after the script finishes so the model receives one updated mobile post-state instead of forcing a separate follow-up tool call.
+    provider_name: local_system
+    entrypoint: tools.mobile.local:mobile_script
+    tool_kind: function
+    parameters:
+      - name: device
+        data_type: string
+        description: Optional configured mobile device name. Omit to use the default mobile device.
+        required: false
+      - name: steps
+        data_type: array
+        description: 'Ordered mobile action steps. Each step must be an object, not a JSON string. Use an array like `[{\"kind\":\"tap\",\"ref\":\"g1-m1\"},{\"kind\":\"type\",\"text\":\"hello\"},{\"kind\":\"press\",\"key\":\"ENTER\"}]`. Control kinds such as `launch-app`, `activate-app`, and `terminate-app` are intentionally not exposed from tools. Steps can include `kind`, optional `device`, `ref`, `selector`, `payload`, `timeout_ms`, plus convenience fields such as `text`, `key`, `keycode`, `format`, and `delay_ms`.'
+        required: true
+      - name: stop_on_error
+        data_type: boolean
+        description: Whether the script should stop immediately when one step fails. Defaults to `true`.
+        required: false
+      - name: default_stabilize
+        data_type: string
+        description: Optional script-wide default stabilization policy for steps that do not set `stabilize`. Supported values are `auto`, `micro`, and `none`.
+        required: false
+      - name: default_stabilize_timeout_ms
+        data_type: integer
+        description: Optional script-wide timeout in milliseconds for `default_stabilize`.
+        required: false
+      - name: default_observe_after
+        data_type: string
+        description: Optional script-wide default post-step observation policy for steps that do not set `observe_after`. Supported values are `auto`, `interactive`, `tree`, `text`, `interactive_text`, and `none`.
+        required: false
+      - name: default_observe_payload
+        data_type: object
+        description: 'Optional script-wide default payload for step-level `observe_after`, for example `{ "format": "interactive_text" }`.'
+        required: false
+      - name: final_observe
+        data_type: object
+        description: 'Optional trailing `snapshot` payload. When provided, the script runs one final mobile snapshot after all steps succeed. A typical value is `{ "format": "interactive_text" }`.'
+        required: false
+      - name: observe_after
+        data_type: boolean
+        description: Convenience flag for `final_observe`. When true and `final_observe` is omitted, the script appends one `interactive_text` snapshot automatically.
+        required: false
+      - name: timeout_ms
+        data_type: integer
+        description: Optional timeout in milliseconds for the trailing `final_observe` snapshot.
+        required: false
+    tags:
+      - mobile
+      - android
+      - builtin
+      - system-managed
+      - surface:interactive
+    required_effect_ids:
+      - local_tool_access
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: mobile_script

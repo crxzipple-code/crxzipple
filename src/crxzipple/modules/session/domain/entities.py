@@ -6,9 +6,9 @@ from uuid import uuid4
 
 from crxzipple.modules.session.domain.exceptions import SessionValidationError
 from crxzipple.modules.session.domain.value_objects import (
-    SessionDelivery,
     SessionKind,
     SessionOrigin,
+    SessionReply,
     SessionRuntimeBinding,
     utcnow,
 )
@@ -24,7 +24,7 @@ class Session(AggregateRoot[str]):
     channel: str | None = None
     chat_type: str | None = None
     origin: SessionOrigin = field(default_factory=SessionOrigin)
-    delivery: SessionDelivery = field(default_factory=SessionDelivery)
+    reply: SessionReply = field(default_factory=SessionReply)
     metadata: dict[str, object] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
@@ -81,7 +81,7 @@ class Session(AggregateRoot[str]):
         channel: str | None = None,
         chat_type: str | None = None,
         origin: SessionOrigin | None = None,
-        delivery: SessionDelivery | None = None,
+        reply: SessionReply | None = None,
         metadata: dict[str, object] | None = None,
         workspace: str | None = None,
         updated_at: datetime | None = None,
@@ -96,8 +96,8 @@ class Session(AggregateRoot[str]):
             self.chat_type = chat_type.strip() or None
         if origin is not None:
             self.origin = origin
-        if delivery is not None:
-            self.delivery = delivery
+        if reply is not None:
+            self.reply = reply
         if metadata:
             self.metadata.update(metadata)
         self.sync_runtime_binding(

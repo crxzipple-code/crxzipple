@@ -62,6 +62,20 @@ class ToolRunStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class ToolRunAssignmentStatus(StrEnum):
+    ASSIGNED = "assigned"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class ToolWorkerStatus(StrEnum):
+    ONLINE = "online"
+    STALE = "stale"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolRunResult(ValueObject):
     content: Any

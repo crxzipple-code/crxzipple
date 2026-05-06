@@ -15,14 +15,12 @@ class RecalledMemory:
     summary: str
     content: str
     tags: tuple[str, ...]
-    source_candidate_id: str | None
 
 
 def recall_prompt_memories(
     memory_service: MemoryPort,
     *,
     run: OrchestrationRun,
-    limit: int = 3,
 ) -> tuple[RecalledMemory, ...]:
     if run.agent_id is None or not run.agent_id.strip():
         return ()
@@ -30,7 +28,6 @@ def recall_prompt_memories(
     if context is None:
         return ()
     memory_service.warm_context(context=context)
-    del limit
     for path in ("MEMORY.md", "memory.md"):
         excerpt = memory_service.get(
             context=context,
@@ -52,5 +49,4 @@ def _to_recalled_memory(excerpt: MemoryExcerpt) -> RecalledMemory:
         summary=f"Bootstrap memory from {excerpt.path}",
         content=excerpt.text,
         tags=(),
-        source_candidate_id=None,
     )

@@ -14,7 +14,10 @@ from crxzipple.modules.llm.infrastructure.persistence.repositories import (
     SqlAlchemyLlmProfileRepository,
 )
 from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
+    SqlAlchemyOrchestrationExecutorLeaseRepository,
+    SqlAlchemyOrchestrationIngressRequestRepository,
     SqlAlchemyOrchestrationRunRepository,
+    SqlAlchemyOrchestrationSchedulerSignalRepository,
     SqlAlchemyOrchestrationRunWaitRepository,
 )
 from crxzipple.modules.session.infrastructure.persistence.repositories import (
@@ -23,7 +26,9 @@ from crxzipple.modules.session.infrastructure.persistence.repositories import (
     SqlAlchemySessionRepository,
 )
 from crxzipple.modules.tool.infrastructure.persistence.repositories import (
+    SqlAlchemyToolRunAssignmentRepository,
     SqlAlchemyToolRunRepository,
+    SqlAlchemyToolWorkerRepository,
 )
 from crxzipple.shared.application.unit_of_work import UnitOfWork
 from crxzipple.shared.domain.aggregates import AggregateRoot
@@ -43,6 +48,10 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self._session = self._session_factory()
         self.dispatch_tasks = SqlAlchemyDispatchTaskRepository(self.session)
         self.tool_runs = SqlAlchemyToolRunRepository(self.session)
+        self.tool_run_assignments = SqlAlchemyToolRunAssignmentRepository(
+            self.session,
+        )
+        self.tool_workers = SqlAlchemyToolWorkerRepository(self.session)
         self.sessions = SqlAlchemySessionRepository(self.session)
         self.session_messages = SqlAlchemySessionMessageRepository(self.session)
         self.session_instances = SqlAlchemySessionInstanceRepository(self.session)
@@ -50,6 +59,15 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.llm_invocations = SqlAlchemyLlmInvocationRepository(self.session)
         self.llms = self.llm_profiles
         self.orchestration_runs = SqlAlchemyOrchestrationRunRepository(self.session)
+        self.orchestration_ingress_requests = (
+            SqlAlchemyOrchestrationIngressRequestRepository(self.session)
+        )
+        self.orchestration_scheduler_signals = (
+            SqlAlchemyOrchestrationSchedulerSignalRepository(self.session)
+        )
+        self.orchestration_executor_leases = (
+            SqlAlchemyOrchestrationExecutorLeaseRepository(self.session)
+        )
         self.orchestration_waits = SqlAlchemyOrchestrationRunWaitRepository(
             self.session,
         )
@@ -88,12 +106,20 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
                 extra={"aggregate_type": type(aggregate).__name__, "aggregate_id": aggregate.id},
             )
 
+    def flush(self) -> None:
+        logger.debug("flushing unit of work")
+        self.session.flush()
+
     def commit(self) -> None:
         logger.debug("committing unit of work", extra={"aggregate_count": len(self._seen)})
         self.session.commit()
-        for aggregate in self._seen:
-            for event in aggregate.pull_events():
-                self._event_bus.publish(event)
+        events = tuple(
+            event
+            for aggregate in self._seen
+            for event in aggregate.pull_events()
+        )
+        if events:
+            self._event_bus.publish_many(events)
         self._seen.clear()
 
     def rollback(self) -> None:

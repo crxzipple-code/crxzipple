@@ -272,6 +272,28 @@ class SessionCliTestCase(unittest.TestCase):
         self.assertEqual(append_payload["source_id"], "run-1")
         self.assertEqual(append_payload["visibility"], "internal")
 
+    def test_session_start_command_accepts_reply_payload(self) -> None:
+        self._register_llm_and_agent()
+
+        start_result = self.runner.invoke(
+            app,
+            [
+                "session",
+                "start",
+                "agent:assistant:main",
+                "--agent-id",
+                "assistant",
+                "--reply",
+                '{"channel":"webchat","to":"user:1"}',
+            ],
+            env=self.env,
+        )
+
+        self.assertEqual(start_result.exit_code, 0)
+        start_payload = json.loads(start_result.stdout)
+        self.assertEqual(start_payload["reply"], {"channel": "webchat", "to": "user:1"})
+        self.assertNotIn("delivery", start_payload)
+
     def test_session_resolve_key_command_routes_and_ensures_main_session(self) -> None:
         self._register_llm_and_agent()
 

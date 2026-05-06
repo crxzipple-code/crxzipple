@@ -13,7 +13,6 @@ from crxzipple.modules.session.domain.repositories import (
 )
 from crxzipple.modules.session.domain.value_objects import (
     DirectSessionScope,
-    SessionDelivery,
     SessionKeyResolution,
     SessionKind,
     SessionMessageKind,
@@ -22,6 +21,7 @@ from crxzipple.modules.session.domain.value_objects import (
     SessionOrigin,
     SessionResetDecision,
     SessionResetPolicy,
+    SessionReply,
     SessionRouteContext,
     SessionRuntimeBinding,
 )
@@ -29,7 +29,6 @@ from crxzipple.modules.session.domain.value_objects import (
 __all__ = [
     "DirectSessionScope",
     "Session",
-    "SessionDelivery",
     "SessionError",
     "SessionInstance",
     "SessionInstanceNotFoundError",
@@ -43,6 +42,7 @@ __all__ = [
     "SessionMessageVisibility",
     "SessionNotFoundError",
     "SessionOrigin",
+    "SessionReply",
     "SessionResetDecision",
     "SessionResetPolicy",
     "SessionRouteContext",

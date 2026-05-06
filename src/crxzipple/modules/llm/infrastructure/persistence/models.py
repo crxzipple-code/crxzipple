@@ -29,6 +29,8 @@ class LlmProfileModel(Base):
         nullable=True,
     )
     timeout_seconds: Mapped[int] = mapped_column(Integer(), nullable=False, default=60)
+    max_concurrency: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    concurrency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_kind: Mapped[str] = mapped_column(String(100), nullable=False)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
 

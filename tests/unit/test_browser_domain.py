@@ -41,6 +41,12 @@ class _UnsupportedCdpActionEngine(InMemoryCdpBackedPlaywrightActionEngine):
         return False
 
 
+class _UnsupportedMcpActionEngine(InMemoryMcpActionEngine):
+    def supports(self, *, command):  # type: ignore[override]
+        del command
+        return False
+
+
 class BrowserDomainTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.system = BrowserSystemConfig(
@@ -213,6 +219,70 @@ class BrowserDomainTestCase(unittest.TestCase):
             (),
         )
 
+    def test_execution_coordinator_status_start_and_stop_profile(self) -> None:
+        coordinator, runtime_state_store, ref_store = self._build_coordinator()
+
+        status_result = coordinator.execute(
+            self.control_command_assembler.assemble(
+                profile_name="crxzipple",
+                kind="status",
+            )
+        )
+
+        self.assertTrue(status_result.ok)
+        self.assertEqual(status_result.value["profile_name"], "crxzipple")
+        self.assertEqual(status_result.value["runtime"]["attachment_status"], "idle")
+        self.assertEqual(status_result.value["tab_count"], 0)
+
+        start_result = coordinator.execute(
+            self.control_command_assembler.assemble(
+                profile_name="crxzipple",
+                kind="start",
+            )
+        )
+
+        self.assertTrue(start_result.ok)
+        self.assertEqual(start_result.value["profile_name"], "crxzipple")
+        self.assertEqual(start_result.value["runtime"]["attachment_status"], "attached")
+
+        open_result = coordinator.execute(
+            self.control_command_assembler.assemble(
+                profile_name="crxzipple",
+                kind="open-tab",
+                payload={"url": "https://example.com"},
+            )
+        )
+        assert open_result.target_id is not None
+        ref_store.save_tab_refs(
+            profile_name="crxzipple",
+            target_id=open_result.target_id,
+            refs=(
+                BrowserStoredRef(
+                    ref="r1",
+                    selector="#submit",
+                ),
+            ),
+        )
+
+        stop_result = coordinator.execute(
+            self.control_command_assembler.assemble(
+                profile_name="crxzipple",
+                kind="stop",
+            )
+        )
+
+        self.assertTrue(stop_result.ok)
+        self.assertEqual(stop_result.value["profile_name"], "crxzipple")
+        self.assertEqual(stop_result.value["runtime"]["attachment_status"], "closed")
+        runtime_state = runtime_state_store.get(profile_name="crxzipple")
+        self.assertIsNotNone(runtime_state)
+        assert runtime_state is not None
+        self.assertEqual(runtime_state.attachment_status, "closed")
+        self.assertEqual(
+            ref_store.get_tab_refs(profile_name="crxzipple", target_id=open_result.target_id),
+            (),
+        )
+
     def test_execution_coordinator_rejects_reset_for_existing_session(self) -> None:
         coordinator, _runtime_state_store, _ref_store = self._build_coordinator()
 
@@ -324,6 +394,57 @@ class BrowserDomainTestCase(unittest.TestCase):
 
         self.assertEqual(resolved.target_id, "tab-2")
 
+    def test_selection_ops_uses_cached_tabs_without_live_list_lookup(self) -> None:
+        profile = self.profile_resolver.resolve(system=self.system, profile_name="crxzipple")
+        capabilities = self.capabilities_resolver.resolve(profile=profile)
+        command = self.page_action_assembler.assemble(
+            profile_name="crxzipple",
+            kind="click",
+        )
+        plan = self.execution_planner.plan(
+            system=self.system,
+            profile=profile,
+            capabilities=capabilities,
+            command=command,
+        )
+        runtime_state = BrowserProfileRuntimeState(profile_name="crxzipple")
+        runtime_state.metadata["tabs"] = [
+            {
+                "target_id": "tab-cached",
+                "url": "https://cached.example",
+                "title": "Cached",
+                "type": "page",
+            }
+        ]
+
+        class _FailingTabOps:
+            def list_tabs(self) -> tuple[BrowserTab, ...]:
+                raise AssertionError("selection should use cached tabs before live list_tabs")
+
+            def open_tab(self, url: str) -> BrowserTab:
+                raise AssertionError(f"unexpected open_tab({url})")
+
+            def navigate_tab(self, target_id: str, url: str) -> BrowserTab:
+                raise AssertionError(f"unexpected navigate_tab({target_id}, {url})")
+
+            def focus_tab(self, target_id: str) -> BrowserTab:
+                raise AssertionError(f"unexpected focus_tab({target_id})")
+
+            def close_tab(self, target_id: str) -> None:
+                raise AssertionError(f"unexpected close_tab({target_id})")
+
+        selection_ops = self.selection_ops_factory.create(
+            plan=plan,
+            runtime_state=runtime_state,
+            tab_ops=_FailingTabOps(),
+        )
+
+        resolved = selection_ops.ensure_tab_available(
+            requested_target=BrowserActionTarget(),
+        )
+
+        self.assertEqual(resolved.target_id, "tab-cached")
+
     def test_selection_ops_falls_back_to_active_tab_when_requested_page_action_target_is_stale(self) -> None:
         profile = self.profile_resolver.resolve(system=self.system, profile_name="crxzipple")
         capabilities = self.capabilities_resolver.resolve(profile=profile)
@@ -364,6 +485,49 @@ class BrowserDomainTestCase(unittest.TestCase):
         )
 
         self.assertEqual(resolved.target_id, "tab-1")
+
+    def test_selection_ops_treats_missing_numeric_target_as_page_tab_ordinal(self) -> None:
+        profile = self.profile_resolver.resolve(system=self.system, profile_name="crxzipple")
+        capabilities = self.capabilities_resolver.resolve(profile=profile)
+        command = self.page_action_assembler.assemble(
+            profile_name="crxzipple",
+            kind="click",
+            target_id="2",
+        )
+        plan = self.execution_planner.plan(
+            system=self.system,
+            profile=profile,
+            capabilities=capabilities,
+            command=command,
+        )
+        runtime_state = BrowserProfileRuntimeState(
+            profile_name="crxzipple",
+            last_target_id="tab-3",
+            metadata={"active_target_id": "missing-active"},
+        )
+        runtime_state.metadata["tabs"] = [
+            {"target_id": "worker-1", "url": "blob:https://example.test/worker", "type": "worker"},
+            {"target_id": "tab-1", "url": "https://one.example", "type": "page"},
+            {"target_id": "tab-2", "url": "https://two.example", "type": "page"},
+            {"target_id": "tab-3", "url": "https://three.example", "type": "page"},
+        ]
+        control_engine = InMemoryCdpControlEngine()
+        tab_ops = self.tab_ops_factory.create(
+            plan=plan,
+            runtime_state=runtime_state,
+            control_engine=control_engine,
+        )
+        selection_ops = self.selection_ops_factory.create(
+            plan=plan,
+            runtime_state=runtime_state,
+            tab_ops=tab_ops,
+        )
+
+        resolved = selection_ops.ensure_tab_available(
+            requested_target=BrowserActionTarget(target_id="2"),
+        )
+
+        self.assertEqual(resolved.target_id, "tab-2")
 
     def test_selection_ops_does_not_fall_back_for_control_command_with_stale_target(self) -> None:
         profile = self.profile_resolver.resolve(system=self.system, profile_name="crxzipple")
@@ -504,6 +668,38 @@ class BrowserDomainTestCase(unittest.TestCase):
             )
 
         self.assertIn("does not support 'click'", str(context.exception))
+
+    def test_existing_session_unsupported_download_suggests_managed_profile(self) -> None:
+        runtime_state_store = InMemoryBrowserRuntimeStateStore()
+        ref_store = InMemoryBrowserRefStore()
+        coordinator = BrowserExecutionCoordinatorService(
+            system_config_store=InMemoryBrowserSystemConfigStore(self.system),
+            profile_resolver=self.profile_resolver,
+            capabilities_resolver=self.capabilities_resolver,
+            runtime_state_store=runtime_state_store,
+            ref_store=ref_store,
+            execution_planner=self.execution_planner,
+            engine_registry=StaticBrowserEngineRegistry(
+                cdp_control=InMemoryCdpControlEngine(),
+                mcp_control=InMemoryMcpControlEngine(),
+                cdp_backed_playwright=InMemoryCdpBackedPlaywrightActionEngine(),
+                mcp_backed=_UnsupportedMcpActionEngine(),
+            ),
+            tab_ops_factory=self.tab_ops_factory,
+            selection_ops_factory=self.selection_ops_factory,
+        )
+
+        with self.assertRaises(BrowserValidationError) as context:
+            coordinator.execute(
+                self.page_action_assembler.assemble(
+                    profile_name="user",
+                    kind="download",
+                    ref="r1",
+                )
+            )
+
+        self.assertIn("does not support 'download'", str(context.exception))
+        self.assertIn("managed browser profile", str(context.exception))
 
     def test_execution_coordinator_close_tab_clears_last_target(self) -> None:
         coordinator, runtime_state_store, ref_store = self._build_coordinator()

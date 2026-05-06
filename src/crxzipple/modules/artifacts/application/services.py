@@ -18,9 +18,7 @@ from crxzipple.modules.artifacts.domain.exceptions import (
     ArtifactNotFoundError,
     ArtifactValidationError,
 )
-from crxzipple.modules.artifacts.infrastructure.filesystem_store import (
-    FilesystemArtifactStore,
-)
+from crxzipple.modules.artifacts.application.ports import ArtifactStorePort
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +35,7 @@ class ArtifactApplicationService:
 
     def __init__(
         self,
-        store: FilesystemArtifactStore,
+        store: ArtifactStorePort,
         *,
         preview_max_dimension: int = DEFAULT_PREVIEW_MAX_DIMENSION,
         llm_max_dimension: int = DEFAULT_LLM_MAX_DIMENSION,

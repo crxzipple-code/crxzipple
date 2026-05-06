@@ -5,12 +5,15 @@ from threading import enumerate as list_threads
 from threading import current_thread
 from threading import RLock
 from threading import get_ident
+import time
 from typing import Any
 
 from playwright.sync_api import sync_playwright
 
 from crxzipple.modules.browser.domain import BrowserValidationError, ResolvedBrowserProfile
 from .cdp_urls import browser_ref_to_cdp_http_base, normalize_cdp_http_base
+
+_MAX_CONSOLE_MESSAGES_PER_PAGE = 200
 
 
 @dataclass(slots=True)
@@ -23,6 +26,8 @@ class _ThreadPlaywrightState:
     browser_urls: dict[str, str] = field(default_factory=dict)
     pages_by_profile: dict[str, dict[str, Any]] = field(default_factory=dict)
     target_ids_by_page: dict[int, str] = field(default_factory=dict)
+    console_messages_by_page: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    console_listener_pages: dict[int, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -57,6 +62,11 @@ class PlaywrightCdpSessionPool:
             browser=browser,
         )
         if cached_page is not None:
+            self._ensure_page_console_listener(
+                state=state,
+                page=cached_page,
+                target_id=target_id,
+            )
             return cached_page
 
         pages = self._refresh_profile_pages(
@@ -66,10 +76,41 @@ class PlaywrightCdpSessionPool:
         )
         page = pages.get(target_id)
         if page is not None:
+            self._ensure_page_console_listener(
+                state=state,
+                page=page,
+                target_id=target_id,
+            )
             return page
         raise BrowserValidationError(
             f"Browser tab '{target_id}' is not available through Playwright CDP.",
         )
+
+    def get_console_messages(
+        self,
+        *,
+        page,
+        level: str | None = None,
+        limit: int | None = None,
+        clear: bool = False,
+    ) -> list[dict[str, Any]]:
+        state = self._thread_state()
+        marker = id(page)
+        normalized_level = _normalize_console_level(level)
+        with self._lock:
+            messages = list(state.console_messages_by_page.get(marker, ()))
+            if clear:
+                state.console_messages_by_page[marker] = []
+        filtered = [dict(item) for item in messages]
+        if normalized_level is not None:
+            filtered = [
+                item
+                for item in filtered
+                if _normalize_console_level(item.get("level")) == normalized_level
+            ]
+        if limit is not None and limit > 0 and len(filtered) > limit:
+            filtered = filtered[-limit:]
+        return filtered
 
     def clear_profile(self, *, profile_name: str) -> None:
         browsers: list[Any] = []
@@ -79,11 +120,53 @@ class PlaywrightCdpSessionPool:
             for state in self._thread_states.values():
                 browser = state.browsers.pop(profile_name, None)
                 state.browser_urls.pop(profile_name, None)
+                self._purge_profile_console_state(state=state, profile_name=profile_name)
                 self._clear_profile_page_cache(state=state, profile_name=profile_name)
                 if browser is not None and state.owner_thread is active_thread:
                     browsers.append(browser)
         for browser in browsers:
             self._close_browser(browser)
+
+    def probe_connection(
+        self,
+        *,
+        profile: ResolvedBrowserProfile,
+        timeout_ms: int | None = None,
+        cdp_url: str | None = None,
+    ) -> None:
+        state = self._thread_state()
+        effective_cdp_url = self._normalize_cdp_url(
+            profile=profile,
+            cdp_url=cdp_url,
+        )
+        if not effective_cdp_url:
+            raise BrowserValidationError(
+                f"Browser profile '{profile.name}' does not define a CDP URL.",
+            )
+
+        probe_browser = None
+        with self._lock:
+            playwright = self._ensure_playwright(state)
+            try:
+                probe_browser = playwright.chromium.connect_over_cdp(
+                    effective_cdp_url,
+                    timeout=timeout_ms or self.connect_timeout_ms,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise BrowserValidationError(
+                    f"Playwright could not connect over CDP to '{effective_cdp_url}': {exc}",
+                ) from exc
+        if probe_browser is None:
+            raise BrowserValidationError(
+                f"Playwright probe did not return a browser for '{effective_cdp_url}'.",
+            )
+        try:
+            if not self._browser_is_connected(probe_browser):
+                raise BrowserValidationError(
+                    f"Playwright attached to '{effective_cdp_url}' but the browser was not connected.",
+                )
+        finally:
+            self._close_browser(probe_browser)
 
     def close(self) -> None:
         with self._lock:
@@ -140,6 +223,7 @@ class PlaywrightCdpSessionPool:
                 self._close_browser(cached)
                 state.browsers.pop(profile.name, None)
                 state.browser_urls.pop(profile.name, None)
+                self._purge_profile_console_state(state=state, profile_name=profile.name)
                 self._clear_profile_page_cache(state=state, profile_name=profile.name)
 
             playwright = self._ensure_playwright(state)
@@ -222,6 +306,7 @@ class PlaywrightCdpSessionPool:
             if page is None:
                 return None
             if not self._browser_is_connected(browser) or self._page_is_closed(page):
+                self._purge_profile_console_state(state=state, profile_name=profile_name)
                 self._clear_profile_page_cache(state=state, profile_name=profile_name)
                 return None
             return page
@@ -241,6 +326,11 @@ class PlaywrightCdpSessionPool:
                 target_id = self._page_target_id(page, state=state)
                 if target_id is None:
                     continue
+                self._ensure_page_console_listener(
+                    state=state,
+                    page=page,
+                    target_id=target_id,
+                )
                 resolved[target_id] = page
         with self._lock:
             self._clear_profile_page_cache(state=state, profile_name=profile_name)
@@ -259,6 +349,47 @@ class PlaywrightCdpSessionPool:
         profile_pages = state.pages_by_profile.pop(profile_name, {})
         for page in profile_pages.values():
             state.target_ids_by_page.pop(id(page), None)
+
+    @staticmethod
+    def _purge_profile_console_state(
+        *,
+        state: _ThreadPlaywrightState,
+        profile_name: str,
+    ) -> None:
+        profile_pages = state.pages_by_profile.get(profile_name, {})
+        for page in profile_pages.values():
+            marker = id(page)
+            state.console_messages_by_page.pop(marker, None)
+            state.console_listener_pages.pop(marker, None)
+
+    def _ensure_page_console_listener(
+        self,
+        *,
+        state: _ThreadPlaywrightState,
+        page,
+        target_id: str,
+    ) -> None:
+        marker = id(page)
+        if state.console_listener_pages.get(marker) is page:
+            return
+        state.console_messages_by_page.setdefault(marker, [])
+        register = getattr(page, "on", None)
+        if not callable(register):
+            state.console_listener_pages[marker] = page
+            return
+
+        def _capture_console_message(message) -> None:  # noqa: ANN001
+            serialized = _serialize_console_message(message=message, target_id=target_id)
+            if serialized is None:
+                return
+            with self._lock:
+                bucket = state.console_messages_by_page.setdefault(marker, [])
+                bucket.append(serialized)
+                if len(bucket) > _MAX_CONSOLE_MESSAGES_PER_PAGE:
+                    del bucket[:-_MAX_CONSOLE_MESSAGES_PER_PAGE]
+
+        register("console", _capture_console_message)
+        state.console_listener_pages[marker] = page
 
     def _page_target_id(
         self,
@@ -325,3 +456,62 @@ class PlaywrightCdpSessionPool:
             except Exception:  # noqa: BLE001
                 return True
         return False
+
+
+def _message_attr(message, name: str):  # noqa: ANN001, ANN202
+    value = getattr(message, name, None)
+    if callable(value):
+        try:
+            return value()
+        except TypeError:
+            return None
+    return value
+
+
+def _normalize_console_level(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized or normalized == "all":
+        return None
+    if normalized == "warning":
+        return "warn"
+    return normalized
+
+
+def _normalize_console_location(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        raw_url = value.get("url")
+        raw_line = value.get("lineNumber", value.get("line_number"))
+        raw_column = value.get("columnNumber", value.get("column_number"))
+    else:
+        raw_url = getattr(value, "url", None)
+        raw_line = getattr(value, "lineNumber", getattr(value, "line_number", None))
+        raw_column = getattr(value, "columnNumber", getattr(value, "column_number", None))
+    url = str(raw_url).strip() if isinstance(raw_url, str) and raw_url.strip() else None
+    line = raw_line if isinstance(raw_line, int) else None
+    column = raw_column if isinstance(raw_column, int) else None
+    if url is None and line is None and column is None:
+        return None
+    return {
+        "url": url,
+        "line_number": line,
+        "column_number": column,
+    }
+
+
+def _serialize_console_message(*, message, target_id: str) -> dict[str, Any] | None:  # noqa: ANN001
+    text = _message_attr(message, "text")
+    if not isinstance(text, str):
+        return None
+    normalized_text = text.strip()
+    if not normalized_text:
+        return None
+    level = _normalize_console_level(_message_attr(message, "type")) or "log"
+    return {
+        "target_id": target_id,
+        "level": level,
+        "text": normalized_text,
+        "location": _normalize_console_location(_message_attr(message, "location")),
+        "captured_at_ms": int(time.time() * 1000),
+    }

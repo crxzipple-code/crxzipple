@@ -72,12 +72,14 @@ class LlmDefaults(ValueObject):
     top_p: float | None = None
     max_output_tokens: int | None = None
     reasoning_effort: str | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise LlmValidationError(
                 "LLM max_output_tokens must be greater than zero.",
             )
+        object.__setattr__(self, "extra_body", dict(self.extra_body))
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -89,11 +91,20 @@ class LlmDefaults(ValueObject):
             payload["max_output_tokens"] = self.max_output_tokens
         if self.reasoning_effort is not None:
             payload["reasoning_effort"] = self.reasoning_effort
+        if self.extra_body:
+            payload["extra_body"] = dict(self.extra_body)
         return payload
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "LlmDefaults":
         payload = payload or {}
+        extra_body_raw = payload.get("extra_body")
+        if extra_body_raw is None:
+            extra_body: dict[str, Any] = {}
+        elif isinstance(extra_body_raw, dict):
+            extra_body = dict(extra_body_raw)
+        else:
+            raise LlmValidationError("LLM extra_body must decode to an object.")
         return cls(
             temperature=(
                 float(payload["temperature"])
@@ -111,6 +122,7 @@ class LlmDefaults(ValueObject):
                 if payload.get("reasoning_effort") is not None
                 else None
             ),
+            extra_body=extra_body,
         )
 
 

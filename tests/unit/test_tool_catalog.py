@@ -1,6 +1,48 @@
 from __future__ import annotations
 
+from crxzipple.modules.tool.application import ToolDiscoveryProviderDescriptor
+from crxzipple.modules.tool.application.specifications import ToolSpec
+from crxzipple.shared.domain.events import Event
+
 from tests.unit.tool_test_support import *  # noqa: F403
+
+
+class _CountingDiscoveryGateway:
+    def __init__(
+        self,
+        *,
+        specs_by_provider: dict[str, list[ToolSpec]] | None = None,
+    ) -> None:
+        self.calls: list[str | None] = []
+        self.specs_by_provider = specs_by_provider or {}
+
+    def list_providers(self) -> list[ToolDiscoveryProviderDescriptor]:
+        return [
+            ToolDiscoveryProviderDescriptor(
+                name="local_builtin",
+                description="Local builtins",
+                source_kind=ToolSourceKind.LOCAL_DISCOVERY,
+            ),
+            ToolDiscoveryProviderDescriptor(
+                name="local_filesystem",
+                description="Local filesystem",
+                source_kind=ToolSourceKind.LOCAL_DISCOVERY,
+            ),
+            ToolDiscoveryProviderDescriptor(
+                name="sample_api",
+                description="Sample API",
+                source_kind=ToolSourceKind.REMOTE_REGISTRY,
+            ),
+        ]
+
+    def discover(self, *, provider_name: str | None = None) -> list[ToolSpec]:
+        self.calls.append(provider_name)
+        if provider_name is None:
+            specs: list[ToolSpec] = []
+            for provider_specs in self.specs_by_provider.values():
+                specs.extend(provider_specs)
+            return specs
+        return list(self.specs_by_provider.get(provider_name, []))
 
 
 class ToolCatalogTestCase(ToolTestCaseBase):
@@ -91,6 +133,46 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertNotIn("dangerous_write", enabled_ids)
         self.assertIn("memory_search", enabled_ids)
         self.assertIn("memory_write_daily", enabled_ids)
+        self.assertIn("mobile_script", enabled_ids)
+        self.assertIn("mobile_snapshot", enabled_ids)
+        self.assertIn("mobile_tap", enabled_ids)
+        self.assertIn("mobile_swipe", enabled_ids)
+        self.assertIn("session_status", enabled_ids)
+        self.assertIn("sessions_list", enabled_ids)
+        self.assertIn("sessions_history", enabled_ids)
+        self.assertIn("sessions_send", enabled_ids)
+        self.assertIn("sessions_spawn", enabled_ids)
+        self.assertIn("subagents", enabled_ids)
+        self.assertIn("sessions_stop", enabled_ids)
+        self.assertIn("sessions_yield", enabled_ids)
+        self.assertNotIn("mobile_session", enabled_ids)
+
+    def test_list_enabled_tools_refreshes_filesystem_discovery_once(self) -> None:
+        gateway = _CountingDiscoveryGateway()
+        self.container.tool_service.discovery_gateway = gateway
+
+        self.container.tool_service.list_enabled_tools()
+        self.container.tool_service.list_enabled_tools()
+
+        self.assertEqual(gateway.calls, ["local_filesystem", "sample_api", "sample_api"])
+
+    def test_explicit_filesystem_discovery_refreshes_after_hot_path_resolution(self) -> None:
+        gateway = _CountingDiscoveryGateway()
+        self.container.tool_service.discovery_gateway = gateway
+
+        self.container.tool_service.list_enabled_tools()
+        self.container.tool_service.discover_tools(provider_name="local_filesystem")
+        self.container.tool_service.list_enabled_tools()
+
+        self.assertEqual(
+            gateway.calls,
+            [
+                "local_filesystem",
+                "sample_api",
+                "local_filesystem",
+                "sample_api",
+            ],
+        )
 
     def test_discovers_local_tools_without_persisting_definitions(self) -> None:
         discovered = self.container.tool_service.discover_local_tools()
@@ -112,6 +194,8 @@ class ToolCatalogTestCase(ToolTestCaseBase):
 
         self.assertNotIn("tools", tables)
         self.assertIn("tool_runs", tables)
+        self.assertIn("tool_run_assignments", tables)
+        self.assertIn("tool_workers", tables)
 
     def test_list_tools_uses_runtime_system_managed_definition(self) -> None:
         tools = {
@@ -202,6 +286,22 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("scope:workspace_bound", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
+    def test_get_tool_returns_mobile_snapshot_tool_from_local_package(self) -> None:
+        tool = self.container.tool_service.get_tool("mobile_snapshot")
+
+        self.assertEqual(tool.id, "mobile_snapshot")
+        self.assertEqual(tool.runtime_key, "mobile_snapshot")
+        self.assertIn("mobile", tool.tags)
+        self.assertIn("system-managed", tool.tags)
+
+    def test_get_tool_returns_session_status_tool_from_local_package(self) -> None:
+        tool = self.container.tool_service.get_tool("session_status")
+
+        self.assertEqual(tool.id, "session_status")
+        self.assertEqual(tool.runtime_key, "session_status")
+        self.assertIn("session", tool.tags)
+        self.assertIn("system-managed", tool.tags)
+
     def test_get_tool_returns_workspace_list_tool_without_db_row(self) -> None:
         tool = self.container.tool_service.get_tool("workspace_list")
 
@@ -232,7 +332,8 @@ class ToolCatalogTestCase(ToolTestCaseBase):
 
         self.assertFalse(disabled.enabled)
         event_names = [
-            event.name for event in self.container.event_bus.published_events[-2:]
-        ]
+            event.event_name
+            for event in self.container.event_bus.published_events
+            if isinstance(event, Event) and bool(event.name)
+        ][-2:]
         self.assertEqual(event_names, ["tool.enabled", "tool.disabled"])
-

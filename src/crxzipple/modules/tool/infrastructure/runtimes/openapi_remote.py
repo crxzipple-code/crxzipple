@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
-import os
 from typing import Any
 from urllib.parse import quote
 
-import requests
+import httpx
 
 from crxzipple.core.config import OpenApiCredentialBinding
+from crxzipple.modules.access import CredentialResolutionError, CredentialResolver
 from crxzipple.modules.tool.domain import ToolRunResult
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.infrastructure.discovery.openapi import (
@@ -19,6 +18,9 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
 )
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
+from crxzipple.shared.infrastructure.http import get_async_http_client
+
+_CREDENTIAL_RESOLVER = CredentialResolver()
 
 
 class OpenApiRemoteInvoker:
@@ -27,89 +29,38 @@ class OpenApiRemoteInvoker:
         operation: OpenApiOperation,
         arguments: dict[str, Any],
     ) -> Any:
-        return await asyncio.to_thread(
-            self._execute_sync,
+        url, query_items, headers, json_body = _build_request(
             operation,
             dict(arguments),
         )
 
-    def _execute_sync(
-        self,
-        operation: OpenApiOperation,
-        arguments: dict[str, Any],
-    ) -> Any:
-        path = operation.path_template
-        for parameter_name in operation.path_parameters:
-            if parameter_name not in arguments:
-                raise ToolValidationError(
-                    f"Remote OpenAPI tool '{operation.tool_id}' requires path parameter '{parameter_name}'.",
-                )
-            path = path.replace(
-                "{" + parameter_name + "}",
-                quote(str(arguments.pop(parameter_name)), safe=""),
-            )
-
-        query_items: list[tuple[str, str]] = []
-        for parameter_name in operation.query_parameters:
-            value = arguments.pop(parameter_name, None)
-            if value is None:
-                continue
-            if isinstance(value, (list, tuple)):
-                query_items.extend(
-                    (parameter_name, _serialize_scalar(item)) for item in value
-                )
-            else:
-                query_items.append((parameter_name, _serialize_scalar(value)))
-
-        body = arguments.pop("body", None)
-        if operation.body_required and body is None:
-            raise ToolValidationError(
-                f"Remote OpenAPI tool '{operation.tool_id}' requires a JSON body payload.",
-            )
-
-        headers = {"Accept": "application/json"}
-        cookies: list[str] = []
-        query_items.extend(
-            _build_security_query_items(
-                operation,
-                headers=headers,
-                cookies=cookies,
-            ),
-        )
-        if cookies:
-            headers["Cookie"] = "; ".join(cookies)
-
-        url = _build_url(operation.base_url, path)
-        json_body: dict[str, Any] | list[Any] | None = None
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-            json_body = body
-
         try:
-            response = requests.request(
+            client = get_async_http_client(
+                url,
+                timeout=operation.timeout_seconds,
+                client_factory=httpx.AsyncClient,
+            )
+            response = await client.request(
                 method=operation.method,
                 url=url,
                 params=query_items or None,
                 headers=headers,
                 json=json_body,
-                timeout=operation.timeout_seconds,
             )
-            response.raise_for_status()
-            payload = response.content
-            content_type = response.headers.get("Content-Type", "")
-            status_code = response.status_code
-            final_url = response.url
-        except requests.HTTPError as exc:
-            response = exc.response
-            status_code = response.status_code if response is not None else "unknown"
-            detail = response.text if response is not None else str(exc)
-            raise ToolValidationError(
-                f"Remote OpenAPI tool '{operation.tool_id}' failed with HTTP {status_code}: {detail}",
-            ) from exc
-        except requests.RequestException as exc:
+        except httpx.RequestError as exc:
             raise ToolValidationError(
                 f"Remote OpenAPI tool '{operation.tool_id}' could not reach {url}: {exc}",
             ) from exc
+
+        if response.status_code >= 400:
+            raise ToolValidationError(
+                f"Remote OpenAPI tool '{operation.tool_id}' failed with HTTP {response.status_code}: {response.text}",
+            )
+
+        payload = response.content
+        content_type = response.headers.get("Content-Type", "")
+        status_code = response.status_code
+        final_url = str(response.url)
 
         decoded_body = _decode_response_body(payload, content_type)
         return ToolRunResult.text(
@@ -130,6 +81,8 @@ class OpenApiRemoteInvoker:
 def register_openapi_remote_handlers(
     registry: ToolRuntimeRegistry,
     operations: list[OpenApiOperation] | tuple[OpenApiOperation, ...],
+    *,
+    max_concurrency: int | None = None,
 ) -> None:
     invoker = OpenApiRemoteInvoker()
     for operation in operations:
@@ -142,7 +95,70 @@ def register_openapi_remote_handlers(
         ) -> Any:
             return await _invoker.execute(_operation, arguments)
 
-        registry.register(operation.runtime_key, handler)
+        registry.register(
+            operation.runtime_key,
+            handler,
+            concurrency_key=f"openapi:{operation.provider_name}",
+            max_concurrency=max_concurrency,
+        )
+
+
+def _build_request(
+    operation: OpenApiOperation,
+    arguments: dict[str, Any],
+) -> tuple[
+    str,
+    list[tuple[str, str]],
+    dict[str, str],
+    dict[str, Any] | list[Any] | None,
+]:
+    path = operation.path_template
+    for parameter_name in operation.path_parameters:
+        if parameter_name not in arguments:
+            raise ToolValidationError(
+                f"Remote OpenAPI tool '{operation.tool_id}' requires path parameter '{parameter_name}'.",
+            )
+        path = path.replace(
+            "{" + parameter_name + "}",
+            quote(str(arguments.pop(parameter_name)), safe=""),
+        )
+
+    query_items: list[tuple[str, str]] = []
+    for parameter_name in operation.query_parameters:
+        value = arguments.pop(parameter_name, None)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            query_items.extend(
+                (parameter_name, _serialize_scalar(item)) for item in value
+            )
+        else:
+            query_items.append((parameter_name, _serialize_scalar(value)))
+
+    body = arguments.pop("body", None)
+    if operation.body_required and body is None:
+        raise ToolValidationError(
+            f"Remote OpenAPI tool '{operation.tool_id}' requires a JSON body payload.",
+        )
+
+    headers = {"Accept": "application/json"}
+    cookies: list[str] = []
+    query_items.extend(
+        _build_security_query_items(
+            operation,
+            headers=headers,
+            cookies=cookies,
+        ),
+    )
+    if cookies:
+        headers["Cookie"] = "; ".join(cookies)
+
+    json_body: dict[str, Any] | list[Any] | None = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        json_body = body
+
+    return _build_url(operation.base_url, path), query_items, headers, json_body
 
 
 def _build_url(
@@ -305,19 +321,9 @@ def _resolve_secret_source(
             f"OpenAPI credential binding for security scheme '{scheme_name}' is missing {field_name}.",
         )
 
-    if source.startswith("env:"):
-        env_name = source.removeprefix("env:").strip()
-        if not env_name:
-            raise ToolValidationError(
-                f"OpenAPI credential binding for security scheme '{scheme_name}' references an empty environment variable.",
-            )
-        value = os.getenv(env_name)
-        if value is None or not value.strip():
-            raise ToolValidationError(
-                f"OpenAPI credential binding for security scheme '{scheme_name}' could not resolve env var '{env_name}'.",
-            )
-        return value
-
-    raise ToolValidationError(
-        f"OpenAPI credential binding for security scheme '{scheme_name}' uses unsupported source '{source}'.",
-    )
+    try:
+        return _CREDENTIAL_RESOLVER.resolve(source)
+    except CredentialResolutionError as exc:
+        raise ToolValidationError(
+            f"OpenAPI credential binding for security scheme '{scheme_name}' {exc}",
+        ) from exc

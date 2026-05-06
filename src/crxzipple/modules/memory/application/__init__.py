@@ -1,11 +1,30 @@
 from crxzipple.modules.memory.application.contracts import (
+    MemoryIndexManagerPort,
     MemoryIndexStore,
     MemorySearchGateway,
     MemorySourceScanner,
+    MemoryStorePort,
 )
 from crxzipple.modules.memory.application.indexing import (
     SearchMemoryIndexService,
     SyncMemoryIndexService,
+)
+from crxzipple.modules.memory.application.events import (
+    MEMORY_CONTEXT_RESOLVE_FAILED_EVENT,
+    MEMORY_CONTEXT_RESOLVED_EVENT,
+    MEMORY_INDEX_MARKED_DIRTY_EVENT,
+    MEMORY_INDEX_SYNC_FAILED_EVENT,
+    MEMORY_INDEX_SYNC_STARTED_EVENT,
+    MEMORY_INDEX_SYNC_SUCCEEDED_EVENT,
+    MEMORY_OPERATION_EVENT_NAMES,
+    MEMORY_RETRIEVAL_FAILED_EVENT,
+    MEMORY_RETRIEVAL_STARTED_EVENT,
+    MEMORY_RETRIEVAL_SUCCEEDED_EVENT,
+    MEMORY_WRITE_FAILED_EVENT,
+    MEMORY_WRITE_SUCCEEDED_EVENT,
+    MemoryEventEmitter,
+    emit_memory_event,
+    memory_event_from_payload,
 )
 from crxzipple.modules.memory.application.models import (
     MemoryExcerpt,
@@ -20,11 +39,26 @@ from crxzipple.modules.memory.application.services import FileBackedMemoryServic
 
 __all__ = [
     "MemoryIndexStore",
+    "MemoryIndexManagerPort",
     "MemorySearchGateway",
     "MemorySearchRecord",
     "MemorySourceScanner",
+    "MemoryStorePort",
     "FileBackedMemoryService",
+    "MEMORY_CONTEXT_RESOLVE_FAILED_EVENT",
+    "MEMORY_CONTEXT_RESOLVED_EVENT",
+    "MEMORY_INDEX_MARKED_DIRTY_EVENT",
+    "MEMORY_INDEX_SYNC_FAILED_EVENT",
+    "MEMORY_INDEX_SYNC_STARTED_EVENT",
+    "MEMORY_INDEX_SYNC_SUCCEEDED_EVENT",
+    "MEMORY_OPERATION_EVENT_NAMES",
+    "MEMORY_RETRIEVAL_FAILED_EVENT",
+    "MEMORY_RETRIEVAL_STARTED_EVENT",
+    "MEMORY_RETRIEVAL_SUCCEEDED_EVENT",
+    "MEMORY_WRITE_FAILED_EVENT",
+    "MEMORY_WRITE_SUCCEEDED_EVENT",
     "MemoryExcerpt",
+    "MemoryEventEmitter",
     "MemoryFileSummary",
     "MemoryRetrievalBackend",
     "MemorySearchHit",
@@ -32,4 +66,6 @@ __all__ = [
     "MemoryWriteResult",
     "SearchMemoryIndexService",
     "SyncMemoryIndexService",
+    "emit_memory_event",
+    "memory_event_from_payload",
 ]

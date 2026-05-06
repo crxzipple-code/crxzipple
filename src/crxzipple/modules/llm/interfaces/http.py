@@ -27,6 +27,10 @@ from crxzipple.modules.llm.domain import (
     LlmSourceKind,
     ToolSchema,
 )
+from crxzipple.shared.time import (
+    format_datetime_utc,
+    format_optional_datetime_utc,
+)
 
 
 router = APIRouter()
@@ -37,6 +41,7 @@ class LlmDefaultsResponse(BaseModel):
     top_p: float | None = None
     max_output_tokens: int | None = None
     reasoning_effort: str | None = None
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class RegisterLlmProfileRequest(BaseModel):
@@ -51,6 +56,8 @@ class RegisterLlmProfileRequest(BaseModel):
     base_url: str | None = None
     credential_binding: str | None = None
     timeout_seconds: int = 60
+    max_concurrency: int | None = Field(default=None, ge=1)
+    concurrency_key: str | None = None
     enabled: bool = True
 
 
@@ -66,6 +73,8 @@ class LlmProfileResponse(BaseModel):
     base_url: str | None
     credential_binding: str | None
     timeout_seconds: int
+    max_concurrency: int | None = None
+    concurrency_key: str | None = None
     source_kind: str
     enabled: bool
 
@@ -145,31 +154,12 @@ def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfil
         context_window_tokens=profile.context_window_tokens,
         model_family=LlmModelFamily(profile.model_family),
         capabilities=tuple(LlmCapability(item) for item in profile.capabilities),
-        default_params=LlmDefaults(
-            temperature=(
-                float(profile.default_params["temperature"])
-                if profile.default_params.get("temperature") is not None
-                else None
-            ),
-            top_p=(
-                float(profile.default_params["top_p"])
-                if profile.default_params.get("top_p") is not None
-                else None
-            ),
-            max_output_tokens=(
-                int(profile.default_params["max_output_tokens"])
-                if profile.default_params.get("max_output_tokens") is not None
-                else None
-            ),
-            reasoning_effort=(
-                str(profile.default_params["reasoning_effort"])
-                if profile.default_params.get("reasoning_effort") is not None
-                else None
-            ),
-        ),
+        default_params=LlmDefaults.from_payload(profile.default_params),
         base_url=profile.base_url,
         credential_binding=profile.credential_binding,
         timeout_seconds=profile.timeout_seconds,
+        max_concurrency=profile.max_concurrency,
+        concurrency_key=profile.concurrency_key,
         source_kind=LlmSourceKind(profile.source_kind),
         enabled=profile.enabled,
     )
@@ -194,10 +184,13 @@ def register_profile(
                 top_p=payload.default_params.top_p,
                 max_output_tokens=payload.default_params.max_output_tokens,
                 reasoning_effort=payload.default_params.reasoning_effort,
+                extra_body=dict(payload.default_params.extra_body),
             ),
             base_url=payload.base_url,
             credential_binding=payload.credential_binding,
             timeout_seconds=payload.timeout_seconds,
+            max_concurrency=payload.max_concurrency,
+            concurrency_key=payload.concurrency_key,
             enabled=payload.enabled,
         ),
     )
@@ -369,10 +362,13 @@ def _to_profile_response(profile: Any) -> LlmProfileResponse:
             top_p=profile.default_params.top_p,
             max_output_tokens=profile.default_params.max_output_tokens,
             reasoning_effort=profile.default_params.reasoning_effort,
+            extra_body=dict(profile.default_params.extra_body),
         ),
         base_url=profile.base_url,
         credential_binding=profile.credential_binding,
         timeout_seconds=profile.timeout_seconds,
+        max_concurrency=profile.max_concurrency,
+        concurrency_key=profile.concurrency_key,
         source_kind=profile.source_kind.value,
         enabled=profile.enabled,
     )
@@ -445,15 +441,7 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
             else None
         ),
         provider_request_id=invocation.provider_request_id,
-        created_at=invocation.created_at.isoformat(),
-        started_at=(
-            invocation.started_at.isoformat()
-            if invocation.started_at is not None
-            else None
-        ),
-        completed_at=(
-            invocation.completed_at.isoformat()
-            if invocation.completed_at is not None
-            else None
-        ),
+        created_at=format_datetime_utc(invocation.created_at),
+        started_at=format_optional_datetime_utc(invocation.started_at),
+        completed_at=format_optional_datetime_utc(invocation.completed_at),
     )

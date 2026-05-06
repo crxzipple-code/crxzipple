@@ -240,7 +240,7 @@ class PromptTranscriptTestCase(unittest.TestCase):
                     role="tool",
                     kind=SessionMessageKind.TOOL_RESULT,
                     content_payload={
-                        "tool_name": "browser",
+                        "tool_name": "browser_action",
                         "tool_call_id": "call-1",
                         "status": "succeeded",
                         "details": {"ok": True},
@@ -259,7 +259,7 @@ class PromptTranscriptTestCase(unittest.TestCase):
                     },
                     metadata={
                         "tool_call_id": "call-1",
-                        "tool_name": "browser",
+                        "tool_name": "browser_action",
                     },
                 ),
             ),
@@ -288,14 +288,14 @@ class PromptTranscriptTestCase(unittest.TestCase):
                     role="tool",
                     kind=SessionMessageKind.TOOL_RESULT,
                     content_payload={
-                        "tool_name": "browser",
+                        "tool_name": "browser_action",
                         "tool_call_id": "call-1",
                         "status": "succeeded",
                         "details": {"secret": "should not be shown"},
                     },
                     metadata={
                         "tool_call_id": "call-1",
-                        "tool_name": "browser",
+                        "tool_name": "browser_action",
                     },
                 ),
             ),
@@ -329,12 +329,12 @@ class PromptTranscriptTestCase(unittest.TestCase):
                     content_payload={
                         "type": "function_call",
                         "call_id": "call-1",
-                        "name": "browser",
-                        "arguments": {"kind": "snapshot"},
+                        "name": "browser_snapshot",
+                        "arguments": {"format": "interactive"},
                     },
                     metadata={
                         "tool_call_id": "call-1",
-                        "tool_name": "browser",
+                        "tool_name": "browser_snapshot",
                     },
                 ),
                 SessionMessage(
@@ -347,7 +347,7 @@ class PromptTranscriptTestCase(unittest.TestCase):
                     content_payload={"blocks": [{"type": "text", "text": "done"}]},
                     metadata={
                         "tool_call_id": "call-1",
-                        "tool_name": "browser",
+                        "tool_name": "browser_snapshot",
                     },
                 ),
                 SessionMessage(

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from crxzipple.modules.orchestration.application import ResolveSessionBundleInput
 from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
     EnsureSessionInput,
+    ResolveSessionInput,
     ResetSessionInput,
 )
 from crxzipple.modules.session.domain import (
@@ -24,8 +24,9 @@ from crxzipple.modules.session.interfaces.shared import (
     SessionInterfaceErrorFactory,
     build_ensure_session_input,
     build_reset_policy,
-    build_resolve_session_bundle_input,
+    build_resolve_session_input,
 )
+from crxzipple.shared.time import format_datetime_utc
 
 
 class SessionRuntimeBindingPayload(BaseModel):
@@ -53,7 +54,7 @@ class SessionRequest(BaseModel):
     channel: str | None = None
     chat_type: str | None = None
     origin: dict[str, object] | None = None
-    delivery: dict[str, object] | None = None
+    reply: dict[str, object] | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
     active_session_id: str | None = None
 
@@ -69,7 +70,7 @@ class SessionRequest(BaseModel):
             channel=self.channel,
             chat_type=self.chat_type,
             origin_payload=self.origin,
-            delivery_payload=self.delivery,
+            reply_payload=self.reply,
             metadata=self.metadata,
             active_session_id=self.active_session_id,
             error_factory=error_factory,
@@ -84,7 +85,7 @@ class SessionResponse(BaseModel):
     channel: str | None = None
     chat_type: str | None = None
     origin: dict[str, object] = Field(default_factory=dict)
-    delivery: dict[str, object] = Field(default_factory=dict)
+    reply: dict[str, object] = Field(default_factory=dict)
     metadata: dict[str, object] = Field(default_factory=dict)
     created_at: str
     updated_at: str
@@ -100,11 +101,11 @@ class SessionResponse(BaseModel):
             channel=dto.channel,
             chat_type=dto.chat_type,
             origin=dto.origin,
-            delivery=dto.delivery,
+            reply=dto.reply,
             metadata=dto.metadata,
-            created_at=dto.created_at.isoformat(),
-            updated_at=dto.updated_at.isoformat(),
-            last_reset_at=dto.last_reset_at.isoformat(),
+            created_at=format_datetime_utc(dto.created_at),
+            updated_at=format_datetime_utc(dto.updated_at),
+            last_reset_at=format_datetime_utc(dto.last_reset_at),
         )
 
 
@@ -160,7 +161,7 @@ class SessionMessageResponse(BaseModel):
             source_id=dto.source_id,
             visibility=dto.visibility,
             metadata=dto.metadata,
-            created_at=dto.created_at.isoformat(),
+            created_at=format_datetime_utc(dto.created_at),
         )
 
 
@@ -185,8 +186,12 @@ class SessionInstanceResponse(BaseModel):
             sequence_no=dto.sequence_no,
             kind=dto.kind,
             status=dto.status,
-            opened_at=dto.opened_at.isoformat(),
-            closed_at=dto.closed_at.isoformat() if dto.closed_at is not None else None,
+            opened_at=format_datetime_utc(dto.opened_at),
+            closed_at=(
+                format_datetime_utc(dto.closed_at)
+                if dto.closed_at is not None
+                else None
+            ),
             reset_reason=dto.reset_reason,
             metadata=dto.metadata,
         )
@@ -221,8 +226,8 @@ class ResolveSessionRequest(BaseModel):
     touch_activity: bool = True
     reset_policy: ResolveSessionPolicyRequest | None = None
 
-    def to_input(self) -> ResolveSessionBundleInput:
-        return build_resolve_session_bundle_input(
+    def to_input(self) -> ResolveSessionInput:
+        return build_resolve_session_input(
             agent_id=self.agent_id,
             channel=self.channel,
             chat_type=self.chat_type,

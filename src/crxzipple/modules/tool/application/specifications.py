@@ -15,6 +15,27 @@ from crxzipple.modules.tool.domain.value_objects import (
 )
 
 
+def _normalize_access_requirement_sets(
+    values: tuple[tuple[str, ...], ...],
+    *,
+    fallback_requirements: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    resolved: list[tuple[str, ...]] = []
+    for value in values:
+        requirement_set = tuple(
+            dict.fromkeys(
+                requirement.strip()
+                for requirement in value
+                if requirement is not None and requirement.strip()
+            ),
+        )
+        if requirement_set not in resolved:
+            resolved.append(requirement_set)
+    if not resolved and fallback_requirements:
+        resolved.append(fallback_requirements)
+    return tuple(resolved)
+
+
 @dataclass(frozen=True, slots=True)
 class ToolSpec(ValueObject):
     id: str
@@ -25,6 +46,8 @@ class ToolSpec(ValueObject):
     parameters: tuple[ToolParameter, ...] = field(default_factory=tuple)
     tags: tuple[str, ...] = field(default_factory=tuple)
     required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
+    access_requirements: tuple[str, ...] = field(default_factory=tuple)
+    access_requirement_sets: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
     execution_policy: ToolExecutionPolicy = field(default_factory=ToolExecutionPolicy)
     execution_support: ToolExecutionSupport = field(default_factory=ToolExecutionSupport)
     source_kind: ToolSourceKind = ToolSourceKind.MANUAL
@@ -59,6 +82,22 @@ class ToolSpec(ValueObject):
                 ),
             ),
         )
+        access_requirements = tuple(
+            dict.fromkeys(
+                requirement.strip()
+                for requirement in self.access_requirements
+                if requirement is not None and requirement.strip()
+            ),
+        )
+        object.__setattr__(self, "access_requirements", access_requirements)
+        object.__setattr__(
+            self,
+            "access_requirement_sets",
+            _normalize_access_requirement_sets(
+                self.access_requirement_sets,
+                fallback_requirements=access_requirements,
+            ),
+        )
 
     @classmethod
     def from_tool(cls, tool: Tool, *, provider_name: str) -> "ToolSpec":
@@ -71,6 +110,8 @@ class ToolSpec(ValueObject):
             parameters=tool.parameters,
             tags=tool.tags,
             required_effect_ids=tool.required_effect_ids,
+            access_requirements=tool.access_requirements,
+            access_requirement_sets=tool.access_requirement_sets,
             execution_policy=tool.execution_policy,
             execution_support=tool.execution_support,
             source_kind=tool.source_kind,

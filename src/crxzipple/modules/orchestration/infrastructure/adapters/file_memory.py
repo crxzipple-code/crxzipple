@@ -8,10 +8,13 @@ from crxzipple.modules.agent.domain import AgentNotFoundError, AgentValidationEr
 from crxzipple.modules.agent.domain.entities import AgentProfile
 from crxzipple.modules.memory.application import (
     FileBackedMemoryService,
+    MEMORY_CONTEXT_RESOLVE_FAILED_EVENT,
+    MEMORY_CONTEXT_RESOLVED_EVENT,
+    MemoryEventEmitter,
     MemoryExcerpt,
     MemorySearchHit,
     MemoryUseContext,
-    MemoryWriteResult,
+    emit_memory_event,
 )
 from crxzipple.modules.orchestration.application.ports import MemoryPort
 from crxzipple.modules.orchestration.infrastructure.memory_bindings import (
@@ -25,23 +28,50 @@ class FileMemoryContextResolver:
     default_retrieval_backend: str
     binding_loader: Callable[[str], AgentMemoryBinding] | None = None
     context_observer: Callable[[MemoryUseContext], None] | None = None
+    event_emitter: MemoryEventEmitter | None = None
 
     def resolve(self, space_ref: str | None) -> MemoryUseContext | None:
         normalized_space_ref = (space_ref or "").strip()
         if not normalized_space_ref:
+            self._observe_resolution(
+                normalized_space_ref,
+                None,
+                reason="empty space reference",
+            )
             return None
         try:
             profile = self.agent_service.get_profile(normalized_space_ref)
         except AgentNotFoundError:
-            return self._resolve_by_memory_space_id(normalized_space_ref)
+            context = self._resolve_by_memory_space_id(normalized_space_ref)
+            if context is None:
+                self._observe_resolution(
+                    normalized_space_ref,
+                    None,
+                    reason="agent or memory space not found",
+                )
+            return context
         except AgentValidationError:
             context = self._context_from_registered_home(normalized_space_ref)
             if context is not None:
                 self._observe(context)
+                self._observe_resolution(normalized_space_ref, context)
+            else:
+                self._observe_resolution(
+                    normalized_space_ref,
+                    None,
+                    reason="registered home not found",
+                )
             return context
         context = self._context_from_profile(profile)
         if context is not None:
             self._observe(context)
+            self._observe_resolution(normalized_space_ref, context)
+        else:
+            self._observe_resolution(
+                normalized_space_ref,
+                None,
+                reason="agent home is not configured",
+            )
         return context
 
     def _resolve_by_memory_space_id(self, space_id: str) -> MemoryUseContext | None:
@@ -59,6 +89,7 @@ class FileMemoryContextResolver:
         context = self._context_from_profile(matches[0])
         if context is not None:
             self._observe(context)
+            self._observe_resolution(space_id, context)
         return context
 
     def _context_from_registered_home(self, profile_id: str) -> MemoryUseContext | None:
@@ -111,6 +142,40 @@ class FileMemoryContextResolver:
         if self.context_observer is not None:
             self.context_observer(context)
 
+    def _observe_resolution(
+        self,
+        space_ref: str | None,
+        context: MemoryUseContext | None,
+        *,
+        reason: str = "resolved",
+    ) -> None:
+        if context is None:
+            emit_memory_event(
+                self.event_emitter,
+                MEMORY_CONTEXT_RESOLVE_FAILED_EVENT,
+                status="failed",
+                level="warning",
+                payload={
+                    "agent_id": (space_ref or "").strip(),
+                    "space_ref": (space_ref or "").strip(),
+                    "reason": reason,
+                    "owner_id": (space_ref or "").strip(),
+                    "owner_kind": "memory_space",
+                },
+            )
+            return
+        emit_memory_event(
+            self.event_emitter,
+            MEMORY_CONTEXT_RESOLVED_EVENT,
+            context=context,
+            status="resolved",
+            payload={
+                "agent_id": (space_ref or "").strip(),
+                "space_ref": (space_ref or "").strip(),
+                "reason": reason,
+            },
+        )
+
 
 @dataclass(slots=True)
 class FileBackedMemoryPortAdapter(MemoryPort):
@@ -159,41 +224,4 @@ class FileBackedMemoryPortAdapter(MemoryPort):
             path=path,
             start_line=start_line,
             line_count=line_count,
-        )
-
-    def append_daily(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-        title: str | None = None,
-    ) -> MemoryWriteResult:
-        return self.service.append_daily(
-            context=context,
-            content=content,
-            title=title,
-        )
-
-    def write_long_term(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-    ) -> MemoryWriteResult:
-        return self.service.write_long_term(
-            context=context,
-            content=content,
-        )
-
-    def archive_session(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-        slug: str | None = None,
-    ) -> MemoryWriteResult:
-        return self.service.archive_session(
-            context=context,
-            content=content,
-            slug=slug,
         )

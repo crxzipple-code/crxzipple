@@ -26,7 +26,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
 
-    _drop_sessions_agent_fk(inspector)
+    _drop_sessions_agent_fk(bind, inspector)
 
     if inspector.has_table("agents"):
         op.drop_table("agents")
@@ -42,7 +42,12 @@ def downgrade() -> None:
             sa.Column("id", sa.String(length=100), nullable=False),
             sa.Column("name", sa.String(length=255), nullable=False),
             sa.Column("description", sa.String(length=500), nullable=False, server_default=""),
-            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            sa.Column(
+                "enabled",
+                sa.Boolean(),
+                nullable=False,
+                server_default=_bool_default(bind, True),
+            ),
             sa.Column(
                 "identity_payload",
                 sa.JSON(),
@@ -92,20 +97,29 @@ def downgrade() -> None:
                 """,
             ),
         )
-        with op.batch_alter_table(
-            "sessions",
-            recreate="always",
-            naming_convention=_BATCH_NAMING_CONVENTION,
-        ) as batch_op:
-            batch_op.create_foreign_key(
+        if bind.dialect.name == "postgresql":
+            op.create_foreign_key(
                 "fk_sessions_agent_id_agents",
+                "sessions",
                 "agents",
                 ["agent_id"],
                 ["id"],
             )
+        else:
+            with op.batch_alter_table(
+                "sessions",
+                recreate="always",
+                naming_convention=_BATCH_NAMING_CONVENTION,
+            ) as batch_op:
+                batch_op.create_foreign_key(
+                    "fk_sessions_agent_id_agents",
+                    "agents",
+                    ["agent_id"],
+                    ["id"],
+                )
 
 
-def _drop_sessions_agent_fk(inspector: sa.Inspector) -> None:
+def _drop_sessions_agent_fk(bind: sa.Connection, inspector: sa.Inspector) -> None:
     if not inspector.has_table("sessions"):
         return
 
@@ -122,9 +136,18 @@ def _drop_sessions_agent_fk(inspector: sa.Inspector) -> None:
     if constraint_name is None:
         return
 
-    with op.batch_alter_table(
-        "sessions",
-        recreate="always",
-        naming_convention=_BATCH_NAMING_CONVENTION,
-    ) as batch_op:
-        batch_op.drop_constraint(constraint_name, type_="foreignkey")
+    if bind.dialect.name == "postgresql":
+        op.drop_constraint(constraint_name, "sessions", type_="foreignkey")
+    else:
+        with op.batch_alter_table(
+            "sessions",
+            recreate="always",
+            naming_convention=_BATCH_NAMING_CONVENTION,
+        ) as batch_op:
+            batch_op.drop_constraint(constraint_name, type_="foreignkey")
+
+
+def _bool_default(bind: sa.Connection, value: bool) -> sa.TextClause:
+    if bind.dialect.name == "postgresql":
+        return sa.text("true" if value else "false")
+    return sa.text("1" if value else "0")

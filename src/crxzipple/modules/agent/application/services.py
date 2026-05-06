@@ -16,10 +16,9 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
-    AgentToolPreferences,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
-from crxzipple.shared.domain.events import DomainEvent
+from crxzipple.shared.domain.events import Event
 
 
 _UNSET = object()
@@ -43,7 +42,6 @@ class RegisterAgentProfileInput:
         default_factory=AgentRuntimePreferences,
     )
     home_sidecar_files: dict[str, str] = field(default_factory=dict)
-    tool_preferences: AgentToolPreferences = field(default_factory=AgentToolPreferences)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +55,6 @@ class UpdateAgentProfileInput:
     llm_routing_policy: object = _UNSET
     execution_policy: object = _UNSET
     runtime_preferences: object = _UNSET
-    tool_preferences: object = _UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,10 +205,9 @@ class AgentApplicationService:
                     data.id,
                     data.runtime_preferences,
                 ),
-                tool_preferences=data.tool_preferences,
             )
             profile.record_event(
-                DomainEvent(
+                Event(
                     name="agent.profile.registered",
                     payload={
                         "agent_profile_id": profile.id,
@@ -219,7 +215,7 @@ class AgentApplicationService:
                     },
                 ),
             )
-            self._persist_profile_projection_and_home(
+            self._persist_profile_state_and_home(
                 uow,
                 profile,
                 home_sidecar_files=data.home_sidecar_files,
@@ -251,10 +247,9 @@ class AgentApplicationService:
                         data.id,
                         data.runtime_preferences,
                     ),
-                    tool_preferences=data.tool_preferences,
                 )
                 profile.record_event(
-                    DomainEvent(
+                    Event(
                         name=(
                             "agent.profile.registered"
                             if existing is None
@@ -266,7 +261,7 @@ class AgentApplicationService:
                         },
                     ),
                 )
-                self._persist_profile_projection_and_home(
+                self._persist_profile_state_and_home(
                     uow,
                     profile,
                     home_sidecar_files=data.home_sidecar_files,
@@ -316,14 +311,9 @@ class AgentApplicationService:
                     if data.runtime_preferences is not _UNSET
                     else None
                 ),
-                tool_preferences=(
-                    data.tool_preferences
-                    if data.tool_preferences is not _UNSET
-                    else None
-                ),
             )
             self._normalize_profile_runtime_preferences(profile)
-            self._persist_profile_projection_and_home(
+            self._persist_profile_state_and_home(
                 uow,
                 profile,
                 source_home_dir=previous_home_dir,
@@ -358,7 +348,7 @@ class AgentApplicationService:
                     f"Agent profile '{profile_id}' was not found.",
                 )
             profile.enable()
-            self._persist_profile_projection_and_home(uow, profile)
+            self._persist_profile_state_and_home(uow, profile)
             uow.commit()
             return profile
 
@@ -370,7 +360,7 @@ class AgentApplicationService:
                     f"Agent profile '{profile_id}' was not found.",
                 )
             profile.disable()
-            self._persist_profile_projection_and_home(uow, profile)
+            self._persist_profile_state_and_home(uow, profile)
             uow.commit()
             return profile
 
@@ -415,7 +405,7 @@ class AgentApplicationService:
                 source_dir=source_dir,
                 target_home_dir=target_home_dir,
             )
-            self._persist_profile_projection_and_home(
+            self._persist_profile_state_and_home(
                 uow,
                 profile,
                 source_home_dir=previous_runtime_preferences.resolved_home_dir,
@@ -450,7 +440,7 @@ class AgentApplicationService:
                 home_dir=home_dir,
             )
             self._normalize_profile_runtime_preferences(updated_profile)
-            self._persist_profile_projection_and_home(
+            self._persist_profile_state_and_home(
                 uow,
                 updated_profile,
                 home_sidecar_files=self._build_home_sidecar_files(
@@ -493,7 +483,7 @@ class AgentApplicationService:
                         attrs=dict(profile.runtime_preferences.attrs),
                     ),
                 )
-            self._persist_profile_projection_and_home(
+            self._persist_profile_state_and_home(
                 uow,
                 profile,
                 source_home_dir=previous_home_dir,
@@ -623,7 +613,7 @@ class AgentApplicationService:
         self._normalize_profile_runtime_preferences(profile)
         return profile
 
-    def _persist_profile_projection_and_home(
+    def _persist_profile_state_and_home(
         self,
         uow: AgentUnitOfWork,
         profile: AgentProfile,

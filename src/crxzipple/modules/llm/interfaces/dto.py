@@ -12,6 +12,10 @@ from crxzipple.modules.llm.domain.value_objects import (
     ToolCallIntent,
     ToolSchema,
 )
+from crxzipple.shared.time import (
+    format_datetime_utc,
+    format_optional_datetime_utc,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +24,7 @@ class LlmDefaultsDTO:
     top_p: float | None
     max_output_tokens: int | None
     reasoning_effort: str | None
+    extra_body: dict[str, object]
 
     @classmethod
     def from_value(cls, defaults: LlmDefaults) -> "LlmDefaultsDTO":
@@ -28,6 +33,7 @@ class LlmDefaultsDTO:
             top_p=defaults.top_p,
             max_output_tokens=defaults.max_output_tokens,
             reasoning_effort=defaults.reasoning_effort,
+            extra_body=dict(defaults.extra_body),
         )
 
 
@@ -44,6 +50,8 @@ class LlmProfileDTO:
     base_url: str | None
     credential_binding: str | None
     timeout_seconds: int
+    max_concurrency: int | None
+    concurrency_key: str | None
     source_kind: str
     enabled: bool
 
@@ -61,6 +69,8 @@ class LlmProfileDTO:
             base_url=profile.base_url,
             credential_binding=profile.credential_binding,
             timeout_seconds=profile.timeout_seconds,
+            max_concurrency=profile.max_concurrency,
+            concurrency_key=profile.concurrency_key,
             source_kind=profile.source_kind.value,
             enabled=profile.enabled,
         )
@@ -215,15 +225,7 @@ class LlmInvocationDTO:
                 else None
             ),
             provider_request_id=invocation.provider_request_id,
-            created_at=invocation.created_at.isoformat(),
-            started_at=(
-                invocation.started_at.isoformat()
-                if invocation.started_at is not None
-                else None
-            ),
-            completed_at=(
-                invocation.completed_at.isoformat()
-                if invocation.completed_at is not None
-                else None
-            ),
+            created_at=format_datetime_utc(invocation.created_at),
+            started_at=format_optional_datetime_utc(invocation.started_at),
+            completed_at=format_optional_datetime_utc(invocation.completed_at),
         )

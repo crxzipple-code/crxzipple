@@ -1,0 +1,73 @@
+@import "./tokens.css";
+@import "./themes/light.css";
+@import "./themes/dark.css";
+@import "./operations.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  letter-spacing: 0;
+}
+
+input::placeholder {
+  color: var(--text-placeholder);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.page-grid {
+  height: calc(100dvh - var(--shell-topbar-height));
+  min-height: 0;
+  overflow: hidden;
+}
+
+.scroll-area {
+  min-height: 0;
+  overflow: auto;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.section-title {
+  margin: 0;
+  font-size: var(--font-size-5);
+  line-height: 1.2;
+}
+
+.section-subtitle {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-2);
+}

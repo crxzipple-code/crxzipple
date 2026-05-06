@@ -5,6 +5,7 @@ import unittest
 
 from crxzipple.modules import MODULE_NAMES
 from crxzipple.modules.tool.application import RegisterToolInput
+from crxzipple.shared.domain.events import Event
 from tests.unit.support import SqliteTestHarness
 
 
@@ -30,7 +31,17 @@ class SkeletonTestCase(unittest.TestCase):
     def test_declares_expected_modules(self) -> None:
         self.assertEqual(
             MODULE_NAMES,
-            ("tool", "session", "llm", "agent", "orchestration", "dispatch"),
+            (
+                "access",
+                "tool",
+                "session",
+                "llm",
+                "agent",
+                "orchestration",
+                "dispatch",
+                "events",
+                "channels",
+            ),
         )
 
     def test_tool_service_registers_runtime_tool_and_publishes_event(self) -> None:
@@ -44,9 +55,14 @@ class SkeletonTestCase(unittest.TestCase):
 
         self.assertEqual(tool.id, "search")
         self.assertEqual(self.container.tool_service.get_tool("search"), tool)
-        self.assertEqual(len(self.container.event_bus.published_events), 1)
+        published_events = [
+            event
+            for event in self.container.event_bus.published_events
+            if isinstance(event, Event) and bool(event.name)
+        ]
+        self.assertEqual(len(published_events), 1)
         self.assertEqual(
-            self.container.event_bus.published_events[0].name,
+            published_events[0].event_name,
             "tool.registered",
         )
 

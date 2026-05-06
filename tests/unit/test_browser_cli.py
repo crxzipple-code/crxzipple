@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json as _json
+from types import SimpleNamespace
 
 from tests.unit.cli_test_support import *
 
@@ -127,6 +128,84 @@ class BrowserCliTestCase(CliModuleTestCase):
                 "close": f"{self._fake_cdp_server.base_url}/json/close/{payload['target_id']}",
             },
         )
+
+    def test_browser_host_run_uses_host_loop(self) -> None:
+        container = SimpleNamespace(
+            browser_system_config_store=SimpleNamespace(
+                load=lambda: SimpleNamespace(default_profile="crxzipple"),
+            ),
+            browser_cdp_control=SimpleNamespace(
+                terminate_owned_processes_on_close=False,
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.browser.interfaces.cli.ensure_container",
+            return_value=container,
+        ), patch(
+            "crxzipple.modules.browser.interfaces.cli._run_host_loop",
+        ) as mocked_loop:
+            result = self.runner.invoke(
+                app,
+                [
+                    "browser",
+                    "host",
+                    "run",
+                    "--profile",
+                    "crxzipple",
+                    "--poll-interval-seconds",
+                    "1.5",
+                    "--max-cycles",
+                    "2",
+                ],
+                env=self.env,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        args = mocked_loop.call_args
+        self.assertIsNotNone(args)
+        self.assertEqual(args.args[0], container)
+        self.assertEqual(args.kwargs["profile_name"], "crxzipple")
+        self.assertEqual(args.kwargs["poll_interval_seconds"], 1.5)
+        self.assertEqual(args.kwargs["max_cycles"], 2)
+        self.assertTrue(container.browser_cdp_control.terminate_owned_processes_on_close)
+
+    def test_browser_mcp_run_uses_mcp_loop(self) -> None:
+        container = SimpleNamespace(
+            browser_system_config_store=SimpleNamespace(
+                load=lambda: SimpleNamespace(default_profile="user"),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.browser.interfaces.cli.ensure_container",
+            return_value=container,
+        ), patch(
+            "crxzipple.modules.browser.interfaces.cli._run_mcp_loop",
+        ) as mocked_loop:
+            result = self.runner.invoke(
+                app,
+                [
+                    "browser",
+                    "mcp",
+                    "run",
+                    "--profile",
+                    "user",
+                    "--poll-interval-seconds",
+                    "1.5",
+                    "--max-cycles",
+                    "2",
+                ],
+                env=self.env,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        args = mocked_loop.call_args
+        self.assertIsNotNone(args)
+        self.assertEqual(args.args[0], container)
+        self.assertEqual(args.kwargs["profile_name"], "user")
+        self.assertEqual(args.kwargs["poll_interval_seconds"], 1.5)
+        self.assertEqual(args.kwargs["max_cycles"], 2)
 
     def test_browser_act_snapshot_command_exposes_frame_path(self) -> None:
         open_result = self.runner.invoke(

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import tempfile
 import unittest
 
-from crxzipple.core.config import load_settings
+from crxzipple.core.config import (
+    RuntimeDatabaseGuardError,
+    load_settings,
+    require_runtime_database,
+)
 
 
 class ConfigTestCase(unittest.TestCase):
@@ -30,3 +36,251 @@ class ConfigTestCase(unittest.TestCase):
         self.assertEqual(settings.artifact_file_llm_max_bytes, 123456)
         self.assertEqual(settings.artifact_text_file_llm_max_chars, 4321)
         self.assertEqual(settings.tool_details_max_chars, 5678)
+
+    def test_load_settings_reads_remote_tool_concurrency_limits(self) -> None:
+        os.environ["APP_TOOL_REMOTE_DEFAULT_MAX_CONCURRENCY"] = "32"
+        os.environ["APP_TOOL_MCP_PROVIDERS"] = """
+        [
+          {
+            "name": "browser_mcp",
+            "command": ["node", "server.js"],
+            "max_concurrency": 3
+          }
+        ]
+        """
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "sample.yaml"
+            config_path.write_text(
+                """
+name: sample_api
+spec_location: sample_openapi.json
+base_url: https://api.example.test
+max_concurrency: 7
+""".strip(),
+                encoding="utf-8",
+            )
+            os.environ["APP_TOOL_OPENAPI_PROVIDER_PATHS"] = str(config_path)
+
+            settings = load_settings()
+
+        self.assertEqual(settings.tool_remote_default_max_concurrency, 32)
+        self.assertEqual(settings.tool_mcp_providers[0].max_concurrency, 3)
+        self.assertEqual(settings.tool_openapi_providers[0].max_concurrency, 7)
+
+    def test_load_settings_reads_llm_profile_concurrency_limits(self) -> None:
+        os.environ["APP_LLM_PROFILES"] = """
+        [
+          {
+            "id": "local-vllm",
+            "provider": "openai_compatible",
+            "api_family": "openai_chat_compatible",
+            "model_name": "qwen3.5",
+            "max_concurrency": 2,
+            "concurrency_key": "vllm:qwen3.5"
+          }
+        ]
+        """
+
+        settings = load_settings()
+
+        profile = next(item for item in settings.llm_profiles if item.id == "local-vllm")
+        self.assertEqual(profile.max_concurrency, 2)
+        self.assertEqual(profile.concurrency_key, "vllm:qwen3.5")
+
+    def test_load_settings_defaults_executor_concurrency_to_four(self) -> None:
+        os.environ.pop("APP_ORCHESTRATION_EXECUTOR_MAX_CONCURRENT_ASSIGNMENTS", None)
+
+        settings = load_settings()
+
+        self.assertEqual(settings.orchestration_executor_max_concurrent_assignments, 4)
+
+    def test_load_settings_reads_tool_worker_inflight_capacity(self) -> None:
+        os.environ["APP_TOOL_WORKER_MAX_IN_FLIGHT"] = "6"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.tool_worker_max_in_flight, 6)
+
+    def test_load_settings_defaults_tool_worker_inflight_capacity_to_four(self) -> None:
+        os.environ.pop("APP_TOOL_WORKER_MAX_IN_FLIGHT", None)
+
+        settings = load_settings()
+
+        self.assertEqual(settings.tool_worker_max_in_flight, 4)
+
+    def test_load_settings_reads_tool_worker_capability_concurrency(self) -> None:
+        os.environ["APP_TOOL_WORKER_MAX_IN_FLIGHT"] = "6"
+        os.environ["APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY"] = "5"
+        os.environ["APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY"] = "4"
+        os.environ["APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY"] = "2"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.tool_worker_default_run_concurrency, 5)
+        self.assertEqual(settings.tool_worker_image_run_concurrency, 4)
+        self.assertEqual(settings.tool_worker_shared_state_run_concurrency, 2)
+
+    def test_load_settings_defaults_capability_concurrency_from_worker_capacity(self) -> None:
+        os.environ["APP_TOOL_WORKER_MAX_IN_FLIGHT"] = "3"
+        os.environ.pop("APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY", None)
+        os.environ.pop("APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY", None)
+        os.environ.pop("APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY", None)
+
+        settings = load_settings()
+
+        self.assertEqual(settings.tool_worker_default_run_concurrency, 3)
+        self.assertEqual(settings.tool_worker_image_run_concurrency, 3)
+        self.assertEqual(settings.tool_worker_shared_state_run_concurrency, 1)
+
+    def test_load_settings_reads_detailed_engine_metrics_flag(self) -> None:
+        os.environ["APP_ORCHESTRATION_DETAILED_ENGINE_METRICS_ENABLED"] = "true"
+
+        settings = load_settings()
+
+        self.assertTrue(settings.orchestration_detailed_engine_metrics_enabled)
+
+    def test_load_settings_reads_mobile_device_specs(self) -> None:
+        os.environ["APP_DAEMON_STATE_DIR"] = "/tmp/crxzipple-daemon-state"
+        os.environ["APP_MOBILE_DEVICE_SPECS"] = """
+        [
+          {
+            "name": "pixel",
+            "platform": "android",
+            "udid": "emulator-5554",
+            "app_package": "com.google.android.gm",
+            "app_activity": "com.google.android.gm.ConversationListActivityGmail"
+          }
+        ]
+        """
+
+        settings = load_settings()
+
+        self.assertEqual(settings.daemon_state_dir, "/tmp/crxzipple-daemon-state")
+        self.assertEqual(len(settings.mobile_devices), 1)
+        self.assertEqual(settings.mobile_devices[0].name, "pixel")
+        self.assertEqual(settings.mobile_devices[0].udid, "emulator-5554")
+        self.assertEqual(settings.mobile_devices[0].app_package, "com.google.android.gm")
+        self.assertEqual(
+            settings.mobile_devices[0].app_activity,
+            "com.google.android.gm.ConversationListActivityGmail",
+        )
+
+    def test_load_settings_reads_ocr_overrides(self) -> None:
+        os.environ.pop("APP_OCR_BASE_URL", None)
+        os.environ["APP_OCR_ENABLED"] = "true"
+        os.environ["APP_OCR_BACKEND"] = "local"
+        os.environ["APP_OCR_PROVIDER"] = "host"
+        os.environ["APP_OCR_HOST"] = "127.0.0.1"
+        os.environ["APP_OCR_PORT"] = "19999"
+        os.environ["APP_OCR_LANGUAGE"] = "en"
+        os.environ["APP_OCR_USE_GPU"] = "true"
+        os.environ["APP_OCR_REQUEST_TIMEOUT_SECONDS"] = "12.5"
+
+        settings = load_settings()
+
+        self.assertTrue(settings.ocr_enabled)
+        self.assertEqual(settings.ocr_backend, "local")
+        self.assertEqual(settings.ocr_provider, "host")
+        self.assertEqual(settings.ocr_host, "127.0.0.1")
+        self.assertEqual(settings.ocr_port, 19999)
+        self.assertEqual(settings.ocr_base_url, "http://127.0.0.1:19999")
+        self.assertEqual(settings.ocr_language, "en")
+        self.assertTrue(settings.ocr_use_gpu)
+        self.assertEqual(settings.ocr_request_timeout_seconds, 12.5)
+
+    def test_load_settings_reads_redis_events_overrides(self) -> None:
+        os.environ["APP_EVENTS_BACKEND"] = "redis"
+        os.environ["APP_EVENTS_FILE_SYNC_WRITES"] = "true"
+        os.environ["APP_EVENTS_REDIS_URL"] = "redis://127.0.0.1:6379/9"
+        os.environ["APP_EVENTS_REDIS_KEY_PREFIX"] = "crx:test:events"
+        os.environ["APP_EVENTS_REDIS_BLOCK_MS"] = "250"
+        os.environ["APP_EVENTS_REDIS_DEDUPE_TTL_SECONDS"] = "45"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.events_backend, "redis")
+        self.assertTrue(settings.events_file_sync_writes)
+        self.assertEqual(settings.events_redis_url, "redis://127.0.0.1:6379/9")
+        self.assertEqual(settings.events_redis_key_prefix, "crx:test:events")
+        self.assertEqual(settings.events_redis_block_ms, 250)
+        self.assertEqual(settings.events_redis_dedupe_ttl_seconds, 45)
+
+    def test_load_settings_defaults_to_redis_events_for_local_dev(self) -> None:
+        os.environ.pop("APP_EVENTS_BACKEND", None)
+        os.environ.pop("APP_EVENTS_REDIS_URL", None)
+
+        settings = load_settings()
+
+        self.assertEqual(settings.events_backend, "redis")
+        self.assertEqual(settings.events_redis_url, "redis://127.0.0.1:6379/0")
+
+    def test_runtime_database_guard_rejects_sqlite_without_explicit_fallback(self) -> None:
+        os.environ["APP_DATABASE_URL"] = "sqlite:///tmp/crxzipple-test.db"
+        os.environ.pop("APP_ALLOW_SQLITE_RUNTIME_FALLBACK", None)
+
+        settings = load_settings()
+
+        with self.assertRaises(RuntimeDatabaseGuardError):
+            require_runtime_database(settings, runtime_name="test runtime")
+
+    def test_runtime_database_guard_allows_sqlite_with_explicit_fallback(self) -> None:
+        os.environ["APP_DATABASE_URL"] = "sqlite:///tmp/crxzipple-test.db"
+        os.environ["APP_ALLOW_SQLITE_RUNTIME_FALLBACK"] = "1"
+
+        settings = load_settings()
+
+        require_runtime_database(settings, runtime_name="test runtime")
+        self.assertTrue(settings.allow_sqlite_runtime_fallback)
+
+    def test_load_settings_reads_channel_profiles_from_config_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "lark.yaml"
+            config_path.write_text(
+                """
+channel_type: lark
+enabled: true
+accounts:
+  - account_id: default
+    transport_mode: webhook
+    metadata:
+      agent_id: assistant-lark
+      lark_app_id: cli_test
+      lark_app_secret: secret_test
+""".strip(),
+                encoding="utf-8",
+            )
+            os.environ["APP_CHANNEL_PROFILE_PATHS"] = str(config_path)
+
+            settings = load_settings()
+
+            self.assertEqual(len(settings.channel_profiles), 1)
+            profile = settings.channel_profiles[0]
+            self.assertEqual(profile.channel_type, "lark")
+            self.assertEqual(profile.accounts[0].account_id, "default")
+            self.assertEqual(
+                profile.accounts[0].metadata["lark_app_id"],
+                "cli_test",
+            )
+
+    def test_load_settings_supports_remote_ocr_host(self) -> None:
+        os.environ["APP_OCR_BACKEND"] = "remote"
+        os.environ["APP_OCR_PROVIDER"] = "ppstructurev3"
+        os.environ["APP_OCR_BASE_URL"] = "https://ocr.example.com"
+        os.environ["APP_OCR_REQUEST_TIMEOUT_SECONDS"] = "33"
+
+        settings = load_settings()
+
+        self.assertEqual(settings.ocr_backend, "remote")
+        self.assertEqual(settings.ocr_provider, "ppstructurev3")
+        self.assertEqual(settings.ocr_base_url, "https://ocr.example.com")
+        self.assertEqual(settings.ocr_request_timeout_seconds, 33.0)
+
+    def test_load_settings_rejects_local_non_host_ocr_provider(self) -> None:
+        os.environ["APP_OCR_BACKEND"] = "local"
+        os.environ["APP_OCR_PROVIDER"] = "ppstructurev3"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "APP_OCR_PROVIDER must be 'host' when APP_OCR_BACKEND=local.",
+        ):
+            load_settings()

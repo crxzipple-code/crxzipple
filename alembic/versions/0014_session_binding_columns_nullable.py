@@ -22,17 +22,31 @@ depends_on = None
 def upgrade() -> None:
     bind = op.get_bind()
 
-    with op.batch_alter_table("sessions", recreate="always") as batch_op:
-        batch_op.alter_column(
+    if bind.dialect.name == "postgresql":
+        op.alter_column(
+            "sessions",
             "agent_id",
             existing_type=sa.String(length=100),
             nullable=True,
         )
-        batch_op.alter_column(
+        op.alter_column(
+            "sessions",
             "llm_id",
             existing_type=sa.String(length=100),
             nullable=True,
         )
+    else:
+        with op.batch_alter_table("sessions", recreate="always") as batch_op:
+            batch_op.alter_column(
+                "agent_id",
+                existing_type=sa.String(length=100),
+                nullable=True,
+            )
+            batch_op.alter_column(
+                "llm_id",
+                existing_type=sa.String(length=100),
+                nullable=True,
+            )
 
     rows = bind.execute(
         sa.text(
@@ -58,13 +72,7 @@ def upgrade() -> None:
         if changed:
             metadata["runtime_binding"] = runtime_binding
             bind.execute(
-                sa.text(
-                    """
-                    UPDATE sessions
-                    SET metadata_payload = :metadata_payload
-                    WHERE id = :id
-                    """,
-                ),
+                _metadata_update_stmt(bind),
                 {
                     "id": row.id,
                     "metadata_payload": json.dumps(metadata),
@@ -111,17 +119,31 @@ def downgrade() -> None:
             },
         )
 
-    with op.batch_alter_table("sessions", recreate="always") as batch_op:
-        batch_op.alter_column(
+    if bind.dialect.name == "postgresql":
+        op.alter_column(
+            "sessions",
             "agent_id",
             existing_type=sa.String(length=100),
             nullable=False,
         )
-        batch_op.alter_column(
+        op.alter_column(
+            "sessions",
             "llm_id",
             existing_type=sa.String(length=100),
             nullable=False,
         )
+    else:
+        with op.batch_alter_table("sessions", recreate="always") as batch_op:
+            batch_op.alter_column(
+                "agent_id",
+                existing_type=sa.String(length=100),
+                nullable=False,
+            )
+            batch_op.alter_column(
+                "llm_id",
+                existing_type=sa.String(length=100),
+                nullable=False,
+            )
 
 
 def _decode_json_payload(value: object) -> dict[str, object]:
@@ -132,3 +154,21 @@ def _decode_json_payload(value: object) -> dict[str, object]:
         if isinstance(decoded, dict):
             return dict(decoded)
     return {}
+
+
+def _metadata_update_stmt(bind: sa.Connection) -> sa.TextClause:
+    if bind.dialect.name == "postgresql":
+        return sa.text(
+            """
+            UPDATE sessions
+            SET metadata_payload = CAST(:metadata_payload AS JSON)
+            WHERE id = :id
+            """,
+        )
+    return sa.text(
+        """
+        UPDATE sessions
+        SET metadata_payload = :metadata_payload
+        WHERE id = :id
+        """,
+    )

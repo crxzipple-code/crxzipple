@@ -29,13 +29,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                             "workdir": str(workdir),
                             "sandbox_mode": "sandbox",
                         },
-                        "tool_preferences": {
-                            "requested_effect_ids": ["network_search"],
-                            "requested_tool_ids": ["brave_search.news_search"],
-                            "preferred_tags": ["search"],
-                            "prefers_background_tools": False,
-                            "prefers_mutating_tools": False,
-                        },
                     },
                 )
 
@@ -73,10 +66,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     get_response.json()["runtime_preferences"]["workspace"],
                     str(workdir),
                 )
-                self.assertEqual(
-                    get_response.json()["tool_preferences"]["requested_effect_ids"],
-                    ["network_search"],
-                )
                 self.assertEqual(list_response.status_code, 200)
                 self.assertEqual(len(list_response.json()), 1)
                 self.assertTrue(
@@ -106,10 +95,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                             "home_dir": str(home_dir),
                             "sandbox_mode": "sandbox",
                         },
-                        tool_preferences={
-                            "requested_tool_ids": ["filesystem.read_text"],
-                            "prefers_background_tools": False,
-                        },
                     ),
                 ),
                 tool_openapi_providers=(),
@@ -131,10 +116,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(
                     get_response.json()["execution_policy"]["timeout_seconds"],
                     75,
-                )
-                self.assertEqual(
-                    get_response.json()["tool_preferences"]["requested_tool_ids"],
-                    ["filesystem.read_text"],
                 )
                 self.assertTrue((home_dir / "agent.json").is_file())
                 self.assertTrue((home_dir / "AGENT.md").is_file())
@@ -240,7 +221,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 payload["instruction_policy"]["stream_by_default"] = True
                 payload["llm_routing_policy"]["default_llm_id"] = "openai.gpt-5.4"
                 payload["runtime_preferences"]["workdir"] = str(root / "project-b")
-                payload["tool_preferences"]["requested_effect_ids"] = ["weather_data"]
                 agent_config_path.write_text(
                     json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
@@ -259,10 +239,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(
                     synced["runtime_preferences"]["workdir"],
                     str(root / "project-b"),
-                )
-                self.assertEqual(
-                    synced["tool_preferences"]["requested_effect_ids"],
-                    ["weather_data"],
                 )
 
     def test_agent_home_endpoint_reads_and_updates_files(self) -> None:
@@ -424,7 +400,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     str(root / "workdir-b"),
                 )
 
-    def test_agent_endpoints_discover_home_only_profiles_without_db_projection(self) -> None:
+    def test_agent_endpoints_discover_home_only_profiles_without_db_snapshot(self) -> None:
             agent_home_root = derive_agent_home_root(self.harness.database_url)
             home_dir = agent_home_root / "file-only-writer"
             home_dir.mkdir(parents=True, exist_ok=True)
@@ -447,13 +423,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                             "home_dir": str(home_dir),
                             "workdir": str(home_dir / "workspace"),
                             "attrs": {},
-                        },
-                        "tool_preferences": {
-                            "requested_effect_ids": [],
-                            "requested_tool_ids": [],
-                            "preferred_tags": [],
-                            "prefers_background_tools": True,
-                            "prefers_mutating_tools": True,
                         },
                     },
                     ensure_ascii=True,

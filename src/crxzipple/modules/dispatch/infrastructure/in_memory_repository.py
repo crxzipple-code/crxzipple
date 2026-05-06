@@ -79,6 +79,36 @@ class InMemoryDispatchTaskRepository:
         task.updated_at = timestamp
         return task
 
+    def claim_queued(
+        self,
+        *,
+        task_id: str,
+        owner_kind: str | None = None,
+        worker_id: str,
+        claim_token: str,
+        lease_seconds: int | None = None,
+    ) -> DispatchTask | None:
+        task = self._items.get(task_id)
+        if task is None:
+            return None
+        if task.status is not DispatchTaskStatus.QUEUED:
+            return None
+        if owner_kind is not None and task.owner_kind != owner_kind:
+            return None
+        timestamp = utcnow()
+        task.status = DispatchTaskStatus.CLAIMED
+        task.claimed_by = worker_id
+        task.claim_token = claim_token
+        task.claimed_at = timestamp
+        task.heartbeat_at = timestamp
+        task.lease_expires_at = (
+            None
+            if lease_seconds is None
+            else timestamp + timedelta(seconds=lease_seconds)
+        )
+        task.updated_at = timestamp
+        return task
+
     def recover_abandoned(
         self,
         *,

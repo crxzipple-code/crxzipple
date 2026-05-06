@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -37,12 +37,30 @@ class LlmAdapter(Protocol):
         ...
 
 
+class AsyncLlmAdapter(Protocol):
+    async def invoke_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> LlmAdapterResponse:
+        ...
+
+
 class LlmStreamingAdapter(Protocol):
     def stream_invoke(
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> Iterator[LlmStreamEvent]:
+        ...
+
+
+class AsyncLlmStreamingAdapter(Protocol):
+    def stream_invoke_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> AsyncIterator[LlmStreamEvent]:
         ...
 
 

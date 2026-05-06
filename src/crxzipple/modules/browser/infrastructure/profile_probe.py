@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 from typing import Any
 
 from crxzipple.modules.browser.domain import (
@@ -83,6 +84,7 @@ def _probe_plan(
 class BrowserProfileProbeService:
     cdp_control: CdpControlEngine
     mcp_pool: ChromeMcpClientPool
+    playwright_probe: Callable[..., None] | None = None
 
     def probe(
         self,
@@ -158,11 +160,35 @@ class BrowserProfileProbeService:
             if isinstance(payload, dict):
                 raw_browser_ref = payload.get("webSocketDebuggerUrl")
                 browser_ref = str(raw_browser_ref).strip() if raw_browser_ref else None
+            if (
+                callable(self.playwright_probe)
+                and capabilities.action_family == "cdp-backed-playwright"
+            ):
+                try:
+                    self.playwright_probe(profile=profile, timeout_ms=2_000)
+                except BrowserValidationError as exc:
+                    return {
+                        "attempted": True,
+                        "ok": False,
+                        "status": "cdp-playwright-unreachable",
+                        "message": (
+                            "CDP endpoint responded, but Playwright could not attach. "
+                            "Retry or reset this managed profile."
+                        ),
+                        "raw_message": str(exc),
+                        "cdp_base_url": base_url,
+                        "browser_ref": browser_ref,
+                        "tab_count": len(tabs),
+                    }
             return {
                 "attempted": True,
                 "ok": True,
                 "status": "cdp-reachable",
-                "message": "CDP endpoint is reachable.",
+                "message": (
+                    "CDP endpoint is reachable."
+                    if capabilities.action_family != "cdp-backed-playwright"
+                    else "CDP endpoint is reachable and Playwright can attach."
+                ),
                 "cdp_base_url": base_url,
                 "browser_ref": browser_ref,
                 "tab_count": len(tabs),

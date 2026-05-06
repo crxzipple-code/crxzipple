@@ -135,7 +135,7 @@ class FileMemoryStore:
             kind="long_term",
         )
 
-    def archive_session(
+    def write_archive(
         self,
         *,
         context: MemoryUseContext,
@@ -144,7 +144,7 @@ class FileMemoryStore:
         now: datetime | None = None,
     ) -> MemoryWriteResult:
         timestamp = now.astimezone(timezone.utc) if now is not None else datetime.now(timezone.utc)
-        normalized_slug = slugify(slug or "session")
+        normalized_slug = slugify(slug or "archive")
         root = ensure_storage_root(context.storage_root)
         memory_dir = root / "memory"
         memory_dir.mkdir(parents=True, exist_ok=True)

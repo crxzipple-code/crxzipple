@@ -443,6 +443,7 @@ class ToolCliTestCase(CliModuleTestCase):
         self.assertNotEqual(run_payload["result"]["metadata"]["process_id"], os.getpid())
 
     def test_tool_background_run_eventually_succeeds(self) -> None:
+        worker_id = "cli-background-worker"
         discover_result = self.runner.invoke(
             app,
             ["tool", "discover-local"],
@@ -471,9 +472,15 @@ class ToolCliTestCase(CliModuleTestCase):
         deadline = time.monotonic() + 5
         fetched_run_payload = None
         while time.monotonic() < deadline:
+            scheduler_result = self.runner.invoke(
+                app,
+                ["tool-scheduler", "once", "--worker-id", worker_id],
+                env=self.env,
+            )
+            self.assertEqual(scheduler_result.exit_code, 0)
             worker_result = self.runner.invoke(
                 app,
-                ["tool-worker", "once"],
+                ["tool-worker", "once", "--worker-id", worker_id],
                 env=self.env,
             )
             self.assertEqual(worker_result.exit_code, 0)
@@ -493,9 +500,86 @@ class ToolCliTestCase(CliModuleTestCase):
         self.assertEqual(fetched_run_payload["output_payload"]["message"], "queued hello")
         self.assertEqual(fetched_run_payload["result"]["metadata"]["environment"], "local")
         self.assertEqual(fetched_run_payload["attempt_count"], 1)
-        self.assertIsNotNone(fetched_run_payload["worker_id"])
+        self.assertEqual(fetched_run_payload["worker_id"], worker_id)
+
+    def test_tool_scheduler_run_accepts_daemon_worker_id(self) -> None:
+        result = self.runner.invoke(
+            app,
+            [
+                "tool-scheduler",
+                "run-scheduler",
+                "--worker-id",
+                "worker-tool-scheduler-1",
+                "--max-idle-cycles",
+                "1",
+                "--poll-interval-seconds",
+                "0.05",
+            ],
+            env=self.env,
+        )
+
+        self.assertEqual(result.exit_code, 0)
+
+    def test_tool_scheduler_run_rejects_sqlite_without_explicit_runtime_fallback(self) -> None:
+        result = self.runner.invoke(
+            app,
+            [
+                "tool-scheduler",
+                "run-scheduler",
+                "--max-idle-cycles",
+                "1",
+            ],
+            env=self.env_without_sqlite_runtime_fallback(),
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Refusing to start tool scheduler with SQLite", result.stderr)
+        self.assertIn("APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1", result.stderr)
+
+    def test_tool_worker_run_uses_configured_inflight_capacity_by_default(self) -> None:
+        env = dict(self.env)
+        env["APP_TOOL_WORKER_MAX_IN_FLIGHT"] = "6"
+
+        result = self.runner.invoke(
+            app,
+            [
+                "tool-worker",
+                "run",
+                "--worker-id",
+                "cli-config-worker",
+                "--max-idle-cycles",
+                "1",
+                "--poll-interval-seconds",
+                "0.05",
+            ],
+            env=env,
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        container = self.harness.build_container()
+        workers = {worker.id: worker for worker in container.tool_service.list_tool_workers()}
+        self.assertEqual(workers["cli-config-worker"].max_in_flight, 6)
+
+    def test_tool_worker_run_rejects_sqlite_without_explicit_runtime_fallback(self) -> None:
+        result = self.runner.invoke(
+            app,
+            [
+                "tool-worker",
+                "run",
+                "--worker-id",
+                "cli-guard-worker",
+                "--max-idle-cycles",
+                "1",
+            ],
+            env=self.env_without_sqlite_runtime_fallback(),
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Refusing to start tool worker with SQLite", result.stderr)
+        self.assertIn("APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1", result.stderr)
 
     def test_tool_background_process_run_eventually_succeeds(self) -> None:
+        worker_id = "cli-process-worker"
         discover_result = self.runner.invoke(
             app,
             ["tool", "discover-local"],
@@ -527,9 +611,15 @@ class ToolCliTestCase(CliModuleTestCase):
         deadline = time.monotonic() + 5
         fetched_run_payload = None
         while time.monotonic() < deadline:
+            scheduler_result = self.runner.invoke(
+                app,
+                ["tool-scheduler", "once", "--worker-id", worker_id],
+                env=self.env,
+            )
+            self.assertEqual(scheduler_result.exit_code, 0)
             worker_result = self.runner.invoke(
                 app,
-                ["tool-worker", "once", "--worker-id", "cli-process-worker"],
+                ["tool-worker", "once", "--worker-id", worker_id],
                 env=self.env,
             )
             self.assertEqual(worker_result.exit_code, 0)
@@ -551,7 +641,7 @@ class ToolCliTestCase(CliModuleTestCase):
             "queued process hello",
         )
         self.assertEqual(fetched_run_payload["target"]["strategy"], "process")
-        self.assertEqual(fetched_run_payload["worker_id"], "cli-process-worker")
+        self.assertEqual(fetched_run_payload["worker_id"], worker_id)
         self.assertNotEqual(
             fetched_run_payload["result"]["metadata"]["process_id"],
             os.getpid(),

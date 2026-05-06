@@ -4,9 +4,13 @@ import base64
 import calendar
 from dataclasses import replace
 from dataclasses import dataclass
+from dataclasses import field
 from fnmatch import fnmatch
 import json
+import mimetypes
+from pathlib import Path
 import re
+import tempfile
 import time
 from typing import Any, Mapping
 
@@ -22,10 +26,12 @@ from crxzipple.modules.browser.domain import (
     BrowserValidationError,
 )
 from crxzipple.modules.browser.domain.value_objects import _normalize_optional_text
+from crxzipple.modules.daemon import DaemonApplicationService
 
 from ..application.ports import BrowserActionEngine, BrowserRefStore
 from .cdp_urls import browser_ref_to_cdp_http_base
 from .chrome_mcp import ChromeMcpClientPool
+from .daemon_leases import host_daemon_lease
 from .playwright import PlaywrightCdpSessionPool
 from .role_snapshot import (
     build_role_snapshot,
@@ -42,30 +48,44 @@ _LOCATOR_ACTION_KINDS = frozenset(
         "scroll-into-view",
         "select",
         "fill",
+        "upload",
+        "download",
     }
 )
 _SUPPORTED_KINDS = frozenset(
     _LOCATOR_ACTION_KINDS
     | {
         "batch",
+        "console",
+        "cookies",
+        "dialog",
+        "wait-download",
         "resize",
         "wait",
         "snapshot",
         "screenshot",
         "pdf",
         "evaluate",
+        "storage",
     }
 )
 _MCP_SUPPORTED_KINDS = frozenset(
     {
+        "batch",
         "click",
+        "console",
+        "cookies",
+        "dialog",
         "type",
         "press",
         "hover",
         "drag",
         "resize",
+        "scroll-into-view",
         "select",
         "fill",
+        "storage",
+        "upload",
         "wait",
         "snapshot",
         "screenshot",
@@ -116,6 +136,7 @@ _RETRYABLE_TRANSIENT_ACTION_KINDS = frozenset(
         "hover",
         "scroll-into-view",
         "select",
+        "download",
         "wait",
         "snapshot",
         "evaluate",
@@ -155,6 +176,10 @@ _TARGET_INFO_MARKER = "__crxzipple_widget_target_info__"
 _BULK_SELECTION_MARKER = "__crxzipple_collect_bulk_selection_candidates__"
 _TEXT_MATCH_ORDINAL_MARKER = "__crxzipple_find_preferred_text_ordinal__"
 _TEXT_MATCH_DETAILS_MARKER = "__crxzipple_collect_text_match_details__"
+_STORAGE_MARKER = "__crxzipple_storage_access__"
+_MCP_STORAGE_MARKER = "__crxzipple_mcp_storage_access__"
+_MCP_COOKIES_MARKER = "__crxzipple_mcp_cookies_access__"
+_MCP_CONSOLE_MARKER = "__crxzipple_mcp_console_access__"
 _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
 (() => {{
   const {_INTERACTIVE_SNAPSHOT_MARKER} = true;
@@ -1237,6 +1262,249 @@ _TARGET_INFO_EXPRESSION = f"""
   }};
 }}
 """.strip()
+_STORAGE_EXPRESSION = f"""
+/*{_STORAGE_MARKER}*/
+({{ kind, operation, key, value }}) => {{
+  const store = kind === "session" ? window.sessionStorage : window.localStorage;
+  if (operation === "get") {{
+    if (key) {{
+      const resolved = store.getItem(key);
+      return resolved === null ? {{}} : {{ [key]: resolved }};
+    }}
+    const out = {{}};
+    for (let i = 0; i < store.length; i += 1) {{
+      const itemKey = store.key(i);
+      if (!itemKey) continue;
+      const itemValue = store.getItem(itemKey);
+      if (itemValue !== null) {{
+        out[itemKey] = itemValue;
+      }}
+    }}
+    return out;
+  }}
+  if (operation === "set") {{
+    store.setItem(String(key), String(value ?? ""));
+    return {{ [String(key)]: String(value ?? "") }};
+  }}
+  if (operation === "clear") {{
+    store.clear();
+    return {{}};
+  }}
+  throw new Error(`Unsupported storage operation: ${{operation}}`);
+}}
+""".strip()
+_MCP_STORAGE_EXPRESSION = f"""
+/*{_MCP_STORAGE_MARKER}*/
+(raw) => {{
+  const input = JSON.parse(String(raw || "{{}}"));
+  const kind = input.kind === "session" ? "session" : "local";
+  const operation = String(input.operation || "get").toLowerCase();
+  const key = typeof input.key === "string" && input.key ? input.key : null;
+  const value = input.value == null ? null : String(input.value);
+  const store = kind === "session" ? window.sessionStorage : window.localStorage;
+  if (operation === "get") {{
+    if (key) {{
+      const resolved = store.getItem(key);
+      return resolved === null ? {{}} : {{ [key]: resolved }};
+    }}
+    const out = {{}};
+    for (let i = 0; i < store.length; i += 1) {{
+      const itemKey = store.key(i);
+      if (!itemKey) continue;
+      const itemValue = store.getItem(itemKey);
+      if (itemValue !== null) {{
+        out[itemKey] = itemValue;
+      }}
+    }}
+    return out;
+  }}
+  if (operation === "set") {{
+    if (!key) throw new Error("storage set requires key");
+    store.setItem(String(key), String(value ?? ""));
+    return {{ [String(key)]: String(value ?? "") }};
+  }}
+  if (operation === "clear") {{
+    store.clear();
+    return {{}};
+  }}
+  throw new Error(`Unsupported storage operation: ${{operation}}`);
+}}
+""".strip()
+_MCP_COOKIES_EXPRESSION = f"""
+/*{_MCP_COOKIES_MARKER}*/
+(raw) => {{
+  const input = JSON.parse(String(raw || "{{}}"));
+  const operation = String(input.operation || "get").toLowerCase();
+  const parseCookies = () => {{
+    if (!document.cookie) return [];
+    return document.cookie
+      .split(/;\\s*/)
+      .filter(Boolean)
+      .map((part) => {{
+        const index = part.indexOf("=");
+        const rawName = index >= 0 ? part.slice(0, index) : part;
+        const rawValue = index >= 0 ? part.slice(index + 1) : "";
+        return {{
+          name: decodeURIComponent(rawName),
+          value: decodeURIComponent(rawValue),
+        }};
+      }});
+  }};
+  if (operation === "get") {{
+    return parseCookies();
+  }}
+  if (operation === "clear") {{
+    for (const cookie of parseCookies()) {{
+      document.cookie = `${{encodeURIComponent(cookie.name)}}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+    }}
+    return [];
+  }}
+  if (operation === "set") {{
+    const cookie = input.cookie || {{}};
+    const name = typeof cookie.name === "string" ? cookie.name.trim() : "";
+    if (!name) throw new Error("cookie set requires name");
+    const value = cookie.value == null ? "" : String(cookie.value);
+    const segments = [`${{encodeURIComponent(name)}}=${{encodeURIComponent(value)}}`];
+    const path = typeof cookie.path === "string" && cookie.path.trim() ? cookie.path.trim() : "/";
+    segments.push(`path=${{path}}`);
+    if (typeof cookie.domain === "string" && cookie.domain.trim()) {{
+      segments.push(`domain=${{cookie.domain.trim()}}`);
+    }}
+    if (typeof cookie.sameSite === "string" && cookie.sameSite.trim()) {{
+      segments.push(`SameSite=${{cookie.sameSite.trim()}}`);
+    }}
+    if (cookie.secure) {{
+      segments.push("Secure");
+    }}
+    if (cookie.expires != null) {{
+      const expiresDate = new Date(Number(cookie.expires) * 1000);
+      if (!Number.isNaN(expiresDate.getTime())) {{
+        segments.push(`expires=${{expiresDate.toUTCString()}}`);
+      }}
+    }}
+    document.cookie = segments.join("; ");
+    return parseCookies().filter((item) => item.name === name);
+  }}
+  throw new Error(`Unsupported cookie operation: ${{operation}}`);
+}}
+""".strip()
+_MCP_CONSOLE_EXPRESSION = f"""
+/*{_MCP_CONSOLE_MARKER}*/
+(raw) => {{
+  const input = JSON.parse(String(raw || "{{}}"));
+  const normalizeLevel = (value) => {{
+    const resolved = String(value || "").trim().toLowerCase();
+    if (!resolved) return "log";
+    return resolved === "warning" ? "warn" : resolved;
+  }};
+  const stateKey = "__crxzippleConsoleState__";
+  const installKey = "__crxzippleConsoleInstalled__";
+  const globalObject = window;
+  if (!globalObject[stateKey] || !Array.isArray(globalObject[stateKey].messages)) {{
+    globalObject[stateKey] = {{ messages: [] }};
+  }}
+  const state = globalObject[stateKey];
+  const push = (level, text, location = null) => {{
+    state.messages.push({{
+      level: normalizeLevel(level),
+      text: String(text || ""),
+      location,
+      captured_at_ms: Date.now(),
+    }});
+    if (state.messages.length > 200) {{
+      state.messages.splice(0, state.messages.length - 200);
+    }}
+  }};
+  if (!globalObject[installKey]) {{
+    const methods = ["log", "info", "warn", "error", "debug"];
+    const originals = {{}};
+    for (const method of methods) {{
+      const original = console[method];
+      originals[method] = typeof original === "function" ? original.bind(console) : null;
+      console[method] = (...args) => {{
+        const text = args
+          .map((value) => {{
+            if (typeof value === "string") return value;
+            try {{
+              return JSON.stringify(value);
+            }} catch {{
+              return String(value);
+            }}
+          }})
+          .join(" ");
+        push(method, text);
+        if (originals[method]) {{
+          originals[method](...args);
+        }}
+      }};
+    }}
+    window.addEventListener("error", (event) => {{
+      push("error", event.message || "Script error", {{
+        url: event.filename || null,
+        line_number: typeof event.lineno === "number" ? event.lineno : null,
+        column_number: typeof event.colno === "number" ? event.colno : null,
+      }});
+    }});
+    window.addEventListener("unhandledrejection", (event) => {{
+      const reason = event.reason;
+      let text = "Unhandled promise rejection";
+      if (typeof reason === "string") {{
+        text = reason;
+      }} else if (reason && typeof reason.message === "string") {{
+        text = reason.message;
+      }} else if (reason != null) {{
+        try {{
+          text = JSON.stringify(reason);
+        }} catch {{
+          text = String(reason);
+        }}
+      }}
+      push("error", text);
+    }});
+    globalObject[installKey] = true;
+  }}
+  const requestedLevel = typeof input.level === "string" && input.level.trim()
+    ? normalizeLevel(input.level)
+    : null;
+  const requestedLimit = Number.isFinite(Number(input.limit)) && Number(input.limit) > 0
+    ? Math.floor(Number(input.limit))
+    : null;
+  let messages = Array.isArray(state.messages) ? state.messages.slice() : [];
+  if (requestedLevel) {{
+    messages = messages.filter((item) => normalizeLevel(item.level) === requestedLevel);
+  }}
+  if (requestedLimit && messages.length > requestedLimit) {{
+    messages = messages.slice(-requestedLimit);
+  }}
+  if (input.clear) {{
+    state.messages = [];
+  }}
+  return messages;
+}}
+""".strip()
+_MCP_SCROLL_INTO_VIEW_EXPRESSION = """
+(uid) => {
+  const targetUid = String(uid || "").trim();
+  if (!targetUid) {
+    throw new Error("scroll-into-view requires uid");
+  }
+  const queue = [document.documentElement || document.body];
+  const seen = new Set();
+  while (queue.length) {
+    const current = queue.shift();
+    if (!(current instanceof Element) || seen.has(current)) continue;
+    seen.add(current);
+    if ((current.getAttribute("data-uid") || current.id || "").trim() === targetUid) {
+      if (typeof current.scrollIntoView === "function") {
+        current.scrollIntoView({ block: "center", inline: "nearest" });
+      }
+      return true;
+    }
+    queue.push(...Array.from(current.children));
+  }
+  return false;
+}
+""".strip()
 _TEXT_MATCH_ORDINAL_EXPRESSION = f"""
 /*{_TEXT_MATCH_ORDINAL_MARKER}*/
 (root, options) => {{
@@ -1763,6 +2031,10 @@ def _normalize_batch_action(
         payload.setdefault("values", list(raw_action["values"]))
     if isinstance(raw_action.get("fields"), (list, tuple)):
         payload.setdefault("fields", list(raw_action["fields"]))
+    if isinstance(raw_action.get("paths"), (list, tuple)):
+        payload.setdefault("paths", list(raw_action["paths"]))
+    if isinstance(raw_action.get("path"), str):
+        payload.setdefault("path", raw_action["path"])
 
     return BrowserPageActionCommand(
         profile_name=profile_name,
@@ -1916,6 +2188,96 @@ def _normalize_form_fields(value: Any) -> tuple[dict[str, Any], ...]:
             }
         )
     return tuple(normalized)
+
+
+def _download_name(download: Any) -> str | None:
+    suggested = getattr(download, "suggested_filename", None)
+    if callable(suggested):
+        try:
+            suggested = suggested()
+        except Exception:  # noqa: BLE001
+            suggested = None
+    if isinstance(suggested, str) and suggested.strip():
+        return suggested.strip()
+    return None
+
+
+def _download_failure(download: Any) -> str | None:
+    failure = getattr(download, "failure", None)
+    if callable(failure):
+        try:
+            failure = failure()
+        except Exception as exc:  # noqa: BLE001
+            failure = str(exc)
+    if isinstance(failure, str) and failure.strip():
+        return failure.strip()
+    return None
+
+
+def _download_bytes(download: Any) -> bytes:
+    path_value: str | None = None
+    path_getter = getattr(download, "path", None)
+    if callable(path_getter):
+        try:
+            raw_path = path_getter()
+        except Exception:  # noqa: BLE001
+            raw_path = None
+        if isinstance(raw_path, str) and raw_path.strip():
+            path_value = raw_path.strip()
+    if path_value is not None:
+        return Path(path_value).read_bytes()
+    save_as = getattr(download, "save_as", None)
+    if callable(save_as):
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_path = temp_file.name
+        try:
+            save_as(temp_path)
+            return Path(temp_path).read_bytes()
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+    raise BrowserValidationError(
+        "Playwright download does not expose a readable path.",
+    )
+
+
+def _download_content_type(*, filename: str | None) -> str:
+    if filename is not None:
+        guessed, _ = mimetypes.guess_type(filename)
+        if guessed:
+            return guessed
+    return "application/octet-stream"
+
+
+def _serialize_download(download: Any) -> dict[str, Any]:
+    failure = _download_failure(download)
+    if failure is not None:
+        raise BrowserValidationError(f"Browser download failed: {failure}")
+    filename = _download_name(download)
+    data = _download_bytes(download)
+    content_type = _download_content_type(filename=filename)
+    result: dict[str, Any] = {
+        "kind": "download",
+        "content_type": content_type,
+        "encoding": "base64",
+        "data": base64.b64encode(data).decode("ascii"),
+    }
+    if filename is not None:
+        result["name"] = filename
+    return result
+
+
+def _serialize_dialog(dialog: Any) -> dict[str, Any]:
+    dialog_type = getattr(dialog, "type", None)
+    message = getattr(dialog, "message", None)
+    default_value = getattr(dialog, "default_value", None)
+    result: dict[str, Any] = {
+        "kind": "dialog",
+        "type": str(dialog_type).strip() if dialog_type is not None else None,
+        "message": str(message) if message is not None else "",
+    }
+    if default_value is not None:
+        result["default_value"] = str(default_value)
+    return result
 
 
 def _interactive_snapshot_limit(
@@ -2485,6 +2847,7 @@ def _bulk_allow_zero_selection(payload: Mapping[str, Any]) -> bool:
 class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
     session_pool: PlaywrightCdpSessionPool
     ref_store: BrowserRefStore
+    daemon_service: DaemonApplicationService = field(repr=False)
     family: BrowserActionFamily = "cdp-backed-playwright"
 
     def supports(
@@ -2504,37 +2867,42 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
     ) -> BrowserActionResult:
         if tab is None:
             raise BrowserValidationError("cdp-backed-playwright actions require a tab.")
-        cdp_url = self._runtime_cdp_url(plan=plan, runtime_state=runtime_state)
-        max_attempts = (
-            2
-            if command.kind in _RETRYABLE_TRANSIENT_ACTION_KINDS
-            else 1
-        )
-        last_error: Exception | None = None
-        for attempt in range(max_attempts):
-            page = self.session_pool.resolve_page(
-                profile=plan.profile,
-                target_id=tab.target_id,
-                timeout_ms=command.timeout_ms,
-                cdp_url=cdp_url,
+        with host_daemon_lease(
+            daemon_service=self.daemon_service,
+            plan=plan,
+            user_data_dir=plan.profile.user_data_dir,
+        ):
+            cdp_url = self._runtime_cdp_url(plan=plan, runtime_state=runtime_state)
+            max_attempts = (
+                2
+                if command.kind in _RETRYABLE_TRANSIENT_ACTION_KINDS
+                else 1
             )
-            try:
-                result_value, resolved_selector, resolved_frame_path = self._execute_on_page(
-                    plan=plan,
-                    tab=tab,
-                    page=page,
-                    runtime_state=runtime_state,
-                    command=command,
+            last_error: Exception | None = None
+            for attempt in range(max_attempts):
+                page = self.session_pool.resolve_page(
+                    profile=plan.profile,
+                    target_id=tab.target_id,
+                    timeout_ms=command.timeout_ms,
+                    cdp_url=cdp_url,
                 )
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                if attempt + 1 < max_attempts and _is_transient_page_context_error(exc):
-                    continue
-                raise
-        else:
-            assert last_error is not None
-            raise last_error
+                try:
+                    result_value, resolved_selector, resolved_frame_path = self._execute_on_page(
+                        plan=plan,
+                        tab=tab,
+                        page=page,
+                        runtime_state=runtime_state,
+                        command=command,
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    if attempt + 1 < max_attempts and _is_transient_page_context_error(exc):
+                        continue
+                    raise
+            else:
+                assert last_error is not None
+                raise last_error
         if command.kind == "snapshot" and isinstance(result_value, dict):
             runtime_state.remember_page_snapshot(
                 target_id=tab.target_id,
@@ -2623,6 +2991,237 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                 resolved_selector,
                 resolved_frame_path,
             )
+
+        if command.kind == "console":
+            level = _payload_text_any(command.payload, "level")
+            limit = _payload_int_any(command.payload, "limit", minimum=1)
+            clear = bool(_payload_bool_any(command.payload, "clear"))
+            messages = self.session_pool.get_console_messages(
+                page=page,
+                level=level,
+                limit=limit,
+                clear=clear,
+            )
+            return (
+                {
+                    "kind": "console",
+                    "messages": messages,
+                    "count": len(messages),
+                    "level": level.strip().lower() if isinstance(level, str) and level.strip() else None,
+                    "limit": limit,
+                    "cleared": clear,
+                },
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind == "cookies":
+            cookies_operation = (_payload_text_any(
+                command.payload,
+                "cookies_operation",
+                "cookiesOperation",
+                "operation",
+            ) or "get").strip().lower()
+            if cookies_operation not in {"get", "set", "clear"}:
+                raise BrowserValidationError(
+                    "payload.cookies_operation must be one of get, set, or clear.",
+                )
+            page_context = getattr(page, "context", None)
+            if callable(page_context):
+                page_context = page_context()
+            if page_context is None:
+                raise BrowserValidationError("Playwright page does not expose a browser context.")
+            if cookies_operation == "get":
+                cookies_getter = getattr(page_context, "cookies", None)
+                if not callable(cookies_getter):
+                    raise BrowserValidationError(
+                        "Playwright browser context does not support cookies().",
+                    )
+                raw_cookies = cookies_getter()
+                cookies: list[dict[str, Any]] = []
+                if isinstance(raw_cookies, list):
+                    for item in raw_cookies:
+                        if isinstance(item, dict):
+                            cookies.append({str(key): item[key] for key in item})
+                return (
+                    {
+                        "kind": "cookies",
+                        "operation": "get",
+                        "count": len(cookies),
+                        "cookies": cookies,
+                    },
+                    resolved_selector,
+                    resolved_frame_path,
+                )
+            if cookies_operation == "clear":
+                clear_method = getattr(page_context, "clear_cookies", None)
+                if not callable(clear_method):
+                    raise BrowserValidationError(
+                        "Playwright browser context does not support clear_cookies().",
+                    )
+                clear_method()
+                return (
+                    {
+                        "kind": "cookies",
+                        "operation": "clear",
+                        "count": 0,
+                        "cookies": [],
+                    },
+                    resolved_selector,
+                    resolved_frame_path,
+                )
+            raw_cookie = command.payload.get("cookie")
+            if not isinstance(raw_cookie, dict):
+                raise BrowserValidationError("payload.cookie is required for cookies set.")
+            cookie_name = _payload_text_any(raw_cookie, "name")
+            cookie_value = _payload_text_any(raw_cookie, "value")
+            if cookie_name is None or cookie_value is None:
+                raise BrowserValidationError("payload.cookie.name and payload.cookie.value are required.")
+            cookie_payload: dict[str, Any] = {
+                "name": cookie_name,
+                "value": cookie_value,
+            }
+            for source_key, target_key in (
+                ("url", "url"),
+                ("domain", "domain"),
+                ("path", "path"),
+                ("sameSite", "sameSite"),
+                ("same_site", "sameSite"),
+            ):
+                resolved = _payload_text_any(raw_cookie, source_key)
+                if resolved is not None:
+                    cookie_payload[target_key] = resolved
+            expires = _payload_number_any(raw_cookie, "expires")
+            if expires is not None:
+                cookie_payload["expires"] = expires
+            for source_key, target_key in (
+                ("httpOnly", "httpOnly"),
+                ("http_only", "httpOnly"),
+                ("secure", "secure"),
+            ):
+                resolved_bool = _payload_bool_any(raw_cookie, source_key)
+                if resolved_bool is not None:
+                    cookie_payload[target_key] = resolved_bool
+            if "url" not in cookie_payload and not (
+                "domain" in cookie_payload and "path" in cookie_payload
+            ):
+                raise BrowserValidationError(
+                    "payload.cookie requires url, or domain plus path.",
+                )
+            add_cookies = getattr(page_context, "add_cookies", None)
+            if not callable(add_cookies):
+                raise BrowserValidationError(
+                    "Playwright browser context does not support add_cookies().",
+                )
+            add_cookies([cookie_payload])
+            return (
+                {
+                    "kind": "cookies",
+                    "operation": "set",
+                    "count": 1,
+                    "cookies": [cookie_payload],
+                },
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind == "storage":
+            storage_kind = (_payload_text_any(
+                command.payload,
+                "storage_kind",
+                "storageKind",
+                "storage",
+            ) or "local").strip().lower()
+            if storage_kind not in {"local", "session"}:
+                raise BrowserValidationError(
+                    "payload.storage_kind must be either local or session.",
+                )
+            storage_operation = (_payload_text_any(
+                command.payload,
+                "storage_operation",
+                "storageOperation",
+                "operation",
+            ) or "get").strip().lower()
+            if storage_operation not in {"get", "set", "clear"}:
+                raise BrowserValidationError(
+                    "payload.storage_operation must be one of get, set, or clear.",
+                )
+            storage_key = _payload_text_any(
+                command.payload,
+                "storage_key",
+                "storageKey",
+                "key",
+            )
+            raw_storage_value = _payload_value_any(
+                command.payload,
+                "storage_value",
+                "storageValue",
+                "value",
+            )
+            if storage_operation == "set" and storage_key is None:
+                raise BrowserValidationError("payload.storage_key is required for storage set.")
+            values = page.evaluate(
+                _STORAGE_EXPRESSION,
+                {
+                    "kind": storage_kind,
+                    "operation": storage_operation,
+                    "key": storage_key,
+                    "value": (None if raw_storage_value is None else str(raw_storage_value)),
+                },
+            )
+            if not isinstance(values, dict):
+                values = {}
+            return (
+                {
+                    "kind": "storage",
+                    "storage_kind": storage_kind,
+                    "operation": storage_operation,
+                    "key": storage_key,
+                    "values": {
+                        str(key): str(value)
+                        for key, value in values.items()
+                        if value is not None
+                    },
+                },
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind == "dialog":
+            wait_for_event = getattr(page, "wait_for_event", None)
+            if not callable(wait_for_event):
+                raise BrowserValidationError(
+                    "Playwright page does not support wait_for_event().",
+                )
+            dialog = wait_for_event("dialog", **_timeout_kwargs(timeout))
+            accept = command.payload.get("accept")
+            if accept is None:
+                accept = True
+            prompt_text = _payload_text_any(command.payload, "prompt_text", "promptText")
+            if bool(accept):
+                accept_method = getattr(dialog, "accept", None)
+                if not callable(accept_method):
+                    raise BrowserValidationError(
+                        "Playwright dialog does not support accept().",
+                    )
+                if prompt_text is not None:
+                    accept_method(prompt_text)
+                else:
+                    accept_method()
+                result = _serialize_dialog(dialog)
+                result["handled_as"] = "accept"
+                if prompt_text is not None:
+                    result["prompt_text"] = prompt_text
+                return result, resolved_selector, resolved_frame_path
+            dismiss_method = getattr(dialog, "dismiss", None)
+            if not callable(dismiss_method):
+                raise BrowserValidationError(
+                    "Playwright dialog does not support dismiss().",
+                )
+            dismiss_method()
+            result = _serialize_dialog(dialog)
+            result["handled_as"] = "dismiss"
+            return result, resolved_selector, resolved_frame_path
 
         if command.kind == "click":
             button = command.payload.get("button")
@@ -2785,6 +3384,46 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
             self._ensure_editable_text_target(locator=locator, action_kind="fill")
             locator.fill(text, **_timeout_kwargs(timeout))
             return {"kind": "fill", "text": text}, resolved_selector, resolved_frame_path
+
+        if command.kind == "upload":
+            upload_paths = _normalize_text_payload(
+                _payload_value_any(command.payload, "paths", "path"),
+            )
+            if not upload_paths:
+                raise BrowserValidationError("payload.paths is required.")
+            set_input_files = getattr(locator, "set_input_files", None)
+            if not callable(set_input_files):
+                raise BrowserValidationError(
+                    "Playwright locator does not support set_input_files().",
+                )
+            set_input_files(upload_paths, **_timeout_kwargs(timeout))
+            return {"kind": "upload", "paths": upload_paths}, resolved_selector, resolved_frame_path
+
+        if command.kind == "download":
+            expect_download = getattr(page, "expect_download", None)
+            if not callable(expect_download):
+                raise BrowserValidationError(
+                    "Playwright page does not support expect_download().",
+                )
+            button = command.payload.get("button")
+            with expect_download(**_timeout_kwargs(timeout)) as download_info:
+                self._click(
+                    locator=locator,
+                    timeout=timeout,
+                    button=button,
+                    force=bool(command.payload.get("force", False)),
+                    double_click=bool(command.payload.get("double_click", False)),
+                )
+            return _serialize_download(download_info.value), resolved_selector, resolved_frame_path
+
+        if command.kind == "wait-download":
+            wait_for_event = getattr(page, "wait_for_event", None)
+            if not callable(wait_for_event):
+                raise BrowserValidationError(
+                    "Playwright page does not support wait_for_event().",
+                )
+            download = wait_for_event("download", **_timeout_kwargs(timeout))
+            return _serialize_download(download), resolved_selector, resolved_frame_path
 
         if command.kind == "wait":
             return (
@@ -4930,6 +5569,15 @@ class McpBackedActionEngine(BrowserActionEngine):
             command=command,
         )
 
+        if command.kind == "batch":
+            return self._batch(
+                plan=plan,
+                tab=tab,
+                runtime_state=runtime_state,
+                command=command,
+                batch_depth=0,
+            ), uid
+
         if command.kind == "click":
             self.mcp_pool.click_element(
                 profile_name=plan.profile.name,
@@ -4940,6 +5588,86 @@ class McpBackedActionEngine(BrowserActionEngine):
                 double_click=bool(command.payload.get("double_click", False)),
             )
             return {"kind": "click"}, uid
+
+        if command.kind == "dialog":
+            accept = command.payload.get("accept")
+            if accept is None:
+                accept = True
+            prompt_text = _payload_text_any(command.payload, "prompt_text", "promptText")
+            action = "accept" if bool(accept) else "dismiss"
+            self.mcp_pool.handle_dialog(
+                profile_name=plan.profile.name,
+                system=plan.system,
+                target_id=tab.target_id,
+                action=action,
+                prompt_text=prompt_text if action == "accept" else None,
+                user_data_dir=plan.profile.user_data_dir,
+            )
+            result = _serialize_dialog(None)
+            result["handled_as"] = action
+            if prompt_text is not None and action == "accept":
+                result["prompt_text"] = prompt_text
+            return result, uid
+
+        if command.kind == "console":
+            level = _payload_text_any(command.payload, "level")
+            clear = bool(command.payload.get("clear", False))
+            limit = _payload_int_any(command.payload, "limit", minimum=1)
+            raw_messages = self.mcp_pool.evaluate_script(
+                profile_name=plan.profile.name,
+                system=plan.system,
+                target_id=tab.target_id,
+                fn=_MCP_CONSOLE_EXPRESSION,
+                user_data_dir=plan.profile.user_data_dir,
+                args=[
+                    json.dumps(
+                        {
+                            "level": level,
+                            "clear": clear,
+                            "limit": limit,
+                        }
+                    )
+                ],
+            )
+            messages: list[dict[str, Any]] = []
+            if isinstance(raw_messages, list):
+                for item in raw_messages:
+                    if not isinstance(item, Mapping):
+                        continue
+                    location = item.get("location")
+                    normalized_location = None
+                    if isinstance(location, Mapping):
+                        normalized_location = {
+                            "url": (
+                                str(location.get("url")).strip()
+                                if location.get("url") is not None
+                                else None
+                            ),
+                            "line_number": int(location.get("line_number"))
+                            if isinstance(location.get("line_number"), (int, float))
+                            else None,
+                            "column_number": int(location.get("column_number"))
+                            if isinstance(location.get("column_number"), (int, float))
+                            else None,
+                        }
+                    messages.append(
+                        {
+                            "level": _payload_text_any(item, "level") or "log",
+                            "text": _payload_text_any(item, "text") or "",
+                            "location": normalized_location,
+                            "captured_at_ms": int(item.get("captured_at_ms"))
+                            if isinstance(item.get("captured_at_ms"), (int, float))
+                            else None,
+                        }
+                    )
+            return {
+                "kind": "console",
+                "messages": messages,
+                "count": len(messages),
+                "level": level,
+                "limit": limit,
+                "cleared": clear,
+            }, uid
 
         if command.kind in {"type", "fill"}:
             if command.kind == "fill":
@@ -4988,6 +5716,24 @@ class McpBackedActionEngine(BrowserActionEngine):
                 user_data_dir=plan.profile.user_data_dir,
             )
             return {"kind": command.kind, "text": text}, uid
+
+        if command.kind == "upload":
+            upload_paths = _normalize_text_payload(command.payload.get("paths"))
+            if not upload_paths:
+                raise BrowserValidationError("payload.paths is required for upload.")
+            if len(upload_paths) != 1:
+                raise BrowserValidationError(
+                    "mcp-backed upload currently supports exactly one file path.",
+                )
+            self.mcp_pool.upload_file(
+                profile_name=plan.profile.name,
+                system=plan.system,
+                target_id=tab.target_id,
+                uid=uid or self._require_ref(command),
+                file_path=upload_paths[0],
+                user_data_dir=plan.profile.user_data_dir,
+            )
+            return {"kind": "upload", "paths": upload_paths}, uid
 
         if command.kind == "press":
             key = _payload_text(command.payload, key="key")
@@ -5061,6 +5807,22 @@ class McpBackedActionEngine(BrowserActionEngine):
                 "height": height,
             }, uid
 
+        if command.kind == "scroll-into-view":
+            resolved_uid = uid or self._require_ref(command)
+            result = self.mcp_pool.evaluate_script(
+                profile_name=plan.profile.name,
+                system=plan.system,
+                target_id=tab.target_id,
+                fn=_MCP_SCROLL_INTO_VIEW_EXPRESSION,
+                user_data_dir=plan.profile.user_data_dir,
+                args=[resolved_uid],
+            )
+            if not bool(result):
+                raise BrowserValidationError(
+                    f"mcp-backed action 'scroll-into-view' could not resolve uid '{resolved_uid}'.",
+                )
+            return {"kind": "scroll-into-view"}, uid
+
         if command.kind == "select":
             values = command.payload.get("values")
             if isinstance(values, (list, tuple)):
@@ -5081,6 +5843,143 @@ class McpBackedActionEngine(BrowserActionEngine):
                 user_data_dir=plan.profile.user_data_dir,
             )
             return {"kind": "select", "selected": [value]}, uid
+
+        if command.kind == "storage":
+            storage_kind = (_payload_text_any(
+                command.payload,
+                "storage_kind",
+                "storageKind",
+                "storage",
+            ) or "local").strip().lower()
+            if storage_kind not in {"local", "session"}:
+                raise BrowserValidationError(
+                    "payload.storage_kind must be either local or session.",
+                )
+            storage_operation = (_payload_text_any(
+                command.payload,
+                "storage_operation",
+                "storageOperation",
+                "operation",
+            ) or "get").strip().lower()
+            if storage_operation not in {"get", "set", "clear"}:
+                raise BrowserValidationError(
+                    "payload.storage_operation must be one of get, set, or clear.",
+                )
+            storage_key = _payload_text_any(
+                command.payload,
+                "storage_key",
+                "storageKey",
+                "key",
+            )
+            raw_storage_value = _payload_value_any(
+                command.payload,
+                "storage_value",
+                "storageValue",
+                "value",
+            )
+            if storage_operation == "set" and storage_key is None:
+                raise BrowserValidationError("payload.storage_key is required for storage set.")
+            values = self.mcp_pool.evaluate_script(
+                profile_name=plan.profile.name,
+                system=plan.system,
+                target_id=tab.target_id,
+                fn=_MCP_STORAGE_EXPRESSION,
+                user_data_dir=plan.profile.user_data_dir,
+                args=[
+                    json.dumps(
+                        {
+                            "kind": storage_kind,
+                            "operation": storage_operation,
+                            "key": storage_key,
+                            "value": (None if raw_storage_value is None else str(raw_storage_value)),
+                        }
+                    )
+                ],
+            )
+            if not isinstance(values, dict):
+                values = {}
+            return {
+                "kind": "storage",
+                "storage_kind": storage_kind,
+                "operation": storage_operation,
+                "key": storage_key,
+                "values": {
+                    str(key): str(value)
+                    for key, value in values.items()
+                    if value is not None
+                },
+            }, uid
+
+        if command.kind == "cookies":
+            cookies_operation = (_payload_text_any(
+                command.payload,
+                "cookies_operation",
+                "cookiesOperation",
+                "operation",
+            ) or "get").strip().lower()
+            if cookies_operation not in {"get", "set", "clear"}:
+                raise BrowserValidationError(
+                    "payload.cookies_operation must be one of get, set, or clear.",
+                )
+            raw_cookie = _payload_value_any(command.payload, "cookie")
+            cookie_payload: dict[str, Any] | None = None
+            if cookies_operation == "set":
+                if not isinstance(raw_cookie, Mapping):
+                    raise BrowserValidationError("payload.cookie is required for cookies set.")
+                cookie_name = _payload_text_any(raw_cookie, "name")
+                cookie_value = _payload_text_any(raw_cookie, "value")
+                if cookie_name is None or cookie_value is None:
+                    raise BrowserValidationError("payload.cookie.name and payload.cookie.value are required.")
+                http_only = _payload_bool_any(raw_cookie, "httpOnly", "http_only")
+                if http_only:
+                    raise BrowserValidationError(
+                        "mcp-backed cookies set does not support httpOnly cookies.",
+                    )
+                cookie_payload = {
+                    "name": cookie_name,
+                    "value": cookie_value,
+                }
+                for source_key, target_key in (
+                    ("domain", "domain"),
+                    ("path", "path"),
+                    ("sameSite", "sameSite"),
+                    ("same_site", "sameSite"),
+                ):
+                    resolved = _payload_text_any(raw_cookie, source_key)
+                    if resolved is not None:
+                        cookie_payload[target_key] = resolved
+                expires = _payload_number_any(raw_cookie, "expires")
+                if expires is not None:
+                    cookie_payload["expires"] = expires
+                secure = _payload_bool_any(raw_cookie, "secure")
+                if secure is not None:
+                    cookie_payload["secure"] = secure
+            raw_cookies = self.mcp_pool.evaluate_script(
+                profile_name=plan.profile.name,
+                system=plan.system,
+                target_id=tab.target_id,
+                fn=_MCP_COOKIES_EXPRESSION,
+                user_data_dir=plan.profile.user_data_dir,
+                args=[
+                    json.dumps(
+                        {
+                            "operation": cookies_operation,
+                            "cookie": cookie_payload,
+                        }
+                    )
+                ],
+            )
+            cookies: list[dict[str, Any]] = []
+            if isinstance(raw_cookies, list):
+                for item in raw_cookies:
+                    if isinstance(item, Mapping):
+                        cookies.append({str(key): item[key] for key in item})
+            return {
+                "kind": "cookies",
+                "operation": cookies_operation,
+                "count": len(cookies),
+                "cookies": cookies,
+            }, uid
 
         if command.kind == "wait":
             return self._wait(plan=plan, tab=tab, command=command, timeout_ms=timeout_ms), uid
@@ -5139,6 +6038,89 @@ class McpBackedActionEngine(BrowserActionEngine):
         raise BrowserValidationError(
             f"Action engine '{self.family}' does not support '{command.kind}'.",
         )
+
+    def _batch(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        tab: BrowserTab,
+        runtime_state: BrowserProfileRuntimeState,
+        command: BrowserPageActionCommand,
+        batch_depth: int,
+    ) -> dict[str, Any]:
+        if batch_depth > _MAX_BATCH_DEPTH:
+            raise BrowserValidationError(
+                f"Batch nesting depth exceeds maximum of {_MAX_BATCH_DEPTH}.",
+            )
+        raw_actions = command.payload.get("actions")
+        if not isinstance(raw_actions, (list, tuple)) or not raw_actions:
+            raise BrowserValidationError("batch requires actions.")
+        if _count_batch_actions(raw_actions) > _MAX_BATCH_ACTIONS:
+            raise BrowserValidationError(f"Batch exceeds maximum of {_MAX_BATCH_ACTIONS} actions.")
+
+        actions: list[BrowserPageActionCommand] = []
+        for raw_action in raw_actions:
+            if not isinstance(raw_action, Mapping):
+                raise BrowserValidationError("batch actions must be objects.")
+            actions.append(
+                _normalize_batch_action(
+                    raw_action=raw_action,
+                    profile_name=plan.profile.name,
+                    inherited_target_id=tab.target_id,
+                    inherited_timeout_ms=command.timeout_ms,
+                    depth=batch_depth + 1,
+                )
+            )
+        if not actions:
+            raise BrowserValidationError("batch requires actions.")
+        stop_on_error = command.payload.get("stop_on_error")
+        if not isinstance(stop_on_error, bool):
+            stop_on_error = True
+
+        results: list[dict[str, Any]] = []
+        for action in actions:
+            try:
+                result_value, _resolved_uid = self._execute_on_tab(
+                    plan=plan,
+                    tab=tab,
+                    runtime_state=runtime_state,
+                    command=action,
+                )
+                if action.kind == "snapshot" and isinstance(result_value, dict):
+                    runtime_state.remember_page_snapshot(
+                        target_id=tab.target_id,
+                        generation=int(result_value.get("generation") or 1),
+                        snapshot_format=str(result_value.get("format") or "snapshot"),
+                        ref_count=int(result_value.get("ref_count") or 0),
+                        frame_count=int(result_value.get("frame_count") or 0),
+                    )
+                else:
+                    runtime_state.remember_page_action(
+                        target_id=tab.target_id,
+                        action_kind=action.kind,
+                    )
+                results.append(
+                    {
+                        "ok": True,
+                        "kind": action.kind,
+                        "result": result_value,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                results.append(
+                    {
+                        "ok": False,
+                        "kind": action.kind,
+                        "error": str(exc),
+                    }
+                )
+                if stop_on_error:
+                    break
+        return {
+            "kind": "batch",
+            "stop_on_error": stop_on_error,
+            "results": results,
+        }
 
     def _resolve_uid(
         self,

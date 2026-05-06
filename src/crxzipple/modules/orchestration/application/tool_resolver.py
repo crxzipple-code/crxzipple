@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from crxzipple.modules.access import AccessRequirementReadiness
 from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
     AuthorizationDecision,
@@ -14,6 +15,7 @@ from crxzipple.modules.authorization.domain import (
 )
 from crxzipple.modules.llm.domain import ToolSchema
 from crxzipple.modules.orchestration.application.ports import (
+    AccessReadinessPort,
     AuthorizationPort,
     ToolCatalogPort,
 )
@@ -40,6 +42,41 @@ class ResolvedTool:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockedToolAccess:
+    tool_id: str
+    tool_name: str
+    requirement_sets: tuple[tuple[AccessRequirementReadiness, ...], ...]
+
+    def to_payload(self) -> dict[str, object]:
+        set_payloads = tuple(
+            {
+                "ready": all(readiness.ready for readiness in requirement_set),
+                "checks": [
+                    readiness.to_payload()
+                    for readiness in requirement_set
+                ],
+            }
+            for requirement_set in self.requirement_sets
+        )
+        missing_checks = [
+            readiness
+            for requirement_set in self.requirement_sets
+            for readiness in requirement_set
+            if not readiness.ready
+        ]
+        return {
+            "resource_type": "tool",
+            "resource_id": self.tool_id,
+            "display_name": self.tool_name,
+            "ready": False,
+            "setup_available": any(
+                readiness.setup_available for readiness in missing_checks
+            ),
+            "requirement_sets": list(set_payloads),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AskableEffect:
     id: str
     label: str
@@ -56,6 +93,7 @@ class ToolExecutionDecision:
 @dataclass(frozen=True, slots=True)
 class ResolvedToolSet:
     tools: tuple[ResolvedTool, ...]
+    blocked_access: tuple[BlockedToolAccess, ...] = ()
 
     @property
     def schemas(self) -> tuple[ToolSchema, ...]:
@@ -67,11 +105,18 @@ class ResolvedToolSet:
                 return item
         return None
 
+    def blocked_access_by_name(self, name: str) -> BlockedToolAccess | None:
+        for item in self.blocked_access:
+            if item.tool_id == name:
+                return item
+        return None
+
 
 @dataclass(slots=True)
 class ToolResolver:
     tool_catalog: ToolCatalogPort
     authorization_port: AuthorizationPort
+    access_port: AccessReadinessPort | None = None
     run_context_provider: Callable[[OrchestrationRun], dict[str, object]] | None = None
     default_remote_ask_effect_id: str = field(default="remote_tool_access")
     default_background_effect_id: str = field(default="background_execution")
@@ -80,10 +125,26 @@ class ToolResolver:
 
     def resolve(self, run: OrchestrationRun) -> ResolvedToolSet:
         self.tool_catalog.ensure_local_system_tools_registered()
+        context_attrs = self._context_attrs(run)
         resolved: list[ResolvedTool] = []
+        blocked_access: list[BlockedToolAccess] = []
         for tool in self.tool_catalog.list_enabled_tools():
             target = self._preferred_target(tool)
-            if self._surface_is_blocked(run, tool=tool, target=target):
+            resource_attrs = self._resource_attrs(tool, target=target)
+            if self._surface_is_blocked(
+                run,
+                tool=tool,
+                target=target,
+                context_attrs=context_attrs,
+                resource_attrs=resource_attrs,
+            ):
+                continue
+            access_block = self._access_block_for_tool(
+                tool,
+                context_attrs=context_attrs,
+            )
+            if access_block is not None:
+                blocked_access.append(access_block)
                 continue
             resolved.append(
                 ResolvedTool(
@@ -94,6 +155,7 @@ class ToolResolver:
             )
         return ResolvedToolSet(
             tools=tuple(resolved),
+            blocked_access=tuple(blocked_access),
         )
 
     def invocation_context_attrs(
@@ -104,13 +166,36 @@ class ToolResolver:
     ) -> dict[str, Any]:
         return self._context_attrs(run, session_key=session_key)
 
+    def resource_attrs(
+        self,
+        tool: Tool,
+        *,
+        target: ToolExecutionTarget,
+    ) -> dict[str, Any]:
+        return self._resource_attrs(tool, target=target)
+
     def execution_decision(
         self,
         run: OrchestrationRun,
         *,
         tool: Tool,
         target: ToolExecutionTarget,
+        context_attrs: dict[str, Any] | None = None,
+        resource_attrs: dict[str, Any] | None = None,
     ) -> ToolExecutionDecision:
+        resolved_resource_attrs = (
+            resource_attrs
+            if resource_attrs is not None
+            else self._resource_attrs(tool, target=target)
+        )
+        resolved_context_attrs = (
+            context_attrs
+            if context_attrs is not None
+            else self._context_attrs(
+                run,
+                session_key=str(run.metadata.get("session_key", "")).strip(),
+            )
+        )
         authorization_effect_ids = self._authorization_effect_ids(tool, target=target)
         decision = self.authorization_port.check_tool_execution(
             ToolExecutionAuthorizationRequest(
@@ -122,13 +207,10 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs=self._resource_attrs(tool, target=target),
+                    attrs=resolved_resource_attrs,
                 ),
                 context=AuthorizationContext(
-                    attrs=self._context_attrs(
-                        run,
-                        session_key=str(run.metadata.get("session_key", "")).strip(),
-                    ),
+                    attrs=resolved_context_attrs,
                 ),
                 required_effect_ids=authorization_effect_ids,
             ),
@@ -180,23 +262,72 @@ class ToolResolver:
         *,
         tool: Tool,
         target: ToolExecutionTarget,
+        context_attrs: dict[str, Any],
+        resource_attrs: dict[str, Any],
     ) -> bool:
         tool_access_decision = self._tool_access_override_decision(
             run,
             tool=tool,
             target=target,
+            context_attrs=context_attrs,
+            resource_attrs=resource_attrs,
         )
         if tool_access_decision == "deny":
             return True
-        if self._tool_run_override_decision(run, tool=tool, target=target) == "deny":
+        if (
+            self._tool_run_override_decision(
+                run,
+                tool=tool,
+                target=target,
+                context_attrs=context_attrs,
+                resource_attrs=resource_attrs,
+            )
+            == "deny"
+        ):
             return True
         if self._has_explicit_effect_deny(
             run,
             tool=tool,
             target=target,
+            context_attrs=context_attrs,
+            resource_attrs=resource_attrs,
         ):
             return True
         return False
+
+    def _access_block_for_tool(
+        self,
+        tool: Tool,
+        *,
+        context_attrs: dict[str, Any],
+    ) -> BlockedToolAccess | None:
+        if self.access_port is None:
+            return None
+        requirement_sets = tool.access_requirement_sets
+        if not requirement_sets:
+            return None
+        workspace_dir_value = context_attrs.get("workspace_dir")
+        workspace_dir = (
+            workspace_dir_value.strip()
+            if isinstance(workspace_dir_value, str) and workspace_dir_value.strip()
+            else None
+        )
+        checked_sets: list[tuple[AccessRequirementReadiness, ...]] = []
+        for requirement_set in requirement_sets:
+            if not requirement_set:
+                return None
+            readiness = self.access_port.check_requirements(
+                requirement_set,
+                workspace_dir=workspace_dir,
+            )
+            checked_sets.append(tuple(readiness))
+            if readiness and all(item.ready for item in readiness):
+                return None
+        return BlockedToolAccess(
+            tool_id=tool.id,
+            tool_name=tool.name,
+            requirement_sets=tuple(checked_sets),
+        )
 
     def _has_explicit_effect_deny(
         self,
@@ -204,6 +335,8 @@ class ToolResolver:
         *,
         tool: Tool,
         target: ToolExecutionTarget,
+        context_attrs: dict[str, Any],
+        resource_attrs: dict[str, Any],
     ) -> bool:
         effect_ids = list(tool.required_effect_ids)
         if tool.execution_policy.requires_confirmation:
@@ -221,6 +354,8 @@ class ToolResolver:
                     tool=tool,
                     target=target,
                     effect_id=effect_id,
+                    context_attrs=context_attrs,
+                    resource_attrs=resource_attrs,
                 )
                 == "deny"
             ):
@@ -249,6 +384,8 @@ class ToolResolver:
         *,
         tool: Tool,
         target: ToolExecutionTarget,
+        context_attrs: dict[str, Any],
+        resource_attrs: dict[str, Any],
     ) -> str:
         if not self.authorization_port.is_enabled():
             return "no_match"
@@ -263,10 +400,10 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs=self._resource_attrs(tool, target=target),
+                    attrs=resource_attrs,
                 ),
                 context=AuthorizationContext(
-                    attrs=self._context_attrs(run),
+                    attrs=context_attrs,
                 ),
             ),
         )
@@ -279,6 +416,8 @@ class ToolResolver:
         tool: Tool,
         target: ToolExecutionTarget,
         effect_id: str,
+        context_attrs: dict[str, Any],
+        resource_attrs: dict[str, Any],
     ) -> str:
         if not self.authorization_port.is_enabled():
             return "no_match"
@@ -293,11 +432,11 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs=self._resource_attrs(tool, target=target),
+                    attrs=resource_attrs,
                 ),
                 context=AuthorizationContext(
                     attrs={
-                        **self._context_attrs(run),
+                        **context_attrs,
                         "requested_effect_id": effect_id,
                     },
                 ),
@@ -311,6 +450,8 @@ class ToolResolver:
         *,
         tool: Tool,
         target: ToolExecutionTarget,
+        context_attrs: dict[str, Any],
+        resource_attrs: dict[str, Any],
     ) -> str:
         if not self.authorization_port.is_enabled():
             return "no_match"
@@ -325,10 +466,10 @@ class ToolResolver:
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
-                    attrs=self._resource_attrs(tool, target=target),
+                    attrs=resource_attrs,
                 ),
                 context=AuthorizationContext(
-                    attrs=self._context_attrs(run),
+                    attrs=context_attrs,
                 ),
             ),
         )

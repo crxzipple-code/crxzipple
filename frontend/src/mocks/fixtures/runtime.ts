@@ -1,0 +1,662 @@
+import type {
+  OperationsModuleOverview,
+  OperationsOrchestrationReadModel,
+  SettingsSummary,
+  ThreadSummary,
+  TraceEventView,
+  TurnStepView,
+  UiRuntimeAction,
+  UiTableSection,
+  WorkbenchRunView,
+} from "@/shared/runtime/types";
+
+const now = "2026-04-29T06:34:06.000Z";
+
+export const threads: ThreadSummary[] = [
+  {
+    id: "ses_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
+    title: "生成建水旅游宣传海报",
+    agent: "ImageGen Pro",
+    status: "running",
+    last_action: "正在生成图片",
+    updated_at: now,
+  },
+  {
+    id: "ses_collect_web",
+    title: "打开外部网页收集信息",
+    agent: "Browser Expert",
+    status: "waiting",
+    last_action: "等待 browser_control 授权",
+    updated_at: "2026-04-29T06:29:06.000Z",
+  },
+  {
+    id: "ses_report",
+    title: "分析销售数据并生成报表",
+    agent: "Data Analyst",
+    status: "completed",
+    last_action: "完成 3 个文件处理",
+    updated_at: "2026-04-29T05:34:06.000Z",
+  },
+  {
+    id: "ses_video",
+    title: "生成产品介绍视频",
+    agent: "Video Creator",
+    status: "failed",
+    last_action: "tool error (500)",
+    updated_at: "2026-04-29T04:34:06.000Z",
+  },
+  {
+    id: "ses_market",
+    title: "监控竞品动态并总结",
+    agent: "Market Watcher",
+    status: "running",
+    last_action: "正在抓取最新竞品信息",
+    updated_at: "2026-04-29T03:34:06.000Z",
+  },
+];
+
+export const workbenchRun: WorkbenchRunView = {
+  run_id: "run_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
+  session_key: "ses_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
+  title: "生成建水旅游宣传海报",
+  status: "running",
+  agent: { id: "imagegen-pro", name: "ImageGen Pro" },
+  model: { id: "gpt-4o", name: "GPT-4o" },
+  started_at: "2026-04-29T06:32:18.000Z",
+  completed_at: null,
+  duration_ms: 168000,
+  metrics: {
+    tool_calls: 1,
+    llm_calls: 1,
+    tokens: 1284,
+    estimated_cost_usd: 0.006,
+  },
+  turns: [
+    { turn_id: "turn_7", ordinal: 7, status: "running", duration_ms: 168000 },
+    { turn_id: "turn_6", ordinal: 6, status: "completed", duration_ms: 132000 },
+    { turn_id: "turn_5", ordinal: 5, status: "completed", duration_ms: 105000 },
+    { turn_id: "turn_4", ordinal: 4, status: "completed", duration_ms: 181000 },
+    { turn_id: "turn_3", ordinal: 3, status: "completed", duration_ms: 130000 },
+  ],
+  current_turn_id: "turn_7",
+  status_strip: {
+    label: "正在生成图片",
+    eta_ms: 70000,
+    queue_wait_ms: 0,
+  },
+  trace: {
+    trace_id: "trc_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
+    session_key: "ses_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
+    turn_id: "turn_7",
+    run_id: "run_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
+  },
+};
+
+export const steps: TurnStepView[] = [
+  {
+    step_id: "step_user_input",
+    turn_id: "turn_7",
+    run_id: workbenchRun.run_id,
+    type: "user_input",
+    status: "success",
+    title: "User Input",
+    summary: "请生成一张建水古城的旅游宣传海报，突出历史文化和慢生活氛围。",
+    started_at: "2026-04-29T06:32:18.000Z",
+    completed_at: "2026-04-29T06:32:18.000Z",
+    duration_ms: 0,
+    artifacts: [],
+    badges: [],
+    details_available: true,
+    trace: { ...workbenchRun.trace, step_id: "step_user_input" },
+  },
+  {
+    step_id: "step_llm",
+    turn_id: "turn_7",
+    run_id: workbenchRun.run_id,
+    type: "llm",
+    status: "success",
+    title: "LLM Thinking",
+    summary: "理解用户需求，分析建水古城特色，决定使用 image 生成工具。",
+    started_at: "2026-04-29T06:32:21.000Z",
+    completed_at: "2026-04-29T06:32:28.000Z",
+    duration_ms: 7000,
+    artifacts: [],
+    badges: [{ label: "GPT-4o", tone: "info" }],
+    details_available: true,
+    trace: { ...workbenchRun.trace, step_id: "step_llm", llm_invocation_id: "llm_91d2b6a1" },
+  },
+  {
+    step_id: "step_tool_call",
+    turn_id: "turn_7",
+    run_id: workbenchRun.run_id,
+    type: "tool_call",
+    status: "running",
+    title: "Image Generation",
+    summary: "生成建水古城旅游海报（4K，高质量）。",
+    started_at: "2026-04-29T06:32:32.000Z",
+    completed_at: null,
+    duration_ms: null,
+    artifacts: [],
+    badges: [{ label: "Tool Call", tone: "info" }],
+    details_available: true,
+    trace: { ...workbenchRun.trace, step_id: "step_tool_call", tool_run_id: "tr_8f3a6c2e1" },
+  },
+  {
+    step_id: "step_tool_result",
+    turn_id: "turn_7",
+    run_id: workbenchRun.run_id,
+    type: "tool_result",
+    status: "success",
+    title: "Image Generated",
+    summary: "海报文件已生成，可以预览和导出。",
+    started_at: "2026-04-29T06:33:10.000Z",
+    completed_at: "2026-04-29T06:33:12.000Z",
+    duration_ms: 2000,
+    artifacts: [
+      {
+        artifact_id: "art_7e2d9f88",
+        name: "jianshui_travel_poster_4k.png",
+        kind: "image",
+        size_bytes: 3355443,
+        thumbnail_url: "/workbench-poster-preview.png",
+      },
+    ],
+    badges: [{ label: "Tool Result", tone: "success" }],
+    details_available: true,
+    trace: { ...workbenchRun.trace, step_id: "step_tool_result", artifact_id: "art_7e2d9f88" },
+  },
+  {
+    step_id: "step_final",
+    turn_id: "turn_7",
+    run_id: workbenchRun.run_id,
+    type: "final_response",
+    status: "success",
+    title: "Final Response",
+    summary: "这是为您生成的建水古城旅游宣传海报。",
+    markdown: "这是为您生成的建水古城旅游宣传海报。",
+    started_at: "2026-04-29T06:34:02.000Z",
+    completed_at: "2026-04-29T06:34:02.000Z",
+    duration_ms: 0,
+    artifacts: [],
+    badges: [],
+    details_available: true,
+    trace: { ...workbenchRun.trace, step_id: "step_final" },
+  },
+];
+
+export const traceEvents: TraceEventView[] = [
+  event("evt_user", "User Message Received", "channel", "channel", "success", 0, "web_chat 收到用户消息"),
+  event("evt_run", "Run Created", "orchestration", "orchestration", "success", 1200, "创建 run 并绑定 session"),
+  event("evt_llm", "LLM Invocation Started", "llm", "llm", "success", 3600, "开始模型调用"),
+  event("evt_tool_request", "Tool Call Requested", "orchestration", "orchestration", "success", 6700, "请求 image 工具"),
+  event("evt_tool_created", "Tool Run Created", "tool", "tool", "running", 7400, "工具 run 已进入执行队列"),
+  event("evt_tool_success", "Tool Run Succeeded", "tool", "tool", "success", 18400, "工具执行成功"),
+  event("evt_applied", "Result Applied to Run Step", "observation", "orchestration", "success", 20500, "结果写入运行步骤"),
+  event("evt_delivered", "Response Delivered", "channel", "channel", "success", 26300, "回复投递到 web_chat"),
+];
+
+export const traceGraphEvents: TraceEventView[] = [
+  event("evt_graph_user", "User Message Received", "channel", "channel", "success", 120, "Web Channel"),
+  event("evt_graph_run", "Run Created", "orchestration", "orchestration", "success", 200, "Orchestration"),
+  event("evt_graph_llm", "LLM Invocation Started", "llm", "llm", "success", 2400, "OpenAI / gpt-4o"),
+  event("evt_graph_tool_request", "Tool Call Requested", "tool", "tool_planner", "success", 3600, "Tool Planner"),
+  event("evt_graph_tool_created", "Tool Run Created", "tool", "tool_service", "success", 3690, "Tool Service"),
+  event("evt_graph_tool_success", "Tool Run Succeeded", "tool", "tool_service", "success", 7300, "Tool Service"),
+  nonKeyEvent("evt_graph_policy_check", "Policy Check Completed", "tool", "tool_executor", "success", 11800, "Access guard checked"),
+  event("evt_graph_tool_failed", "Tool Run Failed", "tool", "tool_executor", "failed", 12400, "403 Forbidden"),
+  event("evt_graph_created_event", "Tool Run Created Event", "events", "events_service", "success", 60, "Events Service"),
+  event("evt_graph_error_event", "Error Event Generated", "events", "events_service", "failed", 110, "Events Service"),
+  event("evt_graph_observed", "Result Applied to Run Step", "observation", "run_state_observer", "success", 70, "Run State Observer"),
+  event("evt_graph_observation_failed", "Observation Failed", "observation", "run_state_observer", "failed", 111, "Run State Observer"),
+  event("evt_graph_run_failed", "Run Marked Failed", "error", "orchestration", "failed", 70, "Orchestration"),
+  event("evt_graph_failure_delivered", "Failure Delivered", "error", "web_channel", "failed", 150, "Web Channel"),
+  nonKeyEvent("evt_graph_payload_diff", "Payload Diff Captured", "events", "events_service", "success", 132, "Payload diff"),
+  nonKeyEvent("evt_graph_log_attached", "Log Chunk Attached", "events", "events_service", "success", 138, "Logs attached"),
+  nonKeyEvent("evt_graph_artifact_skipped", "Artifact Observation Skipped", "observation", "run_state_observer", "failed", 142, "Observation skipped"),
+  nonKeyEvent("evt_graph_audit", "Audit Event Recorded", "error", "audit", "success", 168, "Audit trail"),
+];
+
+export const operationsModules: OperationsModuleOverview[] = [
+  {
+    module: "orchestration",
+    title: "Orchestration",
+    subtitle: "监控调度状态、队列导航、阻塞异常的 Run 与资源分配。",
+    health: "healthy",
+    updated_at: now,
+    metrics: [
+      { id: "health", label: "Overall Health", value: "Healthy", delta: "All systems operational", tone: "success" },
+      { id: "ingress", label: "Ingress Queue", value: "42", delta: "+12 from last 5m", tone: "info" },
+      { id: "active", label: "Active Runs", value: "18", delta: "+4 from last 5m", tone: "info" },
+      { id: "backpressure", label: "Backpressure", value: "73", delta: "Waiting runs", tone: "warning" },
+      { id: "approval", label: "Approval Waiting", value: "0", delta: "Monitoring only", tone: "success" },
+      { id: "failed", label: "Failed (24h)", value: "2", delta: "-1 from yesterday", tone: "danger" },
+    ],
+    queue: [
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["P0", "run_8f3a7d1c", "img-gen/global", "Waiting for worker", "18s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["P1", "run_a12b9e4f", "research/global", "Waiting for lane lock", "22s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["P1", "run_3c6d2b8a", "data-analyst/global", "Waiting for worker", "2m 0s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["P2", "run_6e7f5d9c", "img-gen/global", "Executor busy", "2m 37s"]),
+    ],
+    lane_locks: [
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["img-gen", "run_3c6d2b8a", "60s", "14:33:30", "Protect critical section"]),
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["research", "run_a12b9e4f", "60s", "14:33:45", "Limit per-lane concurrency"]),
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["email", "run_0a9b6c7d", "60s", "14:33:59", "Send throttling"]),
+    ],
+    executor: [
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["worker_1", "Online", "14:32:17", "run_6e7f5d9c", "65%"]),
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["worker_2", "Online", "14:32:16", "run_9a8b7c6d", "42%"]),
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["worker_4", "Lease Expiring", "14:31:50", "run_5e6f7a8b", "90%"]),
+    ],
+    actions: [
+      { id: "open_run", label: "Open Run", risk: "normal" },
+      { id: "open_trace", label: "Open Trace", risk: "normal" },
+      { id: "cancel_run", label: "Cancel Run", risk: "controlled" },
+      { id: "force_release", label: "Force Release Lane", risk: "dangerous" },
+    ],
+  },
+  {
+    module: "tool",
+    title: "Tool",
+    subtitle: "监控工具目录、执行队列、失败运行、授权与确认风险。",
+    health: "warning",
+    updated_at: now,
+    metrics: [
+      { id: "health", label: "Overall Health", value: "Warning", delta: "Operator attention recommended", tone: "warning" },
+      { id: "catalog", label: "Tool Catalog", value: "34", delta: "31 enabled", tone: "success" },
+      { id: "active_runs", label: "Active Tool Runs", value: "4", delta: "2 queued", tone: "info" },
+      { id: "failed_runs", label: "Failed Tool Runs", value: "2", delta: "retained tool run records", tone: "danger" },
+      { id: "confirmation", label: "Confirmation Required", value: "7", delta: "tools require operator consent", tone: "warning" },
+      { id: "access_gated", label: "Access Gated", value: "11", delta: "tools with access requirements", tone: "warning" },
+    ],
+    queue: [
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["background", "toolrun_browser_42", "browser_control", "queued", "19s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["background", "toolrun_img_88", "image_generate", "dispatching to worker", "41s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["inline", "toolrun_sql_17", "sql_query", "running", "7s"]),
+    ],
+    lane_locks: [
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["browser_control", "-", "60s", "-", "confirmation, access gated"]),
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["shell_exec", "-", "30s", "-", "mutates state"]),
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["sql_query", "-", "45s", "-", "access gated"]),
+    ],
+    executor: [
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["tool-worker-1", "running", "14:32:19", "toolrun_img_88", "72%"]),
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["tool-worker-2", "queued", "14:32:10", "toolrun_browser_42", "31%"]),
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["-", "inline", "-", "toolrun_sql_17", "-"]),
+    ],
+    actions: [
+      { id: "open_tool", label: "Open Tool", risk: "normal" },
+      { id: "open_trace", label: "Open Trace", risk: "normal" },
+      { id: "cancel_tool_run", label: "Cancel Tool Run", risk: "controlled" },
+      { id: "disable_tool", label: "Disable Tool", risk: "dangerous" },
+    ],
+  },
+  {
+    module: "llm",
+    title: "LLM",
+    subtitle: "监控模型配置、调用状态、失败、限流键与上下文容量。",
+    health: "healthy",
+    updated_at: now,
+    metrics: [
+      { id: "health", label: "Overall Health", value: "Healthy", delta: "LLM runtime state is queryable", tone: "success" },
+      { id: "profiles", label: "LLM Profiles", value: "8", delta: "7 enabled", tone: "success" },
+      { id: "active_invocations", label: "Active Invocations", value: "3", delta: "128 succeeded", tone: "info" },
+      { id: "failed_invocations", label: "Failed Invocations", value: "1", delta: "retained invocation records", tone: "danger" },
+      { id: "tokens", label: "Tokens", value: "248912", delta: "reported by providers", tone: "info" },
+      { id: "context", label: "Max Context", value: "128000", delta: "largest configured window", tone: "neutral" },
+    ],
+    queue: [
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["running", "llm_inv_7f2c", "openai.gpt-5.4-mini", "running", "12s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["succeeded", "llm_inv_91ab", "openai.gpt-5.4-mini", "stop", "1m 03s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["failed", "llm_inv_44de", "anthropic.claude", "adapter_error: rate limit", "4m 20s"]),
+    ],
+    lane_locks: [
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["provider:openai", "openai.gpt-5.4-mini", "60s", "8", "openai/openai_responses"]),
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["provider:anthropic", "anthropic.claude", "90s", "4", "anthropic/anthropic_messages"]),
+    ],
+    executor: [
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["openai.gpt-5.4-mini", "enabled", "-", "llm_inv_7f2c", "42"]),
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["anthropic.claude", "enabled", "-", "llm_inv_44de", "18"]),
+      row(["Worker ID", "Status", "Last Heartbeat", "Current Run", "Load"], ["ollama.local", "disabled", "-", "-", "0"]),
+    ],
+    actions: [
+      { id: "open_invocation", label: "Open Invocation", risk: "normal" },
+      { id: "open_trace", label: "Open Trace", risk: "normal" },
+      { id: "retry_invocation", label: "Retry Invocation", risk: "controlled" },
+      { id: "disable_profile", label: "Disable Profile", risk: "dangerous" },
+    ],
+  },
+];
+
+export const operationsOrchestrationPage: OperationsOrchestrationReadModel = {
+  module: "orchestration",
+  title: "Orchestration",
+  subtitle: "调度器、运行队列、Lane Lock、Executor、故障与操作事件的统一控制台。",
+  health: "healthy",
+  updated_at: now,
+  auto_refresh: true,
+  role: {
+    label: "Admin",
+    can_operate: true,
+    scope: "orchestration",
+  },
+  metrics: [
+    { id: "health", label: "Overall Health", value: "Healthy", delta: "All systems operational", tone: "success" },
+    { id: "ingress", label: "Ingress Queue", value: "42", delta: "+12 from last 5m", tone: "info" },
+    { id: "active", label: "Active Runs", value: "18", delta: "+4 from last 5m", tone: "neutral" },
+    { id: "run_queue", label: "Run Queue", value: "31", delta: "6 waiting", tone: "info" },
+    { id: "backpressure", label: "Backpressure", value: "73", delta: "Waiting runs", tone: "warning" },
+    { id: "approval_waiting", label: "Approval Waiting", value: "0", delta: "Monitoring only", tone: "success" },
+    { id: "failed", label: "Failed (24h)", value: "2", delta: "-1 from yesterday", tone: "danger" },
+  ],
+  tabs: [
+    { id: "overview", label: "Overview" },
+    { id: "runs", label: "Runs", count: 73 },
+    { id: "lane_locks", label: "Lane Locks", count: 3 },
+    { id: "executors", label: "Executors", count: 4 },
+    { id: "failures", label: "Failures", count: 2, tone: "danger" },
+    { id: "events", label: "Events" },
+  ],
+  active_tab: "overview",
+  actions: [
+    runtimeAction("open_run", "Open Run"),
+    runtimeAction("open_trace", "Open Trace"),
+    runtimeAction("cancel_run", "Cancel Run", "controlled", true),
+    runtimeAction("requeue", "Requeue", "controlled", true),
+    runtimeAction("force_release_lane", "Force Release Lane", "dangerous", true, true),
+  ],
+  scheduler_status: {
+    id: "scheduler_status",
+    title: "Scheduler Status",
+    items: [
+      { label: "Event Loop", value: "Alive", tone: "success" },
+      { label: "Last Tick", value: "14:32:18.123" },
+      { label: "Tick Lag", value: "28ms" },
+      { label: "Dispatch Latency", value: "p50 18ms / p95 96ms" },
+      { label: "Queue Age (p95)", value: "2m 37s", tone: "warning" },
+      { label: "Throughput (5m)", value: "128 runs" },
+      { label: "Schedule Success Rate (5m)", value: "99.2%" },
+    ],
+  },
+  backpressure: {
+    id: "backpressure",
+    title: "Backpressure",
+    kind: "donut",
+    total: 73,
+    segments: [
+      { id: "lane_lock", label: "Waiting for Lane Lock", value: 28, tone: "warning" },
+      { id: "waiting_worker", label: "Waiting for Worker", value: 20, tone: "info" },
+      { id: "access", label: "Waiting for Access", value: 8, tone: "danger" },
+      { id: "executor_busy", label: "Executor Busy", value: 9, tone: "neutral" },
+      { id: "other", label: "Other", value: 8, tone: "neutral" },
+    ],
+  },
+  stuck_runs: tableSection(
+    "stuck_runs",
+    "Stuck Runs",
+    [
+      ["issue", "Issue"],
+      ["count", "Count"],
+      ["action", "Action"],
+    ],
+    [
+      { issue: "Queued > 5m", count: "5", oldest: "7m 18s", action: "View", example_run_id: "run_a12b9e4f" },
+      { issue: "Running no events > 10m", count: "3", oldest: "14m 06s", action: "View", example_run_id: "run_6e7f5d9c" },
+      { issue: "Lane lock expired", count: "2", oldest: "9m 11s", action: "View", example_run_id: "run_3c6d2b8a" },
+      { issue: "Worker lease expired", count: "1", oldest: "4m 09s", action: "View", example_run_id: "worker_5" },
+    ],
+    11,
+    "/operations/orchestration?tab=stuck",
+  ),
+  policy_limits: {
+    id: "policy_limits",
+    title: "Policy & Limits",
+    items: [
+      { label: "Per-lane Concurrency", value: "30" },
+      { label: "Global Run Concurrency", value: "200" },
+      { label: "Worker Capacity (Online / Total)", value: "38 / 42", tone: "success" },
+      { label: "Approval Timeout", value: "30m" },
+      { label: "Lease Timeout", value: "60s" },
+      { label: "Lane Lock TTL", value: "60s" },
+      { label: "Queue Retention", value: "24h" },
+    ],
+  },
+  run_queue: tableSection(
+    "run_queue",
+    "Run Queue",
+    [
+      ["priority", "Priority"],
+      ["run_id", "Run ID"],
+      ["lane_key", "Lane Key"],
+      ["enqueued_at", "Enqueued At"],
+      ["agent_target", "Agent (Target)"],
+      ["wait_reason", "Wait Reason"],
+      ["wait_time", "Wait Time"],
+      ["actions", "Actions"],
+    ],
+    [
+      { priority: "P0", run_id: "run_8f3a7d1c", lane_key: "img-gen/global", enqueued_at: "14:31:52.123", agent_target: "ImageGenAgent v1.2.3", wait_reason: "Waiting for worker", wait_time: "18s", actions: "Open / Trace" },
+      { priority: "P1", run_id: "run_a12b9e4f", lane_key: "research/global", enqueued_at: "14:31:53.321", agent_target: "ResearchAgent v2.1.0", wait_reason: "Waiting for lane lock", wait_time: "22s", actions: "Open / Trace" },
+      { priority: "P1", run_id: "run_3c6d2b8a", lane_key: "data-analyst/global", enqueued_at: "14:31:55.728", agent_target: "DataAnalystAgent v1.0.5", wait_reason: "Waiting for worker", wait_time: "2m 0s", actions: "Open / Trace" },
+      { priority: "P2", run_id: "run_6e7f5d9c", lane_key: "img-gen/global", enqueued_at: "14:31:58.842", agent_target: "ImageGenAgent v1.2.3", wait_reason: "Executor busy", wait_time: "2m 37s", actions: "Open / Trace" },
+      { priority: "P2", run_id: "run_0a9b6c7d", lane_key: "email/global", enqueued_at: "14:31:59.531", agent_target: "MailAgent v1.0.1", wait_reason: "Waiting for worker", wait_time: "3m 20s", actions: "Open / Trace" },
+    ],
+    31,
+    "/operations/orchestration?tab=runs",
+  ),
+  lane_locks: tableSection(
+    "lane_locks",
+    "Lane Locks",
+    [
+      ["lane_key", "Lane Key"],
+      ["holder_run_id", "Holder Run ID"],
+      ["lock_epoch", "Lock Epoch"],
+      ["ttl", "TTL"],
+      ["expires_at", "Expires At"],
+      ["renewed_at", "Renewed At"],
+      ["reason", "Reason"],
+    ],
+    [
+      { lane_key: "img-gen", holder_run_id: "run_3c6d2b8a", lock_epoch: "1845", ttl: "60s", expires_at: "14:33:30", renewed_at: "14:32:30", reason: "Protect critical section" },
+      { lane_key: "research", holder_run_id: "run_a12b9e4f", lock_epoch: "2761", ttl: "60s", expires_at: "14:33:45", renewed_at: "14:32:45", reason: "Limit per-lane concurrency" },
+      { lane_key: "data-analyst", holder_run_id: "run_5d6e7f8a", lock_epoch: "1932", ttl: "60s", expires_at: "14:33:40", renewed_at: "14:32:40", reason: "Resource isolation" },
+    ],
+    3,
+    "/operations/orchestration?tab=lane_locks",
+  ),
+  executor_overview: tableSection(
+    "executor_overview",
+    "Executor Overview",
+    [
+      ["worker_id", "Worker ID"],
+      ["status", "Status"],
+      ["last_heartbeat", "Last Heartbeat"],
+      ["lease_expires_at", "Lease (Expires At)"],
+      ["current_run", "Current Run"],
+      ["load", "Load (1m)"],
+      ["runs_5m", "Runs (5m)"],
+    ],
+    [
+      { worker_id: "worker_1", status: "Online", last_heartbeat: "14:32:18", lease_expires_at: "14:33:18 (60s)", current_run: "run_6e7f5d9c", load: "65%", runs_5m: "12" },
+      { worker_id: "worker_2", status: "Online", last_heartbeat: "14:32:17", lease_expires_at: "14:33:17 (60s)", current_run: "run_9a8b7c6d", load: "42%", runs_5m: "8" },
+      { worker_id: "worker_4", status: "Lease Expiring", last_heartbeat: "14:31:50", lease_expires_at: "14:32:20 (12s)", current_run: "run_5e6f7a8b", load: "90%", runs_5m: "18" },
+    ],
+    4,
+    "/operations/orchestration?tab=executors",
+  ),
+  ingress_queue: tableSection(
+    "ingress_queue",
+    "Ingress Queue",
+    [
+      ["source", "Source"],
+      ["intake_key", "Intake Key"],
+      ["received_at", "Received At"],
+      ["target_lane", "Target Lane"],
+      ["priority", "Priority"],
+      ["age", "Age"],
+      ["actions", "Actions"],
+    ],
+    [
+      { source: "web_chat", intake_key: "intake_aa12...", received_at: "14:32:10", target_lane: "img-gen", priority: "Queued", age: "22s", actions: "Open" },
+      { source: "api", intake_key: "intake_bb34...", received_at: "14:32:08", target_lane: "research", priority: "High", age: "24s", actions: "Open" },
+    ],
+    42,
+  ),
+  recent_failures: tableSection(
+    "recent_failures",
+    "Recent Failures",
+    [
+      ["time", "Time"],
+      ["run_id", "Run ID"],
+      ["error", "Error"],
+      ["module", "Module"],
+      ["details", "Details"],
+      ["trace", "Trace"],
+    ],
+    [
+      { time: "14:28:17", run_id: "run_7c6d5c4b", error: "Lane Timeout", module: "Orchestration", details: "Lane lock timeout after 5m", trace: "Open Trace" },
+      { time: "14:22:03", run_id: "run_1d2c3b4a", error: "Executor Crash", module: "Orchestration", details: "Worker exited unexpectedly", trace: "Open Trace" },
+    ],
+    2,
+    "/operations/orchestration?tab=failures",
+  ),
+  ops_event_log: tableSection(
+    "ops_event_log",
+    "Ops Event Log",
+    [
+      ["time", "Time"],
+      ["level", "Level"],
+      ["event", "Event"],
+      ["run_id_entity", "Run ID / Entity"],
+      ["source", "Source"],
+    ],
+    [
+      { time: "14:32:18", level: "Info", event: "Run run_8f3a7d1c enqueued", run_id: "run_8f3a7d1c", run_id_entity: "run_8f3a7d1c", source: "Intake Service" },
+      { time: "14:32:12", level: "Info", event: "Run run_a12b0e4f waiting for lane lock", run_id: "run_a12b0e4f", run_id_entity: "run_a12b0e4f", source: "Scheduler" },
+      { time: "14:31:59", level: "Warning", event: "Worker worker_4 lease expiring soon", run_id: "worker_4", run_id_entity: "worker_4", source: "Scheduler" },
+    ],
+    128,
+    "/operations/orchestration?tab=events",
+  ),
+};
+
+export const settingsSummary: SettingsSummary = {
+  resource_counts: [
+    { id: "agents", label: "Agent Profiles", value: "12", delta: "Active", tone: "success" },
+    { id: "llms", label: "LLM Profiles", value: "8", delta: "Configured", tone: "info" },
+    { id: "tools", label: "Tools", value: "34", delta: "Available", tone: "success" },
+    { id: "skills", label: "Skills", value: "10", delta: "Installed", tone: "warning" },
+    { id: "events", label: "Events", value: "128", delta: "Registered", tone: "neutral" },
+    { id: "access", label: "Access Assets", value: "18", delta: "Configured", tone: "success" },
+  ],
+  health_rows: [
+    row(["Component", "Status", "Detail"], ["Agent Profiles", "Healthy", "All agents are properly configured"]),
+    row(["Component", "Status", "Detail"], ["LLM Profiles", "Healthy", "All models are reachable"]),
+    row(["Component", "Status", "Detail"], ["Memory Config", "Warning", "1 memory store needs attention"]),
+    row(["Component", "Status", "Detail"], ["Access Assets", "Healthy", "All credentials are valid"]),
+  ],
+  recent_changes: [
+    row(["Time", "Change", "Owner", "Type"], ["2 hours ago", "Updated agent profile: Research Assistant", "Jane Doe", "Agent Profile"]),
+    row(["Time", "Change", "Owner", "Type"], ["5 hours ago", "Added new tool: browser_control", "John Smith", "Tool"]),
+    row(["Time", "Change", "Owner", "Type"], ["1 day ago", "Updated skill: Search Knowledge Base", "Jane Doe", "Skill"]),
+  ],
+  issues: [
+    row(["Severity", "Category", "Component", "Issue"], ["Warning", "Memory", "memory-store", "Connection latency is high"]),
+    row(["Severity", "Category", "Component", "Issue"], ["Error", "Access", "openai_api_key", "Rate limit reached"]),
+    row(["Severity", "Category", "Component", "Issue"], ["Warning", "Tool", "sql_query", "Schema validation warning"]),
+  ],
+  quick_actions: [
+    { id: "agent", label: "Create Agent Profile", summary: "Define a new agent profile", tone: "info" },
+    { id: "llm", label: "Add LLM Profile", summary: "Register a new model profile", tone: "info" },
+    { id: "tool", label: "Register Tool", summary: "Add a new tool capability", tone: "success" },
+    { id: "access", label: "Validate Access Assets", summary: "Check configured credentials", tone: "warning" },
+  ],
+};
+
+function event(
+  event_id: string,
+  name: TraceEventView["name"],
+  family: TraceEventView["family"],
+  owner: string,
+  status: TraceEventView["status"],
+  relative_ms: number,
+  summary: string,
+): TraceEventView {
+  return {
+    event_id,
+    name,
+    family,
+    owner,
+    status,
+    timestamp: new Date(Date.parse("2026-04-29T06:31:52.123Z") + relative_ms).toISOString(),
+    relative_ms,
+    summary,
+    key_event: true,
+    linked_entities: [
+      { type: "run_id", id: workbenchRun.run_id },
+      { type: "turn_id", id: "turn_7" },
+    ],
+    trace: workbenchRun.trace,
+  };
+}
+
+function nonKeyEvent(
+  event_id: string,
+  name: TraceEventView["name"],
+  family: TraceEventView["family"],
+  owner: string,
+  status: TraceEventView["status"],
+  relative_ms: number,
+  summary: string,
+): TraceEventView {
+  return {
+    ...event(event_id, name, family, owner, status, relative_ms, summary),
+    key_event: false,
+  };
+}
+
+function runtimeAction(
+  id: string,
+  label: string,
+  risk: UiRuntimeAction["risk"] = "normal",
+  requires_confirmation = false,
+  reason_required = false,
+): UiRuntimeAction {
+  return {
+    id,
+    label,
+    owner: "orchestration",
+    risk,
+    allowed: true,
+    requires_confirmation,
+    reason_required,
+  };
+}
+
+function tableSection(
+  id: string,
+  title: string,
+  columns: Array<[string, string]>,
+  rows: Array<Record<string, string>>,
+  total = rows.length,
+  view_all_route: string | null = null,
+): UiTableSection {
+  return {
+    id,
+    title,
+    columns: columns.map(([key, label]) => ({ key, label })),
+    rows: rows.map((cells, index) => ({
+      id: cells.run_id ?? cells.holder_run_id ?? cells.worker_id ?? `${id}_${index}`,
+      cells,
+    })),
+    total,
+    view_all_route,
+    empty_state: "No records.",
+  };
+}
+
+function row(columns: string[], values: string[]) {
+  return columns.reduce<Record<string, string>>((item, column, index) => {
+    item[column] = values[index] ?? "";
+    return item;
+  }, {});
+}

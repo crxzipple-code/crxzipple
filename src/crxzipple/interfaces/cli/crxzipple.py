@@ -1,25 +1,26 @@
 from __future__ import annotations
 
-from threading import Event, Thread
-
+import os
 import typer
 import uvicorn
 
+from crxzipple.core.config import (
+    RuntimeDatabaseGuardError,
+    is_sqlite_database_url,
+    load_settings,
+    require_runtime_database,
+)
 from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
-from crxzipple.interfaces.http.app import create_app
-from crxzipple.interfaces.turns import (
-    ForegroundTurnTimeoutError,
+from crxzipple.modules.orchestration.application.turn_submission import (
+    AwaitTurnTimeoutError,
     build_turn_options,
     extract_output_text,
     resolve_profile,
-    run_foreground_turn,
-)
-from crxzipple.interfaces.worker_loops import (
-    run_orchestration_worker_loop,
-    run_tool_worker_loop,
+    submit_and_wait_for_turn,
 )
 from crxzipple.core.logger import get_logger
+from crxzipple.bootstrap import AppContainer
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationRun,
@@ -30,6 +31,59 @@ from crxzipple.modules.orchestration.interfaces.dto import OrchestrationRunDTO
 from crxzipple.modules.session.domain import DirectSessionScope
 
 logger = get_logger(__name__)
+
+_ACTIVE_DAEMON_STATUSES = frozenset({"starting", "ready", "degraded"})
+
+
+def _guard_serve_database_url() -> None:
+    settings = load_settings()
+    if not is_sqlite_database_url(settings.database_url):
+        return
+    allow_serve_fallback = os.getenv("APP_ALLOW_SQLITE_SERVE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if settings.allow_sqlite_runtime_fallback or allow_serve_fallback:
+        return
+    typer.secho(
+        "Refusing to start the HTTP API with SQLite. "
+        "Source `scripts/dev/infra-env.sh` or set APP_DATABASE_URL to Postgres. "
+        "For a one-off SQLite run, set APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1 explicitly.",
+        err=True,
+        fg=typer.colors.RED,
+    )
+    raise typer.Exit(code=1)
+
+
+def guard_runtime_database(settings, *, runtime_name: str) -> None:  # noqa: ANN001
+    try:
+        require_runtime_database(settings, runtime_name=runtime_name)
+    except RuntimeDatabaseGuardError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+
+
+def _require_orchestration_runtime(container: AppContainer) -> None:
+    service_keys = container.daemon_manager.resolve_reconcile_service_keys(
+        service_set_keys=("orchestration-runtime",),
+        include_eager=False,
+    )
+    unavailable: list[str] = []
+    for service_key in service_keys:
+        instances = container.daemon_manager.healthcheck_service(service_key)
+        if any(instance.status in _ACTIVE_DAEMON_STATUSES for instance in instances):
+            continue
+        unavailable.append(service_key)
+    if not unavailable:
+        return
+    missing = ", ".join(unavailable)
+    raise RuntimeError(
+        "Orchestration runtime is not running for this CLI turn. "
+        f"Unavailable services: {missing}. "
+        "Start it first with `python -m crxzipple.main daemon run --service-set orchestration-runtime`.",
+    )
 
 
 def _echo_completed_run(run: OrchestrationRun, *, json_output: bool) -> None:
@@ -103,15 +157,7 @@ def ask(
     poll_interval_seconds: float = typer.Option(
         0.05,
         min=0.01,
-        help="Polling interval while driving the local worker loop.",
-    ),
-    worker_id: str = typer.Option(
-        "crxzipple-foreground-orch",
-        help="Foreground orchestration worker id.",
-    ),
-    tool_worker_id: str = typer.Option(
-        "crxzipple-foreground-tool",
-        help="Foreground tool worker id.",
+        help="Observe interval while waiting for orchestration runtime updates.",
     ),
     json_output: bool = typer.Option(
         False,
@@ -141,20 +187,23 @@ def ask(
         max_steps=max_steps,
         wait_timeout_seconds=wait_timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
-        worker_id=worker_id,
-        tool_worker_id=tool_worker_id,
     )
     try:
-        run = run_foreground_turn(
-            container.orchestration_service,
-            container.tool_service,
+        _require_orchestration_runtime(container)
+        run = submit_and_wait_for_turn(
+            container.orchestration_scheduler_service,
+            container.orchestration_run_query_service,
+            container.events_service,
             content=content,
             options=options,
         )
     except OrchestrationValidationError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from None
-    except ForegroundTurnTimeoutError as exc:
+    except AwaitTurnTimeoutError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
+    except RuntimeError as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from None
     _echo_completed_run(run, json_output=json_output)
@@ -207,15 +256,7 @@ def chat(
     poll_interval_seconds: float = typer.Option(
         0.05,
         min=0.01,
-        help="Polling interval while driving the local worker loop.",
-    ),
-    worker_id: str = typer.Option(
-        "crxzipple-chat-orch",
-        help="Foreground orchestration worker id.",
-    ),
-    tool_worker_id: str = typer.Option(
-        "crxzipple-chat-tool",
-        help="Foreground tool worker id.",
+        help="Observe interval while waiting for orchestration runtime updates.",
     ),
 ) -> None:
     container = ensure_container(ctx)
@@ -240,9 +281,13 @@ def chat(
         max_steps=max_steps,
         wait_timeout_seconds=wait_timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
-        worker_id=worker_id,
-        tool_worker_id=tool_worker_id,
     )
+
+    try:
+        _require_orchestration_runtime(container)
+    except RuntimeError as exc:
+        typer.secho(str(exc), err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=1) from None
 
     typer.echo(f"Chatting with {profile.id}. Type /exit to quit.")
     while True:
@@ -258,16 +303,17 @@ def chat(
             break
 
         try:
-            run = run_foreground_turn(
-                container.orchestration_service,
-                container.tool_service,
+            run = submit_and_wait_for_turn(
+                container.orchestration_scheduler_service,
+                container.orchestration_run_query_service,
+                container.events_service,
                 content=content,
                 options=options,
             )
         except OrchestrationValidationError as exc:
             typer.secho(str(exc), err=True, fg=typer.colors.RED)
             continue
-        except ForegroundTurnTimeoutError as exc:
+        except AwaitTurnTimeoutError as exc:
             typer.secho(str(exc), err=True, fg=typer.colors.RED)
             continue
         _echo_completed_run(run, json_output=False)
@@ -277,27 +323,11 @@ def serve(
     ctx: typer.Context,
     host: str = typer.Option("127.0.0.1", help="HTTP bind host."),
     port: int = typer.Option(8000, min=1, max=65535, help="HTTP bind port."),
-    orchestration_worker_id: str = typer.Option(
-        "crxzipple-serve-orch",
-        help="Worker id for the orchestration queue consumer.",
-    ),
-    tool_worker_id: str = typer.Option(
-        "crxzipple-serve-tool",
-        help="Worker id for the tool queue consumer.",
-    ),
-    orchestration_poll_interval_seconds: float = typer.Option(
-        0.5,
-        min=0.05,
-        help="Idle wait between orchestration queue polls.",
-    ),
-    tool_poll_interval_seconds: float = typer.Option(
-        0.5,
-        min=0.05,
-        help="Idle wait between tool queue polls.",
-    ),
 ) -> None:
+    _guard_serve_database_url()
+    from crxzipple.interfaces.http.app import create_app
+
     container = ensure_container(ctx)
-    stop_event = Event()
     http_app = create_app(
         settings=container.settings,
         container=container,
@@ -312,57 +342,12 @@ def serve(
         ),
     )
 
-    def _run_orchestration() -> None:
-        try:
-            run_orchestration_worker_loop(
-                container.orchestration_service,
-                worker_id=orchestration_worker_id,
-                poll_interval_seconds=orchestration_poll_interval_seconds,
-                stop_event=stop_event,
-            )
-        except Exception:
-            logger.exception("orchestration worker loop crashed")
-            stop_event.set()
-            server.should_exit = True
-
-    def _run_tool() -> None:
-        try:
-            run_tool_worker_loop(
-                container.tool_service,
-                worker_id=tool_worker_id,
-                poll_interval_seconds=tool_poll_interval_seconds,
-                stop_event=stop_event,
-            )
-        except Exception:
-            logger.exception("tool worker loop crashed")
-            stop_event.set()
-            server.should_exit = True
-
-    orchestration_thread = Thread(
-        target=_run_orchestration,
-        name="crxzipple-orchestration-worker",
-        daemon=True,
-    )
-    tool_thread = Thread(
-        target=_run_tool,
-        name="crxzipple-tool-worker",
-        daemon=True,
-    )
-
     logger.info(
         "starting crxzipple serve",
         extra={
             "host": host,
             "port": port,
-            "orchestration_worker_id": orchestration_worker_id,
-            "tool_worker_id": tool_worker_id,
+            "mode": "api-only",
         },
     )
-    orchestration_thread.start()
-    tool_thread.start()
-    try:
-        server.run()
-    finally:
-        stop_event.set()
-        orchestration_thread.join(timeout=1.0)
-        tool_thread.join(timeout=1.0)
+    server.run()

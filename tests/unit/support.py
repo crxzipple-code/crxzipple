@@ -140,7 +140,11 @@ class SqliteTestHarness:
         self.database_url = f"sqlite:///{database_path}"
         self._containers: list[AppContainer] = []
 
-    def initialize_schema(self, *, settings: Settings | None = None) -> None:
+    def initialize_schema(
+        self,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
         resolved_settings = self._resolved_settings(settings)
         container = build_container(
             settings=resolved_settings,
@@ -149,7 +153,11 @@ class SqliteTestHarness:
         create_schema(container.engine)
         container.close()
 
-    def build_container(self, *, settings: Settings | None = None) -> AppContainer:
+    def build_container(
+        self,
+        *,
+        settings: Settings | None = None,
+    ) -> AppContainer:
         resolved_settings = self._resolved_settings(settings)
         container = build_container(
             settings=resolved_settings,
@@ -165,6 +173,12 @@ class SqliteTestHarness:
             resolved,
             authorization_runtime_policy_path=self.authorization_runtime_policy_path,
             browser_state_dir=str(Path(self._tempdir.name) / "browser"),
+            channel_profiles=resolved.channel_profiles if settings is not None else (),
+            events_backend="file",
+            events_redis_url=None,
+            events_state_dir=str(Path(self._tempdir.name) / "events"),
+            operations_state_dir=str(Path(self._tempdir.name) / "operations"),
+            channels_state_dir=str(Path(self._tempdir.name) / "channels"),
         )
 
     def close(self) -> None:
@@ -501,6 +515,18 @@ class FakePlaywrightLocator:
             ("fill", self._resolved_selector(), text, dict(kwargs), tuple(self.context.frame_path))
         )
 
+    def set_input_files(self, files, **kwargs) -> None:  # noqa: ANN001, ANN003
+        normalized = list(files) if isinstance(files, (list, tuple)) else [files]
+        self.page.operations.append(
+            (
+                "set_input_files",
+                self._resolved_selector(),
+                normalized,
+                dict(kwargs),
+                tuple(self.context.frame_path),
+            )
+        )
+
     def set_checked(self, checked: bool, **kwargs) -> None:  # noqa: ANN003
         self.page.operations.append(
             (
@@ -734,6 +760,271 @@ class FakePlaywrightLocator:
                 return None
             candidates.sort(key=lambda item: (-item[0], item[1]))
             return candidates[0][1]
+        return {
+            "expression": expression,
+            "arg": arg,
+            "selector": self._resolved_selector(),
+            "frame_path": list(self.context.frame_path),
+        }
+
+
+class FakePlaywrightDownload:
+    def __init__(
+        self,
+        *,
+        filename: str = "download.bin",
+        data: bytes = b"fake-download",
+        failure: str | None = None,
+    ) -> None:
+        self.suggested_filename = filename
+        self._failure = failure
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        try:
+            temp_file.write(data)
+            temp_file.flush()
+        finally:
+            temp_file.close()
+        self._path = temp_file.name
+
+    def path(self) -> str:
+        return self._path
+
+    def failure(self) -> str | None:
+        return self._failure
+
+    def save_as(self, path: str) -> None:
+        Path(path).write_bytes(Path(self._path).read_bytes())
+
+
+class FakePlaywrightDialog:
+    def __init__(
+        self,
+        page,
+        *,
+        dialog_type: str = "alert",
+        message: str = "Are you sure?",
+        default_value: str | None = None,
+    ) -> None:  # noqa: ANN001
+        self.page = page
+        self.type = dialog_type
+        self.message = message
+        self.default_value = default_value
+
+    def accept(self, prompt_text: str | None = None) -> None:
+        self.page.operations.append(("dialog.accept", prompt_text))
+
+    def dismiss(self) -> None:
+        self.page.operations.append(("dialog.dismiss",))
+
+
+class FakePlaywrightConsoleMessage:
+    def __init__(
+        self,
+        *,
+        message_type: str = "log",
+        text: str = "console",
+        location: dict[str, object] | None = None,
+    ) -> None:
+        self.type = message_type
+        self.text = text
+        self.location = dict(location or {})
+
+
+class _FakeDownloadContextManager:
+    def __init__(self, page, kwargs: dict[str, object]) -> None:  # noqa: ANN001
+        self.page = page
+        self.kwargs = dict(kwargs)
+        self._download: FakePlaywrightDownload | None = None
+
+    def __enter__(self):  # noqa: ANN201
+        self.page.operations.append(("expect_download", dict(self.kwargs)))
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001, ANN201
+        return False
+
+    @property
+    def value(self) -> FakePlaywrightDownload:
+        if self._download is None:
+            self._download = self.page._pop_download()
+        return self._download
+
+    def wait_for(self, **kwargs) -> None:  # noqa: ANN003
+        self.page.operations.append(
+            ("wait", self._resolved_selector(), dict(kwargs), tuple(self.context.frame_path))
+        )
+
+    def evaluate(self, expression: str, arg=None):  # noqa: ANN001
+        self.page.operations.append(
+            (
+                "locator.evaluate",
+                self._resolved_selector(),
+                expression,
+                arg,
+                tuple(self.context.frame_path),
+            )
+        )
+        if "__crxzipple_widget_target_info__" in expression:
+            item = self._resolved_item() or {}
+            return {
+                "tag": str(item.get("tag") or "").strip().lower() or None,
+                "role": str(item.get("role") or "").strip().lower() or None,
+                "type": str(item.get("input_type") or item.get("type") or "").strip().lower() or None,
+                "contentEditable": bool(item.get("contenteditable", False)),
+                "readOnly": bool(item.get("readonly", False)),
+                "disabled": bool(item.get("disabled", False)),
+                "visible": bool(item.get("visible", True)),
+                "focused": bool(item.get("focused", False)),
+                "checked": bool(item.get("checked", False)),
+                "value": item.get("value"),
+            }
+        if "__crxzipple_collect_bulk_selection_candidates__" in expression:
+            item_selector = None
+            if isinstance(arg, dict):
+                raw_selector = arg.get("itemSelector")
+                if isinstance(raw_selector, str):
+                    item_selector = raw_selector
+            return [
+                dict(item)
+                for item in self._scoped_items()
+                if _matches_fake_item_selector(dict(item), item_selector)
+            ]
+        if "__crxzipple_find_preferred_text_ordinal__" in expression:
+            normalized_text = ""
+            exact = False
+            source_selector = None
+            source_scope_selector = None
+            if isinstance(arg, dict):
+                normalized_text = str(arg.get("text") or "").strip()
+                exact = bool(arg.get("exact", False))
+                raw_source = arg.get("sourceSelector")
+                if isinstance(raw_source, str):
+                    source_selector = raw_source.strip() or None
+                raw_source_scope = arg.get("sourceScopeSelector")
+                if isinstance(raw_source_scope, str):
+                    source_scope_selector = raw_source_scope.strip() or None
+            candidates: list[tuple[int, int]] = []
+            for index, item in enumerate(self._scoped_items()):
+                item_text = str(item.get("text") or item.get("label") or "").strip()
+                if exact:
+                    if item_text != normalized_text:
+                        continue
+                elif normalized_text not in item_text:
+                    continue
+                score = 0
+                if bool(item.get("visible", True)):
+                    score += 1000
+                if not bool(item.get("disabled", False)):
+                    score += 250
+                if (
+                    source_scope_selector is not None
+                    and str(item.get("scope_selector") or "").strip() == source_scope_selector
+                ):
+                    score += 900
+                if source_selector is not None and str(item.get("source_selector") or "").strip() == source_selector:
+                    score += 600
+                candidates.append((score, index))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            return candidates[0][1]
+        if "__crxzipple_collect_text_match_details__" in expression:
+            normalized_text = ""
+            exact = False
+            explicit_ordinal = None
+            source_selector = None
+            source_scope_selector = None
+            if isinstance(arg, dict):
+                normalized_text = str(arg.get("text") or "").strip()
+                exact = bool(arg.get("exact", False))
+                raw_ordinal = arg.get("explicitOrdinal")
+                if isinstance(raw_ordinal, int):
+                    explicit_ordinal = raw_ordinal
+                raw_source = arg.get("sourceSelector")
+                if isinstance(raw_source, str):
+                    source_selector = raw_source.strip() or None
+                raw_source_scope = arg.get("sourceScopeSelector")
+                if isinstance(raw_source_scope, str):
+                    source_scope_selector = raw_source_scope.strip() or None
+            return _fake_text_match_details(
+                self._scoped_items(),
+                text=normalized_text,
+                exact=exact,
+                explicit_ordinal=explicit_ordinal,
+                source_selector=source_selector,
+                source_scope_selector=source_scope_selector,
+            )
+        if "__crxzipple_collect_datepicker_panel_status__" in expression:
+            overlay_selector = None
+            month_header_selector = None
+            limit = 7
+            if isinstance(arg, dict):
+                raw_overlay = arg.get("overlaySelector")
+                if isinstance(raw_overlay, str):
+                    overlay_selector = raw_overlay.strip() or None
+                raw_header = arg.get("monthHeaderSelector")
+                if isinstance(raw_header, str):
+                    month_header_selector = raw_header.strip() or None
+                try:
+                    limit = max(1, int(arg.get("limit", 7)))
+                except (TypeError, ValueError):
+                    limit = 7
+            return self.page.resolve_datepicker_panel_status(
+                overlay_selector=overlay_selector,
+                month_header_selector=month_header_selector,
+                limit=limit,
+            )
+        if "__crxzipple_collect_datepicker_day_ordinal__" in expression:
+            normalized_text = ""
+            exact = False
+            month_header_selector = None
+            month_header_text = None
+            if isinstance(arg, dict):
+                normalized_text = str(arg.get("text") or "").strip()
+                exact = bool(arg.get("exact", False))
+                raw_header_selector = arg.get("monthHeaderSelector")
+                if isinstance(raw_header_selector, str):
+                    month_header_selector = raw_header_selector.strip() or None
+                raw_header_text = arg.get("monthHeaderText")
+                if isinstance(raw_header_text, str):
+                    month_header_text = raw_header_text.strip() or None
+            header_month_scope = None
+            if month_header_selector is not None:
+                for item in self._scoped_items():
+                    if str(item.get("selector") or "").strip() == month_header_selector:
+                        header_month_scope = str(item.get("month_scope_selector") or "").strip() or None
+                        break
+            if header_month_scope is None and month_header_text is not None:
+                for item in self._scoped_items():
+                    item_text = str(item.get("text") or item.get("label") or "").strip()
+                    if month_header_text in item_text:
+                        header_month_scope = str(item.get("month_scope_selector") or "").strip() or None
+                        break
+            matched_items: list[dict[str, object]] = []
+            for item in self._scoped_items():
+                item_text = str(item.get("text") or item.get("label") or "").strip()
+                if exact:
+                    if item_text != normalized_text:
+                        continue
+                elif normalized_text not in item_text:
+                    continue
+                matched_items.append(dict(item))
+            candidates: list[tuple[int, int]] = []
+            for ordinal, item in enumerate(matched_items):
+                score = 0
+                if bool(item.get("visible", True)):
+                    score += 1000
+                if not bool(item.get("disabled", False)):
+                    score += 800
+                if bool(item.get("outside_current_month", False)):
+                    score -= 600
+                if header_month_scope is not None and str(item.get("month_scope_selector") or "").strip() == header_month_scope:
+                    score += 1000
+                candidates.append((score, ordinal))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            return candidates[0][1]
         if "innerText" in expression or "textContent" in expression:
             item = self._resolved_item() or {}
             return str(item.get("text") or item.get("label") or "").strip()
@@ -754,6 +1045,24 @@ class _FakeKeyboard:
 
     def press(self, key: str, **kwargs) -> None:  # noqa: ANN003
         self.page.operations.append(("keyboard.press", key, dict(kwargs)))
+
+
+class _FakeBrowserContext:
+    def __init__(self, page: "FakePlaywrightPage") -> None:
+        self.page = page
+        self.cookie_store: list[dict[str, object]] = []
+
+    def cookies(self) -> list[dict[str, object]]:
+        self.page.operations.append(("context.cookies",))
+        return [dict(cookie) for cookie in self.cookie_store]
+
+    def add_cookies(self, cookies: list[dict[str, object]]) -> None:
+        self.page.operations.append(("context.add_cookies", [dict(cookie) for cookie in cookies]))
+        self.cookie_store.extend(dict(cookie) for cookie in cookies if isinstance(cookie, dict))
+
+    def clear_cookies(self) -> None:
+        self.page.operations.append(("context.clear_cookies",))
+        self.cookie_store.clear()
 
 
 class FakePlaywrightFrame:
@@ -1023,12 +1332,19 @@ class FakePlaywrightPage:
                 "tag": "input",
             },
         ]
+        self.local_storage: dict[str, str] = {}
+        self.session_storage: dict[str, str] = {}
+        self.browser_context = _FakeBrowserContext(self)
         self.operations: list[tuple[object, ...]] = []
         self.click_failures: dict[str, list[Exception]] = {}
         self.evaluate_failures: list[Exception] = []
         self.wait_for_function_failures: dict[str, list[Exception]] = {}
         self.keyboard = _FakeKeyboard(self)
         self.viewport = {"width": 1280, "height": 720}
+        self.queued_downloads: list[FakePlaywrightDownload] = []
+        self.queued_dialogs: list[FakePlaywrightDialog] = []
+        self.console_messages: list[FakePlaywrightConsoleMessage] = []
+        self._event_listeners: dict[str, list[object]] = {}
         self.active_overlay_selector: str | None = None
         self.overlay_candidates: list[dict[str, object]] = []
         self.main_frame = FakePlaywrightFrame(page=self, frame_path=())
@@ -1048,11 +1364,27 @@ class FakePlaywrightPage:
         self.operations.append(("wait_for_url", url, dict(kwargs)))
         self.url = url
 
+    def context(self) -> _FakeBrowserContext:
+        return self.browser_context
+
     def wait_for_function(self, expression: str, arg=None, **kwargs) -> None:  # noqa: ANN003
         self.operations.append(("wait_for_function", expression, arg, dict(kwargs)))
         for marker, failures in self.wait_for_function_failures.items():
             if marker in expression and failures:
                 raise failures.pop(0)
+
+    def wait_for_event(self, event_name: str, **kwargs):  # noqa: ANN003, ANN201
+        self.operations.append(("wait_for_event", event_name, dict(kwargs)))
+        if event_name == "download":
+            return self._pop_download()
+        if event_name == "dialog":
+            return self._pop_dialog()
+        raise RuntimeError(f"Unsupported event: {event_name}")
+
+    def on(self, event_name: str, callback) -> None:  # noqa: ANN001
+        listeners = self._event_listeners.setdefault(event_name, [])
+        listeners.append(callback)
+        self.operations.append(("on", event_name))
 
     def wait_for_load_state(self, state: str, **kwargs) -> None:  # noqa: ANN003
         self.operations.append(("wait_for_load_state", state, dict(kwargs)))
@@ -1071,6 +1403,37 @@ class FakePlaywrightPage:
         self.operations.append(("evaluate", expression, arg))
         if self.evaluate_failures:
             raise self.evaluate_failures.pop(0)
+        if "__crxzipple_storage_access__" in expression:
+            kind = "local"
+            operation = "get"
+            key = None
+            value = None
+            if isinstance(arg, dict):
+                raw_kind = arg.get("kind")
+                if isinstance(raw_kind, str) and raw_kind.strip():
+                    kind = raw_kind.strip().lower()
+                raw_operation = arg.get("operation")
+                if isinstance(raw_operation, str) and raw_operation.strip():
+                    operation = raw_operation.strip().lower()
+                raw_key = arg.get("key")
+                if isinstance(raw_key, str) and raw_key.strip():
+                    key = raw_key.strip()
+                if arg.get("value") is not None:
+                    value = str(arg.get("value"))
+            store = self.session_storage if kind == "session" else self.local_storage
+            if operation == "get":
+                if key is not None:
+                    return {} if key not in store else {key: store[key]}
+                return dict(store)
+            if operation == "set":
+                if key is None:
+                    raise RuntimeError("storage set requires key")
+                store[key] = "" if value is None else value
+                return {key: store[key]}
+            if operation == "clear":
+                store.clear()
+                return {}
+            raise RuntimeError(f"Unsupported storage operation: {operation}")
         if "__crxzipple_collect_interactive_refs__" in expression:
             return [dict(item) for item in self.interactive_items]
         if "__crxzipple_find_active_overlay__" in expression:
@@ -1150,6 +1513,9 @@ class FakePlaywrightPage:
         self.operations.append(("pdf", dict(kwargs)))
         return b"fake-pdf"
 
+    def expect_download(self, **kwargs):  # noqa: ANN003, ANN201
+        return _FakeDownloadContextManager(self, kwargs)
+
     def content(self) -> str:
         self.operations.append(("content",))
         return f"<html><body>{self.body_text}</body></html>"
@@ -1157,6 +1523,63 @@ class FakePlaywrightPage:
     def title(self) -> str:
         self.operations.append(("title",))
         return f"title:{self.target_id}"
+
+    def queue_download(
+        self,
+        *,
+        filename: str = "download.bin",
+        data: bytes = b"fake-download",
+        failure: str | None = None,
+    ) -> None:
+        self.queued_downloads.append(
+            FakePlaywrightDownload(
+                filename=filename,
+                data=data,
+                failure=failure,
+            )
+        )
+
+    def queue_dialog(
+        self,
+        *,
+        dialog_type: str = "alert",
+        message: str = "Are you sure?",
+        default_value: str | None = None,
+    ) -> None:
+        self.queued_dialogs.append(
+            FakePlaywrightDialog(
+                self,
+                dialog_type=dialog_type,
+                message=message,
+                default_value=default_value,
+            )
+        )
+
+    def emit_console(
+        self,
+        *,
+        text: str,
+        message_type: str = "log",
+        location: dict[str, object] | None = None,
+    ) -> None:
+        message = FakePlaywrightConsoleMessage(
+            message_type=message_type,
+            text=text,
+            location=location,
+        )
+        self.console_messages.append(message)
+        for callback in list(self._event_listeners.get("console", ())):
+            callback(message)
+
+    def _pop_download(self) -> FakePlaywrightDownload:
+        if self.queued_downloads:
+            return self.queued_downloads.pop(0)
+        return FakePlaywrightDownload()
+
+    def _pop_dialog(self) -> FakePlaywrightDialog:
+        if self.queued_dialogs:
+            return self.queued_dialogs.pop(0)
+        return FakePlaywrightDialog(self)
 
     @property
     def interactive_items(self) -> list[dict[str, object]]:
@@ -1472,6 +1895,59 @@ class FakePlaywrightCdpSessionPool:
         del profile_name
         self.pages.clear()
 
+    def probe_connection(
+        self,
+        *,
+        profile,
+        timeout_ms: int | None = None,
+        cdp_url: str | None = None,
+    ) -> None:  # noqa: ANN001
+        del profile, timeout_ms, cdp_url
+        return None
+
+    def get_console_messages(
+        self,
+        *,
+        page,
+        level: str | None = None,
+        limit: int | None = None,
+        clear: bool = False,
+    ) -> list[dict[str, object]]:  # noqa: ANN001
+        normalized_level = (
+            str(level).strip().lower()
+            if isinstance(level, str) and str(level).strip()
+            else None
+        )
+        if normalized_level == "warning":
+            normalized_level = "warn"
+        filtered: list[dict[str, object]] = []
+        for message in list(page.console_messages):
+            message_level = str(message.type).strip().lower() or "log"
+            if message_level == "warning":
+                message_level = "warn"
+            if normalized_level is not None and message_level != normalized_level:
+                continue
+            filtered.append(
+                {
+                    "target_id": getattr(page, "target_id", None),
+                    "level": message_level,
+                    "text": str(message.text),
+                    "location": {
+                        "url": message.location.get("url"),
+                        "line_number": message.location.get("lineNumber"),
+                        "column_number": message.location.get("columnNumber"),
+                    }
+                    if isinstance(message.location, dict) and message.location
+                    else None,
+                    "captured_at_ms": 0,
+                }
+            )
+        if limit is not None and limit > 0 and len(filtered) > limit:
+            filtered = filtered[-limit:]
+        if clear:
+            page.console_messages.clear()
+        return filtered
+
     def close(self) -> None:
         self.pages.clear()
 
@@ -1487,12 +1963,17 @@ class FakePlaywrightCdpSessionPool:
 
 
 class FakeChromeMcpClientPool:
-    def __init__(self) -> None:
+    def __init__(self, *, daemon_service=None) -> None:  # noqa: ANN001
+        self.daemon_service = daemon_service
         self.operations: list[tuple[object, ...]] = []
         self._tabs: dict[str, list[BrowserTab]] = {}
         self._next_ids: dict[str, int] = {}
         self._snapshots: dict[tuple[str, str], dict[str, object]] = {}
         self._evaluate_overrides: dict[tuple[str, str, str], object] = {}
+        self._console_messages: dict[tuple[str, str], list[dict[str, object]]] = {}
+        self._local_storage: dict[tuple[str, str], dict[str, str]] = {}
+        self._session_storage: dict[tuple[str, str], dict[str, str]] = {}
+        self._cookies: dict[tuple[str, str], list[dict[str, object]]] = {}
         self._pids: dict[str, int | None] = {}
 
     def ensure_available(self, *, profile_name: str, system, user_data_dir: str | None = None) -> None:  # noqa: ANN001
@@ -1638,6 +2119,21 @@ class FakeChromeMcpClientPool:
         del system
         self.operations.append(("fill", profile_name, target_id, uid, value, user_data_dir))
 
+    def upload_file(
+        self,
+        *,
+        profile_name: str,
+        system,
+        target_id: str,
+        uid: str,
+        file_path: str,
+        user_data_dir: str | None = None,
+    ) -> None:  # noqa: ANN001
+        del system
+        self.operations.append(
+            ("upload_file", profile_name, target_id, uid, file_path, user_data_dir)
+        )
+
     def hover_element(
         self,
         *,
@@ -1692,6 +2188,21 @@ class FakeChromeMcpClientPool:
         del system
         self.operations.append(("press_key", profile_name, target_id, key, user_data_dir))
 
+    def handle_dialog(
+        self,
+        *,
+        profile_name: str,
+        system,
+        target_id: str,
+        action: str,
+        prompt_text: str | None = None,
+        user_data_dir: str | None = None,
+    ) -> None:  # noqa: ANN001
+        del system
+        self.operations.append(
+            ("handle_dialog", profile_name, target_id, action, prompt_text, user_data_dir)
+        )
+
     def evaluate_script(
         self,
         *,
@@ -1709,6 +2220,99 @@ class FakeChromeMcpClientPool:
         override_key = (profile_name, target_id, fn)
         if override_key in self._evaluate_overrides:
             return self._evaluate_overrides[override_key]
+        if "__crxzipple_mcp_console_access__" in fn:
+            input_payload: dict[str, object] = {}
+            if args:
+                try:
+                    parsed = json.loads(args[0])
+                except Exception:  # noqa: BLE001
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    input_payload = parsed
+            requested_level = str(input_payload.get("level") or "").strip().lower() or None
+            if requested_level == "warning":
+                requested_level = "warn"
+            raw_limit = input_payload.get("limit")
+            limit = int(raw_limit) if isinstance(raw_limit, (int, float)) and int(raw_limit) > 0 else None
+            clear = bool(input_payload.get("clear"))
+            messages = [
+                dict(item)
+                for item in self._console_messages.get((profile_name, target_id), [])
+                if requested_level is None
+                or str(item.get("level") or "").strip().lower() == requested_level
+            ]
+            if limit is not None and len(messages) > limit:
+                messages = messages[-limit:]
+            if clear:
+                self._console_messages[(profile_name, target_id)] = []
+            return messages
+        if "scrollIntoView" in fn and args:
+            return True
+        if "__crxzipple_mcp_storage_access__" in fn:
+            input_payload: dict[str, object] = {}
+            if args:
+                try:
+                    parsed = json.loads(args[0])
+                except Exception:  # noqa: BLE001
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    input_payload = parsed
+            kind = str(input_payload.get("kind") or "local").strip().lower()
+            operation = str(input_payload.get("operation") or "get").strip().lower()
+            key = input_payload.get("key")
+            resolved_key = str(key).strip() if isinstance(key, str) and str(key).strip() else None
+            raw_value = input_payload.get("value")
+            value = None if raw_value is None else str(raw_value)
+            storage_key = (profile_name, target_id)
+            store = (
+                self._session_storage.setdefault(storage_key, {})
+                if kind == "session"
+                else self._local_storage.setdefault(storage_key, {})
+            )
+            if operation == "get":
+                if resolved_key is not None:
+                    return {} if resolved_key not in store else {resolved_key: store[resolved_key]}
+                return dict(store)
+            if operation == "set":
+                if resolved_key is None:
+                    raise RuntimeError("storage set requires key")
+                store[resolved_key] = "" if value is None else value
+                return {resolved_key: store[resolved_key]}
+            if operation == "clear":
+                store.clear()
+                return {}
+            raise RuntimeError(f"Unsupported storage operation: {operation}")
+        if "__crxzipple_mcp_cookies_access__" in fn:
+            input_payload: dict[str, object] = {}
+            if args:
+                try:
+                    parsed = json.loads(args[0])
+                except Exception:  # noqa: BLE001
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    input_payload = parsed
+            operation = str(input_payload.get("operation") or "get").strip().lower()
+            cookie_store = self._cookies.setdefault((profile_name, target_id), [])
+            if operation == "get":
+                return [dict(item) for item in cookie_store]
+            if operation == "clear":
+                cookie_store.clear()
+                return []
+            if operation == "set":
+                raw_cookie = input_payload.get("cookie")
+                if not isinstance(raw_cookie, dict):
+                    raise RuntimeError("cookie set requires payload")
+                cookie_name = str(raw_cookie.get("name") or "").strip()
+                if not cookie_name:
+                    raise RuntimeError("cookie set requires name")
+                cookie_store[:] = [
+                    existing for existing in cookie_store
+                    if str(existing.get("name") or "").strip() != cookie_name
+                ]
+                cookie_record = {str(key): raw_cookie[key] for key in raw_cookie}
+                cookie_store.append(cookie_record)
+                return [dict(cookie_record)]
+            raise RuntimeError(f"Unsupported cookie operation: {operation}")
         if "document.title" in fn:
             return f"title:{target_id}"
         if "window.location.href" in fn or "location.href" in fn:
@@ -1759,6 +2363,15 @@ class FakeChromeMcpClientPool:
         value: object,
     ) -> None:
         self._evaluate_overrides[(profile_name, target_id, fn)] = value
+
+    def set_console_messages(
+        self,
+        *,
+        profile_name: str,
+        target_id: str,
+        messages: list[dict[str, object]],
+    ) -> None:
+        self._console_messages[(profile_name, target_id)] = [dict(item) for item in messages]
 
 
 class SampleLlmApiServer:

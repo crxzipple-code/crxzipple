@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import requests
 
 from crxzipple.modules.llm.application.adapters import (
@@ -19,12 +20,14 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     anthropic_tool_schema,
     coerce_text_content,
     default_base_url,
+    ensure_async_json_response,
     ensure_image_input_supported,
     ensure_json_response,
     join_url,
     parse_json_arguments,
     resolve_credential_binding,
 )
+from crxzipple.shared.infrastructure.http import get_async_http_client
 
 
 class AnthropicMessagesAdapter:
@@ -36,6 +39,46 @@ class AnthropicMessagesAdapter:
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
+        url, headers, payload = self._invoke_request(profile, request)
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=profile.timeout_seconds,
+        )
+        data = ensure_json_response(
+            response,
+            description=f"Anthropic profile '{profile.id}'",
+        )
+        return self._response_from_payload(profile, data)
+
+    async def invoke_async(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> LlmAdapterResponse:
+        url, headers, payload = self._invoke_request(profile, request)
+        client = get_async_http_client(
+            url,
+            timeout=profile.timeout_seconds,
+            client_factory=httpx.AsyncClient,
+        )
+        response = await client.post(
+            url,
+            headers=headers,
+            json=payload,
+        )
+        data = await ensure_async_json_response(
+            response,
+            description=f"Anthropic profile '{profile.id}'",
+        )
+        return self._response_from_payload(profile, data)
+
+    def _invoke_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
         ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
             profile.credential_binding,
@@ -81,17 +124,17 @@ class AnthropicMessagesAdapter:
             if key not in {"model", "messages", "system", "tools"}:
                 payload[key] = value
 
-        response = requests.post(
+        return (
             join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/messages"),
-            headers=headers,
-            json=payload,
-            timeout=profile.timeout_seconds,
-        )
-        data = ensure_json_response(
-            response,
-            description=f"Anthropic profile '{profile.id}'",
+            headers,
+            payload,
         )
 
+    @staticmethod
+    def _response_from_payload(
+        profile: LlmProfile,
+        data: dict[str, Any],
+    ) -> LlmAdapterResponse:
         content = data.get("content")
         if not isinstance(content, list):
             raise RuntimeError(f"Anthropic profile '{profile.id}' returned no content.")

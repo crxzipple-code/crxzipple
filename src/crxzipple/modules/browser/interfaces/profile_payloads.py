@@ -192,6 +192,10 @@ def _apply_probe_to_diagnostics(
         updated["status"] = "error"
         updated["recommended_action"] = "verify-remote-cdp-url"
         return updated
+    if probe_status == "cdp-playwright-unreachable":
+        updated["status"] = "error"
+        updated["recommended_action"] = "retry-or-reset-profile"
+        return updated
     if probe_status == "launchable":
         updated["status"] = "ready-to-launch"
         updated["recommended_action"] = "run-open-tab"
@@ -237,7 +241,7 @@ def _diagnostics_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
                 "label": "Bad MCP command",
                 "severity": "error",
             }
-        if probe_status == "cdp-unreachable":
+        if probe_status in {"cdp-unreachable", "cdp-playwright-unreachable"}:
             return {
                 "code": "bad-cdp-endpoint",
                 "label": "Bad CDP endpoint",

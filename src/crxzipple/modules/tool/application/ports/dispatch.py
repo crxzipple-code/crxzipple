@@ -39,6 +39,17 @@ class ToolRunDispatchPort(Protocol):
     ) -> ToolRunDispatchClaim | None:
         ...
 
+    def claim_queued(
+        self,
+        dispatch_tasks: DispatchTaskRepository,
+        collector: DispatchAggregateCollector,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: int | None = None,
+    ) -> ToolRunDispatchClaim | None:
+        ...
+
     def heartbeat(
         self,
         dispatch_tasks: DispatchTaskRepository,

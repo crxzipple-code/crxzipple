@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
 from crxzipple.modules.orchestration.application.lease_manager import (
@@ -11,18 +11,20 @@ from crxzipple.modules.orchestration.application.ports import RunDispatchPort
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationRunRepository,
+    OrchestrationRunStatus,
     OrchestrationRunWaitRepository,
 )
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
+    OrchestrationValidationError,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.services import (
-        AdvanceOrchestrationRunInput,
-        CompleteOrchestrationRunInput,
-        FailOrchestrationRunInput,
+    from crxzipple.modules.orchestration.application.commands import (
+        AdvanceAssignmentInput,
+        CompleteAssignmentInput,
+        FailAssignmentInput,
     )
 
 
@@ -54,30 +56,88 @@ class RunProgressCoordinator:
     uow_factory: Callable[[], ProgressCoordinatorUnitOfWork]
     dispatch_port: RunDispatchPort
     lease_manager: OrchestrationLeaseManager
-    claim_next_queued_run: Callable[[str], OrchestrationRun | None]
     advance_once: Callable[[str, str], OrchestrationRun]
-    heartbeat_run: Callable[[str, str], OrchestrationRun]
+    heartbeat_assignment: Callable[[str, str], OrchestrationRun]
     get_run: Callable[[str], OrchestrationRun]
     apply_compaction_summary: Callable[[OrchestrationRun], None]
-    extract_memory_candidate: Callable[[OrchestrationRun], None]
     maybe_request_auto_compaction: Callable[[OrchestrationRun], OrchestrationRun | None]
     clear_pending_compaction_marker: Callable[[OrchestrationRun], None]
     clear_pending_memory_flush_marker: Callable[[OrchestrationRun], None]
     is_compaction_run: Callable[[OrchestrationRun], bool]
     is_memory_flush_run: Callable[[OrchestrationRun], bool]
+    advance_once_async: Callable[[str, str], Awaitable[OrchestrationRun]] | None = None
 
-    def process_next_queued_run(self, *, worker_id: str) -> OrchestrationRun | None:
-        run = self.claim_next_queued_run(worker_id)
+    def process_next_assigned_assignment(
+        self,
+        *,
+        worker_id: str,
+        exclude_run_ids: tuple[str, ...] = (),
+    ) -> OrchestrationRun | None:
+        run = self.next_assigned_assignment(
+            worker_id=worker_id,
+            exclude_run_ids=exclude_run_ids,
+        )
         if run is None:
             return None
+        return self.process_assigned_assignment(run_id=run.id, worker_id=worker_id)
+
+    def next_assigned_assignment(
+        self,
+        *,
+        worker_id: str,
+        exclude_run_ids: tuple[str, ...] = (),
+    ) -> OrchestrationRun | None:
+        with self.uow_factory() as uow:
+            return uow.orchestration_runs.find_next_assigned(
+                worker_id=worker_id,
+                exclude_run_ids=exclude_run_ids,
+            )
+
+    def process_assigned_assignment(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+    ) -> OrchestrationRun:
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            if run.status is not OrchestrationRunStatus.RUNNING:
+                return run
+            if run.worker_id != worker_id:
+                raise OrchestrationValidationError(
+                    f"Orchestration run '{run_id}' is assigned to another executor.",
+                )
         with self.lease_manager.heartbeat_while_processing(
             run_id=run.id,
             worker_id=worker_id,
-            heartbeat_run=self.heartbeat_run,
+            heartbeat_assignment=self.heartbeat_assignment,
         ):
             return self.advance_once(run_id=run.id, worker_id=worker_id)
 
-    def advance_run(self, data: "AdvanceOrchestrationRunInput") -> OrchestrationRun:
+    async def process_assigned_assignment_async(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+    ) -> OrchestrationRun:
+        if self.advance_once_async is None:
+            return self.process_assigned_assignment(run_id=run_id, worker_id=worker_id)
+        with self.uow_factory() as uow:
+            run = self._get_run(uow, run_id)
+            if run.status is not OrchestrationRunStatus.RUNNING:
+                return run
+            if run.worker_id != worker_id:
+                raise OrchestrationValidationError(
+                    f"Orchestration run '{run_id}' is assigned to another executor.",
+                )
+        with self.lease_manager.heartbeat_while_processing(
+            run_id=run.id,
+            worker_id=worker_id,
+            heartbeat_assignment=self.heartbeat_assignment,
+        ):
+            return await self.advance_once_async(run.id, worker_id)
+
+    def advance_assignment(self, data: "AdvanceAssignmentInput") -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             run.advance(
@@ -92,7 +152,7 @@ class RunProgressCoordinator:
             uow.commit()
             return run
 
-    def complete_run(self, data: "CompleteOrchestrationRunInput") -> OrchestrationRun:
+    def complete_assignment(self, data: "CompleteAssignmentInput") -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             if data.metadata:
@@ -108,13 +168,12 @@ class RunProgressCoordinator:
             uow.collect(run)
             uow.commit()
         self.apply_compaction_summary(run)
-        self.extract_memory_candidate(run)
         self.maybe_request_auto_compaction(run)
         if self.is_memory_flush_run(run):
             self.clear_pending_memory_flush_marker(run)
         return self.get_run(data.run_id)
 
-    def fail_run(self, data: "FailOrchestrationRunInput") -> OrchestrationRun:
+    def fail_assignment(self, data: "FailAssignmentInput") -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             run.fail(

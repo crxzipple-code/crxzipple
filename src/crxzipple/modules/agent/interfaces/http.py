@@ -27,7 +27,6 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
-    AgentToolPreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
 from crxzipple.modules.orchestration.infrastructure import MemoryBindingService
@@ -72,14 +71,6 @@ class AgentRuntimePreferencesRequest(BaseModel):
     attrs: dict[str, object] = Field(default_factory=dict)
 
 
-class AgentToolPreferencesRequest(BaseModel):
-    requested_effect_ids: list[str] = Field(default_factory=list)
-    requested_tool_ids: list[str] = Field(default_factory=list)
-    preferred_tags: list[str] = Field(default_factory=list)
-    prefers_background_tools: bool = True
-    prefers_mutating_tools: bool = True
-
-
 class RegisterAgentProfileRequest(BaseModel):
     id: str
     name: str
@@ -95,9 +86,6 @@ class RegisterAgentProfileRequest(BaseModel):
     )
     runtime_preferences: AgentRuntimePreferencesRequest = Field(
         default_factory=AgentRuntimePreferencesRequest,
-    )
-    tool_preferences: AgentToolPreferencesRequest = Field(
-        default_factory=AgentToolPreferencesRequest,
     )
 
 
@@ -158,14 +146,6 @@ class AgentRuntimePreferencesResponse(BaseModel):
     attrs: dict[str, object] = Field(default_factory=dict)
 
 
-class AgentToolPreferencesResponse(BaseModel):
-    requested_effect_ids: list[str]
-    requested_tool_ids: list[str]
-    preferred_tags: list[str]
-    prefers_background_tools: bool
-    prefers_mutating_tools: bool
-
-
 class AgentProfileResponse(BaseModel):
     id: str
     name: str
@@ -176,7 +156,6 @@ class AgentProfileResponse(BaseModel):
     llm_routing_policy: AgentLlmRoutingPolicyResponse
     execution_policy: AgentExecutionPolicyResponse
     runtime_preferences: AgentRuntimePreferencesResponse
-    tool_preferences: AgentToolPreferencesResponse
 
 
 class AgentHomeMigrationResponse(BaseModel):
@@ -230,7 +209,6 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         home_sidecar_files=_memory_binding_service.sidecar_files_from_runtime_preferences_payload(
             profile.runtime_preferences,
         ),
-        tool_preferences=AgentToolPreferences.from_payload(profile.tool_preferences),
     )
 
 
@@ -277,15 +255,6 @@ def register_profile(
                         payload.runtime_preferences.memory_retrieval_backend
                     ),
                     attrs=payload.runtime_preferences.attrs,
-                ),
-                tool_preferences=AgentToolPreferences(
-                    requested_effect_ids=tuple(
-                        payload.tool_preferences.requested_effect_ids,
-                    ),
-                    requested_tool_ids=tuple(payload.tool_preferences.requested_tool_ids),
-                    preferred_tags=tuple(payload.tool_preferences.preferred_tags),
-                    prefers_background_tools=payload.tool_preferences.prefers_background_tools,
-                    prefers_mutating_tools=payload.tool_preferences.prefers_mutating_tools,
                 ),
             ),
         )
@@ -496,13 +465,6 @@ def _to_response(dto: AgentProfileDTO) -> AgentProfileResponse:
             sandbox_mode=dto.runtime_preferences.sandbox_mode,
             memory_retrieval_backend=dto.runtime_preferences.memory_retrieval_backend,
             attrs=dict(dto.runtime_preferences.attrs),
-        ),
-        tool_preferences=AgentToolPreferencesResponse(
-            requested_effect_ids=list(dto.tool_preferences.requested_effect_ids),
-            requested_tool_ids=list(dto.tool_preferences.requested_tool_ids),
-            preferred_tags=list(dto.tool_preferences.preferred_tags),
-            prefers_background_tools=dto.tool_preferences.prefers_background_tools,
-            prefers_mutating_tools=dto.tool_preferences.prefers_mutating_tools,
         ),
     )
 

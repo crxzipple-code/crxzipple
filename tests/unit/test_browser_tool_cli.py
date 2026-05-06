@@ -45,14 +45,11 @@ class BrowserToolCliTestCase(CliModuleTestCase):
         list_result = self.runner.invoke(app, ["tool", "list"], env=self.env)
 
         self.assertEqual(list_result.exit_code, 0)
+        self.assertIn('"id": "browser_profile"', list_result.stdout)
         self.assertIn('"id": "browser_control"', list_result.stdout)
         self.assertIn('"id": "browser_script"', list_result.stdout)
         self.assertIn('"id": "browser_snapshot"', list_result.stdout)
-        self.assertIn('"id": "browser_click"', list_result.stdout)
-        self.assertIn('"id": "browser_fill"', list_result.stdout)
-        self.assertIn('"id": "browser_wait"', list_result.stdout)
-        self.assertIn('"id": "browser_profiles"', list_result.stdout)
-        self.assertIn('"id": "browser"', list_result.stdout)
+        self.assertIn('"id": "browser_action"', list_result.stdout)
 
         run_result = self.runner.invoke(
             app,

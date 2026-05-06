@@ -22,6 +22,10 @@ class LlmCliTestCase(CliModuleTestCase):
                     "0.2",
                     "--max-output-tokens",
                     "512",
+                    "--max-concurrency",
+                    "2",
+                    "--concurrency-key",
+                    "provider:openai",
                     "--credential-binding",
                     "env:OPENAI_API_KEY",
                 ],
@@ -32,6 +36,8 @@ class LlmCliTestCase(CliModuleTestCase):
             self.assertIn('"id": "writer"', result.stdout)
             self.assertIn('"api_family": "openai_responses"', result.stdout)
             self.assertIn('"model_family": "reasoning"', result.stdout)
+            self.assertIn('"max_concurrency": 2', result.stdout)
+            self.assertIn('"concurrency_key": "provider:openai"', result.stdout)
 
             list_result = self.runner.invoke(app, ["llm", "list"], env=self.env)
 
@@ -110,8 +116,13 @@ class LlmCliTestCase(CliModuleTestCase):
                             "  - structured_output",
                             "default_params:",
                             "  reasoning_effort: medium",
+                            "  extra_body:",
+                            "    chat_template_kwargs:",
+                            "      enable_thinking: false",
                             "credential_binding: env:OPENAI_API_KEY",
                             "timeout_seconds: 120",
+                            "max_concurrency: 2",
+                            "concurrency_key: provider:openai",
                             "",
                         ],
                     ),
@@ -130,9 +141,15 @@ class LlmCliTestCase(CliModuleTestCase):
                 self.assertEqual([item["id"] for item in sync_payload], ["openai.gpt-5.4"])
                 self.assertEqual(sync_payload[0]["api_family"], "openai_responses")
                 self.assertEqual(sync_payload[0]["context_window_tokens"], 1050000)
+                self.assertEqual(sync_payload[0]["max_concurrency"], 2)
+                self.assertEqual(sync_payload[0]["concurrency_key"], "provider:openai")
                 self.assertEqual(
                     sync_payload[0]["default_params"]["reasoning_effort"],
                     "medium",
+                )
+                self.assertEqual(
+                    sync_payload[0]["default_params"]["extra_body"],
+                    {"chat_template_kwargs": {"enable_thinking": False}},
                 )
 
                 list_result = self.runner.invoke(app, ["llm", "list"], env=env)

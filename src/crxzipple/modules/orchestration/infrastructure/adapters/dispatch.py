@@ -27,17 +27,19 @@ class OrchestrationRunDispatchAdapter(RunDispatchPort):
     def enqueue(self, dispatch_tasks, collector, run) -> None:
         self.bridge.enqueue(dispatch_tasks, collector, run)
 
-    def claim_next_queued(
+    def claim_queued(
         self,
         dispatch_tasks,
         collector,
+        run,
         *,
         worker_id: str,
         lease_seconds: int | None = None,
     ) -> RunDispatchClaim | None:
-        task = self.bridge.claim_next_queued(
+        task = self.bridge.claim_queued(
             dispatch_tasks,
             collector,
+            run,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
         )

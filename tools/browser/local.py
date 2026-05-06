@@ -29,6 +29,9 @@ _PAGE_ACTION_KINDS = frozenset(get_args(BrowserPageActionKind))
 _ADVANCED_PAGE_ACTION_KINDS = frozenset(
     {
         "batch",
+        "console",
+        "cookies",
+        "dialog",
         "hover",
         "drag",
         "resize",
@@ -38,22 +41,41 @@ _ADVANCED_PAGE_ACTION_KINDS = frozenset(
         "screenshot",
         "pdf",
         "evaluate",
+        "storage",
         "type",
+        "upload",
+        "download",
+        "wait-download",
     }
 )
-_SCRIPT_INHERITED_TARGET_CONTROL_KINDS = frozenset({"navigate", "focus-tab", "close-tab"})
+_ACTION_TOOL_PAGE_ACTION_KINDS = frozenset(
+    kind for kind in _PAGE_ACTION_KINDS if kind != "snapshot"
+)
 _SCRIPT_STABILIZE_KINDS = frozenset({"none", "micro", "navigation", "overlay", "auto"})
 _SCRIPT_OBSERVE_AFTER_KINDS = frozenset({"none", "interactive", "role", "aria", "auto"})
-_SCRIPT_MICRO_STABILIZE_MS = 1000
-_SCRIPT_OVERLAY_STABILIZE_MS = 300
+_SCRIPT_MICRO_STABILIZE_MS = 200
+_SCRIPT_OVERLAY_STABILIZE_MS = 200
 _SCRIPT_FINAL_OBSERVE_CONTROL_KINDS = frozenset({"open-tab", "navigate"})
-
+_SCRIPT_INHERITED_TARGET_CONTROL_KINDS = frozenset({"navigate", "focus-tab", "close-tab"})
 
 def _normalize_text(value: object) -> str | None:
     if value is None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _normalize_browser_target_id(
+    value: object,
+    *,
+    current_target_id: str | None = None,
+) -> str | None:
+    normalized = _normalize_text(value)
+    if normalized is None:
+        return None
+    if normalized.lower() != "current":
+        return normalized
+    return current_target_id
 
 
 def _normalize_timeout(value: object) -> int | None:
@@ -342,9 +364,21 @@ def _browser_content_blocks(container: Any, content: Any) -> list[dict[str, Any]
     attachment_blocks = _browser_attachment_blocks(container, content)
     if attachment_blocks:
         return attachment_blocks
+    console_blocks = _browser_console_blocks(content)
+    if console_blocks:
+        return console_blocks
+    cookies_blocks = _browser_cookies_blocks(content)
+    if cookies_blocks:
+        return cookies_blocks
+    storage_blocks = _browser_storage_blocks(content)
+    if storage_blocks:
+        return storage_blocks
     snapshot_blocks = _browser_snapshot_blocks(content)
     if snapshot_blocks:
         return snapshot_blocks
+    tabs_blocks = _browser_tabs_blocks(content)
+    if tabs_blocks:
+        return tabs_blocks
     summary = _browser_result_summary(content)
     if summary is None:
         return []
@@ -362,6 +396,15 @@ def _browser_result_summary_inner(content: Any, *, seen: set[int]) -> str | None
     if marker in seen:
         return None
     seen.add(marker)
+    console_summary = _browser_console_summary(content)
+    if console_summary is not None:
+        return console_summary
+    cookies_summary = _browser_cookies_summary(content)
+    if cookies_summary is not None:
+        return cookies_summary
+    storage_summary = _browser_storage_summary(content)
+    if storage_summary is not None:
+        return storage_summary
     evaluate_summary = _browser_evaluate_summary(content)
     if evaluate_summary is not None:
         return evaluate_summary
@@ -408,6 +451,252 @@ def _browser_evaluate_summary(content: dict[str, Any]) -> str | None:
     return _format_browser_evaluate_result(result)
 
 
+def _browser_console_summary(content: dict[str, Any]) -> str | None:
+    command = content.get("command")
+    if not isinstance(command, dict):
+        return None
+    if _normalize_text(command.get("kind")) != "console":
+        return None
+    value = content.get("value")
+    if not isinstance(value, dict):
+        return None
+    result = value.get("result")
+    if not isinstance(result, dict):
+        return None
+    count = result.get("count")
+    try:
+        numeric_count = max(int(count), 0)
+    except (TypeError, ValueError):
+        numeric_count = 0
+    level = _normalize_text(result.get("level"))
+    if numeric_count == 0:
+        if level is not None:
+            return f"Browser console has no {level} messages."
+        return "Browser console has no messages."
+    if level is not None:
+        return f"Browser console returned {numeric_count} {level} message(s)."
+    return f"Browser console returned {numeric_count} message(s)."
+
+
+def _browser_console_blocks(content: Any) -> list[dict[str, Any]]:
+    result = _find_browser_console_result(content)
+    if result is None:
+        return []
+    formatted = _format_browser_console_result(result)
+    if formatted is None:
+        return []
+    return [text_content_block(formatted)]
+
+
+def _browser_storage_summary(content: dict[str, Any]) -> str | None:
+    command = content.get("command")
+    if not isinstance(command, dict):
+        return None
+    if _normalize_text(command.get("kind")) != "storage":
+        return None
+    value = content.get("value")
+    if not isinstance(value, dict):
+        return None
+    result = value.get("result")
+    if not isinstance(result, dict):
+        return None
+    storage_kind = _normalize_text(result.get("storage_kind")) or "local"
+    operation = _normalize_text(result.get("operation")) or "get"
+    values = result.get("values")
+    value_count = len(values) if isinstance(values, dict) else 0
+    if operation == "clear":
+        return f"Cleared {storage_kind} storage."
+    if operation == "set":
+        key = _normalize_text(result.get("key"))
+        if key is not None:
+            return f"Updated {storage_kind} storage key '{key}'."
+        return f"Updated {storage_kind} storage."
+    return f"Read {value_count} {storage_kind} storage entr{'y' if value_count == 1 else 'ies'}."
+
+
+def _browser_cookies_summary(content: dict[str, Any]) -> str | None:
+    command = content.get("command")
+    if not isinstance(command, dict):
+        return None
+    if _normalize_text(command.get("kind")) != "cookies":
+        return None
+    value = content.get("value")
+    if not isinstance(value, dict):
+        return None
+    result = value.get("result")
+    if not isinstance(result, dict):
+        return None
+    operation = _normalize_text(result.get("operation")) or "get"
+    cookies = result.get("cookies")
+    cookie_count = len(cookies) if isinstance(cookies, list) else 0
+    if operation == "clear":
+        return "Cleared browser cookies."
+    if operation == "set":
+        return "Updated browser cookies."
+    return f"Read {cookie_count} browser cookie{'s' if cookie_count != 1 else ''}."
+
+
+def _browser_cookies_blocks(content: Any) -> list[dict[str, Any]]:
+    result = _find_browser_cookies_result(content)
+    if result is None:
+        return []
+    formatted = _format_browser_cookies_result(result)
+    if formatted is None:
+        return []
+    return [text_content_block(formatted)]
+
+
+def _browser_storage_blocks(content: Any) -> list[dict[str, Any]]:
+    result = _find_browser_storage_result(content)
+    if result is None:
+        return []
+    formatted = _format_browser_storage_result(result)
+    if formatted is None:
+        return []
+    return [text_content_block(formatted)]
+
+
+def _find_browser_cookies_result(content: Any) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    command = content.get("command")
+    if isinstance(command, dict) and _normalize_text(command.get("kind")) == "cookies":
+        value = content.get("value")
+        if isinstance(value, dict):
+            result = value.get("result")
+            if isinstance(result, dict):
+                return result
+    return None
+
+
+def _find_browser_storage_result(content: Any) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    command = content.get("command")
+    if isinstance(command, dict) and _normalize_text(command.get("kind")) == "storage":
+        value = content.get("value")
+        if isinstance(value, dict):
+            result = value.get("result")
+            if isinstance(result, dict):
+                return result
+    return None
+
+
+def _format_browser_storage_result(result: dict[str, Any]) -> str | None:
+    storage_kind = _normalize_text(result.get("storage_kind")) or "local"
+    operation = _normalize_text(result.get("operation")) or "get"
+    values = result.get("values")
+    if not isinstance(values, dict):
+        values = {}
+    if operation == "clear":
+        return f"Storage ({storage_kind}): cleared."
+    if operation == "set":
+        key = _normalize_text(result.get("key"))
+        value = values.get(key) if key is not None else None
+        if key is not None:
+            return f"Storage ({storage_kind}) set:\n- {key} = {value!r}"
+        return f"Storage ({storage_kind}) updated."
+    if not values:
+        return f"Storage ({storage_kind}): no entries."
+    lines = [f"Storage ({storage_kind}):"]
+    for key, value in list(values.items())[:20]:
+        lines.append(f"- {key} = {value!r}")
+    hidden_count = len(values) - min(len(values), 20)
+    if hidden_count > 0:
+        lines.append(f"... {hidden_count} more entr{'y' if hidden_count == 1 else 'ies'}")
+    return "\n".join(lines)
+
+
+def _format_browser_cookies_result(result: dict[str, Any]) -> str | None:
+    operation = _normalize_text(result.get("operation")) or "get"
+    cookies = result.get("cookies")
+    if not isinstance(cookies, list):
+        cookies = []
+    if operation == "clear":
+        return "Cookies: cleared."
+    if operation == "set":
+        if not cookies:
+            return "Cookies: updated."
+        lines = ["Cookies set:"]
+        for cookie in cookies[:20]:
+            if not isinstance(cookie, dict):
+                continue
+            name = _normalize_text(cookie.get("name")) or "<unnamed>"
+            value = _normalize_text(cookie.get("value")) or ""
+            scope = _normalize_text(cookie.get("url")) or _normalize_text(cookie.get("domain")) or ""
+            suffix = f" ({scope})" if scope else ""
+            lines.append(f"- {name} = {value!r}{suffix}")
+        return "\n".join(lines)
+    if not cookies:
+        return "Cookies: no cookies."
+    lines = ["Cookies:"]
+    for cookie in cookies[:20]:
+        if not isinstance(cookie, dict):
+            continue
+        name = _normalize_text(cookie.get("name")) or "<unnamed>"
+        value = _normalize_text(cookie.get("value")) or ""
+        scope = _normalize_text(cookie.get("domain")) or _normalize_text(cookie.get("url")) or ""
+        suffix = f" ({scope})" if scope else ""
+        lines.append(f"- {name} = {value!r}{suffix}")
+    hidden_count = len(cookies) - min(len(cookies), 20)
+    if hidden_count > 0:
+        lines.append(f"... {hidden_count} more cookie{'s' if hidden_count != 1 else ''}")
+    return "\n".join(lines)
+
+
+def _find_browser_console_result(content: Any) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    command = content.get("command")
+    if isinstance(command, dict) and _normalize_text(command.get("kind")) == "console":
+        value = content.get("value")
+        if isinstance(value, dict):
+            result = value.get("result")
+            if isinstance(result, dict):
+                return result
+    return None
+
+
+def _format_browser_console_result(result: dict[str, Any]) -> str | None:
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return None
+    lines: list[str] = []
+    level = _normalize_text(result.get("level"))
+    if not messages:
+        if level is not None:
+            return f"Console ({level}): no messages."
+        return "Console: no messages."
+    header = f"Console ({level})" if level is not None else "Console"
+    lines.append(f"{header}:")
+    for message in messages[:20]:
+        if not isinstance(message, dict):
+            continue
+        message_level = _normalize_text(message.get("level")) or "log"
+        text = _normalize_text(message.get("text")) or ""
+        location = message.get("location")
+        location_text = None
+        if isinstance(location, dict):
+            url = _normalize_text(location.get("url"))
+            line_number = location.get("line_number")
+            column_number = location.get("column_number")
+            if url is not None:
+                suffix = ""
+                if isinstance(line_number, int):
+                    suffix = f":{line_number}"
+                    if isinstance(column_number, int):
+                        suffix += f":{column_number}"
+                location_text = f"{url}{suffix}"
+        line = f"- [{message_level}] {text}"
+        if location_text is not None:
+            line += f" ({location_text})"
+        lines.append(line)
+    hidden_count = len(messages) - min(len(messages), 20)
+    if hidden_count > 0:
+        lines.append(f"... {hidden_count} more message(s)")
+    return "\n".join(lines)
+
+
 def _browser_snapshot_blocks(content: Any) -> list[dict[str, Any]]:
     result = _find_browser_snapshot_result(content)
     if result is None:
@@ -452,6 +741,31 @@ def _format_browser_snapshot_result(result: dict[str, Any]) -> str | None:
     if not rendered.strip():
         return None
     return f"Snapshot ({snapshot_format}):\n```json\n{rendered}\n```"
+
+
+def _browser_tabs_blocks(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, dict):
+        return []
+    command = content.get("command")
+    if not isinstance(command, dict) or _normalize_text(command.get("kind")) != "list-tabs":
+        return []
+    value = content.get("value")
+    if not isinstance(value, list):
+        return []
+    tab_lines: list[str] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        target_id = _normalize_text(item.get("target_id")) or "unknown"
+        tab_type = _normalize_text(item.get("type")) or "unknown"
+        title = _normalize_text(item.get("title")) or "(untitled)"
+        url = _normalize_text(item.get("url")) or "(no url)"
+        tab_lines.append(
+            f"{index}. [{target_id}] ({tab_type}) {title}\n   {url}",
+        )
+    if not tab_lines:
+        return []
+    return [text_content_block("Browser tabs:\n" + "\n".join(tab_lines))]
 
 
 def _unwrap_browser_evaluate_result(result: Any) -> Any:
@@ -538,7 +852,7 @@ def _sanitize_browser_result_details(value: Any) -> Any:
         sanitized = {str(key): _sanitize_browser_result_details(item) for key, item in value.items()}
         kind = _normalize_text(sanitized.get("kind"))
         content_type = _normalize_text(sanitized.get("content_type"))
-        if kind in {"screenshot", "pdf"} and content_type is not None:
+        if kind in {"screenshot", "pdf", "download"} and content_type is not None:
             data = sanitized.get("data")
             if isinstance(data, str) and data:
                 sanitized.pop("data", None)
@@ -555,7 +869,7 @@ def _browser_attachment_blocks(container: Any, content: Any) -> list[dict[str, A
     attachment = _find_browser_attachment_payload(content)
     if attachment is None:
         return []
-    kind, content_type, data = attachment
+    kind, content_type, data, attachment_name = attachment
     if kind == "screenshot":
         return [
             text_content_block("Browser screenshot captured."),
@@ -581,18 +895,31 @@ def _browser_attachment_blocks(container: Any, content: Any) -> list[dict[str, A
                 fallback_name="browser-output.pdf",
             ),
         ]
+    if kind == "download":
+        return [
+            text_content_block("Browser download captured."),
+            _browser_attachment_block(
+                container,
+                kind="download",
+                content_type=content_type,
+                data=data,
+                fallback_name=attachment_name or "browser-download.bin",
+            ),
+        ]
     return []
 
 
 def _find_browser_attachment_payload(
     value: Any,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str | None] | None:
     if isinstance(value, dict):
         kind = _normalize_text(value.get("kind"))
         content_type = _normalize_text(value.get("content_type"))
         data = _normalize_text(value.get("data"))
         if kind in {"screenshot", "pdf"} and content_type is not None and data is not None:
-            return kind, content_type, data
+            return kind, content_type, data, _normalize_text(value.get("name"))
+        if kind == "download" and content_type is not None and data is not None:
+            return kind, content_type, data, _normalize_text(value.get("name"))
         for item in value.values():
             resolved = _find_browser_attachment_payload(item)
             if resolved is not None:
@@ -808,7 +1135,7 @@ def _run_control_content(
 ) -> tuple[Any, str]:
     _ensure_browser_enabled(settings)
     profile_name = _resolve_profile_name(arguments, system_config_store)
-    target_id = _normalize_text(arguments.get("target_id"))
+    target_id = _normalize_browser_target_id(arguments.get("target_id"))
     timeout_ms = _normalize_timeout(arguments.get("timeout_ms"))
     payload = _coerce_payload(arguments.get("payload"))
     url = _normalize_text(arguments.get("url"))
@@ -877,7 +1204,7 @@ def _run_page_action_content(
 ) -> tuple[Any, str]:
     _ensure_browser_enabled(settings)
     profile_name = _resolve_profile_name(arguments, system_config_store)
-    target_id = _normalize_text(arguments.get("target_id"))
+    target_id = _normalize_browser_target_id(arguments.get("target_id"))
     ref = _normalize_text(arguments.get("ref"))
     selector = _normalize_text(arguments.get("selector"))
     timeout_ms = _normalize_timeout(arguments.get("timeout_ms"))
@@ -941,8 +1268,18 @@ def _script_step_target_id(
     step_arguments: dict[str, Any],
     current_target_id: str | None,
 ) -> dict[str, Any]:
-    if _normalize_text(step_arguments.get("target_id")) is not None:
-        return step_arguments
+    explicit_target_id = _normalize_text(step_arguments.get("target_id"))
+    if explicit_target_id is not None:
+        normalized = dict(step_arguments)
+        resolved_target_id = _normalize_browser_target_id(
+            explicit_target_id,
+            current_target_id=current_target_id,
+        )
+        if resolved_target_id is None:
+            normalized.pop("target_id", None)
+        else:
+            normalized["target_id"] = resolved_target_id
+        return normalized
     if current_target_id is None:
         return step_arguments
     if family == "page-action" or kind in _SCRIPT_INHERITED_TARGET_CONTROL_KINDS:
@@ -1028,6 +1365,9 @@ def _normalize_click_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 def _normalize_fill_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     normalized_arguments = dict(arguments)
     payload = _coerce_payload(arguments.get("payload"))
+    fields = arguments.get("fields")
+    if isinstance(fields, list):
+        payload.setdefault("fields", list(fields))
     scope_ref = _normalize_text(arguments.get("scope_ref"))
     if scope_ref is not None:
         payload.setdefault("scope_ref", scope_ref)
@@ -1040,6 +1380,28 @@ def _normalize_fill_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     text = _normalize_text(arguments.get("text"))
     if text is not None:
         payload.setdefault("text", text)
+    normalized_arguments["payload"] = payload
+    return normalized_arguments
+
+
+def _normalize_download_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized_arguments = dict(arguments)
+    payload = _coerce_payload(arguments.get("payload"))
+    scope_ref = _normalize_text(arguments.get("scope_ref"))
+    if scope_ref is not None:
+        payload.setdefault("scope_ref", scope_ref)
+    scope_selector = _normalize_text(arguments.get("scope_selector"))
+    if scope_selector is not None:
+        payload.setdefault("scope_selector", scope_selector)
+    ordinal = _normalize_int(arguments.get("ordinal"), label="ordinal", minimum=0)
+    if ordinal is not None:
+        payload.setdefault("ordinal", ordinal)
+    double_click = _normalize_bool(arguments.get("double_click"), label="double_click")
+    if double_click is not None:
+        payload.setdefault("double_click", double_click)
+    button = _normalize_text(arguments.get("button"))
+    if button is not None:
+        payload.setdefault("button", button)
     normalized_arguments["payload"] = payload
     return normalized_arguments
 
@@ -1175,6 +1537,55 @@ def _normalize_advanced_action_arguments(arguments: dict[str, Any]) -> dict[str,
         payload.setdefault("fn", fn)
     if "arg" in arguments and arguments.get("arg") is not None:
         payload.setdefault("arg", arguments.get("arg"))
+    path = _normalize_text(arguments.get("path"))
+    if path is not None:
+        payload.setdefault("path", path)
+    accept = _normalize_bool(arguments.get("accept"), label="accept")
+    if accept is not None:
+        payload.setdefault("accept", accept)
+    prompt_text = _normalize_text(arguments.get("prompt_text"))
+    if prompt_text is None:
+        prompt_text = _normalize_text(arguments.get("promptText"))
+    if prompt_text is not None:
+        payload.setdefault("prompt_text", prompt_text)
+    level = _normalize_text(arguments.get("level"))
+    if level is not None:
+        payload.setdefault("level", level)
+    clear = _normalize_bool(arguments.get("clear"), label="clear")
+    if clear is not None:
+        payload.setdefault("clear", clear)
+    limit = _normalize_int(arguments.get("limit"), label="limit", minimum=1)
+    if limit is not None:
+        payload.setdefault("limit", limit)
+    cookies_operation = _normalize_text(arguments.get("cookies_operation"))
+    if cookies_operation is None:
+        cookies_operation = _normalize_text(arguments.get("operation"))
+    if cookies_operation is not None:
+        payload.setdefault("cookies_operation", cookies_operation)
+    if "cookie" in arguments and arguments.get("cookie") is not None:
+        payload.setdefault("cookie", arguments.get("cookie"))
+    storage_kind = _normalize_text(arguments.get("storage_kind"))
+    if storage_kind is None:
+        storage_kind = _normalize_text(arguments.get("storage"))
+    if storage_kind is not None:
+        payload.setdefault("storage_kind", storage_kind)
+    storage_operation = _normalize_text(arguments.get("storage_operation"))
+    if storage_operation is None:
+        storage_operation = _normalize_text(arguments.get("operation"))
+    if storage_operation is not None:
+        payload.setdefault("storage_operation", storage_operation)
+    storage_key = _normalize_text(arguments.get("storage_key"))
+    if storage_key is None:
+        storage_key = _normalize_text(arguments.get("key"))
+    if storage_key is not None:
+        payload.setdefault("storage_key", storage_key)
+    if "storage_value" in arguments and arguments.get("storage_value") is not None:
+        payload.setdefault("storage_value", arguments.get("storage_value"))
+    paths = arguments.get("paths")
+    if isinstance(paths, list):
+        normalized_paths = [candidate for candidate in (_normalize_text(item) for item in paths) if candidate is not None]
+        if normalized_paths:
+            payload.setdefault("paths", normalized_paths)
     normalized_arguments["payload"] = payload
     return normalized_arguments
 
@@ -1194,6 +1605,8 @@ def _normalize_script_step_arguments(
         return _normalize_click_arguments(normalized)
     if kind == "fill":
         return _normalize_fill_arguments(normalized)
+    if kind == "download":
+        return _normalize_download_arguments(normalized)
     if kind == "wait":
         return _normalize_wait_arguments(normalized)
     if kind in _ADVANCED_PAGE_ACTION_KINDS:
@@ -1377,18 +1790,16 @@ def _merge_tool_result_post_state(
 
 
 def _single_step_script_defaults(*, family: str, kind: str) -> dict[str, Any]:
-    if family == "control":
-        return {}
-    if kind == "wait":
-        return {"default_observe_after": "interactive"}
-    if kind in {"click", "press", "select"}:
-        return {
-            "default_stabilize": "auto",
-            "default_observe_after": "interactive",
-        }
-    if kind in {"fill", "type"}:
-        return {"default_stabilize": "micro"}
     return {}
+
+
+def _strip_single_step_composite_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(arguments)
+    normalized.pop("stabilize", None)
+    normalized.pop("stabilize_timeout_ms", None)
+    normalized.pop("observe_after", None)
+    normalized.pop("observe_payload", None)
+    return normalized
 
 
 def _single_step_script_overrides(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1424,6 +1835,7 @@ def _single_step_script_arguments(
     kind: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    step_arguments = _strip_single_step_composite_arguments(arguments)
     return {
         **_single_step_script_defaults(
             family=family,
@@ -1432,7 +1844,7 @@ def _single_step_script_arguments(
         **_single_step_script_overrides(arguments),
         "steps": [
             {
-                **arguments,
+                **step_arguments,
                 "family": family,
                 "kind": kind,
             }
@@ -1548,7 +1960,7 @@ def _execute_script(
 ) -> ToolRunResult:
     _ensure_browser_enabled(settings)
     steps = _coerce_script_steps(arguments.get("steps"))
-    current_target_id = _normalize_text(arguments.get("target_id"))
+    current_target_id = _normalize_browser_target_id(arguments.get("target_id"))
     inherited_profile_name = _normalize_text(arguments.get("profile"))
     inherited_timeout_ms = _normalize_timeout(arguments.get("timeout_ms"))
     stop_on_error = _normalize_bool(arguments.get("stop_on_error"), label="stop_on_error")
@@ -1765,6 +2177,7 @@ def _execute_script(
             arguments=observe_arguments,
         )
         post_state_result = final_observe_result
+
     return _script_result(
         container=container,
         tool_id=tool_id,
@@ -1775,134 +2188,67 @@ def _execute_script(
         current_target_id=current_target_id,
     )
 
-
-def browser(container: Any):
+def browser_profile(container: Any):
     try:
-        facade, serializer, system_config_store, settings = _browser_runtime(container)
+        _, _, _, settings, _ = _profile_listing_runtime(container)
     except RuntimeError:
         return None
 
-    async def _browser_handler(
+    async def _browser_profile_handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
         _ensure_browser_enabled(settings)
-
-        kind = _normalize_text(arguments.get("kind"))
-        if kind is None:
-            raise BrowserValidationError("kind is required.")
-        family = _resolve_family(kind.lower(), _normalize_text(arguments.get("family")))
-
-        if family == "control":
-            script_arguments = _single_step_script_arguments(
-                family="control",
-                kind=kind.lower(),
-                arguments=arguments,
-            )
-            return await asyncio.to_thread(
-                _execute_script,
+        kind = (_normalize_text(arguments.get("kind")) or "list").lower()
+        if kind == "list":
+            payload = await asyncio.to_thread(_profiles_payload, container)
+            guidance = _profiles_guidance(payload)
+            payload = {
+                **payload,
+                "guidance": guidance,
+            }
+            return _tool_result(
                 container=container,
-                facade=facade,
-                serializer=serializer,
-                system_config_store=system_config_store,
-                settings=settings,
-                tool_id="browser",
-                arguments=script_arguments,
+                tool_id="browser_profile",
+                content=payload,
+                family=None,
+                profile_name=None,
+                kind="list",
                 execution_context=execution_context,
-                preserve_single_step_result=True,
+                guidance=guidance,
             )
-        return await asyncio.to_thread(
-            _execute_script,
-            container=container,
-            facade=facade,
-            serializer=serializer,
-            system_config_store=system_config_store,
-            settings=settings,
-            tool_id="browser",
-            arguments=_single_step_script_arguments(
-                family="page-action",
-                kind=kind.lower(),
-                arguments=arguments,
-            ),
-            execution_context=execution_context,
-            preserve_single_step_result=True,
-        )
+        if kind == "diagnose":
+            profile_name = _normalize_text(arguments.get("profile")) or _normalize_text(
+                arguments.get("profile_name"),
+            )
+            if profile_name is None:
+                raise BrowserValidationError("profile is required for browser_profile kind=diagnose.")
+            payload = await asyncio.to_thread(
+                build_profile_diagnostics_payload,
+                container,
+                profile_name=profile_name,
+            )
+            guidance = _profile_diagnostics_guidance(
+                payload,
+                system_config_store=container.browser_system_config_store,
+            )
+            payload = {
+                **payload,
+                "guidance": guidance,
+            }
+            return _tool_result(
+                container=container,
+                tool_id="browser_profile",
+                content=payload,
+                family=None,
+                profile_name=profile_name,
+                kind="diagnose",
+                execution_context=execution_context,
+                guidance=guidance,
+            )
+        raise BrowserValidationError("browser_profile.kind must be either list or diagnose.")
 
-    return _browser_handler
-
-
-def browser_profiles(container: Any):
-    try:
-        _, _, _, settings, _ = _profile_listing_runtime(container)
-    except RuntimeError:
-        return None
-
-    async def _browser_profiles_handler(
-        arguments: dict[str, Any],
-        execution_context: ToolExecutionContext | None = None,
-    ) -> ToolRunResult:
-        del arguments
-        _ensure_browser_enabled(settings)
-        payload = await asyncio.to_thread(_profiles_payload, container)
-        guidance = _profiles_guidance(payload)
-        payload = {
-            **payload,
-            "guidance": guidance,
-        }
-        return _tool_result(
-            container=container,
-            tool_id="browser_profiles",
-            content=payload,
-            family=None,
-            profile_name=None,
-            kind="list",
-            execution_context=execution_context,
-            guidance=guidance,
-        )
-
-    return _browser_profiles_handler
-
-
-def browser_profile_diagnose(container: Any):
-    try:
-        _, _, _, settings, _ = _profile_listing_runtime(container)
-    except RuntimeError:
-        return None
-
-    async def _browser_profile_diagnose_handler(
-        arguments: dict[str, Any],
-        execution_context: ToolExecutionContext | None = None,
-    ) -> ToolRunResult:
-        _ensure_browser_enabled(settings)
-        profile_name = _normalize_text(arguments.get("profile")) or _normalize_text(arguments.get("profile_name"))
-        if profile_name is None:
-            raise BrowserValidationError("profile is required.")
-        payload = await asyncio.to_thread(
-            build_profile_diagnostics_payload,
-            container,
-            profile_name=profile_name,
-        )
-        guidance = _profile_diagnostics_guidance(
-            payload,
-            system_config_store=container.browser_system_config_store,
-        )
-        payload = {
-            **payload,
-            "guidance": guidance,
-        }
-        return _tool_result(
-            container=container,
-            tool_id="browser_profile_diagnose",
-            content=payload,
-            family=None,
-            profile_name=profile_name,
-            kind="diagnose",
-            execution_context=execution_context,
-            guidance=guidance,
-        )
-
-    return _browser_profile_diagnose_handler
-
+    return _browser_profile_handler
 
 def browser_control(container: Any):
     try:
@@ -1917,7 +2263,7 @@ def browser_control(container: Any):
         kind = _normalize_text(arguments.get("kind"))
         if kind is None or kind.lower() not in _CONTROL_KINDS:
             raise BrowserValidationError(
-                "browser_control.kind must be one of open-tab, list-tabs, navigate, focus-tab, close-tab, reset.",
+                "browser_control.kind must be one of status, start, stop, open-tab, list-tabs, navigate, focus-tab, close-tab, reset.",
             )
         return await asyncio.to_thread(
             _execute_script,
@@ -2005,178 +2351,6 @@ def browser_snapshot(container: Any):
 
     return _browser_snapshot_handler
 
-
-def browser_click(container: Any):
-    try:
-        facade, serializer, system_config_store, settings = _browser_runtime(container)
-    except RuntimeError:
-        return None
-
-    async def _browser_click_handler(
-        arguments: dict[str, Any],
-        execution_context: ToolExecutionContext | None = None,
-    ) -> ToolRunResult:
-        normalized_arguments = dict(arguments)
-        payload = _coerce_payload(arguments.get("payload"))
-        scope_ref = _normalize_text(arguments.get("scope_ref"))
-        if scope_ref is not None:
-            payload.setdefault("scope_ref", scope_ref)
-        scope_selector = _normalize_text(arguments.get("scope_selector"))
-        if scope_selector is not None:
-            payload.setdefault("scope_selector", scope_selector)
-        ordinal = _normalize_int(arguments.get("ordinal"), label="ordinal", minimum=0)
-        if ordinal is not None:
-            payload.setdefault("ordinal", ordinal)
-        double_click = _normalize_bool(arguments.get("double_click"), label="double_click")
-        if double_click is not None:
-            payload.setdefault("double_click", double_click)
-        button = _normalize_text(arguments.get("button"))
-        if button is not None:
-            payload.setdefault("button", button)
-        normalized_arguments["payload"] = payload
-        return await asyncio.to_thread(
-            _execute_script,
-            container=container,
-            facade=facade,
-            serializer=serializer,
-            system_config_store=system_config_store,
-            settings=settings,
-            tool_id="browser_click",
-            arguments=_single_step_script_arguments(
-                family="page-action",
-                kind="click",
-                arguments=normalized_arguments,
-            ),
-            execution_context=execution_context,
-            preserve_single_step_result=True,
-        )
-
-    return _browser_click_handler
-
-
-def browser_fill(container: Any):
-    try:
-        facade, serializer, system_config_store, settings = _browser_runtime(container)
-    except RuntimeError:
-        return None
-
-    async def _browser_fill_handler(
-        arguments: dict[str, Any],
-        execution_context: ToolExecutionContext | None = None,
-    ) -> ToolRunResult:
-        normalized_arguments = dict(arguments)
-        payload = _coerce_payload(arguments.get("payload"))
-        scope_ref = _normalize_text(arguments.get("scope_ref"))
-        if scope_ref is not None:
-            payload.setdefault("scope_ref", scope_ref)
-        scope_selector = _normalize_text(arguments.get("scope_selector"))
-        if scope_selector is not None:
-            payload.setdefault("scope_selector", scope_selector)
-        ordinal = _normalize_int(arguments.get("ordinal"), label="ordinal", minimum=0)
-        if ordinal is not None:
-            payload.setdefault("ordinal", ordinal)
-        text = _normalize_text(arguments.get("text"))
-        if text is not None:
-            payload.setdefault("text", text)
-        normalized_arguments["payload"] = payload
-        return await asyncio.to_thread(
-            _execute_script,
-            container=container,
-            facade=facade,
-            serializer=serializer,
-            system_config_store=system_config_store,
-            settings=settings,
-            tool_id="browser_fill",
-            arguments=_single_step_script_arguments(
-                family="page-action",
-                kind="fill",
-                arguments=normalized_arguments,
-            ),
-            execution_context=execution_context,
-            preserve_single_step_result=True,
-        )
-
-    return _browser_fill_handler
-
-
-def browser_wait(container: Any):
-    try:
-        facade, serializer, system_config_store, settings = _browser_runtime(container)
-    except RuntimeError:
-        return None
-
-    async def _browser_wait_handler(
-        arguments: dict[str, Any],
-        execution_context: ToolExecutionContext | None = None,
-    ) -> ToolRunResult:
-        normalized_arguments = dict(arguments)
-        payload = _coerce_payload(arguments.get("payload"))
-        scope_ref = _normalize_text(arguments.get("scope_ref"))
-        if scope_ref is not None:
-            payload.setdefault("scope_ref", scope_ref)
-        scope_selector = _normalize_text(arguments.get("scope_selector"))
-        if scope_selector is not None:
-            payload.setdefault("scope_selector", scope_selector)
-        exact = _normalize_bool(arguments.get("exact"), label="exact")
-        if exact is not None:
-            payload.setdefault("exact", exact)
-        ordinal = _normalize_int(arguments.get("ordinal"), label="ordinal", minimum=0)
-        if ordinal is not None:
-            payload.setdefault("ordinal", ordinal)
-        text = _normalize_text(arguments.get("text"))
-        if text is not None:
-            payload.setdefault("text", text)
-        text_gone = _normalize_text(arguments.get("text_gone"))
-        if text_gone is not None:
-            payload.setdefault("text_gone", text_gone)
-        overlay_source_ref = _normalize_text(arguments.get("overlay_source_ref"))
-        if overlay_source_ref is not None:
-            payload.setdefault("overlay_source_ref", overlay_source_ref)
-        overlay_source_selector = _normalize_text(arguments.get("overlay_source_selector"))
-        if overlay_source_selector is not None:
-            payload.setdefault("overlay_source_selector", overlay_source_selector)
-        url = _normalize_text(arguments.get("url"))
-        if url is not None:
-            payload.setdefault("url", url)
-        load_state = _normalize_text(arguments.get("load_state"))
-        if load_state is not None:
-            payload.setdefault("load_state", load_state)
-        fn = _normalize_text(arguments.get("fn"))
-        if fn is not None:
-            payload.setdefault("fn", fn)
-        expression = _normalize_text(arguments.get("expression"))
-        if expression is not None:
-            payload.setdefault("expression", expression)
-        state = _normalize_text(arguments.get("state"))
-        if state is not None:
-            payload.setdefault("state", state)
-        delay_ms = _normalize_int(arguments.get("delay_ms"), label="delay_ms", minimum=0)
-        if delay_ms is not None:
-            payload.setdefault("delay_ms", delay_ms)
-        time_ms = _normalize_int(arguments.get("time_ms"), label="time_ms", minimum=0)
-        if time_ms is not None:
-            payload.setdefault("time_ms", time_ms)
-        normalized_arguments["payload"] = payload
-        return await asyncio.to_thread(
-            _execute_script,
-            container=container,
-            facade=facade,
-            serializer=serializer,
-            system_config_store=system_config_store,
-            settings=settings,
-            tool_id="browser_wait",
-            arguments=_single_step_script_arguments(
-                family="page-action",
-                kind="wait",
-                arguments=normalized_arguments,
-            ),
-            execution_context=execution_context,
-            preserve_single_step_result=True,
-        )
-
-    return _browser_wait_handler
-
-
 def browser_action(container: Any):
     try:
         facade, serializer, system_config_store, settings = _browser_runtime(container)
@@ -2188,98 +2362,15 @@ def browser_action(container: Any):
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
         kind = _normalize_text(arguments.get("kind"))
-        if kind is None or kind.lower() not in _ADVANCED_PAGE_ACTION_KINDS:
+        if kind is None or kind.lower() not in _ACTION_TOOL_PAGE_ACTION_KINDS:
             raise BrowserValidationError(
-                "browser_action.kind must be one of batch, type, press, hover, drag, resize, scroll-into-view, select, screenshot, pdf, or evaluate.",
+                "browser_action.kind must be one of click, console, cookies, dialog, fill, upload, download, wait-download, wait, batch, type, press, hover, drag, resize, scroll-into-view, select, screenshot, pdf, evaluate, or storage.",
             )
-        normalized_arguments = dict(arguments)
-        payload = _coerce_payload(arguments.get("payload"))
-        text = _normalize_text(arguments.get("text"))
-        if text is not None:
-            payload.setdefault("text", text)
-        delay_ms = _normalize_int(arguments.get("delay_ms"), label="delay_ms", minimum=0)
-        if delay_ms is not None:
-            payload.setdefault("delay_ms", delay_ms)
-        key = _normalize_text(arguments.get("key"))
-        if key is not None:
-            payload.setdefault("key", key)
-        start_ref = _normalize_text(arguments.get("start_ref"))
-        if start_ref is not None:
-            payload.setdefault("start_ref", start_ref)
-        start_selector = _normalize_text(arguments.get("start_selector"))
-        if start_selector is not None:
-            payload.setdefault("start_selector", start_selector)
-        end_ref = _normalize_text(arguments.get("end_ref"))
-        if end_ref is not None:
-            payload.setdefault("end_ref", end_ref)
-        end_selector = _normalize_text(arguments.get("end_selector"))
-        if end_selector is not None:
-            payload.setdefault("end_selector", end_selector)
-        target_ref = _normalize_text(arguments.get("target_ref"))
-        if target_ref is not None:
-            payload.setdefault("target_ref", target_ref)
-        target_selector = _normalize_text(arguments.get("target_selector"))
-        if target_selector is not None:
-            payload.setdefault("target_selector", target_selector)
-        value = _normalize_text(arguments.get("value"))
-        if value is not None:
-            payload.setdefault("value", value)
-        width = _normalize_int(arguments.get("width"), label="width", minimum=1)
-        if width is not None:
-            payload.setdefault("width", width)
-        height = _normalize_int(arguments.get("height"), label="height", minimum=1)
-        if height is not None:
-            payload.setdefault("height", height)
-        actions = arguments.get("actions")
-        if isinstance(actions, list):
-            payload.setdefault("actions", list(actions))
-        stop_on_error = _normalize_bool(
-            arguments.get("stop_on_error"),
-            label="stop_on_error",
+        normalized_arguments = _normalize_script_step_arguments(
+            family="page-action",
+            kind=kind.lower(),
+            step_arguments=dict(arguments),
         )
-        if stop_on_error is None:
-            stop_on_error = _normalize_bool(
-                arguments.get("stopOnError"),
-                label="stopOnError",
-        )
-        if stop_on_error is not None:
-            payload.setdefault("stop_on_error", stop_on_error)
-        scope_ref = _normalize_text(arguments.get("scope_ref"))
-        if scope_ref is not None:
-            payload.setdefault("scope_ref", scope_ref)
-        scope_selector = _normalize_text(arguments.get("scope_selector"))
-        if scope_selector is not None:
-            payload.setdefault("scope_selector", scope_selector)
-        exact = _normalize_bool(arguments.get("exact"), label="exact")
-        if exact is not None:
-            payload.setdefault("exact", exact)
-        clear_existing = _normalize_bool(arguments.get("clear_existing"), label="clear_existing")
-        if clear_existing is not None:
-            payload.setdefault("clear_existing", clear_existing)
-        ordinal = _normalize_int(arguments.get("ordinal"), label="ordinal", minimum=0)
-        if ordinal is not None:
-            payload.setdefault("ordinal", ordinal)
-        image_type = _normalize_text(arguments.get("type"))
-        if image_type is not None:
-            payload.setdefault("type", image_type)
-        full_page = _normalize_bool(arguments.get("full_page"), label="full_page")
-        if full_page is not None:
-            payload.setdefault("full_page", full_page)
-        print_background = _normalize_bool(
-            arguments.get("print_background"),
-            label="print_background",
-        )
-        if print_background is not None:
-            payload.setdefault("print_background", print_background)
-        expression = _normalize_text(arguments.get("expression"))
-        if expression is not None:
-            payload.setdefault("expression", expression)
-        fn = _normalize_text(arguments.get("fn"))
-        if fn is not None:
-            payload.setdefault("fn", fn)
-        if "arg" in arguments and arguments.get("arg") is not None:
-            payload.setdefault("arg", arguments.get("arg"))
-        normalized_arguments["payload"] = payload
         return await asyncio.to_thread(
             _execute_script,
             container=container,

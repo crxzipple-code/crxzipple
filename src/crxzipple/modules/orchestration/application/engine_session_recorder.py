@@ -9,6 +9,7 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
+    AppendSessionMessagesInput,
     SessionApplicationService,
 )
 from crxzipple.modules.session.domain import SessionMessageKind
@@ -29,6 +30,9 @@ class OrchestrationSessionRecorder:
         *,
         session_key: str,
     ) -> str | None:
+        cached_message_id = run.metadata.get("user_message_id")
+        if isinstance(cached_message_id, str) and cached_message_id.strip():
+            return cached_message_id.strip()
         existing = self.session_service.get_message_by_source(
             session_key=session_key,
             session_id=run.active_session_id,
@@ -100,21 +104,24 @@ class OrchestrationSessionRecorder:
         response_text: str | None,
         tool_calls: tuple[ToolCallIntent, ...],
     ) -> tuple[str, ...]:
-        message_ids: list[str] = []
+        inputs: list[AppendSessionMessageInput] = []
         if response_text is not None and response_text.strip():
-            message_ids.extend(
-                self.append_assistant_response_message(
+            inputs.append(
+                AppendSessionMessageInput(
                     session_key=session_key,
-                    active_session_id=active_session_id,
-                    invocation_id=invocation_id,
-                    response_text=response_text,
-                    structured_output=None,
-                    finish_reason="tool_calls",
-                    usage_payload=None,
+                    session_id=active_session_id,
+                    role="assistant",
+                    content_payload={
+                        "blocks": [text_content_block(response_text)],
+                        "text": response_text,
+                        "finish_reason": "tool_calls",
+                    },
+                    source_kind="llm_invocation",
+                    source_id=invocation_id,
                 ),
             )
         for tool_call in tool_calls:
-            message = self.session_service.append_message(
+            inputs.append(
                 AppendSessionMessageInput(
                     session_key=session_key,
                     session_id=active_session_id,
@@ -133,8 +140,10 @@ class OrchestrationSessionRecorder:
                     },
                 ),
             )
-            message_ids.append(message.id)
-        return tuple(message_ids)
+        messages = self.session_service.append_messages(
+            AppendSessionMessagesInput(messages=tuple(inputs)),
+        )
+        return tuple(message.id for message in messages)
 
     def append_tool_result_message(
         self,
@@ -146,6 +155,76 @@ class OrchestrationSessionRecorder:
         source_kind: str,
         source_id: str,
     ) -> str:
+        message = self.session_service.append_message(
+            self._tool_result_message_input(
+                session_key=session_key,
+                active_session_id=active_session_id,
+                tool_call=tool_call,
+                tool_run=tool_run,
+                source_kind=source_kind,
+                source_id=source_id,
+            ),
+        )
+        return message.id
+
+    def append_tool_result_messages(
+        self,
+        *,
+        session_key: str,
+        active_session_id: str,
+        items: tuple[tuple[ToolCallIntent, ToolRun, str, str], ...],
+    ) -> tuple[str, ...]:
+        inputs = tuple(
+            self._tool_result_message_input(
+                session_key=session_key,
+                active_session_id=active_session_id,
+                tool_call=tool_call,
+                tool_run=tool_run,
+                source_kind=source_kind,
+                source_id=source_id,
+            )
+            for tool_call, tool_run, source_kind, source_id in items
+        )
+        messages = self.session_service.append_messages(
+            AppendSessionMessagesInput(messages=inputs),
+        )
+        return tuple(message.id for message in messages)
+
+    def _tool_result_message_input(
+        self,
+        *,
+        session_key: str,
+        active_session_id: str,
+        tool_call: ToolCallIntent,
+        tool_run: ToolRun,
+        source_kind: str,
+        source_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> AppendSessionMessageInput:
+        content_payload = payload or self._tool_result_payload(
+            tool_call=tool_call,
+            tool_run=tool_run,
+        )
+        return AppendSessionMessageInput(
+            session_key=session_key,
+            session_id=active_session_id,
+            role="tool",
+            kind=SessionMessageKind.TOOL_RESULT,
+            content_payload=content_payload,
+            source_kind=source_kind,
+            source_id=source_id,
+            metadata={
+                "tool_call_id": tool_call.id,
+                "tool_name": tool_call.name,
+            },
+        )
+
+    @staticmethod
+    def _tool_result_payload(
+        *,
+        tool_call: ToolCallIntent,
+        tool_run: ToolRun,
+    ) -> dict[str, object]:
         tool_result = tool_run.result
         payload: dict[str, object] = {
             "tool_name": tool_call.name,
@@ -161,22 +240,7 @@ class OrchestrationSessionRecorder:
         if tool_run.error is not None:
             payload["error"] = tool_run.error.to_storage()
             payload["content"] = [text_content_block(tool_run.error.message)]
-        message = self.session_service.append_message(
-            AppendSessionMessageInput(
-                session_key=session_key,
-                session_id=active_session_id,
-                role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
-                content_payload=payload,
-                source_kind=source_kind,
-                source_id=source_id,
-                metadata={
-                    "tool_call_id": tool_call.id,
-                    "tool_name": tool_call.name,
-                },
-            ),
-        )
-        return message.id
+        return payload
 
     def append_completed_background_tool_results(
         self,

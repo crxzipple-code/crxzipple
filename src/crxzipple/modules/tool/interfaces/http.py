@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from crxzipple.bootstrap import AppContainer
@@ -16,6 +16,14 @@ from crxzipple.modules.tool.domain import (
     ToolEnvironment,
     ToolExecutionStrategy,
     ToolMode,
+)
+from crxzipple.modules.tool.domain.exceptions import (
+    ToolRunNotFoundError,
+    ToolValidationError,
+)
+from crxzipple.shared.time import (
+    format_datetime_utc,
+    format_optional_datetime_utc,
 )
 
 
@@ -69,6 +77,8 @@ class ToolResponse(BaseModel):
     parameters: list[ToolParameterResponse]
     tags: list[str]
     required_effect_ids: list[str]
+    access_requirements: list[str]
+    access_requirement_sets: list[list[str]]
     execution_policy: ToolExecutionPolicyResponse
     execution_support: ToolExecutionSupportResponse
     source_kind: str
@@ -112,6 +122,12 @@ class ToolRunErrorResponse(BaseModel):
     message: str
     code: str
     details: dict[str, Any]
+
+
+class PruneExpiredToolWorkersResponse(BaseModel):
+    pruned_count: int
+    worker_ids: list[str]
+    cutoff: str
 
 
 @router.get("/roots", response_model=list[ToolRootResponse])
@@ -222,7 +238,51 @@ def cancel_tool_run(
     run_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ToolRunResponse:
-    return _to_run_response(container.tool_service.cancel_tool_run(run_id))
+    try:
+        return _to_run_response(container.tool_service.cancel_tool_run(run_id))
+    except ToolRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@router.post(
+    "/runs/{run_id}/retry",
+    response_model=ToolRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def retry_tool_run(
+    run_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> ToolRunResponse:
+    try:
+        original = container.tool_service.get_tool_run(run_id)
+        authorize_tool_run(
+            container,
+            tool_id=original.tool_id,
+            mode=original.target.mode,
+            strategy=original.target.strategy,
+            environment=original.target.environment,
+            interface_name="http",
+        )
+        return _to_run_response(await container.tool_service.retry_tool_run(run_id))
+    except ToolRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ToolValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.post("/workers/prune-expired", response_model=PruneExpiredToolWorkersResponse)
+def prune_expired_tool_workers(
+    container: Annotated[AppContainer, Depends(get_container)],
+    retention_seconds: int = 3600,
+) -> PruneExpiredToolWorkersResponse:
+    result = container.tool_service.prune_expired_workers(
+        retention_seconds=retention_seconds,
+    )
+    return PruneExpiredToolWorkersResponse(
+        pruned_count=int(result["pruned_count"]),
+        worker_ids=[str(item) for item in result["worker_ids"]],
+        cutoff=format_datetime_utc(result["cutoff"]),
+    )
 
 
 def _to_response(tool) -> ToolResponse:
@@ -242,6 +302,11 @@ def _to_response(tool) -> ToolResponse:
         ],
         tags=list(tool.tags),
         required_effect_ids=list(tool.required_effect_ids),
+        access_requirements=list(tool.access_requirements),
+        access_requirement_sets=[
+            list(requirement_set)
+            for requirement_set in tool.access_requirement_sets
+        ],
         execution_policy=ToolExecutionPolicyResponse(
             timeout_seconds=tool.execution_policy.timeout_seconds,
             requires_confirmation=tool.execution_policy.requires_confirmation,
@@ -297,33 +362,17 @@ def _to_run_response(tool_run) -> ToolRunResponse:
         ),
         output_payload=tool_run.output_payload,
         error_message=tool_run.error_message,
-        created_at=tool_run.created_at.isoformat(),
-        started_at=(
-            tool_run.started_at.isoformat()
-            if tool_run.started_at is not None
-            else None
-        ),
-        completed_at=(
-            tool_run.completed_at.isoformat()
-            if tool_run.completed_at is not None
-            else None
-        ),
+        created_at=format_datetime_utc(tool_run.created_at),
+        started_at=format_optional_datetime_utc(tool_run.started_at),
+        completed_at=format_optional_datetime_utc(tool_run.completed_at),
         attempt_count=tool_run.attempt_count,
         max_attempts=tool_run.max_attempts,
         worker_id=tool_run.worker_id,
-        heartbeat_at=(
-            tool_run.heartbeat_at.isoformat()
-            if tool_run.heartbeat_at is not None
-            else None
+        heartbeat_at=format_optional_datetime_utc(tool_run.heartbeat_at),
+        lease_expires_at=format_optional_datetime_utc(
+            tool_run.lease_expires_at,
         ),
-        lease_expires_at=(
-            tool_run.lease_expires_at.isoformat()
-            if tool_run.lease_expires_at is not None
-            else None
-        ),
-        cancel_requested_at=(
-            tool_run.cancel_requested_at.isoformat()
-            if tool_run.cancel_requested_at is not None
-            else None
+        cancel_requested_at=format_optional_datetime_utc(
+            tool_run.cancel_requested_at,
         ),
     )

@@ -230,8 +230,8 @@ def render_memory_search_result(
     used_chars = 0
     for hit in hits:
         snippet = hit.snippet.strip()
-        projected_chars = used_chars + len(snippet)
-        if accepted > 0 and projected_chars > MAX_MEMORY_SEARCH_INJECTED_CHARS:
+        candidate_chars = used_chars + len(snippet)
+        if accepted > 0 and candidate_chars > MAX_MEMORY_SEARCH_INJECTED_CHARS:
             break
         citation = memory_citation(hit.path, hit.start_line, hit.end_line)
         lines.extend(
@@ -246,7 +246,7 @@ def render_memory_search_result(
             ],
         )
         accepted += 1
-        used_chars = projected_chars
+        used_chars = candidate_chars
     return "\n".join(lines).strip()
 
 

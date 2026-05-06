@@ -27,12 +27,21 @@ class InMemoryLlmInvocationRepository:
     def get(self, invocation_id: str) -> LlmInvocation | None:
         return self._items.get(invocation_id)
 
-    def list(self, *, llm_id: str | None = None) -> list[LlmInvocation]:
+    def list(
+        self,
+        *,
+        llm_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[LlmInvocation]:
         items = sorted(
             self._items.values(),
             key=lambda invocation: invocation.created_at,
             reverse=True,
         )
-        if llm_id is None:
-            return items
-        return [item for item in items if item.llm_id == llm_id]
+        if llm_id is not None:
+            items = [item for item in items if item.llm_id == llm_id]
+        start = max(int(offset), 0)
+        if limit is None:
+            return items[start:]
+        return items[start : start + max(int(limit), 0)]

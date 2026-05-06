@@ -49,6 +49,10 @@ from tests.unit.support import (
     fixture_path,
     openapi_fixture_path,
 )
+from tests.unit.orchestration_test_support import (
+    assign_next_orchestration_assignment,
+    process_next_orchestration_assignment,
+)
 
 
 class _FakeStreamResponse:
@@ -56,17 +60,24 @@ class _FakeStreamResponse:
         self,
         *,
         status_code: int = 200,
-        events: tuple[tuple[str, dict[str, object]], ...] = (),
+        events: tuple[tuple[str | None, dict[str, object]], ...] = (),
         text: str = "",
     ) -> None:
         self.status_code = status_code
         self._events = events
         self.text = text
+        self.iter_lines_chunk_size: int | None = None
 
-    def iter_lines(self, decode_unicode: bool = False):  # noqa: ANN001
+    def iter_lines(
+        self,
+        chunk_size: int | None = None,
+        decode_unicode: bool = False,
+    ):  # noqa: ANN001
+        self.iter_lines_chunk_size = chunk_size
         del decode_unicode
         for event_name, payload in self._events:
-            yield f"event: {event_name}".encode("utf-8")
+            if event_name is not None:
+                yield f"event: {event_name}".encode("utf-8")
             yield f"data: {json.dumps(payload)}".encode("utf-8")
             yield b""
 
@@ -173,6 +184,14 @@ class _SequentialResultAdapter:
 class HttpModuleTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_browser_state_dir = os.environ.get("APP_BROWSER_STATE_DIR")
+        self.previous_channels_state_dir = os.environ.get("APP_CHANNELS_STATE_DIR")
+        self.previous_channel_profile_paths = os.environ.get(
+            "APP_CHANNEL_PROFILE_PATHS",
+        )
+        self.previous_events_state_dir = os.environ.get("APP_EVENTS_STATE_DIR")
+        self.previous_operations_state_dir = os.environ.get("APP_OPERATIONS_STATE_DIR")
+        self.previous_events_backend = os.environ.get("APP_EVENTS_BACKEND")
+        self.previous_events_redis_url = os.environ.get("APP_EVENTS_REDIS_URL")
         self.previous_openapi_provider_paths = os.environ.get(
             "APP_TOOL_OPENAPI_PROVIDER_PATHS",
         )
@@ -209,6 +228,18 @@ class HttpModuleTestCase(unittest.TestCase):
         os.environ["APP_BROWSER_STATE_DIR"] = str(
             Path(self.harness._tempdir.name) / "browser",
         )
+        os.environ["APP_CHANNELS_STATE_DIR"] = str(
+            Path(self.harness._tempdir.name) / "channels",
+        )
+        os.environ["APP_CHANNEL_PROFILE_PATHS"] = os.pathsep
+        os.environ["APP_EVENTS_BACKEND"] = "file"
+        os.environ.pop("APP_EVENTS_REDIS_URL", None)
+        os.environ["APP_EVENTS_STATE_DIR"] = str(
+            Path(self.harness._tempdir.name) / "events",
+        )
+        os.environ["APP_OPERATIONS_STATE_DIR"] = str(
+            Path(self.harness._tempdir.name) / "operations",
+        )
         self.client = TestClient(create_app(database_url=self.harness.database_url))
 
     def tearDown(self) -> None:
@@ -222,6 +253,34 @@ class HttpModuleTestCase(unittest.TestCase):
             os.environ.pop("APP_BROWSER_STATE_DIR", None)
         else:
             os.environ["APP_BROWSER_STATE_DIR"] = self.previous_browser_state_dir
+        if self.previous_channels_state_dir is None:
+            os.environ.pop("APP_CHANNELS_STATE_DIR", None)
+        else:
+            os.environ["APP_CHANNELS_STATE_DIR"] = self.previous_channels_state_dir
+        if self.previous_channel_profile_paths is None:
+            os.environ.pop("APP_CHANNEL_PROFILE_PATHS", None)
+        else:
+            os.environ["APP_CHANNEL_PROFILE_PATHS"] = (
+                self.previous_channel_profile_paths
+            )
+        if self.previous_events_state_dir is None:
+            os.environ.pop("APP_EVENTS_STATE_DIR", None)
+        else:
+            os.environ["APP_EVENTS_STATE_DIR"] = self.previous_events_state_dir
+        if self.previous_operations_state_dir is None:
+            os.environ.pop("APP_OPERATIONS_STATE_DIR", None)
+        else:
+            os.environ["APP_OPERATIONS_STATE_DIR"] = (
+                self.previous_operations_state_dir
+            )
+        if self.previous_events_backend is None:
+            os.environ.pop("APP_EVENTS_BACKEND", None)
+        else:
+            os.environ["APP_EVENTS_BACKEND"] = self.previous_events_backend
+        if self.previous_events_redis_url is None:
+            os.environ.pop("APP_EVENTS_REDIS_URL", None)
+        else:
+            os.environ["APP_EVENTS_REDIS_URL"] = self.previous_events_redis_url
         if self.previous_openapi_provider_paths is None:
             os.environ.pop("APP_TOOL_OPENAPI_PROVIDER_PATHS", None)
         else:
@@ -232,6 +291,7 @@ class HttpModuleTestCase(unittest.TestCase):
 
 __all__ = [
     "AgentProfileSettings",
+    "assign_next_orchestration_assignment",
     "FakeCdpServer",
     "FakeChromeMcpClientPool",
     "FakePlaywrightCdpSessionPool",
@@ -273,6 +333,7 @@ __all__ = [
     "openapi_fixture_path",
     "os",
     "patch",
+    "process_next_orchestration_assignment",
     "replace",
     "shutil",
     "sys",

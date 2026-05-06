@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 
-from crxzipple.modules.orchestration.application import ResolveSessionBundleInput
-from crxzipple.modules.session.application import EnsureSessionInput
+from crxzipple.modules.session.application import EnsureSessionInput, ResolveSessionInput
 from crxzipple.modules.session.domain import (
-    SessionDelivery,
     SessionOrigin,
+    SessionReply,
     SessionResetPolicy,
     SessionRouteContext,
     SessionRuntimeBinding,
@@ -58,12 +57,12 @@ def build_session_origin(
     return SessionOrigin.from_payload(dict(payload))
 
 
-def build_session_delivery(
+def build_session_reply(
     payload: Mapping[str, object] | None,
-) -> SessionDelivery | None:
+) -> SessionReply | None:
     if payload is None:
         return None
-    return SessionDelivery.from_payload(dict(payload))
+    return SessionReply.from_payload(dict(payload))
 
 
 def build_reset_policy(
@@ -88,7 +87,7 @@ def build_ensure_session_input(
     channel: str | None = None,
     chat_type: str | None = None,
     origin_payload: Mapping[str, object] | None = None,
-    delivery_payload: Mapping[str, object] | None = None,
+    reply_payload: Mapping[str, object] | None = None,
     metadata: Mapping[str, object] | None = None,
     active_session_id: str | None = None,
     error_factory: SessionInterfaceErrorFactory,
@@ -106,13 +105,13 @@ def build_ensure_session_input(
         channel=channel,
         chat_type=chat_type,
         origin=build_session_origin(origin_payload),
-        delivery=build_session_delivery(delivery_payload),
+        reply=build_session_reply(reply_payload),
         metadata=dict(metadata or {}),
         active_session_id=active_session_id,
     )
 
 
-def build_resolve_session_bundle_input(
+def build_resolve_session_input(
     *,
     agent_id: str,
     channel: str | None = None,
@@ -130,8 +129,8 @@ def build_resolve_session_bundle_input(
     ensure: bool = False,
     touch_activity: bool = True,
     reset_policy: SessionResetPolicy | None = None,
-) -> ResolveSessionBundleInput:
-    return ResolveSessionBundleInput(
+) -> ResolveSessionInput:
+    return ResolveSessionInput(
         context=SessionRouteContext(
             agent_id=agent_id,
             channel=channel,

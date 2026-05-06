@@ -44,9 +44,14 @@ class SkillsHttpTestCase(HttpModuleTestCase):
             validate_payload = validate_response.json()
             self.assertEqual(validate_payload["name"], "release-ops")
             self.assertEqual(validate_payload["version"], "1.2.0")
+            self.assertNotIn("allowed_tools", validate_payload["manifest"])
             self.assertEqual(
-                validate_payload["manifest"]["allowed_tools"],
+                validate_payload["requirements"]["suggested_tools"],
                 ["memory_search", "memory_read"],
+            )
+            self.assertEqual(
+                validate_payload["requirements"]["required_tools"],
+                ["memory_search"],
             )
 
             install_response = self.client.post(
@@ -75,6 +80,21 @@ class SkillsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(workspace_list_response.status_code, 200)
             workspace_names = [item["name"] for item in workspace_list_response.json()]
             self.assertEqual(workspace_names, ["memory-recall", "release-ops"])
+            container = self.client.app.state.container
+            validate_records = container.events_service.read_recent_event_topic(
+                "events.named.skills.package.validate_succeeded",
+                limit=10,
+            )
+            install_records = container.events_service.read_recent_event_topic(
+                "events.named.skills.package.install_succeeded",
+                limit=10,
+            )
+            self.assertTrue(
+                any(record.envelope.payload.get("skill") == "release-ops" for record in validate_records)
+            )
+            self.assertTrue(
+                any(record.envelope.payload.get("skill") == "release-ops" for record in install_records)
+            )
 
 
 if __name__ == "__main__":

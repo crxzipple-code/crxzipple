@@ -1,8 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+from time import perf_counter
 
+from crxzipple.modules.memory.application.contracts import (
+    MemoryIndexManagerPort,
+    MemoryStorePort,
+)
+from crxzipple.modules.memory.application.events import (
+    MEMORY_WRITE_FAILED_EVENT,
+    MEMORY_WRITE_SUCCEEDED_EVENT,
+    MemoryEventEmitter,
+    emit_memory_event,
+)
 from crxzipple.modules.memory.application.indexing import (
     SearchMemoryIndexService,
     SyncMemoryIndexService,
@@ -14,22 +26,21 @@ from crxzipple.modules.memory.application.models import (
     MemoryUseContext,
     MemoryWriteResult,
 )
-from crxzipple.modules.memory.infrastructure.indexing import FileMemoryIndexManager
-from crxzipple.modules.memory.infrastructure.storage import FileMemoryStore
-
 
 @dataclass(slots=True)
 class FileBackedMemoryService:
-    store: FileMemoryStore = field(default_factory=FileMemoryStore)
-    index_manager: FileMemoryIndexManager = field(default_factory=FileMemoryIndexManager)
+    store: MemoryStorePort
+    index_manager: MemoryIndexManagerPort
     sync_index: SyncMemoryIndexService | None = None
     search_index: SearchMemoryIndexService | None = None
+    event_emitter: MemoryEventEmitter | None = None
 
     def __post_init__(self) -> None:
         if self.sync_index is None:
             self.sync_index = self.index_manager.sync_service
         if self.search_index is None:
             self.search_index = self.index_manager.search_service
+        self._wire_event_emitter()
 
     def list_files(
         self,
@@ -85,15 +96,16 @@ class FileBackedMemoryService:
         title: str | None = None,
         now: datetime | None = None,
     ) -> MemoryWriteResult:
-        result = self.store.append_daily(
+        return self._write(
             context=context,
-            content=content,
-            title=title,
-            now=now,
+            operation="append_daily",
+            writer=lambda: self.store.append_daily(
+                context=context,
+                content=content,
+                title=title,
+                now=now,
+            ),
         )
-        assert self.sync_index is not None
-        self.sync_index.mark_dirty(context=context, changed_paths=(result.path,))
-        return result
 
     def write_long_term(
         self,
@@ -101,15 +113,16 @@ class FileBackedMemoryService:
         context: MemoryUseContext,
         content: str,
     ) -> MemoryWriteResult:
-        result = self.store.write_long_term(
+        return self._write(
             context=context,
-            content=content,
+            operation="write_long_term",
+            writer=lambda: self.store.write_long_term(
+                context=context,
+                content=content,
+            ),
         )
-        assert self.sync_index is not None
-        self.sync_index.mark_dirty(context=context, changed_paths=(result.path,))
-        return result
 
-    def archive_session(
+    def write_archive(
         self,
         *,
         context: MemoryUseContext,
@@ -117,12 +130,65 @@ class FileBackedMemoryService:
         slug: str | None = None,
         now: datetime | None = None,
     ) -> MemoryWriteResult:
-        result = self.store.archive_session(
+        return self._write(
             context=context,
-            content=content,
-            slug=slug,
-            now=now,
+            operation="write_archive",
+            writer=lambda: self.store.write_archive(
+                context=context,
+                content=content,
+                slug=slug,
+                now=now,
+            ),
         )
-        assert self.sync_index is not None
-        self.sync_index.mark_dirty(context=context, changed_paths=(result.path,))
+
+    def _wire_event_emitter(self) -> None:
+        if self.sync_index is not None:
+            self.sync_index.event_emitter = self.event_emitter
+        if self.search_index is not None:
+            self.search_index.event_emitter = self.event_emitter
+
+    def _write(
+        self,
+        *,
+        context: MemoryUseContext,
+        operation: str,
+        writer: Callable[[], MemoryWriteResult],
+    ) -> MemoryWriteResult:
+        started_at = perf_counter()
+        try:
+            result = writer()
+            assert self.sync_index is not None
+            self.sync_index.mark_dirty(context=context, changed_paths=(result.path,))
+        except Exception as exc:
+            emit_memory_event(
+                self.event_emitter,
+                MEMORY_WRITE_FAILED_EVENT,
+                context=context,
+                status="failed",
+                level="error",
+                payload={
+                    "operation": operation,
+                    "duration_ms": _duration_ms(started_at),
+                    "error_message": str(exc),
+                },
+            )
+            raise
+        emit_memory_event(
+            self.event_emitter,
+            MEMORY_WRITE_SUCCEEDED_EVENT,
+            context=context,
+            status="succeeded",
+            payload={
+                "operation": operation,
+                "path": result.path,
+                "kind": result.kind,
+                "line_start": result.line_start,
+                "line_end": result.line_end,
+                "duration_ms": _duration_ms(started_at),
+            },
+        )
         return result
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))

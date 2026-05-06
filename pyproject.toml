@@ -11,9 +11,15 @@ requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.15,<1.16",
     "fastapi>=0.135,<0.136",
+    "httpx>=0.28,<0.29",
+    "lark-oapi>=1.5,<2.0",
+    "opencv-python-headless>=4.10,<5.0",
     "Pillow>=11.0,<12.0",
+    "paddleocr>=2.7,<3.0",
     "playwright>=1.52,<1.53",
+    "psycopg[binary]>=3.2,<3.3",
     "PyYAML>=6.0,<7.0",
+    "redis>=5.0,<6.0",
     "requests>=2.32,<2.33",
     "sqlalchemy>=2.0,<2.1",
     "typer>=0.17,<0.18",
@@ -25,7 +31,6 @@ dependencies = [
 [project.scripts]
 crxzipple = "crxzipple.main:main"
 crxzipple-api = "crxzipple.interfaces.http.app:run"
-crxzipple-tool-worker = "crxzipple.modules.tool.interfaces.worker_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

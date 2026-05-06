@@ -10,9 +10,6 @@ from crxzipple.modules.memory.application.indexing import (
 from crxzipple.modules.memory.application.contracts import MemoryEmbeddingProvider
 from crxzipple.modules.memory.application.models import MemorySearchHit, MemoryUseContext
 from crxzipple.modules.memory.domain import MemoryChunkingPolicy
-from crxzipple.modules.memory.infrastructure.indexing.embeddings import (
-    LocalHashedMemoryEmbeddingProvider,
-)
 from crxzipple.modules.memory.infrastructure.indexing.sqlite_index_store import (
     SqliteMemoryIndexStore,
 )
@@ -27,13 +24,17 @@ class FileMemoryIndexManager:
     overlap_chars: int = 320
     index_store: SqliteMemoryIndexStore = field(default_factory=SqliteMemoryIndexStore)
     source_scanner: MarkdownMemorySourceScanner = field(default_factory=MarkdownMemorySourceScanner)
-    embedding_provider: MemoryEmbeddingProvider = field(
-        default_factory=LocalHashedMemoryEmbeddingProvider,
-    )
+    embedding_provider: MemoryEmbeddingProvider | None = None
     sync_service: SyncMemoryIndexService = field(init=False)
     search_service: SearchMemoryIndexService = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.embedding_provider is None:
+            from crxzipple.modules.memory.infrastructure.indexing.embeddings import (
+                LocalHashedMemoryEmbeddingProvider,
+            )
+
+            self.embedding_provider = LocalHashedMemoryEmbeddingProvider()
         policy = MemoryChunkingPolicy(
             chunk_chars=self.chunk_chars,
             overlap_chars=self.overlap_chars,

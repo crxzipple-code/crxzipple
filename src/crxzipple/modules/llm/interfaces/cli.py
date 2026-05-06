@@ -95,6 +95,8 @@ def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfil
         base_url=profile.base_url,
         credential_binding=profile.credential_binding,
         timeout_seconds=profile.timeout_seconds,
+        max_concurrency=profile.max_concurrency,
+        concurrency_key=profile.concurrency_key,
         source_kind=LlmSourceKind(profile.source_kind),
         enabled=profile.enabled,
     )
@@ -139,6 +141,17 @@ def build_cli() -> typer.Typer:
             help="Credential binding reference.",
         ),
         timeout_seconds: int = typer.Option(60, help="Invocation timeout in seconds."),
+        max_concurrency: int | None = typer.Option(
+            None,
+            "--max-concurrency",
+            min=1,
+            help="Optional per-concurrency-key LLM invocation limit.",
+        ),
+        concurrency_key: str | None = typer.Option(
+            None,
+            "--concurrency-key",
+            help="Optional key shared by profiles that should use one LLM limit.",
+        ),
         enabled: bool = typer.Option(True, "--enabled/--disabled"),
     ) -> None:
         container = ensure_container(ctx)
@@ -160,6 +173,8 @@ def build_cli() -> typer.Typer:
                 base_url=base_url,
                 credential_binding=credential_binding,
                 timeout_seconds=timeout_seconds,
+                max_concurrency=max_concurrency,
+                concurrency_key=concurrency_key,
                 enabled=enabled,
             ),
         )

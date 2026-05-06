@@ -5,35 +5,36 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from crxzipple.modules.orchestration.application import (
-    AcceptOrchestrationRunInput,
-    AdvanceOrchestrationRunInput,
-    CompleteOrchestrationRunInput,
-    EnqueueOrchestrationRunInput,
-    FailOrchestrationRunInput,
-    PrepareSessionRunInput,
+    AdvanceAssignmentInput,
+    CompleteAssignmentInput,
+    FailAssignmentInput,
     RequestDueHeartbeatsInput,
     ResumeOrchestrationRunInput,
-    WaitOnToolInput,
+    SubmitOrchestrationTurnInput,
+    WaitAssignmentOnToolInput,
 )
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationRunStage,
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
-    DeliveryTargetDTO,
     InboundInstructionDTO,
     OrchestrationErrorDTO,
     OrchestrationRunDTO,
+    ReplyTargetDTO,
 )
 from crxzipple.modules.orchestration.interfaces.shared import (
-    build_accept_run_input,
-    build_delivery_target,
     build_inbound_instruction,
-    build_prepare_session_run_input,
+    build_reply_target,
     build_reset_policy,
     build_session_route_context,
+    build_submit_turn_input,
 )
 from crxzipple.modules.session.domain import DirectSessionScope
+from crxzipple.shared.time import (
+    format_datetime_utc,
+    format_optional_datetime_utc,
+)
 
 
 class InboundInstructionRequest(BaseModel):
@@ -49,20 +50,19 @@ class InboundInstructionRequest(BaseModel):
         )
 
 
-class DeliveryTargetRequest(BaseModel):
+class ReplyTargetRequest(BaseModel):
     interface_name: str
     address: str | None = None
     reply_to: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
     def to_value_object(self):
-        return build_delivery_target(
+        return build_reply_target(
             interface_name=self.interface_name,
             address=self.address,
             reply_to=self.reply_to,
             metadata=self.metadata,
         )
-
 
 class SessionRouteRequest(BaseModel):
     agent_id: str
@@ -112,7 +112,7 @@ class IntakeOrchestrationRunRequest(BaseModel):
     inbound_instruction: InboundInstructionRequest
     session: SessionRouteRequest
     llm_id: str | None = None
-    delivery_target: DeliveryTargetRequest | None = None
+    reply_target: ReplyTargetRequest | None = None
     run_id: str | None = None
     queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.FIFO
     priority: int = 100
@@ -122,43 +122,37 @@ class IntakeOrchestrationRunRequest(BaseModel):
     touch_activity: bool = True
     reset_policy: ResetPolicyRequest | None = None
 
-    def to_accept_input(self) -> AcceptOrchestrationRunInput:
-        return build_accept_run_input(
+    def to_submit_input(self) -> SubmitOrchestrationTurnInput:
+        return build_submit_turn_input(
             source=self.inbound_instruction.source,
             content=self.inbound_instruction.content,
             inbound_metadata=self.inbound_instruction.metadata,
-            delivery_interface=(
-                self.delivery_target.interface_name
-                if self.delivery_target is not None
+            agent_id=self.session.agent_id,
+            llm_id=self.llm_id,
+            reply_interface=(
+                self.reply_target.interface_name
+                if self.reply_target is not None
                 else None
             ),
-            delivery_address=(
-                self.delivery_target.address
-                if self.delivery_target is not None
+            reply_address=(
+                self.reply_target.address
+                if self.reply_target is not None
                 else None
             ),
-            delivery_reply_to=(
-                self.delivery_target.reply_to
-                if self.delivery_target is not None
+            reply_to=(
+                self.reply_target.reply_to
+                if self.reply_target is not None
                 else None
             ),
-            delivery_metadata=(
-                self.delivery_target.metadata
-                if self.delivery_target is not None
+            reply_metadata=(
+                self.reply_target.metadata
+                if self.reply_target is not None
                 else None
             ),
             run_id=self.run_id,
             queue_policy=self.queue_policy,
             priority=self.priority,
             max_steps=self.max_steps,
-            metadata=self.metadata,
-        )
-
-    def to_prepare_input(self, *, run_id: str) -> PrepareSessionRunInput:
-        return build_prepare_session_run_input(
-            run_id=run_id,
-            agent_id=self.session.agent_id,
-            llm_id=self.llm_id,
             channel=self.session.channel,
             chat_type=self.session.chat_type,
             peer_id=self.session.peer_id,
@@ -177,29 +171,26 @@ class IntakeOrchestrationRunRequest(BaseModel):
                 if self.reset_policy is not None
                 else None
             ),
-            priority=self.priority,
             metadata=self.metadata,
         )
 
-    def to_enqueue_input(self, *, run_id: str) -> EnqueueOrchestrationRunInput:
-        return EnqueueOrchestrationRunInput(
-            run_id=run_id,
-            queue_policy=self.queue_policy,
-        )
 
-
-class ClaimNextRunRequest(BaseModel):
+class ClaimNextAssignmentRequest(BaseModel):
     worker_id: str
 
 
-class AdvanceRunRequest(BaseModel):
+class AssignmentWorkerRequest(BaseModel):
+    worker_id: str
+
+
+class AdvanceAssignmentRequest(BaseModel):
     worker_id: str
     stage: OrchestrationRunStage
     step_increment: int = Field(default=0, ge=0)
     metadata: dict[str, object] = Field(default_factory=dict)
 
-    def to_input(self, *, run_id: str) -> AdvanceOrchestrationRunInput:
-        return AdvanceOrchestrationRunInput(
+    def to_input(self, *, run_id: str) -> AdvanceAssignmentInput:
+        return AdvanceAssignmentInput(
             run_id=run_id,
             worker_id=self.worker_id,
             stage=self.stage,
@@ -208,7 +199,7 @@ class AdvanceRunRequest(BaseModel):
         )
 
 
-class HeartbeatRunRequest(BaseModel):
+class HeartbeatAssignmentRequest(BaseModel):
     worker_id: str
 
 
@@ -235,13 +226,13 @@ class RequestDueHeartbeatsRequest(BaseModel):
         )
 
 
-class WaitOnToolRequest(BaseModel):
+class WaitAssignmentOnToolRequest(BaseModel):
     worker_id: str
     pending_tool_run_ids: list[str] = Field(default_factory=list)
     reason: str | None = None
 
-    def to_input(self, *, run_id: str) -> WaitOnToolInput:
-        return WaitOnToolInput(
+    def to_input(self, *, run_id: str) -> WaitAssignmentOnToolInput:
+        return WaitAssignmentOnToolInput(
             run_id=run_id,
             worker_id=self.worker_id,
             pending_tool_run_ids=tuple(self.pending_tool_run_ids),
@@ -267,26 +258,26 @@ class ResumeRunRequest(BaseModel):
         )
 
 
-class CompleteRunRequest(BaseModel):
+class CompleteAssignmentRequest(BaseModel):
     worker_id: str
     result_payload: dict[str, object] = Field(default_factory=dict)
 
-    def to_input(self, *, run_id: str) -> CompleteOrchestrationRunInput:
-        return CompleteOrchestrationRunInput(
+    def to_input(self, *, run_id: str) -> CompleteAssignmentInput:
+        return CompleteAssignmentInput(
             run_id=run_id,
             worker_id=self.worker_id,
             result_payload=self.result_payload,
         )
 
 
-class FailRunRequest(BaseModel):
+class FailAssignmentRequest(BaseModel):
     message: str
     code: str = "orchestration_failed"
     details: dict[str, object] = Field(default_factory=dict)
     worker_id: str | None = None
 
-    def to_input(self, *, run_id: str) -> FailOrchestrationRunInput:
-        return FailOrchestrationRunInput(
+    def to_input(self, *, run_id: str) -> FailAssignmentInput:
+        return FailAssignmentInput(
             run_id=run_id,
             message=self.message,
             code=self.code,
@@ -305,21 +296,20 @@ class InboundInstructionResponse(BaseModel):
         return cls(source=dto.source, content=dto.content, metadata=dto.metadata)
 
 
-class DeliveryTargetResponse(BaseModel):
+class ReplyTargetResponse(BaseModel):
     interface_name: str
     address: str | None = None
     reply_to: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @classmethod
-    def from_dto(cls, dto: DeliveryTargetDTO) -> "DeliveryTargetResponse":
+    def from_dto(cls, dto: ReplyTargetDTO) -> "ReplyTargetResponse":
         return cls(
             interface_name=dto.interface_name,
             address=dto.address,
             reply_to=dto.reply_to,
             metadata=dto.metadata,
         )
-
 
 class OrchestrationErrorResponse(BaseModel):
     message: str
@@ -346,7 +336,7 @@ class OrchestrationRunResponse(BaseModel):
     pending_tool_run_ids: list[str] = Field(default_factory=list)
     waiting_reason: str | None = None
     inbound_instruction: InboundInstructionResponse
-    delivery_target: DeliveryTargetResponse | None = None
+    reply_target: ReplyTargetResponse | None = None
     result_payload: dict[str, object] | None = None
     error: OrchestrationErrorResponse | None = None
     worker_id: str | None = None
@@ -376,9 +366,9 @@ class OrchestrationRunResponse(BaseModel):
             inbound_instruction=InboundInstructionResponse.from_dto(
                 dto.inbound_instruction,
             ),
-            delivery_target=(
-                DeliveryTargetResponse.from_dto(dto.delivery_target)
-                if dto.delivery_target is not None
+            reply_target=(
+                ReplyTargetResponse.from_dto(dto.reply_target)
+                if dto.reply_target is not None
                 else None
             ),
             result_payload=dto.result_payload,
@@ -389,13 +379,9 @@ class OrchestrationRunResponse(BaseModel):
             ),
             worker_id=dto.worker_id,
             metadata=dto.metadata,
-            created_at=dto.created_at.isoformat(),
-            updated_at=dto.updated_at.isoformat(),
-            queued_at=dto.queued_at.isoformat() if dto.queued_at is not None else None,
-            started_at=dto.started_at.isoformat() if dto.started_at is not None else None,
-            completed_at=(
-                dto.completed_at.isoformat()
-                if dto.completed_at is not None
-                else None
-            ),
+            created_at=format_datetime_utc(dto.created_at),
+            updated_at=format_datetime_utc(dto.updated_at),
+            queued_at=format_optional_datetime_utc(dto.queued_at),
+            started_at=format_optional_datetime_utc(dto.started_at),
+            completed_at=format_optional_datetime_utc(dto.completed_at),
         )

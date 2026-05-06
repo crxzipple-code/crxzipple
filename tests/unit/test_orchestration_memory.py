@@ -4,7 +4,7 @@ from tests.unit.orchestration_test_support import *  # noqa: F403
 
 
 class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
-    def test_process_next_queued_run_does_not_extract_turn_memory_candidate(self) -> None:
+    def test_process_next_orchestration_assignment_does_not_implicitly_write_memory(self) -> None:
         adapter = _StaticTextAdapter(
             text=(
                 "Use effect-based approvals as the default human-facing approval unit, "
@@ -17,7 +17,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-candidate",
                 inbound_instruction=InboundInstruction(
@@ -26,7 +26,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -36,20 +36,19 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertNotIn("memory_candidate_count", processed.metadata)
-        self.assertNotIn("memory_candidate_ids", processed.metadata)
+        self.assertNotIn("inline_tool_run_ids", processed.result_payload or {})
 
-    def test_process_next_queued_run_injects_recalled_memory(self) -> None:
+    def test_process_next_orchestration_assignment_injects_recalled_memory(self) -> None:
         adapter = _StaticTextAdapter(text="approval answer from recalled memory")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -65,7 +64,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             runtime_preferences=AgentRuntimePreferences(workspace=workspace_dir.name),
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-recall",
                 inbound_instruction=InboundInstruction(
@@ -74,7 +73,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -84,11 +83,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -123,6 +122,8 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 "agent_instruction",
                 "runtime_context",
                 "flow_prompt",
+                "available_tools",
+                "session_tools",
                 "project_context",
                 "recalled_memory",
                 "skills_catalog",
@@ -139,7 +140,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             indexed_files = int(connection.execute("SELECT count(*) FROM files").fetchone()[0])
         self.assertGreater(indexed_files, 0)
 
-    def test_process_next_queued_run_includes_memory_recall_skill_without_auto_recall_on_normal_turn(
+    def test_process_next_orchestration_assignment_includes_memory_recall_skill_without_auto_recall_on_normal_turn(
         self,
     ) -> None:
         workspace_dir = tempfile.TemporaryDirectory()
@@ -158,13 +159,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             runtime_preferences=AgentRuntimePreferences(workspace=workspace_dir.name),
         )
 
-        first_run = self.container.orchestration_service.accept(
+        first_run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-normal-turn-initial",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=first_run.id,
                 context=SessionRouteContext(
@@ -174,14 +175,14 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=first_run.id),
         )
-        self.container.orchestration_service.process_next_queued_run(
+        process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-normal-turn-followup",
                 inbound_instruction=InboundInstruction(
@@ -190,7 +191,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -200,11 +201,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -215,12 +216,14 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             [
                 "agent_instruction",
                 "runtime_context",
+                "available_tools",
+                "session_tools",
                 "project_context",
                 "skills_catalog",
             ],
         )
 
-    def test_process_next_queued_run_can_search_and_get_memory_then_continue(
+    def test_process_next_orchestration_assignment_can_search_and_get_memory_then_continue(
         self,
     ) -> None:
         workspace_dir = tempfile.TemporaryDirectory()
@@ -244,7 +247,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             adapter,
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-search-get",
                 inbound_instruction=InboundInstruction(
@@ -253,7 +256,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -263,11 +266,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        completed = self.container.orchestration_service.process_next_queued_run(
+        completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -324,7 +327,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(memory_results[0].metadata["tool_name"], "memory_search")
         self.assertEqual(memory_results[1].metadata["tool_name"], "memory_read")
 
-    def test_process_next_queued_run_includes_session_start_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_session_start_flow_prompt(self) -> None:
         adapter = _StaticTextAdapter(text="hello from new session")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -332,13 +335,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-session-start-flow-prompt",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -348,11 +351,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -373,7 +376,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-    def test_process_next_queued_run_includes_compaction_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_compaction_flow_prompt(self) -> None:
         adapter = _StaticTextAdapter(text="compacted summary")
         self.container.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -381,7 +384,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-compaction-flow-prompt",
                 inbound_instruction=InboundInstruction(
@@ -390,7 +393,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -410,11 +413,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             }
             uow.orchestration_runs.add(current)
             uow.commit()
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -445,13 +448,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-initial-for-heartbeat",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -461,12 +464,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        self.container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(self.container, worker_id="worker-1")
 
-        heartbeat = self.container.orchestration_service.request_heartbeat(
+        heartbeat = self.container.orchestration_scheduler_service.request_heartbeat(
             RequestHeartbeatInput(
                 anchor_run_id=initial.id,
                 reason="scheduled_check",
@@ -476,7 +479,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(heartbeat.metadata["prompt_flow_hint"]["mode"], "heartbeat")
         self.assertEqual(heartbeat.metadata["heartbeat_request"]["basis"], "manual")
 
-        processed = self.container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -501,7 +504,6 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             [schema.name for schema in adapter.requests[-1].tool_schemas],
             [],
         )
-        self.assertNotIn("memory_candidate_count", processed.metadata)
 
     def test_heartbeat_prompt_mode_policy_hides_memory_tools_when_auth_is_enabled(
         self,
@@ -542,13 +544,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        initial = container.orchestration_service.accept(
+        initial = container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-auth-heartbeat-initial",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        container.orchestration_service.prepare_session_run(
+        container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -558,18 +560,18 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        container.orchestration_service.enqueue(
+        container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(container, worker_id="worker-1")
 
-        heartbeat = container.orchestration_service.request_heartbeat(
+        heartbeat = container.orchestration_scheduler_service.request_heartbeat(
             RequestHeartbeatInput(
                 anchor_run_id=initial.id,
                 reason="scheduled_check",
             ),
         )
-        processed = container.orchestration_service.process_next_queued_run(
+        processed = process_next_orchestration_assignment(container,
             worker_id="worker-1",
         )
 
@@ -612,13 +614,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             runtime_preferences=AgentRuntimePreferences(workspace=workspace_dir.name),
         )
 
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-initial-for-memory-flush",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -628,10 +630,10 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        initial_completed = self.container.orchestration_service.process_next_queued_run(
+        initial_completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert initial_completed is not None
@@ -644,7 +646,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        flush = self.container.orchestration_service.request_memory_flush(
+        flush = self.container.orchestration_scheduler_service.request_memory_flush(
             RequestMemoryFlushInput(
                 anchor_run_id=initial.id,
                 reason="manual memory flush",
@@ -654,7 +656,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(flush.metadata["prompt_flow_hint"]["mode"], "memory_flush")
         self.assertEqual(flush.metadata["memory_flush_request"]["basis"], "manual")
 
-        flushed = self.container.orchestration_service.process_next_queued_run(
+        flushed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         self.assertIsNotNone(flushed)
@@ -674,7 +676,6 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             ["memory_flush_skip", "memory_write_daily"],
         )
         self.assertEqual(adapter.requests[-1].overrides.get("tool_choice"), "required")
-        self.assertNotIn("memory_candidate_count", flushed.metadata)
 
         messages_after = self.container.session_service.list_messages(
             ListSessionMessagesInput(
@@ -707,13 +708,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             runtime_preferences=AgentRuntimePreferences(workspace=workspace_dir.name),
         )
 
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-initial-for-memory-flush-skip",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -723,12 +724,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        self.container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(self.container, worker_id="worker-1")
 
-        self.container.orchestration_service.request_memory_flush(
+        self.container.orchestration_scheduler_service.request_memory_flush(
             RequestMemoryFlushInput(anchor_run_id=initial.id),
         )
         context = self.container.memory_context_resolver.resolve("assistant")
@@ -738,7 +739,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             item.path
             for item in self.container.file_memory_service.list_files(context=context)
         ]
-        flushed = self.container.orchestration_service.process_next_queued_run(
+        flushed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -768,13 +769,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-flush-protocol-initial",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -784,15 +785,15 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        self.container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(self.container, worker_id="worker-1")
 
-        self.container.orchestration_service.request_memory_flush(
+        self.container.orchestration_scheduler_service.request_memory_flush(
             RequestMemoryFlushInput(anchor_run_id=initial.id),
         )
-        flushed = self.container.orchestration_service.process_next_queued_run(
+        flushed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -825,13 +826,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.container.local_tool_catalog.register(tool, echo)
 
         self._register_agent_and_llm()
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-memory-flush-surface-initial",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -841,15 +842,15 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        self.container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(self.container, worker_id="worker-1")
 
-        flush = self.container.orchestration_service.request_memory_flush(
+        flush = self.container.orchestration_scheduler_service.request_memory_flush(
             RequestMemoryFlushInput(anchor_run_id=initial.id),
         )
-        resolved = self.container.orchestration_service.engine.tool_resolver.resolve(flush)
+        resolved = self.container.orchestration_inspection_service.resolve_tools(flush)
         self.assertEqual(
             sorted(item.tool.id for item in resolved.tools),
             ["memory_flush_skip", "memory_write_daily"],
@@ -863,13 +864,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-initial-for-due-heartbeat",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -879,10 +880,10 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        self.container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(self.container, worker_id="worker-1")
 
         with self.container.session_service.uow_factory() as uow:
             session = uow.sessions.get("agent:assistant:main")
@@ -891,7 +892,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             uow.sessions.add(session)
             uow.commit()
 
-        requested = self.container.orchestration_service.request_due_heartbeats(
+        requested = self.container.orchestration_scheduler_service.request_due_heartbeats(
             RequestDueHeartbeatsInput(
                 idle_seconds=60,
                 limit=5,
@@ -905,7 +906,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             60,
         )
 
-        requested_again = self.container.orchestration_service.request_due_heartbeats(
+        requested_again = self.container.orchestration_scheduler_service.request_due_heartbeats(
             RequestDueHeartbeatsInput(
                 idle_seconds=60,
                 limit=5,
@@ -925,13 +926,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self._register_agent_and_llm()
 
-        initial = self.container.orchestration_service.accept(
+        initial = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-initial-for-compaction",
                 inbound_instruction=InboundInstruction(source="cli", content="first task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=initial.id,
                 context=SessionRouteContext(
@@ -941,22 +942,22 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=initial.id),
         )
-        initial_completed = self.container.orchestration_service.process_next_queued_run(
+        initial_completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert initial_completed is not None
 
-        compaction = self.container.orchestration_service.request_compaction(
+        compaction = self.container.orchestration_scheduler_service.request_compaction(
             RequestCompactionInput(
                 anchor_run_id=initial.id,
                 reason="manual compaction",
                 preserve="open tasks and constraints",
             ),
         )
-        compaction_completed = self.container.orchestration_service.process_next_queued_run(
+        compaction_completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -989,13 +990,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             [{"type": "text", "text": "compacted summary"}],
         )
 
-        followup = self.container.orchestration_service.accept(
+        followup = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-followup-after-compaction",
                 inbound_instruction=InboundInstruction(source="cli", content="what next?"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=followup.id,
                 context=SessionRouteContext(
@@ -1005,10 +1006,10 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=followup.id),
         )
-        self.container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+        process_next_orchestration_assignment(self.container, worker_id="worker-1")
 
         followup_request = adapter.requests[-1]
         transcript_contents = [
@@ -1074,13 +1075,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            initial = container.orchestration_service.accept(
+            initial = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-auto-compaction-initial",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=initial.id,
                     context=SessionRouteContext(
@@ -1090,12 +1091,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=initial.id),
             )
-            container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+            process_next_orchestration_assignment(container, worker_id="worker-1")
 
-            followup = container.orchestration_service.accept(
+            followup = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-auto-compaction-followup",
                     inbound_instruction=InboundInstruction(
@@ -1104,7 +1105,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=followup.id,
                     context=SessionRouteContext(
@@ -1114,11 +1115,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=followup.id),
             )
 
-            completed = container.orchestration_service.process_next_queued_run(
+            completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             self.assertIsNotNone(completed)
@@ -1136,7 +1137,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             self.assertEqual(adapter.requests[1].overrides.get("tool_choice"), "required")
             self.assertEqual(adapter.requests[2].tool_schemas, ())
 
-            completed_runs = container.orchestration_service.list_runs(
+            completed_runs = container.orchestration_run_query_service.list_runs(
                 status=OrchestrationRunStatus.COMPLETED,
             )
             self.assertEqual(
@@ -1160,9 +1161,6 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 1,
             )
 
-            queued_runs = container.orchestration_service.list_runs(
-                status=OrchestrationRunStatus.QUEUED,
-            )
             refreshed_session = container.session_service.get_session("agent:assistant:main")
             self.assertIn("run_id", refreshed_session.metadata["compaction"])
             self.assertNotIn("pending_run_id", refreshed_session.metadata["compaction"])
@@ -1224,13 +1222,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            initial = container.orchestration_service.accept(
+            initial = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-auto-prompt-threshold-initial",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=initial.id,
                     context=SessionRouteContext(
@@ -1240,12 +1238,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=initial.id),
             )
-            container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+            process_next_orchestration_assignment(container, worker_id="worker-1")
 
-            followup = container.orchestration_service.accept(
+            followup = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-auto-prompt-threshold-followup",
                     inbound_instruction=InboundInstruction(
@@ -1254,7 +1252,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=followup.id,
                     context=SessionRouteContext(
@@ -1264,11 +1262,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=followup.id),
             )
 
-            completed = container.orchestration_service.process_next_queued_run(
+            completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             self.assertIsNotNone(completed)
@@ -1279,7 +1277,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             self.assertEqual(completed.error.code, "context_budget_unrecoverable")
             self.assertIn("preflight_maintenance", completed.metadata)
 
-            completed_runs = container.orchestration_service.list_runs(
+            completed_runs = container.orchestration_run_query_service.list_runs(
                 status=OrchestrationRunStatus.COMPLETED,
             )
             self.assertEqual(
@@ -1362,13 +1360,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            initial = container.orchestration_service.accept(
+            initial = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-context-limit-initial",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=initial.id,
                     context=SessionRouteContext(
@@ -1378,18 +1376,18 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=initial.id),
             )
-            container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+            process_next_orchestration_assignment(container, worker_id="worker-1")
 
-            followup = container.orchestration_service.accept(
+            followup = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-context-limit-followup",
                     inbound_instruction=InboundInstruction(source="cli", content="continue"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=followup.id,
                     context=SessionRouteContext(
@@ -1399,11 +1397,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=followup.id),
             )
 
-            completed = container.orchestration_service.process_next_queued_run(
+            completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             self.assertIsNotNone(completed)
@@ -1415,7 +1413,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 "answer after context recovery",
             )
 
-            completed_runs = container.orchestration_service.list_runs(
+            completed_runs = container.orchestration_run_query_service.list_runs(
                 status=OrchestrationRunStatus.COMPLETED,
             )
             self.assertEqual(
@@ -1460,7 +1458,9 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         custom_harness.initialize_schema(settings=settings)
         container = custom_harness.build_container(settings=settings)
-        container.orchestration_service.engine.prompt_assembler.memory_flush_transcript_max_chars = 1_000
+        container.orchestration_inspection_service.set_memory_flush_transcript_max_chars(
+            1_000
+        )
         try:
             adapter = _SequentialResultAdapter(
                 "A" * 12_000,
@@ -1494,13 +1494,13 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            initial = container.orchestration_service.accept(
+            initial = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-memory-flush-cap-initial",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=initial.id,
                     context=SessionRouteContext(
@@ -1510,12 +1510,12 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=initial.id),
             )
-            container.orchestration_service.process_next_queued_run(worker_id="worker-1")
+            process_next_orchestration_assignment(container, worker_id="worker-1")
 
-            followup = container.orchestration_service.accept(
+            followup = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-memory-flush-cap-followup",
                     inbound_instruction=InboundInstruction(
@@ -1524,7 +1524,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=followup.id,
                     context=SessionRouteContext(
@@ -1534,11 +1534,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=followup.id),
             )
 
-            completed = container.orchestration_service.process_next_queued_run(
+            completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
 

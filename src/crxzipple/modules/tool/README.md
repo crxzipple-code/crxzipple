@@ -30,6 +30,31 @@ interfaces and reused by other bounded contexts such as `agent`.
 - Background execution handoff for local async runs
 - Runtime routing across `local`, `sandbox`, and `remote` adapters
 
+## Runtime organization
+
+The tool application is split into explicit runtime-facing services:
+
+- `ToolCatalogService` owns tool definitions, provider discovery, and
+  availability.
+- `ToolSubmissionService` validates requested tool targets, creates tool runs,
+  executes inline runs, and enqueues background runs.
+- `ToolBackgroundSchedulerService` assigns queued background tool runs to
+  available tool workers through the dispatch backend.
+- `ToolWorkerService` owns tool worker registration, heartbeats, assigned-run
+  execution, cancellation, recovery, and terminal lifecycle updates.
+- `ToolApplicationService` is the public tool application surface used by
+  interfaces and other modules. It does not own scheduler or worker runtime
+  methods.
+
+The scheduler and worker are intentionally separate. The scheduler decides which
+worker gets a queued background run. The worker executes assigned runs and may
+process multiple in-flight assignments concurrently through its async runtime
+loop when `max_in_flight > 1`.
+
+Tool workers report tool lifecycle state only. They do not complete or mutate an
+orchestration run. Orchestration observes terminal tool events and decides how to
+resume an outer agent run.
+
 ## What does not belong here
 
 - Conversation or session lifecycle
@@ -66,13 +91,24 @@ Those concerns should stay in other bounded contexts and reference tools by id.
   exhausted
 - Queued runs can be cancelled immediately, while running runs transition through
   `cancel_requested` before the worker closes them as `cancelled`
+- A single tool worker process can execute multiple I/O-heavy background runs
+  concurrently by running with `--max-in-flight > 1`; daemon-managed workers
+  default to `APP_TOOL_WORKER_MAX_IN_FLIGHT=4`
+- Background scheduling also applies per-capability run limits before claiming
+  work: image tools default to the worker capacity, while shared-state local
+  tools such as browser, command, workspace, mobile, and session tools default to
+  one in-flight run per capability group. Tune with
+  `APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY`,
+  `APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY`, and
+  `APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY`.
 - The sandbox runner isolates execution in a temporary working directory under
   `APP_SANDBOX_BASE_DIR`
 - `APP_SANDBOX_BACKEND` now selects `subprocess` or `docker`
 - Docker sandbox execution uses `APP_SANDBOX_DOCKER_BINARY` and
   `APP_SANDBOX_DOCKER_IMAGE`
-- The in-memory event bus is process-local, so background worker events are not
-  visible to the caller process yet
+- Cross-process worker wake-up and lifecycle observation require a shared events
+  backend. The in-memory backend is process-local and should be treated as a
+  test/local-single-process backend only.
 
 ## Current provider path
 

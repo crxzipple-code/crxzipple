@@ -1,0 +1,357 @@
+.operations-module-console {
+  --ops-gap: 6px;
+  --ops-panel-border: 1px solid var(--border-subtle);
+  --ops-panel-radius: var(--radius-2);
+  --ops-panel-bg: color-mix(in srgb, var(--surface-panel) 92%, transparent);
+  --ops-main-table-min-height: clamp(320px, calc(100dvh - var(--shell-topbar-height) - 440px), 520px);
+  --ops-side-card-min-height: 118px;
+
+  min-width: 0;
+}
+
+.operations-module-console :where(article, section, aside, div) {
+  min-width: 0;
+}
+
+.operations-module-console :where([class$="-status-strip"], [class*="-status-strip "], [class$="-main-grid"], [class*="-main-grid "]) {
+  align-items: start;
+  gap: var(--ops-gap);
+}
+
+.operations-module-console :where([class$="-status-strip"] > article, [class*="-status-strip "] > article) {
+  min-height: var(--ops-side-card-min-height);
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+.operations-module-console :where([class$="-side-panel"], [class*="-side-panel "], [class$="-side-stack"], [class*="-side-stack "]) {
+  align-content: start;
+  gap: var(--ops-gap);
+}
+
+.operations-module-console :where([class$="-side-panel"] > article, [class*="-side-panel "] > article, [class$="-side-stack"] > article, [class*="-side-stack "] > article) {
+  min-height: var(--ops-side-card-min-height);
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+.operations-module-console :where([class$="-table-panel"], [class*="-table-panel "], .table-panel) {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--ops-main-table-min-height);
+}
+
+.operations-module-console :where([class$="-table-panel"], [class*="-table-panel "], .table-panel) :where(.data-table) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.operations-module-console :where(.panel-empty, .table-empty) {
+  display: grid;
+  min-height: 54px;
+  place-items: center;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.operations-module-console :where(.metric--placeholder) {
+  min-height: 64px;
+}
+
+.operations-module-console :where(.detail-drawer, [class$="-drawer"], [class*="-drawer "], [class$="-detail-drawer"], [class*="-detail-drawer "], pre, .data-table) {
+  scrollbar-gutter: stable;
+}
+
+@media (min-width: 1241px) {
+  .operations-module-console {
+    display: flex !important;
+    flex-direction: column;
+    height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain;
+  }
+
+  .operations-module-console > :is(
+    header,
+    nav,
+    [class$="-alert"],
+    [class*="-alert "],
+    [class$="-action-strip"],
+    [class*="-action-strip "],
+    [class$="-write-composer"],
+    [class*="-write-composer "],
+    [class$="-metrics"],
+    [class*="-metrics "],
+    [class$="-metric-strip"],
+    [class*="-metric-strip "],
+    [class$="-status-strip"],
+    [class*="-status-strip "],
+    [class$="-overview-grid"],
+    [class*="-overview-grid "],
+    [class$="-tabs"],
+    [class*="-tabs "],
+    .orchestra-status-bar
+  ) {
+    flex: 0 0 auto;
+  }
+
+  .operations-module-console > :is(
+    [class$="-main-grid"],
+    [class*="-main-grid "],
+    [class$="-workspace"],
+    [class*="-workspace "],
+    [class$="-dashboard"],
+    [class*="-dashboard "],
+    [class$="-focus-grid"],
+    [class*="-focus-grid "],
+    .tool-dashboard-grid
+  ) {
+    flex: 1 1 auto;
+    align-items: stretch !important;
+    min-height: 0 !important;
+    overflow: hidden;
+  }
+
+  .operations-module-console :is(
+    [class$="-main-grid"],
+    [class*="-main-grid "],
+    [class$="-workspace"],
+    [class*="-workspace "],
+    [class$="-dashboard"],
+    [class*="-dashboard "],
+    [class$="-focus-grid"],
+    [class*="-focus-grid "],
+    [class$="-main"],
+    [class*="-main "],
+    [class$="-side"],
+    [class*="-side "],
+    [class$="-side-panel"],
+    [class*="-side-panel "],
+    [class$="-side-stack"],
+    [class*="-side-stack "],
+    [class$="-main-column"],
+    [class*="-main-column "],
+    [class$="-side-column"],
+    [class*="-side-column "]
+  ) {
+    min-height: 0 !important;
+  }
+
+  .operations-module-console :is(
+    [class$="-table-panel"],
+    [class*="-table-panel "],
+    .table-panel,
+    .orchestra-panel--focus-table
+  ) {
+    display: flex;
+    flex-direction: column;
+    min-height: 0 !important;
+    overflow: hidden;
+  }
+
+  .operations-module-console :is(
+    [class$="-side-panel"],
+    [class*="-side-panel "],
+    [class$="-side-stack"],
+    [class*="-side-stack "],
+    [class$="-side"],
+    [class*="-side "],
+    [class$="-side-column"],
+    [class*="-side-column "]
+  ) {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .operations-module-console :is(
+    [class$="-side-panel"],
+    [class*="-side-panel "],
+    [class$="-side-stack"],
+    [class*="-side-stack "],
+    [class$="-side"],
+    [class*="-side "],
+    [class$="-side-column"],
+    [class*="-side-column "]
+  ) > article {
+    display: flex;
+    flex-direction: column;
+    min-height: 0 !important;
+    overflow: hidden;
+  }
+
+  .operations-module-console :where(.data-table) {
+    min-height: 0;
+  }
+
+  .operations-module-console:is(
+    .access-console,
+    .channels-console,
+    .memory-console,
+    .skills-console,
+    .events-console,
+    .daemon-console
+  ) :is(
+    .access-status-strip,
+    .channels-status-strip,
+    .memory-status-strip,
+    .skills-status-strip,
+    .events-status-strip,
+    .daemon-status-strip,
+    .access-main-grid,
+    .channels-main-grid,
+    .memory-main-grid,
+    .skills-main-grid,
+    .events-main-grid,
+    .daemon-main-grid
+  ) {
+    align-items: stretch;
+  }
+
+  .operations-module-console:is(.access-console, .memory-console, .skills-console) :is(
+    .access-main-grid,
+    .memory-main-grid,
+    .skills-main-grid
+  ) {
+    grid-template-columns: minmax(0, 1fr) minmax(318px, 0.26fr);
+  }
+
+  .operations-module-console:is(.channels-console, .events-console, .daemon-console) :is(
+    .channels-main-grid,
+    .events-main-grid,
+    .daemon-main-grid
+  ) {
+    grid-template-columns: minmax(0, 1fr) minmax(306px, 0.25fr);
+  }
+
+  .operations-module-console:is(
+    .access-console,
+    .channels-console,
+    .memory-console,
+    .skills-console,
+    .events-console,
+    .daemon-console
+  ) :is(
+    .access-status-strip,
+    .channels-status-strip,
+    .memory-status-strip,
+    .skills-status-strip,
+    .events-status-strip,
+    .daemon-status-strip
+  ) > article,
+  .operations-module-console:is(
+    .access-console,
+    .channels-console,
+    .memory-console,
+    .skills-console,
+    .events-console,
+    .daemon-console
+  ) :is(
+    .access-side-panel,
+    .channels-side-panel,
+    .memory-side-panel,
+    .skills-side-panel,
+    .events-side-panel,
+    .daemon-side-panel
+  ) > article {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .operations-module-console:is(
+    .access-console,
+    .channels-console,
+    .memory-console,
+    .skills-console,
+    .events-console,
+    .daemon-console
+  ) :is(
+    .access-table-panel,
+    .channels-table-panel,
+    .memory-table-panel,
+    .skills-table-panel,
+    .events-table-panel,
+    .daemon-table-panel
+  ) {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .operations-module-console:is(
+    .access-console,
+    .channels-console,
+    .memory-console,
+    .skills-console,
+    .events-console,
+    .daemon-console
+  ) :is(
+    .access-side-panel,
+    .channels-side-panel,
+    .memory-side-panel,
+    .skills-side-panel,
+    .events-side-panel,
+    .daemon-side-panel
+  ) {
+    height: 100%;
+    align-content: stretch;
+  }
+
+  .memory-console .memory-side-panel,
+  .skills-console .skills-side-panel {
+    grid-template-rows: repeat(3, minmax(0, 1fr));
+  }
+
+  .access-console .access-side-panel {
+    grid-template-rows: minmax(0, 1.42fr) minmax(0, 0.78fr) minmax(0, 0.9fr);
+  }
+
+  .channels-console .channels-side-panel {
+    grid-template-rows: minmax(0, 1.26fr) minmax(0, 0.7fr) minmax(0, 0.88fr);
+  }
+
+  .events-console .events-side-panel {
+    grid-template-rows: minmax(0, 0.88fr) minmax(0, 1.08fr) minmax(0, 0.92fr);
+  }
+
+  .daemon-console .daemon-side-panel {
+    grid-template-rows: minmax(88px, 0.68fr) minmax(122px, 0.94fr) minmax(132px, 1.04fr) minmax(104px, 0.84fr);
+  }
+
+  .operations-module-console.daemon-console .links-panel {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: 6px;
+  }
+
+  .operations-module-console.daemon-console .links-panel h3,
+  .operations-module-console.daemon-console .links-panel .panel-empty {
+    grid-column: 1 / -1;
+  }
+
+  .operations-module-console.daemon-console .links-panel a {
+    min-height: 26px;
+    padding: 0 7px;
+  }
+
+  .daemon-console .state-panel .bar-list {
+    gap: 5px;
+  }
+
+  .daemon-console .daemon-side-panel .compact-empty {
+    min-height: 46px;
+  }
+
+  .memory-console .metric {
+    height: 68px;
+  }
+}
+
+@media (max-width: 760px) {
+  .operations-module-console {
+    --ops-side-card-min-height: 112px;
+    --ops-main-table-min-height: 360px;
+  }
+}

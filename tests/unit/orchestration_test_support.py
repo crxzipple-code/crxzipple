@@ -41,30 +41,33 @@ from crxzipple.modules.llm.domain import (
     ToolCallIntent,
 )
 from crxzipple.modules.orchestration.application import (
-    AcceptOrchestrationRunInput,
-    AdvanceOrchestrationRunInput,
-    CompleteOrchestrationRunInput,
-    EnqueueOrchestrationRunInput,
-    FailOrchestrationRunInput,
-    PrepareSessionRunInput,
+    AdvanceAssignmentInput,
     RequestCompactionInput,
     RequestDueHeartbeatsInput,
     RequestHeartbeatInput,
     RequestMemoryFlushInput,
     ResolveApprovalRequestInput,
+    WaitAssignmentOnToolInput,
+)
+from crxzipple.modules.orchestration.application.commands import (
+    CompleteAssignmentInput,
+    FailAssignmentInput,
     ResumeOrchestrationRunInput,
-    ResolveSessionBundleInput,
+)
+from crxzipple.modules.orchestration.application.intake_commands import (
+    AcceptOrchestrationRunInput,
+    EnqueueOrchestrationRunInput,
+    PrepareSessionRunInput,
     RouteOrchestrationRunInput,
-    WaitOnToolInput,
 )
 from crxzipple.modules.orchestration.domain import (
     ApprovalDecision,
-    DeliveryTarget,
     InboundInstruction,
     OrchestrationQueuePolicy,
     OrchestrationRunStage,
     OrchestrationRunStatus,
     OrchestrationValidationError,
+    ReplyTarget,
 )
 from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
@@ -582,6 +585,40 @@ class _SlowStaticTextAdapter:
         self.requests.append(request)
         time.sleep(self.delay_seconds)
         return LlmAdapterResponse(result=LlmResult(text=self.text))
+
+
+def assign_next_orchestration_assignment(
+    container,
+    *,
+    worker_id: str,
+    max_inflight_assignments: int = 1,
+):
+    container.orchestration_executor_service.heartbeat_executor(
+        worker_id=worker_id,
+        max_inflight_assignments=max_inflight_assignments,
+    )
+    return container.orchestration_scheduler_service.assign_next_assignment()
+
+
+def process_next_orchestration_assignment(
+    container,
+    *,
+    worker_id: str,
+    max_inflight_assignments: int = 1,
+):
+    container.orchestration_executor_service.heartbeat_executor(
+        worker_id=worker_id,
+        max_inflight_assignments=max_inflight_assignments,
+    )
+    assigned = container.orchestration_scheduler_service.assign_next_assignment()
+    if assigned is None:
+        return container.orchestration_executor_service.process_next_assigned_assignment(
+            worker_id=worker_id,
+        )
+    return container.orchestration_executor_service.process_assigned_assignment(
+        run_id=assigned.id,
+        worker_id=worker_id,
+    )
 
 
 

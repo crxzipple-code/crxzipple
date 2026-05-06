@@ -9,6 +9,7 @@ from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.session.application import (
     ListSessionInstancesInput,
     ListSessionMessagesInput,
+    SessionResolutionService,
 )
 from crxzipple.modules.session.domain import (
     SessionInstanceNotFoundError,
@@ -43,6 +44,11 @@ def _not_found(
     exc: SessionNotFoundError | SessionInstanceNotFoundError,
 ) -> HTTPException:
     return HTTPException(status_code=404, detail=str(exc))
+
+def _session_resolution_service(
+    container: AppContainer,
+) -> SessionResolutionService:
+    return container.session_resolution_service
 
 
 @router.post(
@@ -81,7 +87,8 @@ def resolve_session(
     payload: ResolveSessionRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ResolveSessionResponse:
-    bundle = container.orchestration_service.resolve_session_bundle(payload.to_input())
+    resolution_service = _session_resolution_service(container)
+    bundle = resolution_service.resolve(payload.to_input())
     return ResolveSessionResponse.from_dto(
         ResolveSessionDTO.from_result(bundle.resolution),
     )
@@ -128,6 +135,8 @@ def list_messages(
     container: Annotated[AppContainer, Depends(get_container)],
     limit: Annotated[int | None, Query(ge=1)] = None,
     active_session_only: Annotated[bool, Query()] = False,
+    after_sequence_no: Annotated[int | None, Query(ge=0)] = None,
+    before_sequence_no: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[SessionMessageResponse]:
     try:
         items = container.session_service.list_messages(
@@ -135,6 +144,8 @@ def list_messages(
                 session_key=session_key,
                 limit=limit,
                 active_session_only=active_session_only,
+                after_sequence_no=after_sequence_no,
+                before_sequence_no=before_sequence_no,
             ),
         )
     except SessionNotFoundError as exc:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from crxzipple.modules.agent.domain import AgentLlmRoutingPolicy
+from crxzipple.modules.access import AccessApplicationService
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
@@ -30,6 +32,7 @@ def _profile(
     profile_id: str,
     *,
     capabilities: tuple[LlmCapability, ...] = (),
+    credential_binding: str | None = None,
     enabled: bool = True,
 ) -> LlmProfile:
     return LlmProfile(
@@ -43,6 +46,7 @@ def _profile(
             else LlmModelFamily.GENERAL
         ),
         capabilities=capabilities,
+        credential_binding=credential_binding,
         enabled=enabled,
     )
 
@@ -224,6 +228,56 @@ class LlmResolverTestCase(unittest.TestCase):
                     ],
                 },
             )
+
+    def test_auto_skips_models_without_ready_access(self) -> None:
+        resolver = LlmResolver(
+            _FakeLlmPort(
+                _profile("missing-access", credential_binding="env:MISSING_LLM_TOKEN"),
+                _profile("ready-fallback", credential_binding="env:READY_LLM_TOKEN"),
+            ),
+            access_port=AccessApplicationService(),
+        )
+        routing_policy = AgentLlmRoutingPolicy(
+            default_llm_id="missing-access",
+            fallback_llm_ids=("ready-fallback",),
+        )
+
+        with patch.dict("os.environ", {"READY_LLM_TOKEN": "token"}):
+            resolved = resolver.resolve(
+                requested_llm_id="auto",
+                routing_policy=routing_policy,
+                input_content="hello",
+            )
+
+        self.assertEqual(resolved.resolved_llm_id, "ready-fallback")
+        self.assertEqual(resolved.strategy, "auto-default")
+
+    def test_explicit_model_with_missing_access_is_rejected(self) -> None:
+        resolver = LlmResolver(
+            _FakeLlmPort(
+                _profile("missing-access", credential_binding="env:MISSING_LLM_TOKEN"),
+            ),
+            access_port=AccessApplicationService(),
+        )
+        routing_policy = AgentLlmRoutingPolicy(default_llm_id="missing-access")
+
+        with self.assertRaises(OrchestrationValidationError) as caught:
+            resolver.resolve(
+                requested_llm_id="missing-access",
+                routing_policy=routing_policy,
+                input_content="hello",
+            )
+        self.assertEqual(caught.exception.code, "access_not_ready")
+        self.assertEqual(caught.exception.details["resource_type"], "llm_profile")
+        access = caught.exception.details["access"]
+        self.assertIsInstance(access, dict)
+        assert isinstance(access, dict)
+        self.assertEqual(access["requirement"], "env:MISSING_LLM_TOKEN")
+        self.assertEqual(access["status"], "setup_needed")
+        setup_flow = access["setup_flow"]
+        self.assertIsInstance(setup_flow, dict)
+        assert isinstance(setup_flow, dict)
+        self.assertEqual(setup_flow["kind"], "env")
 
 
 if __name__ == "__main__":

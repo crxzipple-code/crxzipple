@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 
 from crxzipple.modules.browser.domain import (
@@ -19,16 +21,59 @@ from crxzipple.modules.browser.infrastructure import (
     CdpBackedPlaywrightActionEngine,
     InMemoryBrowserRefStore,
 )
+from crxzipple.modules.daemon import (
+    DaemonApplicationService,
+    DaemonInstance,
+    DaemonServiceSpec,
+    FileBackedDaemonInstanceStore,
+    FileBackedDaemonLeaseStore,
+    FileBackedDaemonServiceSpecStore,
+    bootstrap_daemon_state_root,
+)
 from tests.unit.support import FakePlaywrightCdpSessionPool
 
 
 class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
+    def _build_daemon_service(self, root_dir: Path) -> DaemonApplicationService:
+        state_root = bootstrap_daemon_state_root(str(root_dir))
+        spec_store = FileBackedDaemonServiceSpecStore(
+            state_root.config_dir,
+            bootstrap_specs=(
+                DaemonServiceSpec(
+                    key="host:browser:crxzipple",
+                    role="host",
+                    managed_by="internal",
+                    transport="process",
+                    start_policy="ensure",
+                    restart_policy="on-failure",
+                ),
+            ),
+        )
+        return DaemonApplicationService(
+            service_spec_store=spec_store,
+            instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
+            lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+        )
+
     def setUp(self) -> None:
+        self._tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tempdir.cleanup)
+        self.daemon_service = self._build_daemon_service(Path(self._tempdir.name))
+        self.daemon_service.save_instance(
+            DaemonInstance(
+                id="browser-host-crxzipple",
+                service_key="host:browser:crxzipple",
+                status="ready",
+                pid=8123,
+                endpoint="http://127.0.0.1:9222",
+            )
+        )
         self.session_pool = FakePlaywrightCdpSessionPool()
         self.ref_store = InMemoryBrowserRefStore()
         self.engine = CdpBackedPlaywrightActionEngine(
             session_pool=self.session_pool,
             ref_store=self.ref_store,
+            daemon_service=self.daemon_service,
         )
         self.profile = ResolvedBrowserProfile(
             name="crxzipple",
@@ -107,6 +152,295 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertIn("type", [operation[0] for operation in page.operations])
         self.assertEqual(click_result.value["result"]["mode"], "direct")
 
+    def test_upload_uses_locator_set_input_files(self) -> None:
+        upload_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="upload",
+            target=BrowserActionTarget(target_id="tab-1", selector="#file-input"),
+            payload={"paths": ["/tmp/one.txt", "/tmp/two.txt"]},
+            timeout_ms=2500,
+        )
+
+        upload_result = self.engine.execute(
+            plan=self._plan(upload_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=upload_command,
+        )
+
+        self.assertTrue(upload_result.ok)
+        self.assertEqual(upload_result.value["engine"], "cdp-backed-playwright")
+        self.assertEqual(
+            upload_result.value["result"],
+            {
+                "kind": "upload",
+                "paths": ["/tmp/one.txt", "/tmp/two.txt"],
+            },
+        )
+
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        self.assertIn(
+            (
+                "set_input_files",
+                "#file-input",
+                ["/tmp/one.txt", "/tmp/two.txt"],
+                {"timeout": 2500.0},
+                (),
+            ),
+            page.operations,
+        )
+
+    def test_download_clicks_locator_and_serializes_file(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.queue_download(filename="report.csv", data=b"city,price\nkunming,320\n")
+        download_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="download",
+            target=BrowserActionTarget(target_id="tab-1", selector="#download"),
+            payload={"button": "left"},
+            timeout_ms=1800,
+        )
+
+        download_result = self.engine.execute(
+            plan=self._plan(download_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=download_command,
+        )
+
+        self.assertTrue(download_result.ok)
+        self.assertEqual(download_result.value["result"]["kind"], "download")
+        self.assertEqual(download_result.value["result"]["name"], "report.csv")
+        self.assertEqual(download_result.value["result"]["content_type"], "text/csv")
+        self.assertIn(("expect_download", {"timeout": 1800.0}), page.operations)
+        self.assertIn(("click", "#download", {"timeout": 1800.0, "button": "left"}, ()), page.operations)
+
+    def test_wait_download_waits_for_next_download_event(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.queue_download(filename="invoice.pdf", data=b"%PDF-1.4")
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="wait-download",
+            target=BrowserActionTarget(target_id="tab-1"),
+            timeout_ms=2200,
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value["result"]["kind"], "download")
+        self.assertEqual(result.value["result"]["name"], "invoice.pdf")
+        self.assertEqual(result.value["result"]["content_type"], "application/pdf")
+        self.assertIn(("wait_for_event", "download", {"timeout": 2200.0}), page.operations)
+
+    def test_dialog_waits_for_next_dialog_and_accepts_prompt(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.queue_dialog(
+            dialog_type="prompt",
+            message="Enter destination",
+            default_value="Kunming",
+        )
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="dialog",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"accept": True, "prompt_text": "Shanghai"},
+            timeout_ms=1700,
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value["result"]["kind"], "dialog")
+        self.assertEqual(result.value["result"]["type"], "prompt")
+        self.assertEqual(result.value["result"]["message"], "Enter destination")
+        self.assertEqual(result.value["result"]["default_value"], "Kunming")
+        self.assertEqual(result.value["result"]["handled_as"], "accept")
+        self.assertEqual(result.value["result"]["prompt_text"], "Shanghai")
+        self.assertIn(("wait_for_event", "dialog", {"timeout": 1700.0}), page.operations)
+        self.assertIn(("dialog.accept", "Shanghai"), page.operations)
+
+    def test_console_returns_buffered_messages_and_can_clear(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.emit_console(
+            text="Network fallback",
+            message_type="warning",
+            location={"url": "https://example.com/app.js", "lineNumber": 9, "columnNumber": 2},
+        )
+        page.emit_console(text="Boot complete", message_type="info")
+
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="console",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"level": "warn", "clear": True},
+            timeout_ms=1600,
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value["result"]["kind"], "console")
+        self.assertEqual(result.value["result"]["count"], 1)
+        self.assertEqual(result.value["result"]["messages"][0]["level"], "warn")
+        self.assertEqual(result.value["result"]["messages"][0]["text"], "Network fallback")
+        self.assertEqual(
+            result.value["result"]["messages"][0]["location"],
+            {
+                "url": "https://example.com/app.js",
+                "line_number": 9,
+                "column_number": 2,
+            },
+        )
+
+        follow_up = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="console",
+            target=BrowserActionTarget(target_id="tab-1"),
+        )
+        follow_up_result = self.engine.execute(
+            plan=self._plan(follow_up),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=follow_up,
+        )
+        self.assertEqual(follow_up_result.value["result"]["count"], 0)
+
+    def test_storage_supports_set_get_and_clear(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        set_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "storage_kind": "local",
+                "storage_operation": "set",
+                "storage_key": "theme",
+                "storage_value": "dark",
+            },
+        )
+        set_result = self.engine.execute(
+            plan=self._plan(set_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=set_command,
+        )
+        self.assertEqual(set_result.value["result"]["values"], {"theme": "dark"})
+        self.assertEqual(page.local_storage, {"theme": "dark"})
+
+        get_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "storage_kind": "local",
+                "storage_operation": "get",
+                "storage_key": "theme",
+            },
+        )
+        get_result = self.engine.execute(
+            plan=self._plan(get_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=get_command,
+        )
+        self.assertEqual(get_result.value["result"]["values"], {"theme": "dark"})
+
+        clear_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "storage_kind": "local",
+                "storage_operation": "clear",
+            },
+        )
+        clear_result = self.engine.execute(
+            plan=self._plan(clear_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=clear_command,
+        )
+        self.assertEqual(clear_result.value["result"]["values"], {})
+        self.assertEqual(page.local_storage, {})
+
+    def test_cookies_supports_set_get_and_clear(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        set_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="cookies",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "cookies_operation": "set",
+                "cookie": {
+                    "name": "session",
+                    "value": "abc123",
+                    "url": "https://example.com",
+                    "httpOnly": True,
+                },
+            },
+        )
+        set_result = self.engine.execute(
+            plan=self._plan(set_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=set_command,
+        )
+        self.assertEqual(set_result.value["result"]["count"], 1)
+        self.assertEqual(set_result.value["result"]["cookies"][0]["name"], "session")
+        self.assertEqual(page.browser_context.cookie_store[0]["value"], "abc123")
+
+        get_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="cookies",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "cookies_operation": "get",
+            },
+        )
+        get_result = self.engine.execute(
+            plan=self._plan(get_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=get_command,
+        )
+        self.assertEqual(get_result.value["result"]["count"], 1)
+        self.assertEqual(get_result.value["result"]["cookies"][0]["name"], "session")
+
+        clear_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="cookies",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "cookies_operation": "clear",
+            },
+        )
+        clear_result = self.engine.execute(
+            plan=self._plan(clear_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=clear_command,
+        )
+        self.assertEqual(clear_result.value["result"]["cookies"], [])
+        self.assertEqual(page.browser_context.cookie_store, [])
+
     def test_action_engine_prefers_runtime_cdp_url_over_profile_url(self) -> None:
         self.runtime_state.metadata["cdp_base_url"] = "http://localhost:18800"
         click_command = BrowserPageActionCommand(
@@ -128,6 +462,41 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
             self.session_pool.resolve_calls[-1]["cdp_url"],
             "http://localhost:18800",
         )
+
+    def test_execute_acquires_and_releases_host_daemon_lease_for_local_managed_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            daemon_service = self._build_daemon_service(Path(temp_dir))
+            daemon_service.save_instance(
+                DaemonInstance(
+                    id="browser-host-crxzipple",
+                    service_key="host:browser:crxzipple",
+                    status="ready",
+                    pid=8123,
+                    endpoint="http://127.0.0.1:9222",
+                )
+            )
+            engine = CdpBackedPlaywrightActionEngine(
+                session_pool=self.session_pool,
+                ref_store=self.ref_store,
+                daemon_service=daemon_service,
+            )
+            click_command = BrowserPageActionCommand(
+                profile_name="crxzipple",
+                kind="click",
+                target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+                payload={"button": "left"},
+            )
+
+            result = engine.execute(
+                plan=self._plan(click_command),
+                runtime_state=self.runtime_state,
+                tab=self.tab,
+                command=click_command,
+            )
+
+            self.assertTrue(result.ok)
+            leases = daemon_service.list_leases(service_key="host:browser:crxzipple")
+            self.assertEqual(leases, ())
 
     def test_click_falls_back_to_force_when_pointer_events_intercept(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")

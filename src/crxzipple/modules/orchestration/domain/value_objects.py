@@ -9,6 +9,7 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationValidationError,
 )
 from crxzipple.shared.domain import ValueObject
+from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 
 def utcnow() -> datetime:
@@ -23,6 +24,36 @@ class OrchestrationRunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class OrchestrationIngressStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class OrchestrationIngressRequestKind(StrEnum):
+    ROUTED_TURN = "routed_turn"
+    BOUND_TURN = "bound_turn"
+
+
+class OrchestrationSchedulerSignalStatus(StrEnum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class OrchestrationExecutorLeaseStatus(StrEnum):
+    ONLINE = "online"
+    DRAINING = "draining"
+    OFFLINE = "offline"
+
+
+class OrchestrationSchedulerSignalKind(StrEnum):
+    TOOL_TERMINAL = "tool_terminal"
+    SESSIONS_SPAWN_FOLLOWUP = "sessions_spawn_followup"
 
 
 class OrchestrationRunStage(StrEnum):
@@ -62,6 +93,64 @@ class ApprovalDecision(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class OrchestrationBoundSessionTarget(ValueObject):
+    agent_id: str
+    session_key: str
+    active_session_id: str
+    lane_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.agent_id.strip():
+            raise OrchestrationValidationError(
+                "Bound session target agent_id cannot be empty.",
+            )
+        if not self.session_key.strip():
+            raise OrchestrationValidationError(
+                "Bound session target session_key cannot be empty.",
+            )
+        if not self.active_session_id.strip():
+            raise OrchestrationValidationError(
+                "Bound session target active_session_id cannot be empty.",
+            )
+        object.__setattr__(self, "lane_key", self._normalize_optional(self.lane_key))
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "agent_id": self.agent_id,
+            "session_key": self.session_key,
+            "active_session_id": self.active_session_id,
+        }
+        if self.lane_key is not None:
+            payload["lane_key"] = self.lane_key
+        return payload
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "OrchestrationBoundSessionTarget | None":
+        if not payload:
+            return None
+        return cls(
+            agent_id=str(payload.get("agent_id", "")),
+            session_key=str(payload.get("session_key", "")),
+            active_session_id=str(payload.get("active_session_id", "")),
+            lane_key=(
+                str(payload["lane_key"])
+                if payload.get("lane_key") is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _normalize_optional(value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+@dataclass(frozen=True, slots=True)
 class InboundInstruction(ValueObject):
     source: str
     content: Any | None = None
@@ -96,7 +185,7 @@ class InboundInstruction(ValueObject):
 
 
 @dataclass(frozen=True, slots=True)
-class DeliveryTarget(ValueObject):
+class ReplyTarget(ValueObject):
     interface_name: str
     address: str | None = None
     reply_to: str | None = None
@@ -104,7 +193,7 @@ class DeliveryTarget(ValueObject):
 
     def __post_init__(self) -> None:
         if not self.interface_name.strip():
-            raise OrchestrationValidationError("Delivery target interface_name cannot be empty.")
+            raise OrchestrationValidationError("Reply target interface_name cannot be empty.")
         object.__setattr__(self, "address", self.address if self.address is None else str(self.address))
         object.__setattr__(self, "reply_to", self.reply_to if self.reply_to is None else str(self.reply_to))
         object.__setattr__(self, "metadata", dict(self.metadata))
@@ -121,7 +210,7 @@ class DeliveryTarget(ValueObject):
         return payload
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any] | None) -> "DeliveryTarget | None":
+    def from_payload(cls, payload: dict[str, Any] | None) -> "ReplyTarget | None":
         if not payload:
             return None
         return cls(
@@ -142,7 +231,6 @@ class DeliveryTarget(ValueObject):
                 else {}
             ),
         )
-
 
 @dataclass(frozen=True, slots=True)
 class OrchestrationErrorPayload(ValueObject):
@@ -265,7 +353,7 @@ class PendingApprovalRequest(ValueObject):
             "reason": self.reason,
             "tool_ids": list(self.tool_ids),
             "tool_arguments": dict(self.tool_arguments),
-            "created_at": self.created_at.isoformat(),
+            "created_at": format_datetime_utc(self.created_at),
         }
         if self.tool_name is not None:
             payload["tool_name"] = self.tool_name
@@ -324,7 +412,9 @@ class PendingApprovalRequest(ValueObject):
                 else None
             ),
             created_at=(
-                datetime.fromisoformat(str(payload["created_at"]))
+                coerce_utc_datetime(
+                    datetime.fromisoformat(str(payload["created_at"])),
+                )
                 if payload.get("created_at") is not None
                 else utcnow()
             ),
@@ -347,7 +437,7 @@ class ApprovalResolution(ValueObject):
         return {
             "request_id": self.request_id,
             "decision": self.decision.value,
-            "resolved_at": self.resolved_at.isoformat(),
+            "resolved_at": format_datetime_utc(self.resolved_at),
         }
 
     @classmethod
@@ -361,7 +451,9 @@ class ApprovalResolution(ValueObject):
             request_id=str(payload.get("request_id", "")),
             decision=ApprovalDecision(str(payload.get("decision", ApprovalDecision.DENY.value))),
             resolved_at=(
-                datetime.fromisoformat(str(payload["resolved_at"]))
+                coerce_utc_datetime(
+                    datetime.fromisoformat(str(payload["resolved_at"])),
+                )
                 if payload.get("resolved_at") is not None
                 else utcnow()
             ),

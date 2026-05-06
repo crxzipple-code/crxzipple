@@ -1,17 +1,17 @@
 # Process Module
 
-`modules/process` owns background process lifecycle management.
+`modules/process` owns the low-level background process primitive.
 
-It is a domain-level capability, not a `tool` implementation detail. Current
-consumers include:
+It is infrastructure for application services that need to manage OS processes.
+It is not an application runtime coordinator and should not become a side door
+around daemon. Current consumers include:
 
-- `tools/command`, via the `exec` and `process` tools
-- the direct CLI group at `crxzipple.main process`
-- the direct HTTP endpoints under `/processes`
+- `daemon`, which owns long-lived internal service lifecycle
+- local diagnostic CLI commands under `crxzipple.main process`
 
 ## Responsibilities
 
-- start shell commands as background processes
+- start shell commands as background processes for trusted local callers
 - persist process session state
 - read stdout and stderr slices
 - report status and exit codes
@@ -21,6 +21,9 @@ consumers include:
 
 - The module does not resolve session workspaces.
 - The module does not enforce tool visibility or authorization policies.
+- The module does not decide which application services should be running.
+- The module does not expose a public HTTP surface for arbitrary command start.
+- Long-lived internal services must be started through `daemon`.
 - Consumer-specific metadata such as `workspace_root` belongs in
   `ProcessSession.metadata`, not in the domain core.
 
@@ -37,7 +40,7 @@ consumers include:
 
 ## CLI
 
-The direct CLI group is exposed as:
+The direct CLI group is exposed only for trusted local diagnostics:
 
 ```bash
 PYTHONPATH=src python3 -m crxzipple.main process --help
@@ -56,19 +59,6 @@ APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.ma
 
 ## HTTP
 
-The direct HTTP endpoints are:
-
-- `POST /processes`
-- `GET /processes`
-- `GET /processes/{process_id}`
-- `GET /processes/{process_id}/output`
-- `POST /processes/{process_id}/terminate`
-- `DELETE /processes/{process_id}`
-
-Example:
-
-```bash
-curl -X POST http://127.0.0.1:8000/processes \
-  -H 'Content-Type: application/json' \
-  -d '{"command":"sleep 30","working_directory":"/tmp"}'
-```
+There is intentionally no public `/processes` HTTP API. API, channel, and CLI
+runtime entrypoints should request daemon-managed services instead of starting
+raw shell commands through HTTP.

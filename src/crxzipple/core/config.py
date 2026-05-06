@@ -5,16 +5,23 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
+
+if TYPE_CHECKING:
+    from crxzipple.modules.channels.domain.value_objects import (
+        ChannelAccountProfile,
+        ChannelProfile,
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OPENAPI_PROVIDER_DIR = PROJECT_ROOT / "config" / "tool_providers"
 DEFAULT_LLM_PROFILE_DIR = PROJECT_ROOT / "config" / "llm_profiles"
 DEFAULT_AGENT_PROFILE_DIR = PROJECT_ROOT / "config" / "agent_profiles"
+DEFAULT_CHANNEL_PROFILE_DIR = PROJECT_ROOT / "config" / "channel_profiles"
 DEFAULT_AUTHORIZATION_POLICY_DIR = PROJECT_ROOT / "config" / "authorization_policies"
 DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH = (
     PROJECT_ROOT / ".crxzipple" / "authorization_runtime.yaml"
@@ -22,7 +29,16 @@ DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH = (
 DEFAULT_WORKSPACE_TOOL_DIR = PROJECT_ROOT / ".crxzipple" / "tools"
 DEFAULT_BUNDLED_TOOL_DIR = PROJECT_ROOT / "tools"
 DEFAULT_BROWSER_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "browser"
+DEFAULT_MOBILE_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "mobile"
+DEFAULT_DAEMON_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "daemon"
+DEFAULT_EVENTS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "events"
+DEFAULT_OPERATIONS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "operations"
+DEFAULT_CHANNELS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "channels"
 DEFAULT_ARTIFACT_STORE_DIR = PROJECT_ROOT / ".crxzipple" / "artifacts"
+DEFAULT_OCR_BACKEND = "local"
+DEFAULT_OCR_PROVIDER = "host"
+DEFAULT_OCR_HOST = "127.0.0.1"
+DEFAULT_OCR_PORT = 18900
 DEFAULT_BROWSER_DEFAULT_PROFILE_NAME = "crxzipple"
 DEFAULT_BROWSER_USER_PROFILE_NAME = "user"
 DEFAULT_BROWSER_USER_CDP_URL = "http://127.0.0.1:9222"
@@ -36,6 +52,71 @@ _ALLOWED_BROWSER_PROFILE_RUNTIME_MODES = {
 }
 _ALLOWED_BROWSER_PROFILE_TRANSPORTS = {"cdp", "proxy"}
 _ALLOWED_BROWSER_PROFILE_DRIVERS = {"managed", "existing-session"}
+_ALLOWED_MOBILE_PLATFORMS = {"android"}
+_ALLOWED_EVENTS_BACKENDS = {"file", "redis"}
+DEFAULT_EVENTS_BACKEND = "redis"
+DEFAULT_EVENTS_REDIS_URL = "redis://127.0.0.1:6379/0"
+ALLOW_SQLITE_RUNTIME_FALLBACK_ENV = "APP_ALLOW_SQLITE_RUNTIME_FALLBACK"
+
+
+class RuntimeDatabaseGuardError(RuntimeError):
+    """Raised when a long-running runtime is pointed at SQLite by default."""
+
+
+def is_sqlite_database_url(database_url: str) -> bool:
+    return urlsplit(database_url).scheme.startswith("sqlite")
+
+
+def require_runtime_database(settings: "Settings", *, runtime_name: str) -> None:
+    if not is_sqlite_database_url(settings.database_url):
+        return
+    if settings.allow_sqlite_runtime_fallback:
+        return
+    raise RuntimeDatabaseGuardError(
+        f"Refusing to start {runtime_name} with SQLite. "
+        "Source `scripts/dev/infra-env.sh` or set APP_DATABASE_URL to Postgres. "
+        f"For an explicit one-off SQLite fallback, set {ALLOW_SQLITE_RUNTIME_FALLBACK_ENV}=1.",
+    )
+
+
+def _load_events_backend() -> Literal["file", "redis"]:
+    raw = os.getenv("APP_EVENTS_BACKEND", DEFAULT_EVENTS_BACKEND).strip().lower()
+    if not raw:
+        return DEFAULT_EVENTS_BACKEND
+    if raw == "redis":
+        return "redis"
+    if raw == "file":
+        return "file"
+    raise ValueError("APP_EVENTS_BACKEND must be one of: file, redis.")
+
+
+def _load_ocr_backend() -> str:
+    raw = os.getenv("APP_OCR_BACKEND", DEFAULT_OCR_BACKEND).strip().lower()
+    if not raw:
+        return DEFAULT_OCR_BACKEND
+    if raw in {"local", "remote"}:
+        return raw
+    raise ValueError("APP_OCR_BACKEND must be one of: local, remote.")
+
+
+def _load_ocr_provider() -> str:
+    raw = os.getenv("APP_OCR_PROVIDER", DEFAULT_OCR_PROVIDER).strip().lower()
+    if not raw:
+        return DEFAULT_OCR_PROVIDER
+    if raw in {"host", "ppstructurev3"}:
+        return raw
+    raise ValueError("APP_OCR_PROVIDER must be one of: host, ppstructurev3.")
+
+
+def _resolve_ocr_base_url(*, backend: str, host: str, port: int) -> str:
+    explicit = os.getenv("APP_OCR_BASE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    if backend == "remote":
+        raise ValueError(
+            "APP_OCR_BASE_URL must be set when APP_OCR_BACKEND=remote.",
+        )
+    return f"http://{host}:{port}"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -43,6 +124,20 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _optional_positive_int(value: object, *, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer.") from exc
+    if parsed < 1:
+        raise ValueError(f"{label} must be a positive integer.")
+    return parsed
 
 
 def _load_memory_retrieval_backend() -> str:
@@ -144,6 +239,76 @@ def _load_browser_proxy_base_urls() -> tuple[tuple[str, str], ...]:
                 f"APP_BROWSER_PROXY_BASE_URLS entry for '{normalized_key}' must be a non-empty URL string.",
             )
         resolved.append((normalized_key, value.strip().rstrip("/")))
+    return tuple(resolved)
+
+
+def _normalize_mobile_device_name(value: str, *, label: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{label} must be a non-empty device name.")
+    if any(separator in normalized for separator in ("/", "\\")):
+        raise ValueError(f"{label} must not contain path separators.")
+    return normalized
+
+
+def _normalize_mobile_platform(value: str, *, label: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_MOBILE_PLATFORMS:
+        return normalized
+    raise ValueError(f"{label} must be one of: android.")
+
+
+def _load_mobile_device_settings() -> tuple[MobileDeviceSettings, ...]:
+    raw = os.getenv("APP_MOBILE_DEVICE_SPECS", "").strip()
+    if not raw:
+        return ()
+    payload = json.loads(raw)
+    if not isinstance(payload, list):
+        raise ValueError(
+            "APP_MOBILE_DEVICE_SPECS must decode to a JSON array of objects.",
+        )
+    resolved: list[MobileDeviceSettings] = []
+    seen: set[str] = set()
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"APP_MOBILE_DEVICE_SPECS[{index}] must be a JSON object.",
+            )
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str):
+            raise ValueError(
+                f"APP_MOBILE_DEVICE_SPECS[{index}].name must be a non-empty string.",
+            )
+        name = _normalize_mobile_device_name(
+            raw_name,
+            label=f"APP_MOBILE_DEVICE_SPECS[{index}].name",
+        )
+        if name in seen:
+            raise ValueError(
+                f"APP_MOBILE_DEVICE_SPECS contains duplicate device '{name}'.",
+            )
+        seen.add(name)
+        resolved.append(
+            MobileDeviceSettings(
+                name=name,
+                platform=str(item.get("platform", "android")),
+                udid=(
+                    str(item["udid"]).strip()
+                    if isinstance(item.get("udid"), str)
+                    else None
+                ),
+                app_package=(
+                    str(item["app_package"]).strip()
+                    if isinstance(item.get("app_package"), str)
+                    else None
+                ),
+                app_activity=(
+                    str(item["app_activity"]).strip()
+                    if isinstance(item.get("app_activity"), str)
+                    else None
+                ),
+            )
+        )
     return tuple(resolved)
 
 
@@ -438,6 +603,49 @@ class BrowserProfileRuntimeSettings:
         object.__setattr__(self, "executable_path", normalized_executable_path or None)
 
 
+@dataclass(frozen=True, slots=True)
+class MobileDeviceSettings:
+    name: str
+    platform: str = "android"
+    udid: str | None = None
+    app_package: str | None = None
+    app_activity: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _normalize_mobile_device_name(self.name, label="Mobile device name"),
+        )
+        object.__setattr__(
+            self,
+            "platform",
+            _normalize_mobile_platform(
+                self.platform,
+                label=f"Mobile device '{self.name}' platform",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "udid",
+            self.udid.strip() if isinstance(self.udid, str) and self.udid.strip() else None,
+        )
+        object.__setattr__(
+            self,
+            "app_package",
+            self.app_package.strip()
+            if isinstance(self.app_package, str) and self.app_package.strip()
+            else None,
+        )
+        object.__setattr__(
+            self,
+            "app_activity",
+            self.app_activity.strip()
+            if isinstance(self.app_activity, str) and self.app_activity.strip()
+            else None,
+        )
+
+
 def _ensure_default_user_browser_profile_settings(
     profiles: tuple[BrowserProfileSettings, ...],
     runtime_settings: tuple[BrowserProfileRuntimeSettings, ...],
@@ -474,6 +682,7 @@ class OpenApiProviderSettings:
     base_url: str | None = None
     description: str = ""
     timeout_seconds: int = 30
+    max_concurrency: int | None = None
     credential_bindings: tuple[OpenApiCredentialBinding, ...] = ()
     default_effect_ids: tuple[str, ...] = ()
 
@@ -484,6 +693,7 @@ class McpProviderSettings:
     command: tuple[str, ...]
     description: str = ""
     timeout_seconds: int = 30
+    max_concurrency: int | None = None
     default_effect_ids: tuple[str, ...] = ()
 
 
@@ -500,6 +710,8 @@ class LlmProfileSettings:
     base_url: str | None = None
     credential_binding: str | None = None
     timeout_seconds: int = 60
+    max_concurrency: int | None = None
+    concurrency_key: str | None = None
     source_kind: str = "imported"
     enabled: bool = True
 
@@ -513,7 +725,6 @@ class AgentProfileDefaultsSettings:
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
-    tool_preferences: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,7 +738,6 @@ class AgentProfileSettings:
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
-    tool_preferences: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_openapi_provider_settings() -> tuple[OpenApiProviderSettings, ...]:
@@ -665,6 +875,10 @@ def _build_openapi_provider_settings(
         ),
         description=str(raw.get("description", "")).strip(),
         timeout_seconds=max(int(raw.get("timeout_seconds", 30)), 1),
+        max_concurrency=_optional_positive_int(
+            raw.get("max_concurrency"),
+            label=f"OpenAPI provider '{name}' max_concurrency",
+        ),
         credential_bindings=_load_openapi_credential_bindings(
             raw.get("credentials", {}),
             provider_name=name,
@@ -810,6 +1024,10 @@ def _load_mcp_provider_settings() -> tuple[McpProviderSettings, ...]:
                 command=command_parts,
                 description=str(item.get("description", "")).strip(),
                 timeout_seconds=max(int(item.get("timeout_seconds", 30)), 1),
+                max_concurrency=_optional_positive_int(
+                    item.get("max_concurrency"),
+                    label=f"MCP provider '{name}' max_concurrency",
+                ),
                 default_effect_ids=tuple(
                     str(part).strip()
                     for part in item.get("default_effect_ids", []) or []
@@ -844,6 +1062,211 @@ def _load_llm_profile_settings() -> tuple[LlmProfileSettings, ...]:
         profiles_by_id[profile.id] = profile
 
     return tuple(profiles_by_id.values())
+
+
+def _load_channel_profile_settings() -> tuple[ChannelProfile, ...]:
+    profiles_by_type: dict[str, ChannelProfile] = {}
+
+    for config_path in _iter_channel_profile_config_paths():
+        for profile in _load_channel_profile_settings_from_path(config_path):
+            profiles_by_type[profile.channel_type.strip().lower()] = profile
+
+    raw = os.getenv("APP_CHANNEL_PROFILES")
+    if raw is None or not raw.strip():
+        return tuple(profiles_by_type.values())
+
+    payload = json.loads(raw)
+    items = _coerce_channel_profile_items(
+        payload,
+        source_description="APP_CHANNEL_PROFILES",
+    )
+    for item in items:
+        profile = _build_channel_profile_settings(
+            item,
+            source_description="APP_CHANNEL_PROFILES",
+        )
+        profiles_by_type[profile.channel_type.strip().lower()] = profile
+
+    return tuple(profiles_by_type.values())
+
+
+def _iter_channel_profile_config_paths() -> tuple[Path, ...]:
+    raw = os.getenv("APP_CHANNEL_PROFILE_PATHS", "").strip()
+    if raw:
+        configured_paths = [
+            Path(part.strip()).expanduser()
+            for part in raw.split(os.pathsep)
+            if part.strip()
+        ]
+    elif DEFAULT_CHANNEL_PROFILE_DIR.exists():
+        configured_paths = [DEFAULT_CHANNEL_PROFILE_DIR]
+    else:
+        configured_paths = []
+
+    resolved_files: list[Path] = []
+    for path in configured_paths:
+        if path.is_dir():
+            resolved_files.extend(
+                candidate
+                for pattern in ("*.yaml", "*.yml", "*.json")
+                for candidate in sorted(path.glob(pattern))
+                if candidate.is_file()
+            )
+            continue
+        if path.is_file():
+            resolved_files.append(path)
+
+    unique_files: list[Path] = []
+    seen: set[Path] = set()
+    for path in resolved_files:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_files.append(resolved)
+    return tuple(unique_files)
+
+
+def _load_channel_profile_settings_from_path(
+    config_path: Path,
+) -> tuple[ChannelProfile, ...]:
+    payload = _load_structured_config(config_path)
+    items = _coerce_channel_profile_items(payload, source_description=str(config_path))
+    return tuple(
+        _build_channel_profile_settings(item, source_description=str(config_path))
+        for item in items
+    )
+
+
+def _coerce_channel_profile_items(
+    payload: object,
+    *,
+    source_description: str,
+) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("profiles"), list):
+            items = payload.get("profiles") or []
+        else:
+            items = [payload]
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        raise ValueError(
+            f"{source_description} channel profile config must decode to an object or list.",
+        )
+    resolved: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{source_description} channel profile items must decode to JSON/YAML objects.",
+            )
+        resolved.append(dict(item))
+    return resolved
+
+
+def _build_channel_profile_settings(
+    raw: object,
+    *,
+    source_description: str,
+) -> ChannelProfile:
+    from crxzipple.modules.channels.domain.value_objects import (
+        ChannelCapabilities,
+        ChannelProfile,
+    )
+
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{source_description} channel profile items must decode to JSON/YAML objects.",
+        )
+    channel_type = str(raw.get("channel_type") or "").strip()
+    if not channel_type:
+        raise ValueError(f"{source_description} channel profile must define channel_type.")
+
+    raw_capabilities = raw.get("capabilities")
+    if raw_capabilities is None:
+        capabilities = ChannelCapabilities()
+    elif isinstance(raw_capabilities, dict):
+        capabilities = ChannelCapabilities.from_payload(dict(raw_capabilities))
+    else:
+        raise ValueError(
+            f"{source_description} channel profile '{channel_type}' capabilities must decode to an object.",
+        )
+
+    raw_accounts = raw.get("accounts")
+    if raw_accounts is None:
+        accounts = ()
+    elif isinstance(raw_accounts, list):
+        accounts = tuple(
+            _build_channel_account_profile_settings(
+                item,
+                source_description=source_description,
+                channel_type=channel_type,
+                index=index,
+            )
+            for index, item in enumerate(raw_accounts)
+        )
+    else:
+        raise ValueError(
+            f"{source_description} channel profile '{channel_type}' accounts must decode to a list.",
+        )
+
+    raw_metadata = raw.get("metadata")
+    if raw_metadata is None:
+        metadata: dict[str, Any] = {}
+    elif isinstance(raw_metadata, dict):
+        metadata = dict(raw_metadata)
+    else:
+        raise ValueError(
+            f"{source_description} channel profile '{channel_type}' metadata must decode to an object.",
+        )
+
+    return ChannelProfile(
+        channel_type=channel_type,
+        enabled=bool(raw.get("enabled", True)),
+        capabilities=capabilities,
+        accounts=accounts,
+        metadata=metadata,
+    )
+
+
+def _build_channel_account_profile_settings(
+    raw: object,
+    *,
+    source_description: str,
+    channel_type: str,
+    index: int,
+) -> ChannelAccountProfile:
+    from crxzipple.modules.channels.domain.value_objects import ChannelAccountProfile
+
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{source_description} channel profile '{channel_type}' accounts[{index}] must decode to an object.",
+        )
+    account_id = str(raw.get("account_id") or "").strip()
+    if not account_id:
+        raise ValueError(
+            f"{source_description} channel profile '{channel_type}' accounts[{index}] must define account_id.",
+        )
+    raw_metadata = raw.get("metadata")
+    if raw_metadata is None:
+        metadata: dict[str, Any] = {}
+    elif isinstance(raw_metadata, dict):
+        metadata = dict(raw_metadata)
+    else:
+        raise ValueError(
+            f"{source_description} channel profile '{channel_type}' accounts[{index}] metadata must decode to an object.",
+        )
+    return ChannelAccountProfile(
+        account_id=account_id,
+        enabled=bool(raw.get("enabled", True)),
+        transport_mode=str(raw.get("transport_mode") or "push"),
+        auth_ref=(
+            str(raw.get("auth_ref")).strip()
+            if raw.get("auth_ref") is not None and str(raw.get("auth_ref")).strip()
+            else None
+        ),
+        metadata=metadata,
+    )
 
 
 def _iter_llm_profile_config_paths() -> tuple[Path, ...]:
@@ -983,6 +1406,15 @@ def _build_llm_profile_settings(
             else None
         ),
         timeout_seconds=max(int(raw.get("timeout_seconds", 60)), 1),
+        max_concurrency=_optional_positive_int(
+            raw.get("max_concurrency"),
+            label=f"LLM profile '{profile_id}' max_concurrency",
+        ),
+        concurrency_key=(
+            str(raw["concurrency_key"]).strip()
+            if raw.get("concurrency_key") is not None
+            else None
+        ),
         source_kind=str(raw.get("source_kind", "imported")).strip() or "imported",
         enabled=bool(raw.get("enabled", True)),
     )
@@ -1162,11 +1594,6 @@ def _build_agent_profile_settings(
             f"Agent profile '{profile_id}' runtime_preferences"
         ),
     )
-    tool_preferences = _coerce_object_payload(
-        raw.get("tool_preferences", {}),
-        source_description=(f"Agent profile '{profile_id}' tool_preferences"),
-    )
-
     return AgentProfileSettings(
         id=profile_id,
         name=name,
@@ -1177,7 +1604,6 @@ def _build_agent_profile_settings(
         llm_routing_policy=llm_routing_policy,
         execution_policy=execution_policy,
         runtime_preferences=runtime_preferences,
-        tool_preferences=tool_preferences,
     )
 
 
@@ -1265,10 +1691,12 @@ class Settings:
     sandbox_docker_image: str
     log_level: str
     log_json: bool
+    allow_sqlite_runtime_fallback: bool = False
     tool_local_paths: tuple[str, ...] = ()
     tool_openapi_providers: tuple[OpenApiProviderSettings, ...] = ()
     tool_mcp_providers: tuple[McpProviderSettings, ...] = ()
     llm_profiles: tuple[LlmProfileSettings, ...] = ()
+    channel_profiles: tuple[ChannelProfile, ...] = ()
     agent_profiles: tuple[AgentProfileSettings, ...] = ()
     authorization_enabled: bool = True
     authorization_policy_paths: tuple[str, ...] = ()
@@ -1289,6 +1717,29 @@ class Settings:
     browser_profile_runtime_settings: tuple[BrowserProfileRuntimeSettings, ...] = ()
     browser_proxy_base_urls: tuple[BrowserProxyEndpointSettings, ...] = ()
     browser_state_dir: str = str(DEFAULT_BROWSER_STATE_DIR)
+    mobile_enabled: bool = True
+    mobile_devices: tuple[MobileDeviceSettings, ...] = ()
+    mobile_state_dir: str = str(DEFAULT_MOBILE_STATE_DIR)
+    ocr_enabled: bool = True
+    ocr_backend: str = DEFAULT_OCR_BACKEND
+    ocr_provider: str = DEFAULT_OCR_PROVIDER
+    ocr_host: str = DEFAULT_OCR_HOST
+    ocr_port: int = DEFAULT_OCR_PORT
+    ocr_base_url: str = f"http://{DEFAULT_OCR_HOST}:{DEFAULT_OCR_PORT}"
+    ocr_language: str = "ch"
+    ocr_use_gpu: bool = False
+    ocr_request_timeout_seconds: float = 60.0
+    daemon_state_dir: str = str(DEFAULT_DAEMON_STATE_DIR)
+    events_state_dir: str = str(DEFAULT_EVENTS_STATE_DIR)
+    operations_state_dir: str = str(DEFAULT_OPERATIONS_STATE_DIR)
+    events_backend: Literal["file", "redis"] = "redis"
+    events_file_sync_writes: bool = False
+    events_redis_url: str | None = DEFAULT_EVENTS_REDIS_URL
+    events_redis_key_prefix: str = "crx:events"
+    events_redis_block_ms: int = 1000
+    events_redis_dedupe_ttl_seconds: int = 3600
+    channels_state_dir: str = str(DEFAULT_CHANNELS_STATE_DIR)
+    mobile_adb_binary: str = "adb"
     artifact_store_dir: str = str(DEFAULT_ARTIFACT_STORE_DIR)
     artifact_image_preview_max_dimension: int = 1024
     artifact_image_llm_max_dimension: int = 1568
@@ -1296,6 +1747,7 @@ class Settings:
     artifact_file_llm_max_bytes: int = 4_000_000
     artifact_text_file_llm_max_chars: int = 20_000
     tool_details_max_chars: int = 131_072
+    tool_remote_default_max_concurrency: int = 16
     browser_executable_path: str | None = None
     browser_sandbox_executable_path: str | None = None
     browser_proxy_base_url: str | None = None
@@ -1309,12 +1761,18 @@ class Settings:
     prompt_system_context_window_ratio: float = 0.15
     orchestration_run_lease_seconds: int = 30
     orchestration_run_heartbeat_seconds: float = 5.0
+    orchestration_executor_max_concurrent_assignments: int = 4
+    orchestration_detailed_engine_metrics_enabled: bool = False
     orchestration_auto_compaction_enabled: bool = True
     orchestration_auto_compaction_reserve_tokens: int = 20_000
     orchestration_auto_compaction_soft_threshold_tokens: int = 4_000
     tool_run_max_attempts: int = 3
     tool_run_lease_seconds: int = 30
     tool_run_heartbeat_seconds: float = 5.0
+    tool_worker_max_in_flight: int = 4
+    tool_worker_default_run_concurrency: int = 4
+    tool_worker_image_run_concurrency: int = 4
+    tool_worker_shared_state_run_concurrency: int = 1
 
     def __post_init__(self) -> None:
         profiles, runtime_settings = _ensure_default_user_browser_profile_settings(
@@ -1339,14 +1797,53 @@ class Settings:
 
 def load_settings() -> Settings:
     browser_profiles, browser_profile_runtime_settings = _load_browser_profile_settings()
+    ocr_backend = _load_ocr_backend()
+    ocr_provider = _load_ocr_provider()
+    ocr_host = os.getenv("APP_OCR_HOST", DEFAULT_OCR_HOST).strip() or DEFAULT_OCR_HOST
+    ocr_port = max(int(os.getenv("APP_OCR_PORT", str(DEFAULT_OCR_PORT))), 1)
+    tool_worker_max_in_flight = max(
+        int(os.getenv("APP_TOOL_WORKER_MAX_IN_FLIGHT", "4")),
+        1,
+    )
+    tool_worker_default_run_concurrency = max(
+        int(
+            os.getenv(
+                "APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY",
+                str(tool_worker_max_in_flight),
+            ),
+        ),
+        1,
+    )
+    tool_worker_image_run_concurrency = max(
+        int(
+            os.getenv(
+                "APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY",
+                str(tool_worker_max_in_flight),
+            ),
+        ),
+        1,
+    )
+    tool_worker_shared_state_run_concurrency = max(
+        int(os.getenv("APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY", "1")),
+        1,
+    )
+    if ocr_backend == "local" and ocr_provider != "host":
+        raise ValueError(
+            "APP_OCR_PROVIDER must be 'host' when APP_OCR_BACKEND=local.",
+        )
     return Settings(
         app_name=os.getenv("APP_NAME", "crxzipple"),
         environment=os.getenv("APP_ENV", "local"),
         database_url=os.getenv("APP_DATABASE_URL", "sqlite:///./crxzipple.db"),
+        allow_sqlite_runtime_fallback=_env_flag(
+            ALLOW_SQLITE_RUNTIME_FALLBACK_ENV,
+            default=False,
+        ),
         tool_local_paths=_load_tool_local_paths(),
         tool_openapi_providers=_load_openapi_provider_settings(),
         tool_mcp_providers=_load_mcp_provider_settings(),
         llm_profiles=_load_llm_profile_settings(),
+        channel_profiles=_load_channel_profile_settings(),
         agent_profiles=_load_agent_profile_settings(),
         authorization_enabled=_env_flag("APP_AUTHORIZATION_ENABLED", default=True),
         authorization_policy_paths=tuple(
@@ -1377,6 +1874,69 @@ def load_settings() -> Settings:
             "APP_BROWSER_STATE_DIR",
             str(DEFAULT_BROWSER_STATE_DIR),
         ),
+        mobile_enabled=_env_flag("APP_MOBILE_ENABLED", default=True),
+        mobile_devices=_load_mobile_device_settings(),
+        mobile_state_dir=os.getenv(
+            "APP_MOBILE_STATE_DIR",
+            str(DEFAULT_MOBILE_STATE_DIR),
+        ),
+        ocr_enabled=_env_flag("APP_OCR_ENABLED", default=True),
+        ocr_backend=ocr_backend,
+        ocr_provider=ocr_provider,
+        ocr_host=ocr_host,
+        ocr_port=ocr_port,
+        ocr_base_url=_resolve_ocr_base_url(
+            backend=ocr_backend,
+            host=ocr_host,
+            port=ocr_port,
+        ),
+        ocr_language=os.getenv("APP_OCR_LANGUAGE", "ch").strip() or "ch",
+        ocr_use_gpu=_env_flag("APP_OCR_USE_GPU", default=False),
+        ocr_request_timeout_seconds=max(
+            float(os.getenv("APP_OCR_REQUEST_TIMEOUT_SECONDS", "60")),
+            0.1,
+        ),
+        daemon_state_dir=os.getenv(
+            "APP_DAEMON_STATE_DIR",
+            str(DEFAULT_DAEMON_STATE_DIR),
+        ),
+        events_state_dir=os.getenv(
+            "APP_EVENTS_STATE_DIR",
+            str(DEFAULT_EVENTS_STATE_DIR),
+        ),
+        operations_state_dir=os.getenv(
+            "APP_OPERATIONS_STATE_DIR",
+            str(DEFAULT_OPERATIONS_STATE_DIR),
+        ),
+        events_backend=_load_events_backend(),
+        events_file_sync_writes=_env_flag(
+            "APP_EVENTS_FILE_SYNC_WRITES",
+            default=False,
+        ),
+        events_redis_url=(
+            os.getenv(
+                "APP_EVENTS_REDIS_URL",
+                DEFAULT_EVENTS_REDIS_URL,
+            ).strip()
+            or DEFAULT_EVENTS_REDIS_URL
+        ),
+        events_redis_key_prefix=(
+            os.getenv("APP_EVENTS_REDIS_KEY_PREFIX", "crx:events").strip()
+            or "crx:events"
+        ),
+        events_redis_block_ms=max(
+            int(os.getenv("APP_EVENTS_REDIS_BLOCK_MS", "1000")),
+            1,
+        ),
+        events_redis_dedupe_ttl_seconds=max(
+            int(os.getenv("APP_EVENTS_REDIS_DEDUPE_TTL_SECONDS", "3600")),
+            1,
+        ),
+        channels_state_dir=os.getenv(
+            "APP_CHANNELS_STATE_DIR",
+            str(DEFAULT_CHANNELS_STATE_DIR),
+        ),
+        mobile_adb_binary=os.getenv("APP_MOBILE_ADB_BINARY", "adb").strip() or "adb",
         artifact_store_dir=os.getenv(
             "APP_ARTIFACT_STORE_DIR",
             str(DEFAULT_ARTIFACT_STORE_DIR),
@@ -1403,6 +1963,10 @@ def load_settings() -> Settings:
         ),
         tool_details_max_chars=max(
             int(os.getenv("APP_TOOL_DETAILS_MAX_CHARS", "131072")),
+            1,
+        ),
+        tool_remote_default_max_concurrency=max(
+            int(os.getenv("APP_TOOL_REMOTE_DEFAULT_MAX_CONCURRENCY", "16")),
             1,
         ),
         browser_executable_path=(
@@ -1454,6 +2018,19 @@ def load_settings() -> Settings:
             float(os.getenv("APP_ORCHESTRATION_RUN_HEARTBEAT_SECONDS", "5")),
             0.1,
         ),
+        orchestration_executor_max_concurrent_assignments=max(
+            int(
+                os.getenv(
+                    "APP_ORCHESTRATION_EXECUTOR_MAX_CONCURRENT_ASSIGNMENTS",
+                    "4",
+                ),
+            ),
+            1,
+        ),
+        orchestration_detailed_engine_metrics_enabled=_env_flag(
+            "APP_ORCHESTRATION_DETAILED_ENGINE_METRICS_ENABLED",
+            default=False,
+        ),
         orchestration_auto_compaction_enabled=_env_flag(
             "APP_ORCHESTRATION_AUTO_COMPACTION_ENABLED",
             default=True,
@@ -1482,6 +2059,10 @@ def load_settings() -> Settings:
             float(os.getenv("APP_TOOL_RUN_HEARTBEAT_SECONDS", "5")),
             0.1,
         ),
+        tool_worker_max_in_flight=tool_worker_max_in_flight,
+        tool_worker_default_run_concurrency=tool_worker_default_run_concurrency,
+        tool_worker_image_run_concurrency=tool_worker_image_run_concurrency,
+        tool_worker_shared_state_run_concurrency=tool_worker_shared_state_run_concurrency,
         sandbox_base_dir=os.getenv(
             "APP_SANDBOX_BASE_DIR",
             os.path.join(tempfile.gettempdir(), "crxzipple-sandboxes"),

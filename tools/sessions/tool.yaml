@@ -1,0 +1,249 @@
+kind: local_package
+namespace: sessions
+local_tools:
+  - id: session_status
+    name: Session Status
+    description: Inspect an exact session bucket and its current active instance. Use this to understand real session state before routing work, not for semantic recall.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:session_status
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: session_status
+  - id: sessions_list
+    name: Sessions List
+    description: List recent exact session buckets for the current agent. Use this before sending or reading history from another bucket.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:sessions_list
+    tool_kind: function
+    parameters:
+      - name: agent_id
+        data_type: string
+        description: Optional agent id filter. Defaults to the current agent in tool context.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Maximum number of sessions to return.
+        required: false
+      - name: status
+        data_type: string
+        description: Optional session status filter.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: sessions_list
+  - id: sessions_history
+    name: Sessions History
+    description: Read trimmed exact transcript history for a session bucket or a specific session instance. This is exact history lookup, not memory search.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:sessions_history
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+      - name: session_id
+        data_type: string
+        description: Optional explicit session instance id to inspect.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Maximum number of messages to return after trimming.
+        required: false
+      - name: active_session_only
+        data_type: boolean
+        description: When no session_id is provided, limit results to the active session instance.
+        required: false
+      - name: include_archived
+        data_type: boolean
+        description: Include archived messages.
+        required: false
+      - name: include_internal
+        data_type: boolean
+        description: Include internal-only messages.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: sessions_history
+  - id: sessions_send
+    name: Sessions Send
+    description: Append exact text into a target session bucket's current active instance and optionally enqueue a new orchestration run there. Use this only for deliberate session routing, not memory recall or semantic search.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:sessions_send
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional target session key. Defaults to the current session in tool context.
+        required: false
+      - name: text
+        data_type: string
+        description: Exact message text to append into the target session.
+        required: true
+      - name: enqueue
+        data_type: boolean
+        description: When true, immediately enqueue a new orchestration run bound to the target session's current active instance.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: sessions_send
+  - id: sessions_spawn
+    name: Sessions Spawn
+    description: Create a fresh child session bucket under the current agent, seed it with exact kickoff text, and enqueue a new orchestration run there. This starts background delegated work; it does not wait for the child result inline.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:sessions_spawn
+    tool_kind: function
+    parameters:
+      - name: text
+        data_type: string
+        description: Exact kickoff text for the child session's first inbound message.
+        required: true
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    required_effect_ids:
+      - background_execution
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: sessions_spawn
+  - id: subagents
+    name: Subagents
+    description: List the spawned child session tree under the current requester session, including bucket relationships and current/latest orchestration run state. Use this for exact session-tree inspection, not semantic recall.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:subagents
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional requester session key. Defaults to the current session in tool context.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Maximum number of child session buckets to return.
+        required: false
+      - name: status
+        data_type: string
+        description: Optional subagent session status filter.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: subagents
+  - id: sessions_stop
+    name: Sessions Stop
+    description: Cancel non-terminal orchestration runs in the target requester session bucket and recursively stop spawned child session buckets under it. Use this to stop background delegated work cleanly at the session-tree level.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:sessions_stop
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional requester session key. Defaults to the current session in tool context.
+        required: false
+      - name: reason
+        data_type: string
+        description: Optional short reason describing why the session tree is being stopped.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: sessions_stop
+  - id: sessions_yield
+    name: Sessions Yield
+    description: Ask the current orchestration run to stop auto-continuing after the current tool turn and return control cleanly to the session boundary. Use this after handing work off or when the current session should pause for a later follow-up.
+    provider_name: local_system
+    entrypoint: tools.sessions.local:sessions_yield
+    tool_kind: function
+    parameters:
+      - name: reason
+        data_type: string
+        description: Optional short reason explaining why the current run should yield now.
+        required: false
+    tags:
+      - session
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: sessions_yield

@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import threading
 from typing import Any, Callable, Protocol
 
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository, DispatchTaskStatus
+from crxzipple.modules.orchestration.application.assignment import (
+    OrchestrationAssignmentSelector,
+)
 from crxzipple.modules.orchestration.application.ports import (
     RunDispatchPort,
 )
 from crxzipple.modules.orchestration.domain import (
+    OrchestrationExecutorLease,
+    OrchestrationExecutorLeaseStatus,
+    OrchestrationExecutorLeaseRepository,
     OrchestrationRun,
     OrchestrationRunRepository,
     OrchestrationRunStatus,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
+from crxzipple.shared.infrastructure.database_errors import (
+    is_transient_database_lock_error,
+)
 
 
 logger = get_logger(__name__)
@@ -28,6 +37,7 @@ DISPATCH_LEASE_EXHAUSTED_REASON = (
 
 class LeaseUnitOfWork(Protocol):
     orchestration_runs: OrchestrationRunRepository
+    orchestration_executor_leases: OrchestrationExecutorLeaseRepository
     dispatch_tasks: DispatchTaskRepository
 
     def __enter__(self) -> "LeaseUnitOfWork":
@@ -47,6 +57,9 @@ class LeaseUnitOfWork(Protocol):
     def commit(self) -> None:
         ...
 
+    def rollback(self) -> None:
+        ...
+
 
 @dataclass(slots=True)
 class OrchestrationLeaseManager:
@@ -54,36 +67,96 @@ class OrchestrationLeaseManager:
     dispatch_port: RunDispatchPort
     worker_lease_seconds: int
     worker_heartbeat_seconds: float
+    assignment_selector: OrchestrationAssignmentSelector = field(
+        default_factory=OrchestrationAssignmentSelector,
+    )
 
-    def claim_next_queued_run(
+    def assign_next_assignment(
         self,
-        *,
-        worker_id: str,
-        get_run: Callable[[LeaseUnitOfWork, str], OrchestrationRun],
     ) -> OrchestrationRun | None:
         self.recover_abandoned_runs()
         with self.uow_factory() as uow:
-            claim = self.dispatch_port.claim_next_queued(
-                uow.dispatch_tasks,
-                uow,
-                worker_id=worker_id,
-                lease_seconds=self.worker_lease_seconds,
+            candidates = self.assignment_selector.available_executors(
+                uow.orchestration_executor_leases.list(status=None),
             )
-            if claim is None:
+            if not candidates:
                 return None
-            run = get_run(uow, claim.run_id)
-            run.claim(worker_id=worker_id, claimed_at=claim.claimed_at)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-            return run
+            queued_runs = uow.orchestration_runs.list(
+                status=OrchestrationRunStatus.QUEUED,
+            )
+            active_runs = [
+                *uow.orchestration_runs.list(status=OrchestrationRunStatus.RUNNING),
+                *uow.orchestration_runs.list(status=OrchestrationRunStatus.WAITING),
+            ]
+            skipped_run_ids: set[str] = set()
+            for lease in candidates:
+                while True:
+                    run = self.assignment_selector.select_runnable_run(
+                        queued_runs=[
+                            item
+                            for item in queued_runs
+                            if item.id not in skipped_run_ids
+                        ],
+                        active_runs=active_runs,
+                    )
+                    if run is None:
+                        return None
+                    task = uow.dispatch_tasks.get(run.id)
+                    if task is None or task.status is not DispatchTaskStatus.QUEUED:
+                        skipped_run_ids.add(run.id)
+                        continue
+                    claimed_run = uow.orchestration_runs.claim_queued_for_assignment(
+                        run_id=run.id,
+                        worker_id=lease.worker_id,
+                    )
+                    if claimed_run is None:
+                        skipped_run_ids.add(run.id)
+                        continue
+                    claim = self.dispatch_port.claim_queued(
+                        uow.dispatch_tasks,
+                        uow,
+                        run,
+                        worker_id=lease.worker_id,
+                        lease_seconds=self.worker_lease_seconds,
+                    )
+                    if claim is None:
+                        uow.rollback()
+                        skipped_run_ids.add(run.id)
+                        continue
+                    capacity_lease = (
+                        uow.orchestration_executor_leases.claim_assignment_capacity(
+                            worker_id=lease.worker_id,
+                            lease_seconds=self.worker_lease_seconds,
+                        )
+                    )
+                    if capacity_lease is None:
+                        uow.rollback()
+                        break
+                    claimed_run.claim(
+                        worker_id=lease.worker_id,
+                        claimed_at=claim.claimed_at,
+                    )
+                    uow.collect(capacity_lease)
+                    uow.orchestration_runs.add(claimed_run)
+                    uow.collect(claimed_run)
+                    uow.commit()
+                    return claimed_run
+        return None
 
-    def claim_run(
+    def release_executor_assignment(self, *, worker_id: str) -> None:
+        with self.uow_factory() as uow:
+            uow.orchestration_executor_leases.release_assignment_capacity(
+                worker_id=worker_id,
+            )
+            uow.commit()
+
+    def admit_assignment(
         self,
         run_id: str,
         *,
         worker_id: str,
         get_run: Callable[[LeaseUnitOfWork, str], OrchestrationRun],
+        acquire_lane_lock: bool = True,
     ) -> OrchestrationRun:
         with self.uow_factory() as uow:
             run = get_run(uow, run_id)
@@ -110,7 +183,11 @@ class OrchestrationLeaseManager:
                 claim_token=self._claim_token_for_worker(worker_id),
                 lease_seconds=self.worker_lease_seconds,
             )
-            run.claim(worker_id=worker_id, claimed_at=task.claimed_at)
+            run.claim(
+                worker_id=worker_id,
+                claimed_at=task.claimed_at,
+                acquire_lane_lock=acquire_lane_lock,
+            )
             uow.dispatch_tasks.add(task)
             uow.collect(task)
             uow.orchestration_runs.add(run)
@@ -118,7 +195,7 @@ class OrchestrationLeaseManager:
             uow.commit()
             return run
 
-    def heartbeat_run(
+    def heartbeat_assignment(
         self,
         run_id: str,
         *,
@@ -153,6 +230,7 @@ class OrchestrationLeaseManager:
             return run
 
     def recover_abandoned_runs(self) -> list[OrchestrationRun]:
+        self.mark_expired_executor_leases_offline()
         recovered_ids = self.dispatch_port.recover_abandoned_run_ids(
             reason=DISPATCH_LEASE_EXPIRED_REASON,
         )
@@ -165,6 +243,23 @@ class OrchestrationLeaseManager:
                 if run is not None:
                     recovered_runs.append(run)
             return recovered_runs
+
+    def mark_expired_executor_leases_offline(self) -> list[OrchestrationExecutorLease]:
+        with self.uow_factory() as uow:
+            expired_leases = [
+                lease
+                for lease in uow.orchestration_executor_leases.list(
+                    status=OrchestrationExecutorLeaseStatus.ONLINE,
+                )
+                if lease.is_expired()
+            ]
+            for lease in expired_leases:
+                lease.mark_offline()
+                uow.orchestration_executor_leases.add(lease)
+                uow.collect(lease)
+            if expired_leases:
+                uow.commit()
+            return expired_leases
 
     def handle_recovered_dispatch_task(
         self,
@@ -185,6 +280,11 @@ class OrchestrationLeaseManager:
                 OrchestrationRunStatus.ACCEPTED,
             }:
                 return run
+            release_worker_id = (
+                run.worker_id
+                if run.status is OrchestrationRunStatus.RUNNING
+                else None
+            )
             run.fail(
                 worker_id=None,
                 message=self.lease_exhausted_reason(reason),
@@ -192,6 +292,10 @@ class OrchestrationLeaseManager:
                 details={"reason": reason},
             )
             self.dispatch_port.fail(uow.dispatch_tasks, uow, run)
+            if release_worker_id is not None:
+                uow.orchestration_executor_leases.release_assignment_capacity(
+                    worker_id=release_worker_id,
+                )
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()
@@ -203,7 +307,7 @@ class OrchestrationLeaseManager:
         *,
         run_id: str,
         worker_id: str,
-        heartbeat_run: Callable[..., OrchestrationRun],
+        heartbeat_assignment: Callable[..., OrchestrationRun],
     ) -> Any:
         if self.worker_heartbeat_seconds <= 0:
             yield
@@ -213,8 +317,17 @@ class OrchestrationLeaseManager:
         def _run_heartbeat_loop() -> None:
             while not stop_event.wait(self.worker_heartbeat_seconds):
                 try:
-                    run = heartbeat_run(run_id, worker_id=worker_id)
-                except Exception:
+                    run = heartbeat_assignment(
+                        run_id=run_id,
+                        worker_id=worker_id,
+                    )
+                except Exception as exc:
+                    if is_transient_database_lock_error(exc):
+                        logger.warning(
+                            "transient database lock while heartbeating orchestration run; will retry",
+                            extra={"run_id": run_id, "worker_id": worker_id},
+                        )
+                        continue
                     logger.exception(
                         "failed to heartbeat orchestration run while processing",
                         extra={"run_id": run_id, "worker_id": worker_id},

@@ -9,6 +9,10 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from crxzipple.interfaces.http.app import create_app
+from crxzipple.modules.session.interfaces.http_models import (
+    SessionRequest,
+    SessionResponse,
+)
 from tests.unit.skill_test_support import write_skill_package
 from tests.unit.support import SqliteTestHarness
 
@@ -86,6 +90,15 @@ class SessionHttpTestCase(unittest.TestCase):
         self.assertEqual(agent_response.status_code, 201)
         return agent_response.json()["runtime_preferences"]["home_dir"]
 
+    def test_session_http_models_only_expose_reply(self) -> None:
+        request_schema = SessionRequest.model_json_schema()
+        response_schema = SessionResponse.model_json_schema()
+
+        self.assertIn("reply", request_schema["properties"])
+        self.assertNotIn("delivery", request_schema["properties"])
+        self.assertIn("reply", response_schema["properties"])
+        self.assertNotIn("delivery", response_schema["properties"])
+
     def test_session_endpoints_manage_history_and_reset_instances(self) -> None:
         agent_home = self._register_llm_and_agent()
 
@@ -99,7 +112,7 @@ class SessionHttpTestCase(unittest.TestCase):
                 "channel": "webchat",
                 "chat_type": "direct",
                 "origin": {"provider": "webchat", "surface": "browser"},
-                "delivery": {"channel": "webchat", "to": "user:1"},
+                "reply": {"channel": "webchat", "to": "user:1"},
                 "metadata": {"scope": "main"},
             },
         )
@@ -115,6 +128,11 @@ class SessionHttpTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(create_payload["channel"], "webchat")
+        self.assertEqual(create_payload["reply"], {"channel": "webchat", "to": "user:1"})
+        self.assertNotIn("delivery", create_payload)
+        self.assertTrue(create_payload["created_at"].endswith("+00:00"))
+        self.assertTrue(create_payload["updated_at"].endswith("+00:00"))
+        self.assertTrue(create_payload["last_reset_at"].endswith("+00:00"))
         first_active_session_id = create_payload["active_session_id"]
 
         get_response = self.client.get("/sessions/agent:assistant:main")
@@ -122,6 +140,7 @@ class SessionHttpTestCase(unittest.TestCase):
 
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.json()["active_session_id"], first_active_session_id)
+        self.assertNotIn("compatibility_turn_stream", get_response.json())
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual([item["key"] for item in list_response.json()], ["agent:assistant:main"])
 
@@ -146,6 +165,8 @@ class SessionHttpTestCase(unittest.TestCase):
         self.assertEqual(second_message.json()["session_id"], first_active_session_id)
         self.assertEqual(first_message.json()["sequence_no"], 1)
         self.assertEqual(first_message.json()["kind"], "message")
+        self.assertTrue(first_message.json()["created_at"].endswith("+00:00"))
+        self.assertTrue(second_message.json()["created_at"].endswith("+00:00"))
         self.assertEqual(
             first_message.json()["content_payload"],
             {"blocks": [{"type": "text", "text": "hello"}]},
@@ -193,8 +214,11 @@ class SessionHttpTestCase(unittest.TestCase):
         self.assertEqual(instances_payload[0]["kind"], "main")
         self.assertEqual(instances_payload[0]["status"], "closed")
         self.assertEqual(instances_payload[0]["reset_reason"], "manual")
+        self.assertTrue(instances_payload[0]["opened_at"].endswith("+00:00"))
+        self.assertTrue(instances_payload[0]["closed_at"].endswith("+00:00"))
         self.assertEqual(instances_payload[1]["id"], reset_payload["active_session_id"])
         self.assertEqual(instances_payload[1]["status"], "active")
+        self.assertTrue(instances_payload[1]["opened_at"].endswith("+00:00"))
 
         active_history_after_reset = self.client.get(
             "/sessions/agent:assistant:main/messages",

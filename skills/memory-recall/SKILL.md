@@ -1,3 +1,21 @@
+---
+name: memory-recall
+description: Recall relevant durable memory before answering questions that depend on prior context.
+version: 1
+tags:
+  - memory
+  - recall
+  - context
+when_to_use: When earlier project decisions, user preferences, commitments, or durable workspace context may affect the answer.
+required_tools:
+  - memory_search
+  - memory_read
+suggested_tools:
+  - memory_search
+  - memory_read
+  - memory_write_daily
+---
+
 # Memory Recall
 
 Use this skill when earlier project decisions, user preferences, prior commitments, or durable workspace context may affect the current answer.

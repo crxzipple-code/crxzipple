@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import select
 import subprocess
@@ -13,6 +14,11 @@ from crxzipple.modules.browser.domain import (
     BrowserSystemConfig,
     BrowserTab,
     BrowserValidationError,
+)
+from crxzipple.modules.daemon import (
+    DaemonApplicationService,
+    DaemonLease,
+    DaemonValidationError,
 )
 
 
@@ -378,10 +384,12 @@ class ChromeMcpClientPool:
             _ChromeMcpStdioClient | Any,
         ]
         | None = None,
+        daemon_service: DaemonApplicationService,
     ) -> None:
         self._client_factory = client_factory or self._create_client
         self._lock = threading.Lock()
         self._clients: dict[tuple[str, str | None], Any] = {}
+        self._daemon_service = daemon_service
 
     def ensure_available(
         self,
@@ -417,13 +425,22 @@ class ChromeMcpClientPool:
             clients = [self._clients.pop(key) for key in keys]
         for client in clients:
             client.close()
+        for key_profile, user_data_dir in keys:
+            self._sync_daemon_stopped(
+                profile_name=key_profile,
+                user_data_dir=user_data_dir,
+            )
 
     def close(self) -> None:
         with self._lock:
-            clients = list(self._clients.values())
+            entries = list(self._clients.items())
             self._clients.clear()
-        for client in clients:
+        for (_profile_name, _user_data_dir), client in entries:
             client.close()
+            self._sync_daemon_stopped(
+                profile_name=_profile_name,
+                user_data_dir=_user_data_dir,
+            )
 
     def list_tabs(
         self,
@@ -656,6 +673,28 @@ class ChromeMcpClientPool:
             },
         )
 
+    def upload_file(
+        self,
+        *,
+        profile_name: str,
+        system: BrowserSystemConfig,
+        target_id: str,
+        uid: str,
+        file_path: str,
+        user_data_dir: str | None = None,
+    ) -> None:
+        self._call_tool(
+            profile_name=profile_name,
+            system=system,
+            user_data_dir=user_data_dir,
+            name="upload_file",
+            arguments={
+                "pageId": _parse_page_id(target_id),
+                "uid": uid,
+                "filePath": file_path,
+            },
+        )
+
     def hover_element(
         self,
         *,
@@ -716,6 +755,30 @@ class ChromeMcpClientPool:
                 "pageId": _parse_page_id(target_id),
                 "key": key,
             },
+        )
+
+    def handle_dialog(
+        self,
+        *,
+        profile_name: str,
+        system: BrowserSystemConfig,
+        target_id: str,
+        action: str,
+        prompt_text: str | None = None,
+        user_data_dir: str | None = None,
+    ) -> None:
+        arguments: dict[str, Any] = {
+            "pageId": _parse_page_id(target_id),
+            "action": action,
+        }
+        if prompt_text is not None:
+            arguments["promptText"] = prompt_text
+        self._call_tool(
+            profile_name=profile_name,
+            system=system,
+            user_data_dir=user_data_dir,
+            name="handle_dialog",
+            arguments=arguments,
         )
 
     def evaluate_script(
@@ -814,13 +877,174 @@ class ChromeMcpClientPool:
             system=system,
             user_data_dir=user_data_dir,
         )
-        result = client.call_tool(tool_name=name, arguments=dict(arguments or {}))
-        if not isinstance(result, dict):
-            raise BrowserValidationError(
-                f"Chrome MCP for profile '{profile_name}' returned an invalid payload for tool '{name}'.",
+        self._sync_daemon_ready(
+            profile_name=profile_name,
+            user_data_dir=user_data_dir,
+            client=client,
+        )
+        with self._capability_lease(
+            profile_name=profile_name,
+            user_data_dir=user_data_dir,
+        ):
+            try:
+                result = client.call_tool(tool_name=name, arguments=dict(arguments or {}))
+            except BrowserValidationError as exc:
+                self._sync_daemon_failed(
+                    profile_name=profile_name,
+                    user_data_dir=user_data_dir,
+                    last_error=str(exc),
+                    client=client,
+                )
+                raise
+            if not isinstance(result, dict):
+                error = BrowserValidationError(
+                    f"Chrome MCP for profile '{profile_name}' returned an invalid payload for tool '{name}'.",
+                )
+                self._sync_daemon_failed(
+                    profile_name=profile_name,
+                    user_data_dir=user_data_dir,
+                    last_error=str(error),
+                    client=client,
+                )
+                raise error
+            if result.get("isError") is True:
+                error = BrowserValidationError(
+                    _extract_tool_error_message(result, name=name),
+                )
+                self._sync_daemon_failed(
+                    profile_name=profile_name,
+                    user_data_dir=user_data_dir,
+                    last_error=str(error),
+                    client=client,
+                )
+                raise error
+            self._sync_daemon_ready(
+                profile_name=profile_name,
+                user_data_dir=user_data_dir,
+                client=client,
             )
-        if result.get("isError") is True:
-            raise BrowserValidationError(
-                _extract_tool_error_message(result, name=name),
+            return result
+
+    def _daemon_service_key(self, profile_name: str) -> str:
+        return f"capability:chrome-mcp:{profile_name.strip().lower()}"
+
+    def _daemon_metadata(
+        self,
+        *,
+        profile_name: str,
+        user_data_dir: str | None,
+        client: Any | None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"profile_name": profile_name.strip().lower()}
+        normalized_user_data_dir = _normalize_user_data_dir(user_data_dir)
+        if normalized_user_data_dir is not None:
+            metadata["user_data_dir"] = normalized_user_data_dir
+        command = getattr(client, "command", None)
+        if isinstance(command, tuple):
+            metadata["command"] = list(command)
+        client_pid = getattr(client, "pid", None)
+        if client_pid is not None:
+            metadata["chrome_mcp_pid"] = client_pid
+        return metadata
+
+    def _sync_daemon_ready(
+        self,
+        *,
+        profile_name: str,
+        user_data_dir: str | None,
+        client: Any,
+    ) -> None:
+        self._daemon_service.report_service_ready(
+            service_key=self._daemon_service_key(profile_name),
+            pid=getattr(client, "pid", None),
+            endpoint="stdio",
+            metadata=self._daemon_metadata(
+                profile_name=profile_name,
+                user_data_dir=user_data_dir,
+                client=client,
+            ),
+        )
+
+    def _sync_daemon_failed(
+        self,
+        *,
+        profile_name: str,
+        user_data_dir: str | None,
+        last_error: str,
+        client: Any | None = None,
+    ) -> None:
+        self._daemon_service.report_service_failed(
+            service_key=self._daemon_service_key(profile_name),
+            reason=last_error,
+            pid=getattr(client, "pid", None),
+            endpoint="stdio",
+            metadata=self._daemon_metadata(
+                profile_name=profile_name,
+                user_data_dir=user_data_dir,
+                client=client,
+            ),
+        )
+
+    def _sync_daemon_stopped(
+        self,
+        *,
+        profile_name: str,
+        user_data_dir: str | None,
+    ) -> None:
+        self._daemon_service.report_service_stopped(
+            service_key=self._daemon_service_key(profile_name),
+            clear_metadata_keys=("chrome_mcp_pid",),
+            metadata=self._daemon_metadata(
+                profile_name=profile_name,
+                user_data_dir=user_data_dir,
+                client=None,
+            ),
+        )
+
+    def _lease_owner_id(
+        self,
+        *,
+        profile_name: str,
+        user_data_dir: str | None,
+    ) -> str:
+        normalized_profile = profile_name.strip().lower()
+        normalized_user_data_dir = _normalize_user_data_dir(user_data_dir)
+        if normalized_user_data_dir is None:
+            return normalized_profile
+        digest = hashlib.sha1(normalized_user_data_dir.encode("utf-8")).hexdigest()[:8]
+        return f"{normalized_profile}:{digest}"
+
+    @contextmanager
+    def _capability_lease(
+        self,
+        *,
+        profile_name: str,
+        user_data_dir: str | None,
+    ) -> Any:
+        daemon_service = self._daemon_service
+        lease: DaemonLease | None = None
+        try:
+            lease = daemon_service.acquire_lease(
+                service_key=self._daemon_service_key(profile_name),
+                owner_kind="browser_profile",
+                owner_id=self._lease_owner_id(
+                    profile_name=profile_name,
+                    user_data_dir=user_data_dir,
+                ),
+                ttl_seconds=60,
+                metadata={
+                    "profile_name": profile_name.strip().lower(),
+                    **(
+                        {"user_data_dir": user_data_dir}
+                        if user_data_dir is not None
+                        else {}
+                    ),
+                },
             )
-        return result
+        except (DaemonNotFoundError, DaemonValidationError) as exc:
+            raise BrowserValidationError(str(exc)) from exc
+        try:
+            yield
+        finally:
+            if lease is not None:
+                daemon_service.release_lease(lease.id)

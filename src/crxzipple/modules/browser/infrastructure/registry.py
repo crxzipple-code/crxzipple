@@ -51,6 +51,16 @@ class StaticBrowserEngineRegistry(BrowserEngineRegistry):
         if not isinstance(command, BrowserControlCommand) and not action_engine.supports(
             command=command,
         ):
+            if plan.action_family == "mcp-backed" and command.kind in {
+                "download",
+                "wait-download",
+                "pdf",
+            }:
+                raise BrowserValidationError(
+                    f"Action engine '{plan.action_family}' does not support '{command.kind}'. "
+                    "Existing-session profiles via Chrome MCP currently lack a native primitive for this action; "
+                    "use a managed browser profile instead.",
+                )
             raise BrowserValidationError(
                 f"Action engine '{plan.action_family}' does not support '{command.kind}'.",
             )

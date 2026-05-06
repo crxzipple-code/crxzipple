@@ -1,264 +1,84 @@
-# Agent Workspace Bootstrap Design
+# Agent Workspace Context
 
-## Goal
+本文档记录当前 agent workspace bootstrap 的实现边界。它已经不是待施工 Phase 1 计划。
 
-Make `agent.runtime_preferences.workspace` actually participate in prompt construction.
+## 当前目标
 
-The mechanism should:
+`agent.runtime_preferences.workspace` 会参与 orchestration prompt construction：
 
-- resolve a workspace directory for the current run
-- load a small set of trusted workspace bootstrap files
-- inject their contents into system prompt space
-- keep boundary validation and prompt-size limits outside `PromptAssembler`
+1. `agent` 保存 workspace 偏好，但不读取文件。
+2. `orchestration` 在 prompt assembly 中解析 workspace。
+3. `workspace_context.py` 从 workspace 根目录加载受信任 bootstrap 文件。
+4. `PromptAssembler` 把这些文件作为 system context block 注入。
+5. session transcript、memory recall、skills catalog、tool schema 仍走各自 owner 模块。
 
-This should follow the same broad shape as OpenClaw:
-
-- workspace resolution
-- bootstrap file loading
-- context-file assembly
-- prompt injection
-
-## Current State
-
-Today `crxzipple` has:
-
-- `AgentRuntimePreferences.workspace`
-- `PromptAssembler`
-- `Session` transcript assembly
-
-But it does **not** have:
-
-- workspace resolution for runs
-- bootstrap file loading
-- AGENTS/TOOLS/IDENTITY style prompt injection
-
-`PromptAssembler` currently only injects:
-
-- `profile.instruction_policy.system_prompt`
-- optional effect request instruction
-- session messages
-
-## Design Principles
-
-1. `agent` stores preferred workspace path, but does not load files itself.
-2. `orchestration` owns the run-time prompt-building flow.
-3. workspace bootstrap files are treated as trusted system-context inputs.
-4. file-system reading, boundary checks, and truncation live in a dedicated helper layer.
-5. `PromptAssembler` stays thin and only consumes resolved context files.
-
-## Bootstrap Files
-
-First version should support a fixed allowlist:
-
-- `AGENTS.md`
-- `SOUL.md`
-- `TOOLS.md`
-- `IDENTITY.md`
-- `USER.md`
-- `BOOTSTRAP.md`
-- `MEMORY.md`
-- `memory.md`
-
-Recommended first pass:
-
-- required-ish primary file: `AGENTS.md`
-- optional companions: the rest
-
-## Target Flow
-
-1. resolve workspace for the run
-2. load bootstrap files from that workspace
-3. convert loaded files into injected prompt context blocks
-4. prepend those blocks into system prompt space
-5. continue with existing session transcript assembly
-
-Conceptually:
-
-`AgentProfile.workspace -> WorkspaceResolver -> BootstrapLoader -> ContextFiles -> PromptAssembler`
-
-## Proposed Components
-
-### 1. Workspace Resolver
-
-Add a small orchestration-side helper:
-
-- `modules/orchestration/application/workspace_context.py`
-
-Responsibilities:
-
-- take `AgentProfile.runtime_preferences.workspace`
-- normalize to an absolute path
-- optionally fall back to a configured default later
-- return `ResolvedWorkspaceContext`
-
-Suggested object:
-
-```python
-@dataclass(frozen=True, slots=True)
-class ResolvedWorkspaceContext:
-    workspace_dir: str | None
-    agent_id: str
-```
-
-For the first version:
-
-- if agent has no workspace, inject nothing
-- do not invent fallback directories yet
-
-### 2. Bootstrap Loader
-
-In the same file or a sibling helper:
-
-- `load_workspace_bootstrap_files(workspace_dir: str) -> tuple[WorkspaceBootstrapFile, ...]`
-
-Suggested object:
-
-```python
-@dataclass(frozen=True, slots=True)
-class WorkspaceBootstrapFile:
-    name: str
-    path: str
-    content: str
-```
-
-Responsibilities:
-
-- only load recognized bootstrap basenames
-- ignore missing files
-- reject files outside workspace root
-- reject oversized files
-- trim per-file and total prompt budget
-
-### 3. Prompt Context Files
-
-Add a prompt-facing object:
-
-```python
-@dataclass(frozen=True, slots=True)
-class PromptContextFile:
-    path: str
-    content: str
-```
-
-`PromptAssembler` should accept:
-
-- `context_files: tuple[PromptContextFile, ...] = ()`
-
-And inject them as system messages before transcript messages.
-
-### 4. Prompt Injection Format
-
-Keep it simple and explicit.
-
-Append one extra system message after base system prompt:
-
-```text
-# Project Context
-
-The following workspace files were loaded for this agent run.
-
-## AGENTS.md
-...
-
-## TOOLS.md
-...
-```
-
-This is enough for the first version.
-
-No need yet for:
-
-- multiple system fragments
-- plugin hooks
-- workspace notes
-- bootstrap warning UI text
-
-## Suggested File Changes
-
-### Add
+## 代码入口
 
 - `src/crxzipple/modules/orchestration/application/workspace_context.py`
-
-### Update
-
 - `src/crxzipple/modules/orchestration/application/prompt_assembler.py`
-  - accept `context_files`
-  - inject a project-context system message
-
+- `src/crxzipple/modules/orchestration/application/prompting/producers.py`
 - `src/crxzipple/modules/orchestration/application/engine.py`
-  - resolve workspace context before prompt assembly
-  - pass `context_files` into `PromptAssembler`
+- `src/crxzipple/modules/agent/domain/value_objects.py`
+- `src/crxzipple/modules/agent/infrastructure/home_config.py`
 
-## Safety Rules
+## 文件加载规则
 
-The loader should enforce:
+当前固定 allowlist：
 
-- absolute-path normalization
-- workspace-root containment
-- no symlink/hardlink escape if feasible
-- recognized bootstrap filename allowlist
-- per-file max chars
-- total max chars
-
-Recommended starting limits:
-
-- per file: `20_000` chars
-- total: `80_000` chars
-
-## Phase Plan
-
-### Phase 1
-
-Minimal working chain:
-
-- support `AGENTS.md` only
-- inject one project-context system message
-- no caching
-- no config knobs
-
-### Phase 2
-
-Expand to companion files:
-
+- `AGENT.md` / `AGENTS.md`
 - `SOUL.md`
 - `TOOLS.md`
 - `IDENTITY.md`
 - `USER.md`
 - `BOOTSTRAP.md`
-- `MEMORY.md`
+- `MEMORY.md` / `memory.md`
 
-### Phase 3
+同一组内按顺序取第一个存在的文件，例如 `AGENT.md` 优先于 `AGENTS.md`。
 
-Add hardening and ergonomics:
+## 安全与预算
 
-- caching
-- truncation diagnostics
-- optional extra bootstrap globs
-- per-agent/default workspace fallback
+loader 当前约束：
 
-## Why This Fits Crxzipple
+- workspace path 必须存在且是目录。
+- 每个候选文件必须 resolve 到 workspace root 内部。
+- 只加载 allowlist 中的根目录文件。
+- 文件必须是 UTF-8 文本。
+- 单文件最大 `2 MiB`。
+- 单文件注入最多 `20_000` chars。
+- 总注入最多 `80_000` chars。
+- 超预算内容会截断，并带 `[...truncated...]` 标记。
+- 文件内容按 path + stat identity 做进程内缓存。
 
-This keeps current boundaries intact:
+## Prompt 注入位置
 
-- `agent` still just stores workspace preference
-- `orchestration` still owns prompt-building
-- `session` still owns transcript
-- no new domain is introduced
+`PromptAssembler` 会在 system blocks 中加入 workspace context block。它和以下 block 一起接受统一 system prompt budget：
 
-It also avoids the wrong design:
+- agent instruction
+- runtime context
+- flow prompt
+- available tools
+- session tools
+- workspace context
+- recalled memory
+- skills catalog
 
-- no file reading inside `AgentProfile`
-- no prompt-file logic inside `Session`
-- no direct AGENTS loading inside random interface handlers
+这意味着 workspace context 不是无限追加，也不会绕过 LLM context budget。
 
-## Immediate Next Step
+## 边界
 
-Implement Phase 1:
+- `agent` 只拥有 profile/home/workspace preference。
+- `orchestration` 拥有 runtime prompt building。
+- `session` 只拥有 transcript truth。
+- `memory` 仍是 durable knowledge owner。
+- `skills` 仍是 instruction asset/catalog owner。
+- interface handler 不直接读取 `AGENTS.md` 或 workspace 文件。
 
-- load `AGENTS.md` from `agent.runtime_preferences.workspace`
-- inject it into `PromptAssembler` as one project-context system message
-- add unit tests for:
-  - workspace missing
-  - AGENTS.md present
-  - file outside workspace rejected
-  - prompt contains injected context
+## 后续改动规则
+
+如果要扩展 workspace bootstrap：
+
+1. 先确认是否属于 agent home、workspace context、memory、skills 还是 tool catalog。
+2. 新文件名必须进入 allowlist，不要加 glob 扫描整个 workspace。
+3. 新内容必须接受同一 budget 和 root-containment 检查。
+4. 更新相关 prompt preview/debug metadata，方便 Workbench/Trace/Operations 定位。
+5. 补 workspace 缺失、文件存在、越界路径、超预算截断的测试。

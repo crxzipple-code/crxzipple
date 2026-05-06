@@ -33,10 +33,33 @@ class SkillManifestResponse(BaseModel):
     description: str
     version: str | None = None
     tags: list[str] = Field(default_factory=list)
+    when_to_use: str | None = None
+    anti_patterns: list[str] = Field(default_factory=list)
     instructions_path: str
     required_tools: list[str] = Field(default_factory=list)
     optional_tools: list[str] = Field(default_factory=list)
-    allowed_tools: list[str] = Field(default_factory=list)
+    suggested_tools: list[str] = Field(default_factory=list)
+    required_effects: list[str] = Field(default_factory=list)
+    surfaces: list[str] = Field(default_factory=list)
+    setup_hints: list[str] = Field(default_factory=list)
+
+
+class SkillResourceResponse(BaseModel):
+    path: str
+    kind: str
+    size_bytes: int
+
+
+class SkillRequirementsResponse(BaseModel):
+    required_tools: list[str] = Field(default_factory=list)
+    optional_tools: list[str] = Field(default_factory=list)
+    suggested_tools: list[str] = Field(default_factory=list)
+    required_effects: list[str] = Field(default_factory=list)
+    surfaces: list[str] = Field(default_factory=list)
+    compatibility_auth: list[str] = Field(default_factory=list)
+    compatibility_secrets: list[str] = Field(default_factory=list)
+    compatibility_credential_files: list[str] = Field(default_factory=list)
+    setup_hints: list[str] = Field(default_factory=list)
 
 
 class SkillResponse(BaseModel):
@@ -48,10 +71,13 @@ class SkillResponse(BaseModel):
     root_path: str
     manifest_path: str
     instructions_path: str
+    resources: list[SkillResourceResponse] = Field(default_factory=list)
+    requirements: SkillRequirementsResponse
     manifest: SkillManifestResponse
 
     @classmethod
     def from_entity(cls, package: SkillPackage) -> "SkillResponse":
+        requirements = package.requirements
         return cls(
             name=package.name,
             description=package.description,
@@ -61,6 +87,27 @@ class SkillResponse(BaseModel):
             root_path=package.root_path,
             manifest_path=package.manifest_path,
             instructions_path=package.instructions_path,
+            resources=[
+                SkillResourceResponse(
+                    path=resource.path,
+                    kind=resource.kind,
+                    size_bytes=resource.size_bytes,
+                )
+                for resource in package.resources
+            ],
+            requirements=SkillRequirementsResponse(
+                required_tools=list(requirements.required_tools),
+                optional_tools=list(requirements.optional_tools),
+                suggested_tools=list(requirements.suggested_tools),
+                required_effects=list(requirements.required_effects),
+                surfaces=list(requirements.surfaces),
+                compatibility_auth=list(requirements.compatibility_auth),
+                compatibility_secrets=list(requirements.compatibility_secrets),
+                compatibility_credential_files=list(
+                    requirements.compatibility_credential_files,
+                ),
+                setup_hints=list(requirements.setup_hints),
+            ),
             manifest=SkillManifestResponse(
                 api_version=package.manifest.api_version,
                 kind=package.manifest.kind,
@@ -68,10 +115,15 @@ class SkillResponse(BaseModel):
                 description=package.manifest.description,
                 version=package.manifest.version,
                 tags=list(package.manifest.tags),
+                when_to_use=package.manifest.when_to_use,
+                anti_patterns=list(package.manifest.anti_patterns),
                 instructions_path=package.manifest.instructions_path,
                 required_tools=list(package.manifest.required_tools),
                 optional_tools=list(package.manifest.optional_tools),
-                allowed_tools=list(package.manifest.allowed_tools),
+                suggested_tools=list(package.manifest.suggested_tools),
+                required_effects=list(package.manifest.required_effects),
+                surfaces=list(package.manifest.surfaces),
+                setup_hints=list(package.manifest.setup_hints),
             ),
         )
 

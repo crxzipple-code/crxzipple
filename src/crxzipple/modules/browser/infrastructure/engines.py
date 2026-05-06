@@ -14,6 +14,9 @@ from typing import Any
 import requests
 import websocket
 
+from crxzipple.modules.daemon import (
+    DaemonApplicationService,
+)
 from crxzipple.modules.browser.domain import (
     BrowserActionFamily,
     BrowserActionResult,
@@ -33,14 +36,21 @@ from .cdp_urls import (
     normalize_cdp_ws_url,
 )
 from .chrome_mcp import ChromeMcpClientPool
+from .daemon_leases import (
+    host_daemon_enabled,
+    host_daemon_lease,
+    host_daemon_service_key,
+)
 
 _METADATA_TABS_KEY = "tabs"
+_METADATA_TABS_REFRESHED_AT_KEY = "tabs_refreshed_at"
 _METADATA_NEXT_TAB_ID_KEY = "next_tab_id"
 _METADATA_ACTIVE_TARGET_KEY = "active_target_id"
 _METADATA_CDP_BASE_URL_KEY = "cdp_base_url"
 _PAGE_TAB_TYPES = {"page"}
 _BACKGROUND_TAB_TYPES = {"background_page", "background"}
 _WORKER_TAB_TYPES = {"worker", "service_worker", "shared_worker"}
+_TABS_CACHE_FRESHNESS_SECONDS = 2.0
 
 
 def _copy_tab_payloads(runtime_state: BrowserProfileRuntimeState) -> list[dict[str, Any]]:
@@ -92,6 +102,18 @@ def _store_tabs(
         }
         for tab in tabs
     ]
+    runtime_state.metadata[_METADATA_TABS_REFRESHED_AT_KEY] = time.time()
+
+
+def _tabs_cache_is_fresh(runtime_state: BrowserProfileRuntimeState) -> bool:
+    if not _load_tabs(runtime_state):
+        return False
+    raw = runtime_state.metadata.get(_METADATA_TABS_REFRESHED_AT_KEY)
+    try:
+        refreshed_at = float(raw)
+    except (TypeError, ValueError):
+        return False
+    return (time.time() - refreshed_at) <= _TABS_CACHE_FRESHNESS_SECONDS
 
 
 def _next_tab_id(runtime_state: BrowserProfileRuntimeState, *, prefix: str) -> str:
@@ -292,6 +314,16 @@ def _remote_allow_origins(*, host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
+def _has_expected_remote_allow_origins(
+    *,
+    command: str,
+    host: str,
+    port: int,
+) -> bool:
+    expected = f"--remote-allow-origins={_remote_allow_origins(host=host, port=port)}"
+    return expected in command
+
+
 @dataclass(frozen=True, slots=True)
 class InMemoryCdpControlEngine(BrowserControlEngine):
     family: str = "cdp-control"
@@ -422,13 +454,26 @@ class InMemoryCdpControlEngine(BrowserControlEngine):
         runtime_state.remember_target(None)
         runtime_state.mark_closed()
 
+    def stop_profile(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        runtime_state: BrowserProfileRuntimeState,
+    ) -> None:
+        del plan
+        runtime_state.metadata.clear()
+        runtime_state.remember_target(None)
+        runtime_state.mark_closed()
+
 
 @dataclass(frozen=True, slots=True)
 class CdpControlEngine(BrowserControlEngine):
+    daemon_service: DaemonApplicationService = field(repr=False)
     family: str = "cdp-control"
     request_timeout_s: float = 5.0
     launch_timeout_s: float = 10.0
     launch_poll_interval_s: float = 0.1
+    terminate_owned_processes_on_close: bool = False
     profiles_root: str | Path | None = None
     ws_connect: Any = field(default=websocket.create_connection, repr=False)
     popen: Any = field(default=subprocess.Popen, repr=False)
@@ -462,6 +507,9 @@ class CdpControlEngine(BrowserControlEngine):
         plan: BrowserExecutionPlan,
         runtime_state: BrowserProfileRuntimeState,
     ) -> BrowserProfileRuntimeState:
+        previous_running_pid = runtime_state.running_pid
+        previous_base_url = str(runtime_state.metadata.get(_METADATA_CDP_BASE_URL_KEY) or "").strip()
+        cached_tabs_fresh = _tabs_cache_is_fresh(runtime_state)
         try:
             payload, base_url = self._request_cdp_json(
                 plan=plan,
@@ -477,6 +525,10 @@ class CdpControlEngine(BrowserControlEngine):
                     original_error=validation_error,
                 )
             else:
+                self._sync_host_daemon_failed(
+                    plan=plan,
+                    reason=str(validation_error),
+                )
                 raise
 
         browser_ref = None
@@ -518,11 +570,20 @@ class CdpControlEngine(BrowserControlEngine):
             port_pid = int(port_process["pid"])
             expected_headless = bool(plan.system.headless)
             actual_headless = "--headless" in port_command
+            matches_remote_allow_origins = _has_expected_remote_allow_origins(
+                command=port_command,
+                host=plan.system.cdp_host,
+                port=int(plan.profile.cdp_port or 0),
+            )
             matches_user_data_dir = (
                 expected_user_data_dir is not None
                 and f"--user-data-dir={expected_user_data_dir}" in port_command
             )
-            if not matches_user_data_dir or actual_headless != expected_headless:
+            if (
+                not matches_user_data_dir
+                or actual_headless != expected_headless
+                or not matches_remote_allow_origins
+            ):
                 self._terminate_process_by_pid(port_pid)
                 payload, base_url = self._launch_and_wait_for_browser(
                     plan=plan,
@@ -550,8 +611,16 @@ class CdpControlEngine(BrowserControlEngine):
         if owned_running_pid is None and managed_process is None and port_process is None:
             runtime_state.running_pid = None
         runtime_state.metadata[_METADATA_CDP_BASE_URL_KEY] = base_url
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
+        self._sync_host_daemon_ready(
+            plan=plan,
+            pid=runtime_state.running_pid,
+            endpoint=base_url,
+        )
+        browser_endpoint_changed = previous_base_url != base_url
+        browser_pid_changed = previous_running_pid != runtime_state.running_pid
+        if not cached_tabs_fresh or browser_endpoint_changed or browser_pid_changed:
+            tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
+            _store_tabs(runtime_state, tabs)
         return runtime_state
 
     def list_tabs(
@@ -560,18 +629,12 @@ class CdpControlEngine(BrowserControlEngine):
         plan: BrowserExecutionPlan,
         runtime_state: BrowserProfileRuntimeState,
     ) -> tuple[BrowserTab, ...]:
-        base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
-        payloads = self._list_tab_payloads(plan=plan)
-        return tuple(
-            _tab_from_cdp_payload(
-                payload,
-                include_ws_url=plan.capabilities.supports_per_tab_ws,
-                include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
-                base_url=base_url,
-            )
-            for payload in payloads
-            if str(payload.get("id", "")).strip()
-        )
+        with host_daemon_lease(
+            daemon_service=self.daemon_service,
+            plan=plan,
+            user_data_dir=self._try_resolve_user_data_dir(plan=plan),
+        ):
+            return self._list_tabs_unleased(plan=plan, runtime_state=runtime_state)
 
     def open_tab(
         self,
@@ -580,27 +643,36 @@ class CdpControlEngine(BrowserControlEngine):
         runtime_state: BrowserProfileRuntimeState,
         url: str,
     ) -> BrowserTab:
-        base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
-        payload, base_url = self._request_cdp_json(
+        with host_daemon_lease(
+            daemon_service=self.daemon_service,
             plan=plan,
-            runtime_state=runtime_state,
-            path=build_cdp_json_new_endpoint(base_url, url).removeprefix(base_url),
-            methods=("put", "get"),
-        )
+            user_data_dir=self._try_resolve_user_data_dir(plan=plan),
+        ):
+            base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
+            payload, base_url = self._request_cdp_json(
+                plan=plan,
+                runtime_state=runtime_state,
+                path=build_cdp_json_new_endpoint(base_url, url).removeprefix(base_url),
+                methods=("put", "get"),
+            )
 
-        if not isinstance(payload, dict):
-            raise BrowserValidationError("Browser CDP open-tab returned an invalid payload.")
-        tab = _tab_from_cdp_payload(
-            payload,
-            include_ws_url=plan.capabilities.supports_per_tab_ws,
-            include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
-            base_url=base_url,
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        tab = _canonicalize_opened_tab(opened_tab=tab, live_tabs=tabs)
-        _store_tabs(runtime_state, tabs)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
+            if not isinstance(payload, dict):
+                raise BrowserValidationError("Browser CDP open-tab returned an invalid payload.")
+            tab = _tab_from_cdp_payload(
+                payload,
+                include_ws_url=plan.capabilities.supports_per_tab_ws,
+                include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
+                base_url=base_url,
+            )
+            tabs = (
+                self._list_tabs_unleased(plan=plan, runtime_state=runtime_state)
+                if self._host_daemon_enabled(plan=plan)
+                else self.list_tabs(plan=plan, runtime_state=runtime_state)
+            )
+            tab = _canonicalize_opened_tab(opened_tab=tab, live_tabs=tabs)
+            _store_tabs(runtime_state, tabs)
+            _set_active_target(runtime_state, tab.target_id)
+            return tab
 
     def navigate_tab(
         self,
@@ -610,31 +682,40 @@ class CdpControlEngine(BrowserControlEngine):
         target_id: str,
         url: str,
     ) -> BrowserTab:
-        base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
-        payload = self._require_tab_payload(plan=plan, target_id=target_id)
-        ws_url = str(payload.get("webSocketDebuggerUrl", "")).strip()
-        if not ws_url:
-            raise BrowserValidationError(
-                f"Browser tab '{target_id}' does not expose a websocket debugger URL.",
+        with host_daemon_lease(
+            daemon_service=self.daemon_service,
+            plan=plan,
+            user_data_dir=self._try_resolve_user_data_dir(plan=plan),
+        ):
+            base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
+            payload = self._require_tab_payload(plan=plan, target_id=target_id)
+            ws_url = str(payload.get("webSocketDebuggerUrl", "")).strip()
+            if not ws_url:
+                raise BrowserValidationError(
+                    f"Browser tab '{target_id}' does not expose a websocket debugger URL.",
+                )
+            _send_cdp_command(
+                ws_connect=self.ws_connect,
+                ws_url=ws_url,
+                method="Page.navigate",
+                params={"url": url},
+                timeout_s=self.request_timeout_s,
             )
-        _send_cdp_command(
-            ws_connect=self.ws_connect,
-            ws_url=ws_url,
-            method="Page.navigate",
-            params={"url": url},
-            timeout_s=self.request_timeout_s,
-        )
-        refreshed_payload = self._require_tab_payload(plan=plan, target_id=target_id)
-        tab = _tab_from_cdp_payload(
-            refreshed_payload,
-            include_ws_url=plan.capabilities.supports_per_tab_ws,
-            include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
-            base_url=base_url,
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
+            refreshed_payload = self._require_tab_payload(plan=plan, target_id=target_id)
+            tab = _tab_from_cdp_payload(
+                refreshed_payload,
+                include_ws_url=plan.capabilities.supports_per_tab_ws,
+                include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
+                base_url=base_url,
+            )
+            tabs = (
+                self._list_tabs_unleased(plan=plan, runtime_state=runtime_state)
+                if self._host_daemon_enabled(plan=plan)
+                else self.list_tabs(plan=plan, runtime_state=runtime_state)
+            )
+            _store_tabs(runtime_state, tabs)
+            _set_active_target(runtime_state, tab.target_id)
+            return tab
 
     def focus_tab(
         self,
@@ -643,25 +724,34 @@ class CdpControlEngine(BrowserControlEngine):
         runtime_state: BrowserProfileRuntimeState,
         target_id: str,
     ) -> BrowserTab:
-        base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
-        request_url = append_cdp_path(base_url, f"/json/activate/{target_id}")
-        try:
-            response = self._http.get(request_url, timeout=self.request_timeout_s)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise BrowserValidationError(
-                _request_error_message(method="get", url=request_url, exc=exc),
-            ) from exc
-        tab = _tab_from_cdp_payload(
-            self._require_tab_payload(plan=plan, target_id=target_id),
-            include_ws_url=plan.capabilities.supports_per_tab_ws,
-            include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
-            base_url=base_url,
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
+        with host_daemon_lease(
+            daemon_service=self.daemon_service,
+            plan=plan,
+            user_data_dir=self._try_resolve_user_data_dir(plan=plan),
+        ):
+            base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
+            request_url = append_cdp_path(base_url, f"/json/activate/{target_id}")
+            try:
+                response = self._http.get(request_url, timeout=self.request_timeout_s)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                raise BrowserValidationError(
+                    _request_error_message(method="get", url=request_url, exc=exc),
+                ) from exc
+            tab = _tab_from_cdp_payload(
+                self._require_tab_payload(plan=plan, target_id=target_id),
+                include_ws_url=plan.capabilities.supports_per_tab_ws,
+                include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
+                base_url=base_url,
+            )
+            tabs = (
+                self._list_tabs_unleased(plan=plan, runtime_state=runtime_state)
+                if self._host_daemon_enabled(plan=plan)
+                else self.list_tabs(plan=plan, runtime_state=runtime_state)
+            )
+            _store_tabs(runtime_state, tabs)
+            _set_active_target(runtime_state, tab.target_id)
+            return tab
 
     def close_tab(
         self,
@@ -670,20 +760,29 @@ class CdpControlEngine(BrowserControlEngine):
         runtime_state: BrowserProfileRuntimeState,
         target_id: str,
     ) -> None:
-        base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
-        request_url = append_cdp_path(base_url, f"/json/close/{target_id}")
-        try:
-            response = self._http.get(request_url, timeout=self.request_timeout_s)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise BrowserValidationError(
-                _request_error_message(method="get", url=request_url, exc=exc),
-            ) from exc
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        active_target = runtime_state.metadata.get(_METADATA_ACTIVE_TARGET_KEY)
-        if active_target == target_id:
-            _set_active_target(runtime_state, tabs[0].target_id if tabs else None)
+        with host_daemon_lease(
+            daemon_service=self.daemon_service,
+            plan=plan,
+            user_data_dir=self._try_resolve_user_data_dir(plan=plan),
+        ):
+            base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
+            request_url = append_cdp_path(base_url, f"/json/close/{target_id}")
+            try:
+                response = self._http.get(request_url, timeout=self.request_timeout_s)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                raise BrowserValidationError(
+                    _request_error_message(method="get", url=request_url, exc=exc),
+                ) from exc
+            tabs = (
+                self._list_tabs_unleased(plan=plan, runtime_state=runtime_state)
+                if self._host_daemon_enabled(plan=plan)
+                else self.list_tabs(plan=plan, runtime_state=runtime_state)
+            )
+            _store_tabs(runtime_state, tabs)
+            active_target = runtime_state.metadata.get(_METADATA_ACTIVE_TARGET_KEY)
+            if active_target == target_id:
+                _set_active_target(runtime_state, tabs[0].target_id if tabs else None)
 
     def reset_profile(
         self,
@@ -699,11 +798,44 @@ class CdpControlEngine(BrowserControlEngine):
         runtime_state.metadata.clear()
         runtime_state.remember_target(None)
         runtime_state.mark_closed()
+        self._sync_host_daemon_stopped(plan=plan)
+
+    def stop_profile(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        runtime_state: BrowserProfileRuntimeState,
+    ) -> None:
+        launched = self._launched_processes.pop(plan.profile.name, None)
+        if launched is not None:
+            self._terminate_process(launched)
+        elif plan.capabilities.can_launch and plan.profile.is_loopback:
+            managed_process = self._find_matching_managed_process(plan=plan)
+            if managed_process is not None:
+                self._terminate_process_by_pid(int(managed_process["pid"]))
+            else:
+                port_process = self._find_process_for_cdp_port(plan=plan)
+                if port_process is not None:
+                    expected_user_data_dir = self._try_resolve_user_data_dir(plan=plan)
+                    port_command = str(port_process.get("command", "")).strip()
+                    if (
+                        expected_user_data_dir is not None
+                        and f"--user-data-dir={expected_user_data_dir}" in port_command
+                    ):
+                        self._terminate_process_by_pid(int(port_process["pid"]))
+        runtime_state.metadata.clear()
+        runtime_state.remember_target(None)
+        runtime_state.mark_closed()
+        self._sync_host_daemon_stopped(plan=plan)
 
     def close(self) -> None:
-        for profile_name, process in list(self._launched_processes.items()):
-            self._terminate_process(process)
-            self._launched_processes.pop(profile_name, None)
+        if self.terminate_owned_processes_on_close:
+            for profile_name, process in list(self._launched_processes.items()):
+                self._terminate_process(process)
+                self._launched_processes.pop(profile_name, None)
+                self._sync_host_daemon_stopped_by_profile(profile_name=profile_name)
+        else:
+            self._launched_processes.clear()
         self._http.close()
 
     def _list_tab_payloads(
@@ -723,6 +855,25 @@ class CdpControlEngine(BrowserControlEngine):
             if isinstance(item, dict):
                 resolved.append(dict(item))
         return tuple(resolved)
+
+    def _list_tabs_unleased(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        runtime_state: BrowserProfileRuntimeState,
+    ) -> tuple[BrowserTab, ...]:
+        base_url = self._current_cdp_base_url(plan=plan, runtime_state=runtime_state)
+        payloads = self._list_tab_payloads(plan=plan)
+        return tuple(
+            _tab_from_cdp_payload(
+                payload,
+                include_ws_url=plan.capabilities.supports_per_tab_ws,
+                include_json_endpoints=plan.capabilities.supports_json_tab_endpoints,
+                base_url=base_url,
+            )
+            for payload in payloads
+            if str(payload.get("id", "")).strip()
+        )
 
     def _require_tab_payload(
         self,
@@ -763,9 +914,17 @@ class CdpControlEngine(BrowserControlEngine):
                         poll_result is not None
                         and self._find_process_for_cdp_port(plan=plan) is None
                     ):
+                        self._sync_host_daemon_failed(
+                            plan=plan,
+                            reason="Local managed browser exited before CDP became available.",
+                        )
                         raise BrowserValidationError(
                             "Local managed browser exited before CDP became available.",
                         ) from original_error
+                    self._sync_host_daemon_failed(
+                        plan=plan,
+                        reason=f"{original_error} Local managed browser did not expose CDP before timeout.",
+                    )
                     raise BrowserValidationError(
                         f"{original_error} Local managed browser did not expose CDP before timeout.",
                     ) from original_error
@@ -878,7 +1037,6 @@ class CdpControlEngine(BrowserControlEngine):
             command.append("--headless=new")
         if plan.system.no_sandbox:
             command.append("--no-sandbox")
-        command.append("about:blank")
 
         try:
             process = self.popen(
@@ -889,6 +1047,10 @@ class CdpControlEngine(BrowserControlEngine):
                 start_new_session=True,
             )
         except Exception as exc:  # noqa: BLE001
+            self._sync_host_daemon_failed(
+                plan=plan,
+                reason=f"Local managed browser could not be launched: {exc}",
+            )
             raise BrowserValidationError(
                 f"Local managed browser could not be launched: {exc}",
             ) from exc
@@ -969,6 +1131,12 @@ class CdpControlEngine(BrowserControlEngine):
             if f"--remote-debugging-port={cdp_port}" not in command:
                 continue
             if f"--user-data-dir={user_data_dir}" not in command:
+                continue
+            if not _has_expected_remote_allow_origins(
+                command=command,
+                host=plan.system.cdp_host,
+                port=cdp_port,
+            ):
                 continue
             return {
                 "pid": pid,
@@ -1080,6 +1248,77 @@ class CdpControlEngine(BrowserControlEngine):
             return
         except Exception:  # noqa: BLE001
             return
+
+    def _host_daemon_enabled(self, *, plan: BrowserExecutionPlan) -> bool:
+        return host_daemon_enabled(plan=plan)
+
+    def _host_daemon_service_key(self, *, profile_name: str) -> str:
+        return host_daemon_service_key(profile_name=profile_name)
+
+    def _host_daemon_metadata(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        pid: int | None = None,
+    ) -> dict[str, Any]:
+        user_data_dir = self._try_resolve_user_data_dir(plan=plan)
+        metadata: dict[str, Any] = {
+            "profile_name": plan.profile.name,
+            "mode": plan.capabilities.mode,
+        }
+        if user_data_dir is not None:
+            metadata["user_data_dir"] = user_data_dir
+        if plan.profile.cdp_url is not None:
+            metadata["cdp_url"] = plan.profile.cdp_url
+        if plan.profile.cdp_port is not None:
+            metadata["cdp_port"] = plan.profile.cdp_port
+        if pid is not None:
+            metadata["browser_pid"] = pid
+        return metadata
+
+    def _sync_host_daemon_ready(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        pid: int | None,
+        endpoint: str | None,
+    ) -> None:
+        if not self._host_daemon_enabled(plan=plan):
+            return
+        self.daemon_service.report_service_ready(
+            service_key=self._host_daemon_service_key(profile_name=plan.profile.name),
+            pid=pid,
+            endpoint=endpoint,
+            metadata=self._host_daemon_metadata(plan=plan, pid=pid),
+        )
+
+    def _sync_host_daemon_failed(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        reason: str,
+    ) -> None:
+        if not self._host_daemon_enabled(plan=plan):
+            return
+        self.daemon_service.report_service_failed(
+            service_key=self._host_daemon_service_key(profile_name=plan.profile.name),
+            reason=reason,
+            metadata=self._host_daemon_metadata(plan=plan),
+        )
+
+    def _sync_host_daemon_stopped(self, *, plan: BrowserExecutionPlan) -> None:
+        if not self._host_daemon_enabled(plan=plan):
+            return
+        self.daemon_service.report_service_stopped(
+            service_key=self._host_daemon_service_key(profile_name=plan.profile.name),
+            clear_metadata_keys=("browser_pid",),
+        )
+
+    def _sync_host_daemon_stopped_by_profile(self, *, profile_name: str) -> None:
+        self.daemon_service.report_service_stopped(
+            service_key=self._host_daemon_service_key(profile_name=profile_name),
+            clear_metadata_keys=("browser_pid",),
+        )
 
 
 @dataclass(slots=True)
@@ -1211,6 +1450,17 @@ class McpControlEngine(BrowserControlEngine):
         runtime_state.remember_target(None)
         runtime_state.mark_closed()
 
+    def stop_profile(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        runtime_state: BrowserProfileRuntimeState,
+    ) -> None:
+        self.mcp_pool.close_profile(profile_name=plan.profile.name)
+        runtime_state.metadata.clear()
+        runtime_state.remember_target(None)
+        runtime_state.mark_closed()
+
 
 @dataclass(frozen=True, slots=True)
 class InMemoryMcpControlEngine(BrowserControlEngine):
@@ -1314,6 +1564,17 @@ class InMemoryMcpControlEngine(BrowserControlEngine):
             _set_active_target(runtime_state, tabs[0].target_id if tabs else None)
 
     def reset_profile(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        runtime_state: BrowserProfileRuntimeState,
+    ) -> None:
+        del plan
+        runtime_state.metadata.clear()
+        runtime_state.remember_target(None)
+        runtime_state.mark_closed()
+
+    def stop_profile(
         self,
         *,
         plan: BrowserExecutionPlan,

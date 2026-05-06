@@ -7,7 +7,7 @@ from crxzipple.modules.orchestration.domain.value_objects import (
 
 
 class OrchestrationScheduler:
-    """Minimal queue coordination helper for phase 1."""
+    """Queue mutation helper used by scheduler-owned coordinators."""
 
     def enqueue(
         self,

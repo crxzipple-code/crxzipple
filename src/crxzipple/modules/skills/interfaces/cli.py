@@ -18,6 +18,7 @@ def _skill_payload(
     *,
     instructions: str | None = None,
 ) -> dict[str, object]:
+    requirements = package.requirements
     payload: dict[str, object] = {
         "name": package.name,
         "description": package.description,
@@ -27,6 +28,15 @@ def _skill_payload(
         "root_path": package.root_path,
         "manifest_path": package.manifest_path,
         "instructions_path": package.instructions_path,
+        "resources": [
+            {
+                "path": resource.path,
+                "kind": resource.kind,
+                "size_bytes": resource.size_bytes,
+            }
+            for resource in package.resources
+        ],
+        "requirements": requirements.to_payload(),
         "manifest": {
             "api_version": package.manifest.api_version,
             "kind": package.manifest.kind,
@@ -34,10 +44,15 @@ def _skill_payload(
             "description": package.manifest.description,
             "version": package.manifest.version,
             "tags": list(package.manifest.tags),
+            "when_to_use": package.manifest.when_to_use,
+            "anti_patterns": list(package.manifest.anti_patterns),
             "instructions_path": package.manifest.instructions_path,
             "required_tools": list(package.manifest.required_tools),
             "optional_tools": list(package.manifest.optional_tools),
-            "allowed_tools": list(package.manifest.allowed_tools),
+            "suggested_tools": list(package.manifest.suggested_tools),
+            "required_effects": list(package.manifest.required_effects),
+            "surfaces": list(package.manifest.surfaces),
+            "setup_hints": list(package.manifest.setup_hints),
         },
     }
     if instructions is not None:

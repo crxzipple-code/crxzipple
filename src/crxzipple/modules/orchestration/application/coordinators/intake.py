@@ -15,21 +15,19 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
-    OrchestrationValidationError,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.services import (
+    from crxzipple.modules.orchestration.application.intake_commands import (
         AcceptOrchestrationRunInput,
         BindSessionInput,
         EnqueueOrchestrationRunInput,
         PrepareSessionRunInput,
         RouteOrchestrationRunInput,
     )
-    from crxzipple.modules.orchestration.application.session_resolver import (
-        ResolveSessionBundleInput,
-        SessionBundle,
+    from crxzipple.modules.orchestration.application.intake_workflows import (
+        PreparedSessionRunPlan,
     )
 
 
@@ -60,15 +58,16 @@ class RunIntakeCoordinator:
     uow_factory: Callable[[], IntakeCoordinatorUnitOfWork]
     scheduler: OrchestrationScheduler
     dispatch_port: RunDispatchPort
-    resolve_session_bundle: Callable[["ResolveSessionBundleInput"], "SessionBundle"]
-    resolve_session_bundle_input_factory: Callable[..., "ResolveSessionBundleInput"]
-    session_start_prompt_flow_hint: Callable[["SessionBundle"], dict[str, object] | None]
+    plan_prepared_session_run: Callable[
+        ["PrepareSessionRunInput"],
+        "PreparedSessionRunPlan",
+    ]
 
     def accept(self, data: "AcceptOrchestrationRunInput") -> OrchestrationRun:
         run = OrchestrationRun.accept(
             run_id=data.run_id or uuid4().hex,
             inbound_instruction=data.inbound_instruction,
-            delivery_target=data.delivery_target,
+            reply_target=data.reply_target,
             queue_policy=data.queue_policy,
             priority=data.priority,
             max_steps=data.max_steps,
@@ -124,47 +123,21 @@ class RunIntakeCoordinator:
             return run
 
     def prepare_session_run(self, data: "PrepareSessionRunInput") -> OrchestrationRun:
-        requested_llm_id = (
-            data.requested_llm_id.strip()
-            if isinstance(data.requested_llm_id, str) and data.requested_llm_id.strip()
-            else None
-        )
-        bundle = self.resolve_session_bundle(
-            self.resolve_session_bundle_input_factory(
-                context=data.context,
-                ensure=data.ensure,
-                touch_activity=data.touch_activity,
-                reset_policy=data.reset_policy,
-                now=data.now,
-            ),
-        )
-        if bundle.session is None or bundle.active_instance is None:
-            raise OrchestrationValidationError(
-                "Session resolution did not produce an active session to bind.",
-            )
-
-        route_metadata = {
-            "session_key": bundle.routing.key_resolution.key,
-            "session_kind": bundle.routing.key_resolution.kind.value,
-        }
-        if requested_llm_id is not None:
-            route_metadata.setdefault("requested_llm_id", requested_llm_id)
-        route_metadata.update(data.metadata)
+        plan = self.plan_prepared_session_run(data)
 
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             run.route(
-                agent_id=data.context.agent_id,
-                lane_key=bundle.routing.lane_key,
-                priority=data.priority,
-                metadata=route_metadata,
+                agent_id=plan.agent_id,
+                lane_key=plan.lane_key,
+                priority=plan.priority,
+                metadata=dict(plan.route_metadata),
             )
             run.bind_session(
-                active_session_id=bundle.active_instance.id,
+                active_session_id=plan.active_session_id,
             )
-            prompt_flow_hint = self.session_start_prompt_flow_hint(bundle)
-            if prompt_flow_hint is not None:
-                run.metadata["prompt_flow_hint"] = prompt_flow_hint
+            if plan.prompt_flow_hint is not None:
+                run.metadata["prompt_flow_hint"] = dict(plan.prompt_flow_hint)
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()

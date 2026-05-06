@@ -20,14 +20,6 @@ class AgentCliTestCase(CliModuleTestCase):
                     "--stream-by-default",
                     "--workspace",
                     "/tmp/workspace",
-                    "--requested-effect",
-                    "network_search",
-                    "--requested-tool",
-                    "brave_search.news_search",
-                    "--preferred-tool-tag",
-                    "search",
-                    "--no-prefers-background-tools",
-                    "--no-prefers-mutating-tools",
                 ],
                 env=self.env,
             )
@@ -43,9 +35,6 @@ class AgentCliTestCase(CliModuleTestCase):
             self.assertEqual(get_result.exit_code, 0)
             self.assertIn('"name": "Writer"', list_result.stdout)
             self.assertIn('"default_llm_id": "openai.gpt-5.4-mini"', get_result.stdout)
-            self.assertIn('"requested_effect_ids": [', get_result.stdout)
-            self.assertIn('"network_search"', get_result.stdout)
-            self.assertIn('"brave_search.news_search"', get_result.stdout)
 
     def test_agent_cli_migrates_profile_home(self) -> None:
             with tempfile.TemporaryDirectory() as tempdir:

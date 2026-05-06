@@ -44,6 +44,29 @@ class ToolRunDispatchAdapter(ToolRunDispatchPort):
             claimed_at=task.claimed_at,
         )
 
+    def claim_queued(
+        self,
+        dispatch_tasks,
+        collector,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: int | None = None,
+    ) -> ToolRunDispatchClaim | None:
+        task = self.bridge.claim_queued(
+            dispatch_tasks,
+            collector,
+            run_id=run_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
+        if task is None:
+            return None
+        return ToolRunDispatchClaim(
+            run_id=task.owner_id,
+            claimed_at=task.claimed_at,
+        )
+
     def heartbeat(self, dispatch_tasks, collector, run, *, worker_id: str, lease_seconds: int) -> None:
         self.bridge.heartbeat(
             dispatch_tasks,

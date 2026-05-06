@@ -25,6 +25,10 @@ class UnitOfWork(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def flush(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def commit(self) -> None:
         raise NotImplementedError
 

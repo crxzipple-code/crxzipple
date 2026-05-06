@@ -397,6 +397,195 @@ class BrowserMcpEnginesTestCase(unittest.TestCase):
         self.assertIn(("fill", "user", "1", "e1", "hello", "/tmp/browser-user"), self.mcp_pool.operations)
         self.assertIn(("fill", "user", "1", "e2", "true", "/tmp/browser-user"), self.mcp_pool.operations)
 
+    def test_mcp_storage_supports_set_get_and_clear(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+
+        set_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="storage",
+                target_id="1",
+                payload={
+                    "storage_kind": "local",
+                    "storage_operation": "set",
+                    "storage_key": "theme",
+                    "storage_value": "dark",
+                },
+            )
+        )
+        get_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="storage",
+                target_id="1",
+                payload={
+                    "storage_kind": "local",
+                    "storage_operation": "get",
+                    "storage_key": "theme",
+                },
+            )
+        )
+        clear_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="storage",
+                target_id="1",
+                payload={
+                    "storage_kind": "local",
+                    "storage_operation": "clear",
+                },
+            )
+        )
+
+        self.assertTrue(set_result.ok)
+        self.assertEqual(set_result.value["engine"], "mcp-backed")
+        self.assertEqual(set_result.value["result"]["values"], {"theme": "dark"})
+        self.assertEqual(get_result.value["result"]["values"], {"theme": "dark"})
+        self.assertEqual(clear_result.value["result"]["values"], {})
+        self.assertTrue(
+            any(
+                operation[0] == "evaluate_script"
+                and operation[1] == "user"
+                and operation[2] == "1"
+                and operation[4] == "/tmp/browser-user"
+                for operation in self.mcp_pool.operations
+            )
+        )
+
+    def test_mcp_cookies_supports_set_get_and_clear(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+
+        set_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="cookies",
+                target_id="1",
+                payload={
+                    "cookies_operation": "set",
+                    "cookie": {
+                        "name": "session",
+                        "value": "abc123",
+                        "path": "/",
+                    },
+                },
+            )
+        )
+        get_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="cookies",
+                target_id="1",
+                payload={"cookies_operation": "get"},
+            )
+        )
+        clear_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="cookies",
+                target_id="1",
+                payload={"cookies_operation": "clear"},
+            )
+        )
+
+        self.assertTrue(set_result.ok)
+        self.assertEqual(set_result.value["engine"], "mcp-backed")
+        self.assertEqual(set_result.value["result"]["count"], 1)
+        self.assertEqual(set_result.value["result"]["cookies"][0]["name"], "session")
+        self.assertEqual(get_result.value["result"]["cookies"][0]["value"], "abc123")
+        self.assertEqual(clear_result.value["result"]["cookies"], [])
+
+    def test_mcp_dialog_supports_accept_and_prompt_text(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+
+        dialog_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="dialog",
+                target_id="1",
+                payload={"accept": True, "prompt_text": "Shanghai"},
+            )
+        )
+
+        self.assertTrue(dialog_result.ok)
+        self.assertEqual(dialog_result.value["engine"], "mcp-backed")
+        self.assertEqual(dialog_result.value["result"]["kind"], "dialog")
+        self.assertEqual(dialog_result.value["result"]["handled_as"], "accept")
+        self.assertEqual(dialog_result.value["result"]["prompt_text"], "Shanghai")
+        self.assertIn(
+            ("handle_dialog", "user", "1", "accept", "Shanghai", "/tmp/browser-user"),
+            self.mcp_pool.operations,
+        )
+
+    def test_mcp_upload_supports_single_file_path(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+        self.ref_store.save_tab_refs(
+            profile_name="user",
+            target_id="1",
+            refs=(
+                BrowserStoredRef(
+                    ref="r1",
+                    uid="e1",
+                    generation=1,
+                    snapshot_format="interactive",
+                    label="Upload",
+                    role="button",
+                ),
+            ),
+        )
+        runtime_state = self.runtime_state_store.get(profile_name="user")
+        assert runtime_state is not None
+        runtime_state.remember_page_snapshot(
+            target_id="1",
+            generation=1,
+            snapshot_format="interactive",
+            ref_count=1,
+            frame_count=1,
+        )
+        self.runtime_state_store.save(runtime_state)
+
+        upload_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="upload",
+                target_id="1",
+                ref="r1",
+                payload={"paths": ["/tmp/a.txt"]},
+            )
+        )
+
+        self.assertTrue(upload_result.ok)
+        self.assertEqual(upload_result.value["engine"], "mcp-backed")
+        self.assertEqual(upload_result.value["result"]["kind"], "upload")
+        self.assertEqual(upload_result.value["result"]["paths"], ["/tmp/a.txt"])
+        self.assertIn(
+            ("upload_file", "user", "1", "e1", "/tmp/a.txt", "/tmp/browser-user"),
+            self.mcp_pool.operations,
+        )
+
     def test_mcp_drag_supports_start_and_end_ref_aliases(self) -> None:
         self.coordinator.execute(
             self.control_assembler.assemble(
@@ -478,7 +667,63 @@ class BrowserMcpEnginesTestCase(unittest.TestCase):
             self.mcp_pool.operations,
         )
 
-    def test_mcp_batch_is_rejected(self) -> None:
+    def test_mcp_scroll_into_view_uses_ref_uid(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+        self.ref_store.save_tab_refs(
+            profile_name="user",
+            target_id="1",
+            refs=(
+                BrowserStoredRef(
+                    ref="r1",
+                    uid="e1",
+                    generation=1,
+                    snapshot_format="interactive",
+                    label="Submit",
+                    role="button",
+                ),
+            ),
+        )
+        runtime_state = self.runtime_state_store.get(profile_name="user")
+        assert runtime_state is not None
+        runtime_state.remember_page_snapshot(
+            target_id="1",
+            generation=1,
+            snapshot_format="interactive",
+            ref_count=1,
+            frame_count=1,
+        )
+        self.runtime_state_store.save(runtime_state)
+
+        scroll_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="scroll-into-view",
+                target_id="1",
+                ref="r1",
+            )
+        )
+
+        self.assertTrue(scroll_result.ok)
+        self.assertEqual(scroll_result.value["engine"], "mcp-backed")
+        self.assertEqual(scroll_result.value["result"]["kind"], "scroll-into-view")
+        self.assertTrue(
+            any(
+                operation[0] == "evaluate_script"
+                and operation[1] == "user"
+                and operation[2] == "1"
+                and operation[4] == "/tmp/browser-user"
+                and operation[5] == ("e1",)
+                for operation in self.mcp_pool.operations
+            )
+        )
+
+    def test_mcp_batch_executes_actions_in_order(self) -> None:
         self.coordinator.execute(
             self.control_assembler.assemble(
                 profile_name="user",
@@ -487,19 +732,170 @@ class BrowserMcpEnginesTestCase(unittest.TestCase):
             )
         )
 
-        with self.assertRaises(BrowserValidationError):
-            self.coordinator.execute(
-                self.page_action_assembler.assemble(
-                    profile_name="user",
-                    kind="batch",
-                    target_id="1",
-                    payload={
-                        "actions": [
-                            {"kind": "click", "ref": "r1"},
-                        ]
-                    },
-                )
+        self.ref_store.save_tab_refs(
+            profile_name="user",
+            target_id="1",
+            refs=(
+                BrowserStoredRef(
+                    ref="r1",
+                    uid="e1",
+                    generation=1,
+                    snapshot_format="interactive",
+                    label="Submit",
+                    role="button",
+                ),
+            ),
+        )
+        runtime_state = self.runtime_state_store.get(profile_name="user")
+        assert runtime_state is not None
+        runtime_state.remember_page_snapshot(
+            target_id="1",
+            generation=1,
+            snapshot_format="interactive",
+            ref_count=1,
+            frame_count=1,
+        )
+        self.runtime_state_store.save(runtime_state)
+
+        batch_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="batch",
+                target_id="1",
+                payload={
+                    "actions": [
+                        {"kind": "click", "ref": "r1"},
+                        {"kind": "evaluate", "fn": "() => document.title"},
+                    ]
+                },
             )
+        )
+
+        self.assertTrue(batch_result.ok)
+        self.assertEqual(batch_result.value["engine"], "mcp-backed")
+        self.assertEqual(batch_result.value["result"]["kind"], "batch")
+        self.assertEqual(len(batch_result.value["result"]["results"]), 2)
+        self.assertTrue(batch_result.value["result"]["results"][0]["ok"])
+        self.assertEqual(batch_result.value["result"]["results"][0]["kind"], "click")
+        self.assertTrue(batch_result.value["result"]["results"][1]["ok"])
+        self.assertEqual(batch_result.value["result"]["results"][1]["kind"], "evaluate")
+        self.assertIn(("click", "user", "1", "e1", "/tmp/browser-user", False), self.mcp_pool.operations)
+        self.assertIn(
+            (
+                "evaluate_script",
+                "user",
+                "1",
+                "() => document.title",
+                "/tmp/browser-user",
+                (),
+            ),
+            self.mcp_pool.operations,
+        )
+
+    def test_mcp_batch_stop_on_error_false_continues_after_failure(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+
+        batch_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="batch",
+                target_id="1",
+                payload={
+                    "actions": [
+                        {"kind": "pdf"},
+                        {"kind": "evaluate", "fn": "() => document.title"},
+                    ],
+                    "stop_on_error": False,
+                },
+            )
+        )
+
+        self.assertTrue(batch_result.ok)
+        results = batch_result.value["result"]["results"]
+        self.assertFalse(results[0]["ok"])
+        self.assertEqual(results[0]["kind"], "pdf")
+        self.assertTrue(results[1]["ok"])
+        self.assertEqual(results[1]["kind"], "evaluate")
+
+    def test_mcp_console_supports_filter_limit_and_clear(self) -> None:
+        self.coordinator.execute(
+            self.control_assembler.assemble(
+                profile_name="user",
+                kind="open-tab",
+                payload={"url": "https://example.org"},
+            )
+        )
+        self.mcp_pool.set_console_messages(
+            profile_name="user",
+            target_id="1",
+            messages=[
+                {
+                    "level": "log",
+                    "text": "boot",
+                    "captured_at_ms": 100,
+                },
+                {
+                    "level": "warn",
+                    "text": "careful",
+                    "location": {
+                        "url": "https://example.org/app.js",
+                        "line_number": 12,
+                        "column_number": 4,
+                    },
+                    "captured_at_ms": 200,
+                },
+                {
+                    "level": "warn",
+                    "text": "heads-up",
+                    "captured_at_ms": 300,
+                },
+            ],
+        )
+
+        console_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="console",
+                target_id="1",
+                payload={"level": "warn", "limit": 1, "clear": True},
+            )
+        )
+
+        self.assertTrue(console_result.ok)
+        self.assertEqual(console_result.value["engine"], "mcp-backed")
+        self.assertEqual(console_result.value["result"]["kind"], "console")
+        self.assertEqual(console_result.value["result"]["count"], 1)
+        self.assertEqual(console_result.value["result"]["level"], "warn")
+        self.assertEqual(console_result.value["result"]["limit"], 1)
+        self.assertTrue(console_result.value["result"]["cleared"])
+        self.assertEqual(
+            console_result.value["result"]["messages"],
+            [
+                {
+                    "level": "warn",
+                    "text": "heads-up",
+                    "location": None,
+                    "captured_at_ms": 300,
+                }
+            ],
+        )
+
+        cleared_result = self.coordinator.execute(
+            self.page_action_assembler.assemble(
+                profile_name="user",
+                kind="console",
+                target_id="1",
+            )
+        )
+        self.assertTrue(cleared_result.ok)
+        self.assertEqual(cleared_result.value["result"]["count"], 0)
+        self.assertEqual(cleared_result.value["result"]["messages"], [])
 
     def test_mcp_snapshot_rejects_selector_or_frame_scoping(self) -> None:
         self.coordinator.execute(

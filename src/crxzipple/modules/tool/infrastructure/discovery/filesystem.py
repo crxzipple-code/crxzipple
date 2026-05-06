@@ -123,6 +123,16 @@ def _load_manifest(
             payload.get("required_effect_ids", []),
             manifest_path,
         ),
+        access_requirements=_parse_string_list(
+            payload.get("access_requirements", []),
+            "access_requirements",
+            manifest_path,
+        ),
+        access_requirement_sets=_parse_string_sets(
+            payload.get("access_requirement_sets", []),
+            "access_requirement_sets",
+            manifest_path,
+        ),
         execution_policy=ToolExecutionPolicy(
             timeout_seconds=int(payload.get("timeout_seconds", 30)),
             requires_confirmation=bool(payload.get("requires_confirmation", False)),
@@ -227,6 +237,33 @@ def _parse_effect_ids(raw: Any, manifest_path: Path) -> tuple[str, ...]:
     return tuple(str(effect_id).strip() for effect_id in raw if str(effect_id).strip())
 
 
+def _parse_string_list(
+    raw: Any,
+    field_name: str,
+    manifest_path: Path,
+) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise ToolValidationError(
+            f"Tool manifest '{manifest_path}' field '{field_name}' must be a list.",
+        )
+    return tuple(str(item).strip() for item in raw if str(item).strip())
+
+
+def _parse_string_sets(
+    raw: Any,
+    field_name: str,
+    manifest_path: Path,
+) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(raw, list):
+        raise ToolValidationError(
+            f"Tool manifest '{manifest_path}' field '{field_name}' must be a list.",
+        )
+    sets: list[tuple[str, ...]] = []
+    for item in raw:
+        sets.append(_parse_string_list(item, field_name, manifest_path))
+    return tuple(sets)
+
+
 def _parse_modes(raw: Any, manifest_path: Path) -> tuple[ToolMode, ...]:
     return tuple(_parse_enum_sequence(raw, ToolMode, "supported_modes", manifest_path))
 
@@ -302,6 +339,9 @@ def _tool_from_spec(spec: ToolSpec) -> Tool:
         kind=spec.kind,
         parameters=spec.parameters,
         tags=spec.tags,
+        required_effect_ids=spec.required_effect_ids,
+        access_requirements=spec.access_requirements,
+        access_requirement_sets=spec.access_requirement_sets,
         execution_policy=spec.execution_policy,
         execution_support=spec.execution_support,
         source_kind=spec.source_kind,

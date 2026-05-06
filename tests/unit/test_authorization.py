@@ -91,6 +91,8 @@ class AuthorizationTestCase(unittest.TestCase):
             [
                 "allow_llm_invocation",
                 "allow_safe_tool_execution",
+                "allow_session_context_tool_execution",
+                "allow_session_context_tool_mutation_effect",
                 "deny_tool_access_when_required_scope_missing",
                 "deny_tool_access_when_surface_mismatch",
                 "deny_tool_access_when_surface_requires_explicit_declaration",

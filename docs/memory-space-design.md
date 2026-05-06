@@ -2,597 +2,194 @@
 
 ## Goal
 
-Define `memory` as a standalone durable-knowledge subsystem that is scoped by
-`memory_space`, not by `agent`.
+Define `memory` as a standalone durable-knowledge subsystem scoped by a neutral
+`memory_space`, not by `agent`, `session`, or `run`.
 
-The design goal is:
+The current design goal is:
 
-- keep candidate and entry lifecycle inside `memory`
-- keep retrieval, storage projection, and embedding details inside `memory`
-- move agent-specific resolution and usage policy into `orchestration`
-- let future callers use memory without introducing an `agent` dependency
+- keep durable knowledge storage, indexing, retrieval, and citations inside
+  `memory`
+- let orchestration resolve which memory space a run may use
+- keep session transcript truth inside `session`
+- keep prompt assembly, maintenance timing, and tool exposure policy inside
+  `orchestration`
+- avoid hidden automatic post-turn memory mutation
 
-## Problem In The Current Shape
+## Current Position
 
-Today the memory subsystem is logically scoped by `agent_id`, but that
-`agent_id` has leaked into places that should stay generic:
+Memory is not a second runtime. It is a durable knowledge service.
 
-- domain entities use `agent_id` as a core identity field
-- application inputs accept `agent_id` instead of a neutral scope id
-- `MemoryApplicationService` resolves workspace, review mode, and retrieval
-  backend from `agent_id`
-- orchestration tools inject hidden `agent_id` into `memory_search` and
-  `memory_get`
+Normal run execution should not silently write durable memory. Durable writes
+happen through explicit memory tools or a standardized maintenance run that
+invokes those tools.
 
-This works, but it makes `memory` harder to reuse for:
+The current capture paths are:
 
-- workspace-scoped memory
-- project-scoped memory
-- team-scoped memory
-- session overlays
-- non-agent callers
+- `memory_write_daily` for an explicit daily durable note
+- future explicit long-term write tools, if we decide to expose them
+- orchestration-triggered memory flush runs, which are still normal tool-using
+  runs and must call a memory write or skip tool
 
-## Design Principles
+The current recall paths are:
 
-### 1. Memory Owns Durable Knowledge, Not Runtime Identity
+- `memory_search` for relevant durable knowledge
+- `memory_read` for cited excerpts
+- bounded prompt bootstrap from `MEMORY.md` or `memory.md` when the run surface
+  allows automatic recall
 
-`memory` should understand:
+## Boundaries
 
-- spaces
-- candidates
-- entries
-- search and recall
-- durable storage and projection
-- review and forgetting
+### Memory Owns
 
-`memory` should not understand:
+- `MemoryUseContext`
+- memory files such as `MEMORY.md`, `memory.md`, and `memory/*.md`
+- file classification
+- safe file excerpt reads
+- durable write helpers
+- index warmup and dirty marking
+- keyword/vector search
+- retrieval backend selection once the caller has supplied context
+
+### Memory Does Not Own
 
 - agent profile selection
 - run routing
-- prompt assembly timing
+- worker scheduling
+- session transcript truth
+- prompt assembly policy
 - tool exposure policy
-
-### 2. Orchestration Owns Usage Decisions
-
-`orchestration` should decide:
-
-- which memory space a run uses
-- whether auto recall is enabled
-- whether turn completion creates a candidate
-- whether flush is enabled
-- which memory tools are exposed for this run
-- which review mode or retrieval backend applies to this run
-
-### 3. Policy Is Not Identity
-
-`review_required`, `auto_approve`, `keyword`, `hybrid`, `vector`, and
-`workspace_root` are usage policy. They should be resolved outside the memory
-domain and then passed into memory in a neutral form.
-
-### 4. File Projection Stays In Memory
-
-Workspace Markdown projection is still a memory concern. It is a storage view
-of memory entries, not an orchestration rule.
-
-## Target Boundary
-
-### Memory Core Owns
-
-- `MemorySpaceId`
-- `MemoryCandidate`
-- `MemoryEntry`
-- candidate review lifecycle
-- durable entry lifecycle
-- retrieval backend selection and execution
-- workspace and database projection
-- citations and provenance
-- forget and delete
+- final authorization decisions
+- compaction timing
 
 ### Orchestration Owns
 
-- `agent/session/run -> memory_space` resolution
-- prompt-time recall policy
-- tool exposure policy
-- post-turn candidate extraction timing
-- memory flush timing
-- agent-profile defaults that influence memory use
+- resolving the active profile and session route
+- mapping a run to a memory space
+- deciding whether bounded bootstrap recall is enabled for the prompt surface
+- exposing memory tools for the current prompt mode
+- scheduling memory flush maintenance runs
+- ensuring memory flush runs do not become normal assistant replies
 
-### Agent Owns
+### Session Owns
 
-- default memory preferences in profile data
-- no direct ownership of memory identifiers
+- exact user/assistant/tool transcript history
+- message visibility and archival
+- active session routing
+- compaction replacement summaries
 
-## Core Types
+Session history is not memory. Compaction archives transcript state inside the
+session module; memory only stores durable knowledge when explicitly written.
 
-### Value Objects
+## Memory Space
 
-```python
-from dataclasses import dataclass
-from typing import Literal
+A memory space is a neutral durable-knowledge scope.
 
+Today, orchestration often resolves it from `run.agent_id` because an agent home
+is the primary storage root. That mapping is an orchestration concern, not a
+memory-domain identity rule.
 
-@dataclass(frozen=True, slots=True)
-class MemorySpaceId:
-    value: str
+Future callers may resolve memory spaces from:
 
+- agent homes
+- workspaces
+- projects
+- teams
+- imported knowledge bases
 
-MemoryReviewMode = Literal["review_required", "auto_approve"]
-MemoryRetrievalBackendName = Literal["keyword", "hybrid", "vector"]
-```
-
-### Memory Policy
-
-This is not domain identity. It is caller-resolved usage policy.
-
-```python
-@dataclass(frozen=True, slots=True)
-class MemoryPolicy:
-    review_mode: MemoryReviewMode = "review_required"
-    retrieval_backend: MemoryRetrievalBackendName = "keyword"
-    workspace_root: str | None = None
-    auto_recall: bool = False
-    auto_capture: bool = True
-```
-
-### Memory Use Context
-
-This is the contract between orchestration and memory.
-
-```python
-@dataclass(frozen=True, slots=True)
-class MemoryUseContext:
-    space_id: MemorySpaceId
-    policy: MemoryPolicy
-    session_key: str | None = None
-    run_id: str | None = None
-```
-
-### Draft Inputs
-
-```python
-@dataclass(frozen=True, slots=True)
-class MemoryCandidateDraft:
-    title: str
-    content: str
-    summary: str = ""
-    tags: tuple[str, ...] = ()
-    metadata: dict[str, object] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryEntryDraft:
-    title: str
-    content: str
-    summary: str = ""
-    tags: tuple[str, ...] = ()
-    metadata: dict[str, object] = field(default_factory=dict)
-```
-
-## Domain Model
-
-### MemoryEntry
-
-Target shape:
-
-- `id`
-- `space_id`
-- `title`
-- `content`
-- `summary`
-- `session_key`
-- `run_id`
-- `source_candidate_id`
-- `tags`
-- `metadata`
-- `created_at`
-- `updated_at`
-
-### MemoryCandidate
-
-Target shape:
-
-- `id`
-- `space_id`
-- `title`
-- `content`
-- `summary`
-- `session_key`
-- `run_id`
-- `tags`
-- `metadata`
-- `status`
-- `created_at`
-- `reviewed_at`
-- `review_reason`
-- `approved_entry_id`
-
-The memory domain should be able to answer:
-
-- which space owns this entry
-- which candidate produced this entry
-- whether this candidate is pending, approved, rejected, or forgotten
-
-It should not need to answer:
-
-- which agent profile produced this memory
-- which run policy enabled this memory
-
-Those belong in provenance metadata if needed.
-
-## Application Ports
-
-### Read Port
-
-```python
-from typing import Protocol
-
-
-class MemoryReadPort(Protocol):
-    def get_entry(
-        self,
-        *,
-        context: MemoryUseContext,
-        entry_id: str,
-    ) -> MemoryEntry:
-        ...
-
-    def list_entries(
-        self,
-        *,
-        context: MemoryUseContext,
-        query: str | None = None,
-        limit: int | None = None,
-    ) -> list[MemoryEntry]:
-        ...
-
-    def recall_entries(
-        self,
-        *,
-        context: MemoryUseContext,
-        query_text: str,
-        limit: int = 3,
-        search_limit: int = 25,
-    ) -> list[MemoryEntry]:
-        ...
-```
-
-### Write Port
-
-```python
-class MemoryWritePort(Protocol):
-    def propose_candidate(
-        self,
-        *,
-        context: MemoryUseContext,
-        draft: MemoryCandidateDraft,
-        candidate_id: str | None = None,
-    ) -> MemoryCandidate:
-        ...
-
-    def approve_candidate(
-        self,
-        *,
-        candidate_id: str,
-        entry_id: str | None = None,
-    ) -> MemoryEntry:
-        ...
-
-    def reject_candidate(
-        self,
-        *,
-        candidate_id: str,
-        reason: str = "rejected",
-    ) -> MemoryCandidate:
-        ...
-
-    def store_entry(
-        self,
-        *,
-        context: MemoryUseContext,
-        draft: MemoryEntryDraft,
-        entry_id: str | None = None,
-    ) -> MemoryEntry:
-        ...
-
-    def forget_entry(
-        self,
-        *,
-        context: MemoryUseContext,
-        entry_id: str,
-        reason: str = "forgotten",
-    ) -> MemoryEntry:
-        ...
-```
-
-### Why `context` Belongs On Read And Write Calls
-
-The same memory service can serve many spaces. Passing `MemoryUseContext` keeps
-the service generic while still allowing:
-
-- space selection
-- per-space review mode
-- per-space retrieval backend
-- optional workspace projection
-- session and run provenance
-
-The context should be resolved before entering memory, not inside memory from an
-`agent_id`.
-
-## Infrastructure Inside Memory
-
-The following stay inside `memory.infrastructure`:
-
-- database repositories
-- workspace Markdown projection
-- FTS and keyword indexing
-- vector and hybrid retrieval
-- embedding providers
-- citation and file-locator helpers
-
-Suggested interfaces:
-
-```python
-class MemoryProjectionStore(Protocol):
-    def append_entry(
-        self,
-        *,
-        workspace_root: str,
-        entry: MemoryEntry,
-    ) -> MemoryEntry:
-        ...
-
-    def get_entry(
-        self,
-        *,
-        workspace_root: str,
-        entry_id: str,
-        space_id: MemorySpaceId | None = None,
-    ) -> MemoryEntry | None:
-        ...
-
-    def remove_entry(
-        self,
-        *,
-        workspace_root: str,
-        entry_id: str,
-    ) -> None:
-        ...
-```
-
-This keeps file-backed memory generic. It can serve agent homes today and any
-other workspace-backed memory space later.
-
-## Orchestration Integration
-
-### Memory Space Resolver
-
-Orchestration should own a resolver that turns runtime state into a neutral
-memory context.
-
-```python
-class MemoryContextResolver(Protocol):
-    def resolve_for_run(self, run: OrchestrationRun) -> MemoryUseContext | None:
-        ...
-```
-
-Typical inputs to this resolver:
-
-- `run.agent_id`
-- agent profile preferences
-- workspace configuration
-- session metadata
-- future project or team scope rules
-
-Typical output:
+The memory module should only receive the resolved context:
 
 ```python
 MemoryUseContext(
-    space_id=MemorySpaceId("agent:planner"),
-    policy=MemoryPolicy(
-        review_mode="review_required",
-        retrieval_backend="hybrid",
-        workspace_root="/path/to/agent-home",
-        auto_recall=True,
-        auto_capture=True,
-    ),
-    session_key="bulk:abc",
-    run_id="run_123",
+    space_id="assistant",
+    storage_root="/path/to/agent/home",
+    retrieval_backend="keyword",
 )
 ```
 
-### Prompt Recall Flow
+## Orchestration Memory Port
 
-Prompt assembly should look like this:
+The orchestration-facing memory port is intentionally read-oriented:
 
-1. orchestration resolves `MemoryUseContext`
-2. orchestration checks `context.policy.auto_recall`
-3. orchestration calls `memory.recall_entries(context=..., query_text=...)`
-4. orchestration injects the results into the prompt
+- `resolve_context`
+- `warm_context`
+- `search`
+- `get`
 
-Memory does not decide recall timing. It only performs recall.
+It does not expose direct durable write methods. This keeps orchestration from
+becoming an alternate memory writer and makes the write path observable as a
+normal tool/maintenance run.
 
-### Tool Exposure Flow
+The lower-level file-backed memory service may still have durable write helpers
+for memory tools and memory HTTP/CLI surfaces.
 
-Tool availability remains an orchestration concern.
+## Prompt Bootstrap
 
-Recommended shape:
+Prompt bootstrap may include a small stable memory block from `MEMORY.md` or
+`memory.md`.
 
-1. orchestration decides whether memory tools are enabled
-2. orchestration binds the resolved `MemoryUseContext` to the tool session
-3. tools call memory with the bound context
+This is intentionally not general retrieval:
 
-Avoid hidden tool arguments such as `__agent_id`.
+- it reads only the stable bootstrap file
+- it is controlled by prompt surface policy
+- it does not create or update memory
+- it is separate from `memory_search`
 
-Prefer one of these approaches:
+Heavy automatic recall should stay off by default. If a task needs deeper
+recall, the model should use memory tools and cite the excerpts it read.
 
-- bind `MemoryUseContext` in the tool runtime session
-- bind an opaque `memory_scope_token` that orchestration resolves back to
-  `MemoryUseContext`
+## Memory Flush
 
-This keeps tool payloads generic and avoids exposing agent identity as memory
-identity.
+Memory flush is a maintenance run created by orchestration.
 
-### Turn Completion Capture Flow
+Its purpose is to let the model decide whether recent transcript content
+contains durable knowledge worth recording.
 
-When a turn finishes:
+Important constraints:
 
-1. orchestration decides whether this turn should generate memory
-2. orchestration builds `MemoryCandidateDraft`
-3. orchestration calls `memory.propose_candidate(context=..., draft=...)`
-4. memory applies review mode from `context.policy.review_mode`
+- a memory flush run uses prompt mode `memory_flush`
+- exposed tools are restricted to memory flush tools
+- tool choice is required
+- a successful write must happen through a memory tool
+- if there is nothing durable to record, the run must call `memory_flush_skip`
+- a memory flush run must not append a normal assistant reply to the user
 
-This preserves the current candidate workflow while moving the capture decision
-out of memory.
+This preserves the principle that memory writes remain explicit and auditable.
 
-### Flush Flow
+## Storage View
 
-When flush is triggered:
-
-1. orchestration resolves `MemoryUseContext`
-2. orchestration builds `MemoryEntryDraft`
-3. orchestration calls `memory.store_entry(context=..., draft=...)`
-
-Flush timing belongs to orchestration. Durable storage belongs to memory.
-
-## Recommended Package Split
-
-### Memory
+The current file view is:
 
 ```text
-modules/memory/
-  domain/
-    entities.py
-    value_objects.py
-    repositories.py
-    exceptions.py
-  application/
-    ports.py
-    services.py
-    dto.py
-  infrastructure/
-    retrieval.py
-    embeddings.py
-    workspace_store.py
-    persistence/
+agent-home/
+  MEMORY.md
+  memory/
+    YYYY-MM-DD.md
+    YYYY-MM-DD-slug.md
 ```
 
-### Orchestration
+File kinds:
 
-```text
-modules/orchestration/
-  application/
-    memory_context.py
-    memory_candidates.py
-    prompt_assembler.py
-    tool_resolver.py
-  infrastructure/
-    adapters/
-      memory.py
-    memory_context_resolver.py
-```
+- `long_term`: `MEMORY.md` or `memory.md`
+- `daily`: `memory/YYYY-MM-DD.md`
+- `archive`: other markdown files under `memory/`
 
-The orchestration adapter should be narrow. It translates orchestration runtime
-state into `MemoryUseContext` and then forwards calls to the memory read and
-write ports.
+The `archive` kind is a durable memory file kind. It is not the source of truth
+for session transcript history.
 
-## Migration From The Current Code
+## Migration Notes
 
-### Phase 1: Neutral Naming In Memory Core
+Completed direction:
 
-Replace `agent_id` with `space_id` in:
+- memory context uses neutral `space_id`
+- orchestration resolves memory context from agent/home bindings
+- prompt recall is bounded bootstrap, not broad automatic retrieval
+- memory writes are explicit tool calls or maintenance flush tool calls
+- orchestration memory port no longer exposes direct write methods
+- low-level archive helpers use a neutral archive-write name
 
-- `MemoryEntry`
-- `MemoryCandidate`
-- memory DTOs such as `CreateMemoryCandidateInput`
-- repository filters and persistence models
+Still worth improving:
 
-Keep orchestration passing `run.agent_id` through a trivial mapping during this
-phase.
-
-### Phase 2: Pull Resolvers Out Of Memory Service
-
-Remove these from `MemoryApplicationService`:
-
-- `candidate_review_mode_resolver`
-- `workspace_resolver`
-- `retrieval_backend_resolver`
-
-Replace them with explicit `MemoryUseContext` on public calls.
-
-This is the biggest boundary cleanup. It makes memory deterministic and easier
-to test.
-
-### Phase 3: Move Tool Context Binding To Orchestration
-
-Replace the current hidden tool argument injection with a bound memory context
-owned by orchestration.
-
-Memory tool implementations should receive either:
-
-- `MemoryUseContext` directly, or
-- a resolved `space_id` plus policy derived by orchestration
-
-### Phase 4: Trim The Adapter
-
-Replace the current orchestration `MemoryPort` with narrower read and write
-ports that are `space_id`-aware.
-
-Suggested target:
-
-```python
-class OrchestrationMemoryPort(MemoryReadPort, MemoryWritePort, Protocol):
-    def memory_lookup_instruction(self) -> str:
-        ...
-
-    def is_memory_tool_name(self, name: str) -> bool:
-        ...
-```
-
-The important difference is that this port should no longer mention `agent_id`.
-
-### Phase 5: Optional Multi-Space Features
-
-After the boundary is clean, future extensions become simpler:
-
-- project-level shared memory spaces
-- session overlay spaces
-- team knowledge spaces
-- composite recall across multiple spaces
-- cross-space write policies
-
-## Current-To-Target Mapping
-
-### Current Concept: `agent_id`
-
-Target equivalent: `MemorySpaceId`
-
-Example transitional mapping:
-
-- `agent:planner`
-- `agent:researcher`
-- `workspace:/repo/foo`
-- `project:alpha`
-
-### Current Concept: Agent Runtime Preferences
-
-Target equivalent: orchestration-resolved `MemoryPolicy`
-
-The profile still stores defaults, but memory does not read the profile
-directly.
-
-### Current Concept: `WorkspaceMemoryStore`
-
-Target equivalent: still valid, but keyed by `workspace_root` and `space_id`
-instead of assuming `agent_id`.
-
-## Decision Summary
-
-The long-term shape should be:
-
-- `memory` is a generic, space-scoped durable knowledge subsystem
-- `orchestration` is the caller that resolves space and policy for each run
-- `agent` is only one possible source of defaults, not the identity model of
-  memory itself
-
-That keeps the current review workflow and retrieval features, while removing
-the architectural coupling that currently makes memory agent-aware.
+- add a dedicated long-term write tool only if we want models to update
+  `MEMORY.md` directly
+- make memory space resolution available to non-agent callers without coupling
+  them to agent profiles

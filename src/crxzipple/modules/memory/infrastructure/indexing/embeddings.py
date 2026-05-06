@@ -7,12 +7,6 @@ import re
 
 import requests
 
-from crxzipple.modules.llm.infrastructure.adapters.common import (
-    ensure_json_response,
-    join_url,
-    resolve_credential_binding,
-)
-
 
 class LocalHashedMemoryEmbeddingProvider:
     def __init__(
@@ -92,6 +86,12 @@ class OpenAICompatibleMemoryEmbeddingProvider:
         return self._base_url.rstrip("/")
 
     def embed_texts(self, texts: Sequence[str]) -> tuple[tuple[float, ...], ...]:
+        from crxzipple.modules.llm.infrastructure.adapters.common import (
+            ensure_json_response,
+            join_url,
+            resolve_credential_binding,
+        )
+
         normalized_texts = [str(text) for text in texts]
         if not normalized_texts:
             return ()

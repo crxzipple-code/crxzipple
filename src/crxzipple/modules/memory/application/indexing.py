@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import perf_counter
+from threading import RLock
 from typing import Iterable
 
 from crxzipple.modules.memory.application.contracts import (
@@ -8,6 +10,17 @@ from crxzipple.modules.memory.application.contracts import (
     MemoryIndexStore,
     MemorySearchGateway,
     MemorySourceScanner,
+)
+from crxzipple.modules.memory.application.events import (
+    MEMORY_INDEX_MARKED_DIRTY_EVENT,
+    MEMORY_INDEX_SYNC_FAILED_EVENT,
+    MEMORY_INDEX_SYNC_STARTED_EVENT,
+    MEMORY_INDEX_SYNC_SUCCEEDED_EVENT,
+    MEMORY_RETRIEVAL_FAILED_EVENT,
+    MEMORY_RETRIEVAL_STARTED_EVENT,
+    MEMORY_RETRIEVAL_SUCCEEDED_EVENT,
+    MemoryEventEmitter,
+    emit_memory_event,
 )
 from crxzipple.modules.memory.application.models import (
     MemorySearchHit,
@@ -32,6 +45,7 @@ class SyncMemoryIndexService:
     planner: MemoryIndexPlanner = field(default_factory=MemoryIndexPlanner)
     chunking_policy: MemoryChunkingPolicy = field(default_factory=MemoryChunkingPolicy)
     embedding_provider: MemoryEmbeddingProvider | None = None
+    event_emitter: MemoryEventEmitter | None = None
     _dirty_context_keys: set[str] = field(default_factory=set, init=False, repr=False)
     _known_fingerprints: dict[str, tuple[tuple[str, int, int], ...]] = field(
         default_factory=dict,
@@ -48,6 +62,11 @@ class SyncMemoryIndexService:
         init=False,
         repr=False,
     )
+    _lock: RLock = field(
+        default_factory=RLock,
+        init=False,
+        repr=False,
+    )
 
     def ensure_synced(
         self,
@@ -55,6 +74,16 @@ class SyncMemoryIndexService:
         context: MemoryUseContext,
         force: bool = False,
     ) -> bool:
+        with self._lock:
+            return self._ensure_synced_locked(context=context, force=force)
+
+    def _ensure_synced_locked(
+        self,
+        *,
+        context: MemoryUseContext,
+        force: bool = False,
+    ) -> bool:
+        started_at = perf_counter()
         context_key = _context_key(context)
         fingerprint = self.source_scanner.fingerprint(storage_root=context.storage_root)
         expected_metadata = self._expected_metadata(context)
@@ -69,98 +98,158 @@ class SyncMemoryIndexService:
             and self._known_metadata.get(context_key) == metadata_signature
         ):
             return False
-        metadata_changed = self.index_store.sync_metadata(
-            storage_root=context.storage_root,
-            space_id=context.space_id,
-            expected=expected_metadata,
+        emit_memory_event(
+            self.event_emitter,
+            MEMORY_INDEX_SYNC_STARTED_EVENT,
+            context=context,
+            status="started",
+            payload={
+                "force": force,
+                "dirty_paths": list(dirty_paths),
+                "source_file_count": len(fingerprint),
+            },
         )
-        existing_hashes = self.index_store.indexed_file_hashes(
-            storage_root=context.storage_root,
-            space_id=context.space_id,
-        )
-        use_incremental = (
-            not force
-            and not metadata_changed
-            and bool(dirty_paths)
-            and context_key in self._known_fingerprints
-        )
-        if use_incremental:
-            current_files = self.source_scanner.scan_paths(
+        files_to_reindex_count = 0
+        stale_paths_count = 0
+        chunk_count = 0
+        metadata_changed = False
+        try:
+            metadata_changed = self.index_store.sync_metadata(
                 storage_root=context.storage_root,
-                relative_paths=dirty_paths,
+                space_id=context.space_id,
+                expected=expected_metadata,
             )
-            active_paths = {item.path for item in current_files}
-            stale_paths = tuple(path for path in dirty_paths if path not in active_paths)
-            files_to_reindex = tuple(
-                item
-                for item in current_files
-                if existing_hashes.get(item.path) != item.source_file_hash
-            )
-            needs_full_reindex = False
-        else:
-            current_files = self.source_scanner.scan(storage_root=context.storage_root)
-            sync_plan = self.planner.build_sync_plan(
-                current_files=current_files,
-                existing_hashes=existing_hashes,
-                metadata_changed=metadata_changed,
-            )
-            stale_paths = sync_plan.stale_paths
-            files_to_reindex = sync_plan.files_to_reindex
-            needs_full_reindex = sync_plan.needs_full_reindex
-        if needs_full_reindex:
-            self.index_store.clear(
+            existing_hashes = self.index_store.indexed_file_hashes(
                 storage_root=context.storage_root,
                 space_id=context.space_id,
             )
-        for stale_path in stale_paths:
-            self.index_store.delete_path(
-                storage_root=context.storage_root,
-                space_id=context.space_id,
-                path=stale_path,
+            use_incremental = (
+                not force
+                and not metadata_changed
+                and bool(dirty_paths)
+                and context_key in self._known_fingerprints
             )
-        for indexed_file in files_to_reindex:
-            chunks = self.chunking_policy.chunk_text(indexed_file.text)
-            embeddings = self._embeddings_for_chunks(
-                context=context,
-                chunks=chunks,
-            )
-            self.index_store.replace_file_chunks(
-                storage_root=context.storage_root,
-                space_id=context.space_id,
-                indexed_file=indexed_file,
-                chunks=chunks,
-                embeddings=embeddings,
-                embedding_provider_name=(
-                    self.embedding_provider.provider_name
-                    if embeddings is not None and self.embedding_provider is not None
-                    else None
-                ),
-                embedding_model_name=(
-                    self.embedding_provider.model_name
-                    if embeddings is not None and self.embedding_provider is not None
-                    else None
-                ),
-                embedding_provider_key=(
-                    self.embedding_provider.provider_key
-                    if embeddings is not None and self.embedding_provider is not None
-                    else None
-                ),
-                retrieval_backend=context.retrieval_backend,
-            )
-        self._dirty_context_keys.discard(context_key)
-        self._dirty_paths_by_context.pop(context_key, None)
-        if use_incremental:
-            self._known_fingerprints[context_key] = _merge_fingerprint(
-                self._known_fingerprints.get(context_key, ()),
-                dirty_paths=dirty_paths,
-                changed_paths=self.source_scanner.fingerprint_paths(
+            if use_incremental:
+                current_files = self.source_scanner.scan_paths(
                     storage_root=context.storage_root,
                     relative_paths=dirty_paths,
-                ),
+                )
+                active_paths = {item.path for item in current_files}
+                stale_paths = tuple(path for path in dirty_paths if path not in active_paths)
+                files_to_reindex = tuple(
+                    item
+                    for item in current_files
+                    if existing_hashes.get(item.path) != item.source_file_hash
+                )
+                needs_full_reindex = False
+            else:
+                current_files = self.source_scanner.scan(storage_root=context.storage_root)
+                sync_plan = self.planner.build_sync_plan(
+                    current_files=current_files,
+                    existing_hashes=existing_hashes,
+                    metadata_changed=metadata_changed,
+                )
+                stale_paths = sync_plan.stale_paths
+                files_to_reindex = sync_plan.files_to_reindex
+                needs_full_reindex = sync_plan.needs_full_reindex
+            files_to_reindex_count = len(files_to_reindex)
+            stale_paths_count = len(stale_paths)
+            if needs_full_reindex:
+                self.index_store.clear(
+                    storage_root=context.storage_root,
+                    space_id=context.space_id,
+                )
+            for stale_path in stale_paths:
+                self.index_store.delete_path(
+                    storage_root=context.storage_root,
+                    space_id=context.space_id,
+                    path=stale_path,
+                )
+            for indexed_file in files_to_reindex:
+                chunks = self.chunking_policy.chunk_text(indexed_file.text)
+                chunk_count += len(chunks)
+                embeddings = self._embeddings_for_chunks(
+                    context=context,
+                    chunks=chunks,
+                )
+                self.index_store.replace_file_chunks(
+                    storage_root=context.storage_root,
+                    space_id=context.space_id,
+                    indexed_file=indexed_file,
+                    chunks=chunks,
+                    embeddings=embeddings,
+                    embedding_provider_name=(
+                        self.embedding_provider.provider_name
+                        if embeddings is not None and self.embedding_provider is not None
+                        else None
+                    ),
+                    embedding_model_name=(
+                        self.embedding_provider.model_name
+                        if embeddings is not None and self.embedding_provider is not None
+                        else None
+                    ),
+                    embedding_provider_key=(
+                        self.embedding_provider.provider_key
+                        if embeddings is not None and self.embedding_provider is not None
+                        else None
+                    ),
+                    retrieval_backend=context.retrieval_backend,
+                )
+            self._dirty_context_keys.discard(context_key)
+            self._dirty_paths_by_context.pop(context_key, None)
+            if use_incremental:
+                self._known_fingerprints[context_key] = _merge_fingerprint(
+                    self._known_fingerprints.get(context_key, ()),
+                    dirty_paths=dirty_paths,
+                    changed_paths=self.source_scanner.fingerprint_paths(
+                        storage_root=context.storage_root,
+                        relative_paths=dirty_paths,
+                    ),
+                )
+            else:
+                self._known_fingerprints[context_key] = fingerprint
+            self._known_metadata[context_key] = metadata_signature
+        except Exception as exc:
+            emit_memory_event(
+                self.event_emitter,
+                MEMORY_INDEX_SYNC_FAILED_EVENT,
+                context=context,
+                status="failed",
+                level="error",
+                payload={
+                    "duration_ms": _duration_ms(started_at),
+                    "force": force,
+                    "dirty_paths": list(dirty_paths),
+                    "error_message": str(exc),
+                },
             )
-        else:
-            self._known_fingerprints[context_key] = fingerprint
-        self._known_metadata[context_key] = metadata_signature
+            raise
+        emit_memory_event(
+            self.event_emitter,
+            MEMORY_INDEX_SYNC_SUCCEEDED_EVENT,
+            context=context,
+            status="succeeded",
+            payload={
+                "duration_ms": _duration_ms(started_at),
+                "force": force,
+                "metadata_changed": metadata_changed,
+                "incremental": use_incremental,
+                "source_file_count": len(current_files),
+                "reindexed_files": files_to_reindex_count,
+                "stale_paths": stale_paths_count,
+                "chunk_count": chunk_count,
+                "embedding_provider": (
+                    self.embedding_provider.provider_name
+                    if self.embedding_provider is not None
+                    else "-"
+                ),
+                "embedding_model": (
+                    self.embedding_provider.model_name
+                    if self.embedding_provider is not None
+                    else "-"
+                ),
+            },
+        )
         return True
 
     def mark_dirty(
@@ -169,13 +258,24 @@ class SyncMemoryIndexService:
         context: MemoryUseContext,
         changed_paths: Iterable[str] | None = None,
     ) -> None:
-        context_key = _context_key(context)
-        self._dirty_context_keys.add(context_key)
-        normalized = _normalize_dirty_paths(changed_paths)
-        if not normalized:
-            return
-        bucket = self._dirty_paths_by_context.setdefault(context_key, set())
-        bucket.update(normalized)
+        with self._lock:
+            context_key = _context_key(context)
+            self._dirty_context_keys.add(context_key)
+            normalized = _normalize_dirty_paths(changed_paths)
+            emit_memory_event(
+                self.event_emitter,
+                MEMORY_INDEX_MARKED_DIRTY_EVENT,
+                context=context,
+                status="dirty",
+                payload={
+                    "changed_paths": list(normalized),
+                    "changed_path_count": len(normalized),
+                },
+            )
+            if not normalized:
+                return
+            bucket = self._dirty_paths_by_context.setdefault(context_key, set())
+            bucket.update(normalized)
 
     def warm_context(self, *, context: MemoryUseContext) -> bool:
         return self.ensure_synced(context=context, force=False)
@@ -251,6 +351,7 @@ class SearchMemoryIndexService:
     sync_service: SyncMemoryIndexService
     search_gateway: MemorySearchGateway
     embedding_provider: MemoryEmbeddingProvider | None = None
+    event_emitter: MemoryEventEmitter | None = None
 
     def search(
         self,
@@ -259,32 +360,71 @@ class SearchMemoryIndexService:
         query: str,
         limit: int = 6,
     ) -> list[MemorySearchHit]:
+        started_at = perf_counter()
         normalized_query = query.strip()
         if not normalized_query:
             return []
-        self.sync_service.ensure_synced(context=context, force=False)
-        query_embedding: tuple[float, ...] | None = None
-        if (
-            context.retrieval_backend in {"hybrid", "vector"}
-            and self.embedding_provider is not None
-        ):
-            query_embedding = self.embedding_provider.embed_texts((normalized_query,))[0]
-        records = self.search_gateway.search_records(
-            storage_root=context.storage_root,
-            space_id=context.space_id,
-            query=normalized_query,
-            limit=max(limit, 1),
-            retrieval_backend=context.retrieval_backend,
-            query_embedding=query_embedding,
+        emit_memory_event(
+            self.event_emitter,
+            MEMORY_RETRIEVAL_STARTED_EVENT,
+            context=context,
+            status="started",
+            payload={"query": normalized_query, "limit": max(limit, 1)},
         )
-        return [
-            MemorySearchHit.from_item(
-                self._memory_item_from_record(context=context, record=record),
-                score=record.score,
-                snippet=search_snippet(record.text, normalized_query),
+        try:
+            self.sync_service.ensure_synced(context=context, force=False)
+            query_embedding: tuple[float, ...] | None = None
+            if (
+                context.retrieval_backend in {"hybrid", "vector"}
+                and self.embedding_provider is not None
+            ):
+                query_embedding = self.embedding_provider.embed_texts((normalized_query,))[0]
+            records = self.search_gateway.search_records(
+                storage_root=context.storage_root,
+                space_id=context.space_id,
+                query=normalized_query,
+                limit=max(limit, 1),
+                retrieval_backend=context.retrieval_backend,
+                query_embedding=query_embedding,
             )
-            for record in records
-        ]
+            hits = [
+                MemorySearchHit.from_item(
+                    self._memory_item_from_record(context=context, record=record),
+                    score=record.score,
+                    snippet=search_snippet(record.text, normalized_query),
+                )
+                for record in records
+            ]
+        except Exception as exc:
+            emit_memory_event(
+                self.event_emitter,
+                MEMORY_RETRIEVAL_FAILED_EVENT,
+                context=context,
+                status="failed",
+                level="error",
+                payload={
+                    "query": normalized_query,
+                    "limit": max(limit, 1),
+                    "duration_ms": _duration_ms(started_at),
+                    "error_message": str(exc),
+                },
+            )
+            raise
+        emit_memory_event(
+            self.event_emitter,
+            MEMORY_RETRIEVAL_SUCCEEDED_EVENT,
+            context=context,
+            status="succeeded",
+            payload={
+                "query": normalized_query,
+                "limit": max(limit, 1),
+                "duration_ms": _duration_ms(started_at),
+                "hit_count": len(hits),
+                "top_path": hits[0].path if hits else "-",
+                "top_score": hits[0].score if hits else 0.0,
+            },
+        )
+        return hits
 
     def _memory_item_from_record(
         self,
@@ -316,6 +456,10 @@ def _content_hash(text: str) -> str:
 
 def _context_key(context: MemoryUseContext) -> str:
     return f"{context.space_id}::{context.storage_root}"
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))
 
 
 def _merge_fingerprint(

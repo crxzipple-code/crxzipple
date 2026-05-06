@@ -68,3 +68,29 @@ class SkillInstallationPort(Protocol):
         workspace_dir: str | None,
     ) -> InstalledSkill:
         ...
+
+
+class SkillRepositoryPort(Protocol):
+    def list_available(self, *, workspace_dir: str | None) -> tuple[SkillPackage, ...]:
+        ...
+
+    def read(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        path: str | None,
+    ) -> SkillReadResult:
+        ...
+
+    def validate(self, *, path: str) -> SkillPackage:
+        ...
+
+    def install(
+        self,
+        *,
+        source_dir: str,
+        scope: SkillInstallScope,
+        workspace_dir: str | None,
+    ) -> InstalledSkill:
+        ...

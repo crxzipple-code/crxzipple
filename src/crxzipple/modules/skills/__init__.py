@@ -8,6 +8,7 @@ from crxzipple.modules.skills.application import (
     SkillPackage,
     SkillReadPort,
     SkillReadResult,
+    SkillResource,
 )
 from crxzipple.modules.skills.domain import (
     SkillError,
@@ -45,5 +46,6 @@ __all__ = [
     "SkillPackage",
     "SkillReadPort",
     "SkillReadResult",
+    "SkillResource",
     "SkillValidationError",
 ]

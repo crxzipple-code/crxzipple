@@ -9,9 +9,18 @@ import unittest
 from unittest.mock import patch
 
 from crxzipple.modules.memory import FileBackedMemoryService, MemoryUseContext
+from crxzipple.modules.memory.infrastructure.indexing import FileMemoryIndexManager
+from crxzipple.modules.memory.infrastructure.storage import FileMemoryStore
 from crxzipple.modules.memory.infrastructure.watching.watch_registry import (
     MemoryWatchRegistry,
 )
+
+
+def _file_backed_memory_service() -> FileBackedMemoryService:
+    return FileBackedMemoryService(
+        store=FileMemoryStore(),
+        index_manager=FileMemoryIndexManager(),
+    )
 
 
 class MemoryWatchingTestCase(unittest.TestCase):
@@ -23,7 +32,7 @@ class MemoryWatchingTestCase(unittest.TestCase):
             storage_root=str(self.root),
             retrieval_backend="hybrid",
         )
-        self.service = FileBackedMemoryService()
+        self.service = _file_backed_memory_service()
 
     def tearDown(self) -> None:
         self.workspace.cleanup()

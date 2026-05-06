@@ -6,6 +6,10 @@ from typing import Any
 from crxzipple.modules.tool.application import ToolDiscoveryProviderDescriptor
 from crxzipple.modules.tool.domain import ToolRunError, ToolRunResult
 from crxzipple.modules.tool.domain.entities import Tool, ToolRun
+from crxzipple.shared.time import (
+    format_datetime_utc,
+    format_optional_datetime_utc,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +61,8 @@ class ToolDTO:
     parameters: tuple[ToolParameterDTO, ...]
     tags: tuple[str, ...]
     required_effect_ids: tuple[str, ...]
+    access_requirements: tuple[str, ...]
+    access_requirement_sets: tuple[tuple[str, ...], ...]
     execution_policy: ToolExecutionPolicyDTO
     execution_support: ToolExecutionSupportDTO
     source_kind: str
@@ -81,6 +87,8 @@ class ToolDTO:
             ),
             tags=tool.tags,
             required_effect_ids=tool.required_effect_ids,
+            access_requirements=tool.access_requirements,
+            access_requirement_sets=tool.access_requirement_sets,
             execution_policy=ToolExecutionPolicyDTO(
                 timeout_seconds=tool.execution_policy.timeout_seconds,
                 requires_confirmation=tool.execution_policy.requires_confirmation,
@@ -187,33 +195,17 @@ class ToolRunDTO:
             ),
             output_payload=tool_run.output_payload,
             error_message=tool_run.error_message,
-            created_at=tool_run.created_at.isoformat(),
-            started_at=(
-                tool_run.started_at.isoformat()
-                if tool_run.started_at is not None
-                else None
-            ),
-            completed_at=(
-                tool_run.completed_at.isoformat()
-                if tool_run.completed_at is not None
-                else None
-            ),
+            created_at=format_datetime_utc(tool_run.created_at),
+            started_at=format_optional_datetime_utc(tool_run.started_at),
+            completed_at=format_optional_datetime_utc(tool_run.completed_at),
             attempt_count=tool_run.attempt_count,
             max_attempts=tool_run.max_attempts,
             worker_id=tool_run.worker_id,
-            heartbeat_at=(
-                tool_run.heartbeat_at.isoformat()
-                if tool_run.heartbeat_at is not None
-                else None
+            heartbeat_at=format_optional_datetime_utc(tool_run.heartbeat_at),
+            lease_expires_at=format_optional_datetime_utc(
+                tool_run.lease_expires_at,
             ),
-            lease_expires_at=(
-                tool_run.lease_expires_at.isoformat()
-                if tool_run.lease_expires_at is not None
-                else None
-            ),
-            cancel_requested_at=(
-                tool_run.cancel_requested_at.isoformat()
-                if tool_run.cancel_requested_at is not None
-                else None
+            cancel_requested_at=format_optional_datetime_utc(
+                tool_run.cancel_requested_at,
             ),
         )

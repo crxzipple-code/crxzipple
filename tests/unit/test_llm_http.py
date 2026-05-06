@@ -14,14 +14,28 @@ class LlmHttpTestCase(HttpModuleTestCase):
                     "model_name": "gpt-5",
                     "model_family": "reasoning",
                     "capabilities": ["tool_calling"],
-                    "default_params": {"temperature": 0.2, "max_output_tokens": 512},
+                    "default_params": {
+                        "temperature": 0.2,
+                        "max_output_tokens": 512,
+                        "extra_body": {
+                            "chat_template_kwargs": {"enable_thinking": False},
+                        },
+                    },
                     "credential_binding": "env:OPENAI_API_KEY",
+                    "max_concurrency": 2,
+                    "concurrency_key": "provider:openai",
                 },
             )
 
             self.assertEqual(create_response.status_code, 201)
             self.assertEqual(create_response.json()["id"], "writer")
             self.assertEqual(create_response.json()["api_family"], "openai_responses")
+            self.assertEqual(
+                create_response.json()["default_params"]["extra_body"],
+                {"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            self.assertEqual(create_response.json()["max_concurrency"], 2)
+            self.assertEqual(create_response.json()["concurrency_key"], "provider:openai")
 
             get_response = self.client.get("/llms/writer")
             list_response = self.client.get("/llms")
@@ -178,9 +192,16 @@ class LlmHttpTestCase(HttpModuleTestCase):
                         model_name="gpt-5.4",
                         model_family="reasoning",
                         capabilities=("tool_calling", "structured_output"),
-                        default_params={"reasoning_effort": "medium"},
+                        default_params={
+                            "reasoning_effort": "medium",
+                            "extra_body": {
+                                "chat_template_kwargs": {"enable_thinking": False},
+                            },
+                        },
                         credential_binding="env:OPENAI_API_KEY",
                         timeout_seconds=120,
+                        max_concurrency=2,
+                        concurrency_key="provider:openai",
                     ),
                 ),
             )
@@ -202,6 +223,12 @@ class LlmHttpTestCase(HttpModuleTestCase):
                     sync_payload[0]["default_params"]["reasoning_effort"],
                     "medium",
                 )
+                self.assertEqual(
+                    sync_payload[0]["default_params"]["extra_body"],
+                    {"chat_template_kwargs": {"enable_thinking": False}},
+                )
+                self.assertEqual(sync_payload[0]["max_concurrency"], 2)
+                self.assertEqual(sync_payload[0]["concurrency_key"], "provider:openai")
 
                 list_response = client.get("/llms")
                 self.assertEqual(list_response.status_code, 200)

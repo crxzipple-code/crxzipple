@@ -7,16 +7,16 @@ from crxzipple.modules.process.domain import (
     ProcessSession,
     ProcessValidationError,
 )
-from crxzipple.modules.process.infrastructure import (
-    FilesystemProcessSessionRepository,
-    ProcessSupervisor,
+from crxzipple.modules.process.application.ports import (
+    ProcessSessionRepositoryPort,
+    ProcessSupervisorPort,
 )
 
 
 @dataclass(slots=True)
 class ProcessApplicationService:
-    repository: FilesystemProcessSessionRepository
-    supervisor: ProcessSupervisor
+    repository: ProcessSessionRepositoryPort
+    supervisor: ProcessSupervisorPort
 
     def start_command(
         self,
@@ -37,6 +37,12 @@ class ProcessApplicationService:
 
     def list_sessions(self) -> tuple[ProcessSession, ...]:
         return tuple(self.repository.refresh(session) for session in self.repository.list_all())
+
+    def list_sessions_metadata(self) -> tuple[ProcessSession, ...]:
+        return tuple(
+            self.repository.refresh(session, include_output=False)
+            for session in self.repository.list_all(include_output=False)
+        )
 
     def get_session(self, *, process_id: str) -> ProcessSession:
         return self.repository.refresh(self.repository.get(process_id))

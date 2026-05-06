@@ -23,9 +23,10 @@ from crxzipple.modules.orchestration.domain.exceptions import (
 )
 from crxzipple.modules.session.application import SessionApplicationService
 from crxzipple.shared.domain.aggregates import AggregateRoot
+from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.services import (
+    from crxzipple.modules.orchestration.application.commands import (
         RequestCompactionInput,
         RequestDueHeartbeatsInput,
         RequestHeartbeatInput,
@@ -111,7 +112,7 @@ class RunRequestCoordinator:
                 session_key=anchor.session_key,
                 metadata={
                     "pending_run_id": run.id,
-                    "requested_at": run.created_at.isoformat(),
+                    "requested_at": format_datetime_utc(run.created_at),
                     "request_reason": (data.reason or "").strip() or "manual",
                     "trigger_basis": trigger_basis,
                     "trigger_details": trigger_details,
@@ -185,7 +186,9 @@ class RunRequestCoordinator:
                 session_key=anchor.session_key,
                 metadata={
                     "pending_memory_flush_run_id": run.id,
-                    "pending_memory_flush_requested_at": run.created_at.isoformat(),
+                    "pending_memory_flush_requested_at": format_datetime_utc(
+                        run.created_at,
+                    ),
                     "pending_memory_flush_reason": (
                         (data.reason or "").strip() or "auto_pre_compaction_flush"
                     ),
@@ -223,9 +226,7 @@ class RunRequestCoordinator:
                 break
             if session.status.strip().lower() != "active":
                 continue
-            updated_at = session.updated_at
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            updated_at = coerce_utc_datetime(session.updated_at)
             if updated_at > idle_before:
                 continue
             if self._existing_inflight_run(session.id) is not None:
@@ -242,7 +243,7 @@ class RunRequestCoordinator:
                         trigger_basis="idle_session",
                         trigger_details={
                             "idle_seconds": data.idle_seconds,
-                            "session_updated_at": updated_at.isoformat(),
+                            "session_updated_at": format_datetime_utc(updated_at),
                         },
                         queue_policy=data.queue_policy,
                         priority=data.priority,

@@ -99,7 +99,7 @@ class SessionOrigin(ValueObject):
 
 
 @dataclass(frozen=True, slots=True)
-class SessionDelivery(ValueObject):
+class SessionReply(ValueObject):
     channel: str | None = None
     to_id: str | None = None
     account_id: str | None = None
@@ -118,7 +118,7 @@ class SessionDelivery(ValueObject):
         return payload
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any] | None) -> "SessionDelivery":
+    def from_payload(cls, payload: dict[str, Any] | None) -> "SessionReply":
         payload = payload or {}
         return cls(
             channel=str(payload["channel"]) if payload.get("channel") is not None else None,
@@ -134,7 +134,6 @@ class SessionDelivery(ValueObject):
                 else None
             ),
         )
-
 
 @dataclass(frozen=True, slots=True)
 class SessionMessage(ValueObject):

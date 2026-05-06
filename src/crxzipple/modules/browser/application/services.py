@@ -46,6 +46,9 @@ _UNSET = object()
 _TAB_SCOPED_ACTIONS = frozenset(
     {
         "click",
+        "console",
+        "cookies",
+        "dialog",
         "type",
         "press",
         "hover",
@@ -55,11 +58,15 @@ _TAB_SCOPED_ACTIONS = frozenset(
         "scroll-into-view",
         "select",
         "fill",
+        "upload",
+        "download",
+        "wait-download",
         "wait",
         "snapshot",
         "screenshot",
         "pdf",
         "evaluate",
+        "storage",
     }
 )
 
@@ -100,6 +107,18 @@ def _normalize_url(value: str, *, label: str) -> str:
 
 def _compose_cdp_url(system: BrowserSystemConfig, cdp_port: int) -> str:
     return f"http://{system.cdp_host}:{cdp_port}"
+
+
+def _runtime_status_payload(
+    runtime_state: BrowserProfileRuntimeState,
+) -> dict[str, Any]:
+    return {
+        "attachment_status": runtime_state.attachment_status,
+        "browser_ref": runtime_state.browser_ref,
+        "running_pid": runtime_state.running_pid,
+        "last_target_id": runtime_state.last_target_id,
+        "last_error": runtime_state.last_error,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,12 +384,45 @@ class _DefaultBrowserProfileSelectionOps(BrowserProfileSelectionOps):
     runtime_state: BrowserProfileRuntimeState
     tab_ops: BrowserProfileTabOps
 
+    def _cached_tabs(self) -> tuple[BrowserTab, ...]:
+        raw = self.runtime_state.metadata.get("tabs")
+        if not isinstance(raw, list):
+            return ()
+        tabs: list[BrowserTab] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            target_id = str(item.get("target_id", "")).strip()
+            if not target_id:
+                continue
+            tabs.append(
+                BrowserTab(
+                    target_id=target_id,
+                    url=str(item.get("url", "")).strip(),
+                    title=str(item.get("title", "")).strip(),
+                    type=str(item.get("type", "page")).strip() or "page",
+                    ws_url=(
+                        str(item["ws_url"])
+                        if item.get("ws_url") is not None
+                        else None
+                    ),
+                    json_endpoints=(
+                        dict(item["json_endpoints"])
+                        if isinstance(item.get("json_endpoints"), dict)
+                        else None
+                    ),
+                )
+            )
+        return tuple(tabs)
+
     def ensure_tab_available(
         self,
         *,
         requested_target: BrowserActionTarget,
     ) -> BrowserTab:
-        tabs = self.tab_ops.list_tabs()
+        tabs = self._cached_tabs()
+        if not tabs:
+            tabs = self.tab_ops.list_tabs()
         if not tabs and requested_target.target_id is None:
             tabs = (self.tab_ops.open_tab("about:blank"),)
         if not tabs:
@@ -409,6 +461,18 @@ class _DefaultBrowserProfileSelectionOps(BrowserProfileSelectionOps):
             return None
         if not isinstance(self.plan.command, BrowserPageActionCommand):
             return None
+
+        requested_target_id = self.plan.command.target.target_id
+        if isinstance(requested_target_id, str):
+            try:
+                requested_ordinal = int(requested_target_id.strip())
+            except ValueError:
+                requested_ordinal = None
+            if requested_ordinal is not None and requested_ordinal >= 1:
+                page_tabs = tuple(tab for tab in tabs if tab.type == "page")
+                ordinal_tabs = page_tabs or tabs
+                if requested_ordinal <= len(ordinal_tabs):
+                    return ordinal_tabs[requested_ordinal - 1]
 
         active_target = self.runtime_state.metadata.get("active_target_id")
         if isinstance(active_target, str) and active_target.strip():
@@ -494,6 +558,57 @@ class BrowserExecutionCoordinatorService(BrowserExecutionCoordinator):
                 message="Reset browser profile.",
             )
 
+        if isinstance(command, BrowserControlCommand) and command.kind == "stop":
+            control_engine.stop_profile(
+                plan=plan,
+                runtime_state=runtime_state,
+            )
+            action_engine.clear_profile(profile_name=profile.name)
+            self.ref_store.delete_profile_refs(profile_name=profile.name)
+            self.runtime_state_store.save(runtime_state)
+            return BrowserActionResult(
+                command=command,
+                ok=True,
+                value={
+                    "profile_name": profile.name,
+                    "runtime": _runtime_status_payload(runtime_state),
+                },
+                message="Stopped browser profile.",
+            )
+
+        if isinstance(command, BrowserControlCommand) and command.kind == "status":
+            tabs: tuple[BrowserTab, ...] = ()
+            tabs_error: str | None = None
+            if runtime_state.attachment_status == "attached":
+                try:
+                    tabs = control_engine.list_tabs(
+                        plan=plan,
+                        runtime_state=runtime_state,
+                    )
+                except BrowserValidationError as exc:
+                    tabs_error = str(exc)
+            return BrowserActionResult(
+                command=command,
+                ok=True,
+                target_id=runtime_state.last_target_id,
+                value={
+                    "profile_name": profile.name,
+                    "driver": profile.driver,
+                    "mode": capabilities.mode,
+                    "control_family": capabilities.control_family,
+                    "action_family": capabilities.action_family,
+                    "can_launch": capabilities.can_launch,
+                    "supports_reset": capabilities.supports_reset,
+                    "supports_per_tab_ws": capabilities.supports_per_tab_ws,
+                    "supports_json_tab_endpoints": capabilities.supports_json_tab_endpoints,
+                    "runtime": _runtime_status_payload(runtime_state),
+                    "tabs": tabs,
+                    "tab_count": len(tabs),
+                    "tabs_error": tabs_error,
+                },
+                message="Loaded browser profile status.",
+            )
+
         runtime_state.mark_attaching()
         self.runtime_state_store.save(runtime_state)
         try:
@@ -512,6 +627,21 @@ class BrowserExecutionCoordinatorService(BrowserExecutionCoordinator):
             runtime_state=runtime_state,
             control_engine=control_engine,
         )
+
+        if isinstance(command, BrowserControlCommand) and command.kind == "start":
+            tabs = tab_ops.list_tabs()
+            return BrowserActionResult(
+                command=command,
+                ok=True,
+                target_id=runtime_state.last_target_id,
+                value={
+                    "profile_name": profile.name,
+                    "runtime": _runtime_status_payload(runtime_state),
+                    "tabs": tabs,
+                    "tab_count": len(tabs),
+                },
+                message="Started browser profile.",
+            )
 
         if isinstance(command, BrowserControlCommand) and command.kind == "list-tabs":
             tabs = tab_ops.list_tabs()

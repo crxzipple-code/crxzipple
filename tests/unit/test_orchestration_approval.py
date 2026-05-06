@@ -3,20 +3,81 @@ from __future__ import annotations
 from crxzipple.modules.tool.domain import ToolRunResult
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
+from tests.unit.tool_runtime_test_support import process_next_background_tool_run
 
 
 class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
     _BROWSER_TOOL_IDS = [
-        "browser",
-        "browser_click",
+        "browser_action",
         "browser_control",
-        "browser_fill",
-        "browser_profile_diagnose",
-        "browser_profiles",
+        "browser_profile",
         "browser_script",
         "browser_snapshot",
-        "browser_wait",
     ]
+    _MOBILE_TOOL_IDS = [
+        "mobile_devices",
+        "mobile_press",
+        "mobile_screenshot",
+        "mobile_script",
+        "mobile_snapshot",
+        "mobile_swipe",
+        "mobile_tap",
+        "mobile_type",
+        "mobile_wait",
+    ]
+    _SESSION_TOOL_IDS = [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_send",
+        "sessions_spawn",
+        "sessions_stop",
+        "sessions_yield",
+    ]
+    _POST_SKILL_SESSION_TOOL_IDS = ["subagents"]
+
+    def test_tool_resolver_reuses_run_context_during_surface_filtering(self) -> None:
+        self._register_agent_and_llm()
+        call_count = 0
+
+        def run_context_provider(_run: object) -> dict[str, object]:
+            nonlocal call_count
+            call_count += 1
+            return {
+                "available_scopes": [
+                    "memory_context",
+                    "session_context",
+                    "workspace_bound",
+                ],
+                "workspace_dir": "/tmp",
+            }
+
+        self.container.orchestration_inspection_service.engine.tool_resolver.run_context_provider = (
+            run_context_provider
+        )
+        run = self.container.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-tool-context-cache",
+                inbound_instruction=InboundInstruction(source="cli", content="hello"),
+            ),
+        )
+        self.container.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+
+        resolved = self.container.orchestration_inspection_service.resolve_tools(
+            self.container.orchestration_run_query_service.get_run(run.id),
+        )
+
+        self.assertGreater(len(resolved.tools), 1)
+        self.assertEqual(call_count, 1)
 
     def test_tool_resolver_applies_authorized_tool_access_override(self) -> None:
         custom_harness = SqliteTestHarness()
@@ -79,13 +140,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 tool_id="brave_search.news_search",
             )
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-tool-access-allow",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -96,8 +157,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            resolved = container.orchestration_service.engine.tool_resolver.resolve(
-                container.orchestration_service.get_run(run.id),
+            resolved = container.orchestration_inspection_service.resolve_tools(
+                container.orchestration_run_query_service.get_run(run.id),
             )
 
             self.assertEqual(
@@ -112,10 +173,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_read",
                     "memory_search",
                     "memory_write_daily",
+                    *self._MOBILE_TOOL_IDS,
                     "open_meteo_weather.forecast_weather",
                     "process",
                     "read",
+                    *self._SESSION_TOOL_IDS,
                     "skill_read",
+                    *self._POST_SKILL_SESSION_TOOL_IDS,
                     "workspace_list",
                     "workspace_search",
                     "write",
@@ -124,8 +188,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             weather_tool = resolved.by_name("open_meteo_weather.forecast_weather")
             self.assertIsNotNone(weather_tool)
             assert weather_tool is not None
-            execution = container.orchestration_service.engine.tool_resolver.execution_decision(
-                container.orchestration_service.get_run(run.id),
+            execution = container.orchestration_inspection_service.decide_tool_execution(
+                container.orchestration_run_query_service.get_run(run.id),
                 tool=weather_tool.tool,
                 target=weather_tool.target,
             )
@@ -197,13 +261,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 effect_id="network_search",
             )
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-effect-access-allow",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -214,8 +278,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            resolved = container.orchestration_service.engine.tool_resolver.resolve(
-                container.orchestration_service.get_run(run.id),
+            resolved = container.orchestration_inspection_service.resolve_tools(
+                container.orchestration_run_query_service.get_run(run.id),
             )
 
             self.assertEqual(
@@ -230,10 +294,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_read",
                     "memory_search",
                     "memory_write_daily",
+                    *self._MOBILE_TOOL_IDS,
                     "open_meteo_weather.forecast_weather",
                     "process",
                     "read",
+                    *self._SESSION_TOOL_IDS,
                     "skill_read",
+                    *self._POST_SKILL_SESSION_TOOL_IDS,
                     "workspace_list",
                     "workspace_search",
                     "write",
@@ -245,15 +312,19 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             self.assertIsNotNone(weather_tool)
             assert search_tool is not None
             assert weather_tool is not None
-            search_execution = container.orchestration_service.engine.tool_resolver.execution_decision(
-                container.orchestration_service.get_run(run.id),
-                tool=search_tool.tool,
-                target=search_tool.target,
+            search_execution = (
+                container.orchestration_inspection_service.decide_tool_execution(
+                    container.orchestration_run_query_service.get_run(run.id),
+                    tool=search_tool.tool,
+                    target=search_tool.target,
+                )
             )
-            weather_execution = container.orchestration_service.engine.tool_resolver.execution_decision(
-                container.orchestration_service.get_run(run.id),
-                tool=weather_tool.tool,
-                target=weather_tool.target,
+            weather_execution = (
+                container.orchestration_inspection_service.decide_tool_execution(
+                    container.orchestration_run_query_service.get_run(run.id),
+                    tool=weather_tool.tool,
+                    target=weather_tool.target,
+                )
             )
             self.assertEqual(search_execution.mode, "allow")
             self.assertEqual(weather_execution.mode, "approval_required")
@@ -325,13 +396,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-tool-access-deny",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -342,8 +413,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            resolved = container.orchestration_service.engine.tool_resolver.resolve(
-                container.orchestration_service.get_run(run.id),
+            resolved = container.orchestration_inspection_service.resolve_tools(
+                container.orchestration_run_query_service.get_run(run.id),
             )
 
             self.assertEqual(
@@ -357,9 +428,12 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_read",
                     "memory_search",
                     "memory_write_daily",
+                    *self._MOBILE_TOOL_IDS,
                     "process",
                     "read",
+                    *self._SESSION_TOOL_IDS,
                     "skill_read",
+                    *self._POST_SKILL_SESSION_TOOL_IDS,
                     "workspace_list",
                     "workspace_search",
                     "write",
@@ -428,13 +502,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-effect-access-deny",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -445,8 +519,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            resolved = container.orchestration_service.engine.tool_resolver.resolve(
-                container.orchestration_service.get_run(run.id),
+            resolved = container.orchestration_inspection_service.resolve_tools(
+                container.orchestration_run_query_service.get_run(run.id),
             )
 
             self.assertEqual(
@@ -460,9 +534,12 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_read",
                     "memory_search",
                     "memory_write_daily",
+                    *self._MOBILE_TOOL_IDS,
                     "process",
                     "read",
+                    *self._SESSION_TOOL_IDS,
                     "skill_read",
+                    *self._POST_SKILL_SESSION_TOOL_IDS,
                     "workspace_list",
                     "workspace_search",
                     "write",
@@ -482,13 +559,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             runtime_preferences=AgentRuntimePreferences(workspace=workspace_dir.name),
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-workspace-read-visible",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -499,8 +576,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        resolved = self.container.orchestration_service.engine.tool_resolver.resolve(
-            self.container.orchestration_service.get_run(run.id),
+        resolved = self.container.orchestration_inspection_service.resolve_tools(
+            self.container.orchestration_run_query_service.get_run(run.id),
         )
 
         tool_ids = [item.tool.id for item in resolved.tools]
@@ -550,8 +627,8 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         self.assertEqual(list_tool.tool.required_effect_ids, ("workspace_read",))
         self.assertIn("scope:workspace_bound", search_tool.tool.tags)
         self.assertEqual(search_tool.tool.required_effect_ids, ("workspace_read",))
-        exec_execution = self.container.orchestration_service.engine.tool_resolver.execution_decision(
-            self.container.orchestration_service.get_run(run.id),
+        exec_execution = self.container.orchestration_inspection_service.decide_tool_execution(
+            self.container.orchestration_run_query_service.get_run(run.id),
             tool=exec_tool.tool,
             target=exec_tool.target,
         )
@@ -603,13 +680,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             _EffectApprovalAdapter(),
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-capability-approval",
                 inbound_instruction=InboundInstruction(source="cli", content="complete the task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -619,11 +696,11 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        waiting = self.container.orchestration_service.process_next_queued_run(
+        waiting = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert waiting is not None
@@ -636,7 +713,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         self.assertEqual(pending_request.tool_ids, ("echo",))
         self.assertEqual(pending_request.tool_name, "echo")
 
-        resumed = self.container.orchestration_service.resolve_approval_request(
+        resumed = self.container.orchestration_approval_control_service.resolve_approval_request(
             ResolveApprovalRequestInput(
                 run_id=run.id,
                 request_id=pending_request.request_id,
@@ -645,7 +722,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
 
-        completed = self.container.orchestration_service.process_next_queued_run(
+        completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert completed is not None
@@ -653,7 +730,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         assert completed.result_payload is not None
         self.assertEqual(completed.result_payload.get("output_text"), "approval flow complete")
 
-    def test_process_next_queued_run_includes_approval_resume_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_approval_resume_flow_prompt(self) -> None:
         self.container.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="local-capability",
@@ -698,13 +775,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             adapter,
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-approval-resume-flow-prompt",
                 inbound_instruction=InboundInstruction(source="cli", content="complete the task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -714,25 +791,25 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        waiting = self.container.orchestration_service.process_next_queued_run(
+        waiting = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert waiting is not None
         pending_request = waiting.pending_approval_request()
         assert pending_request is not None
 
-        self.container.orchestration_service.resolve_approval_request(
+        self.container.orchestration_approval_control_service.resolve_approval_request(
             ResolveApprovalRequestInput(
                 run_id=run.id,
                 request_id=pending_request.request_id,
                 decision=ApprovalDecision.ALLOW_ONCE,
             ),
         )
-        completed = self.container.orchestration_service.process_next_queued_run(
+        completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -753,7 +830,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 for message in resume_system_messages
             ),
         )
-        refreshed_run = self.container.orchestration_service.get_run(run.id)
+        refreshed_run = self.container.orchestration_run_query_service.get_run(run.id)
         session_messages = self.container.session_service.list_messages(
             ListSessionMessagesInput(
                 session_key=str(refreshed_run.metadata["session_key"]),
@@ -812,13 +889,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             _MultiToolApprovalAdapter(),
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-multi-tool-approval",
                 inbound_instruction=InboundInstruction(source="cli", content="complete the task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -828,11 +905,11 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        waiting = self.container.orchestration_service.process_next_queued_run(
+        waiting = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert waiting is not None
@@ -897,13 +974,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             adapter,
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-approval-recovery-contract",
                 inbound_instruction=InboundInstruction(source="cli", content="complete the task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -913,26 +990,26 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        waiting = self.container.orchestration_service.process_next_queued_run(
+        waiting = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert waiting is not None
         pending_request = waiting.pending_approval_request()
         assert pending_request is not None
 
+        wait_coordinator = (
+            self.container.orchestration_approval_control_service.resolve_approval_request_fn.__self__
+        )
         with patch.object(
-            type(self.container.orchestration_service.wait_coordinator),
-            "continue_recovery_contract",
-            autospec=True,
-            side_effect=lambda _coordinator, run_id: (
-                self.container.orchestration_service.get_run(run_id)
-            ),
+            wait_coordinator,
+            "continue_recovery_contract_fn",
+            lambda run_id: self.container.orchestration_run_query_service.get_run(run_id),
         ):
-            stalled = self.container.orchestration_service.resolve_approval_request(
+            stalled = self.container.orchestration_approval_control_service.resolve_approval_request(
                 ResolveApprovalRequestInput(
                     run_id=run.id,
                     request_id=pending_request.request_id,
@@ -947,21 +1024,23 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         self.assertEqual(recovery_contract.get("kind"), "approval")
         self.assertEqual(recovery_contract.get("state"), "resolved_allow_pending_replay")
 
-        recovered = self.container.orchestration_service.recover_abandoned_runs()
+        recovered = (
+            self.container.orchestration_scheduler_service.recover_abandoned_runs()
+        )
         self.assertTrue(any(item.id == run.id for item in recovered))
 
-        resumed = self.container.orchestration_service.get_run(run.id)
+        resumed = self.container.orchestration_run_query_service.get_run(run.id)
         self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
         self.assertEqual(resumed.stage, OrchestrationRunStage.QUEUED)
 
-        completed = self.container.orchestration_service.process_next_queued_run(
+        completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert completed is not None
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(completed.result_payload.get("output_text"), "approval flow complete")
 
-    def test_process_next_queued_run_includes_approval_denied_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_approval_denied_flow_prompt(self) -> None:
         self.container.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="local-capability",
@@ -1006,13 +1085,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             adapter,
         )
 
-        run = self.container.orchestration_service.accept(
+        run = self.container.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-approval-denied-flow-prompt",
                 inbound_instruction=InboundInstruction(source="cli", content="complete the task"),
             ),
         )
-        self.container.orchestration_service.prepare_session_run(
+        self.container.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -1022,18 +1101,18 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_service.enqueue(
+        self.container.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        waiting = self.container.orchestration_service.process_next_queued_run(
+        waiting = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert waiting is not None
         pending_request = waiting.pending_approval_request()
         assert pending_request is not None
 
-        resumed = self.container.orchestration_service.resolve_approval_request(
+        resumed = self.container.orchestration_approval_control_service.resolve_approval_request(
             ResolveApprovalRequestInput(
                 run_id=run.id,
                 request_id=pending_request.request_id,
@@ -1042,7 +1121,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
 
-        completed = self.container.orchestration_service.process_next_queued_run(
+        completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
@@ -1127,7 +1206,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 _EffectApprovalOrVisibleAdapter(),
             )
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-effect-agent-approval",
                     inbound_instruction=InboundInstruction(
@@ -1136,7 +1215,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1146,18 +1225,18 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
-            waiting = container.orchestration_service.process_next_queued_run(
+            waiting = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             assert waiting is not None
             pending_request = waiting.pending_approval_request()
             assert pending_request is not None
 
-            resumed = container.orchestration_service.resolve_approval_request(
+            resumed = container.orchestration_approval_control_service.resolve_approval_request(
                 ResolveApprovalRequestInput(
                     run_id=run.id,
                     request_id=pending_request.request_id,
@@ -1166,20 +1245,18 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             )
             self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
 
-            profile = container.agent_service.get_profile("writer")
-            self.assertEqual(profile.tool_preferences.requested_effect_ids, ())
             policies = container.authorization_service.list_policies()
             self.assertTrue(
                 any(policy.actions == ("tool.access_effect",) for policy in policies),
             )
 
-            completed = container.orchestration_service.process_next_queued_run(
+            completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             assert completed is not None
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
 
-            followup = container.orchestration_service.accept(
+            followup = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-effect-agent-followup",
                     inbound_instruction=InboundInstruction(
@@ -1188,7 +1265,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            followup = container.orchestration_service.prepare_session_run(
+            followup = container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=followup.id,
                     context=SessionRouteContext(
@@ -1198,8 +1275,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            resolver = container.orchestration_service.engine.tool_resolver
-            resolved = resolver.resolve(followup)
+            resolved = container.orchestration_inspection_service.resolve_tools(followup)
 
             self.assertIsNotNone(resolved.by_name("echo"))
         finally:
@@ -1269,13 +1345,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
 
             container.local_tool_catalog.register(tool, background_echo)
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-background-approval",
                     inbound_instruction=InboundInstruction(source="cli", content="search"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1285,11 +1361,11 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
-            waiting_for_approval = container.orchestration_service.process_next_queued_run(
+            waiting_for_approval = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             self.assertIsNotNone(waiting_for_approval)
@@ -1304,7 +1380,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             self.assertEqual(pending_request.effect_id, "background_execution")
             self.assertEqual(pending_request.tool_name, "background_echo")
 
-            waiting_on_tool = container.orchestration_service.resolve_approval_request(
+            waiting_on_tool = container.orchestration_approval_control_service.resolve_approval_request(
                 ResolveApprovalRequestInput(
                     run_id=run.id,
                     request_id=pending_request.request_id,
@@ -1316,18 +1392,26 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             self.assertEqual(waiting_on_tool.waiting_reason, "tool_background_wait")
             self.assertEqual(len(waiting_on_tool.pending_tool_run_ids), 1)
 
-            finished_tool_run = container.tool_service.process_next_queued_run(
+            finished_tool_run = process_next_background_tool_run(
+                container,
                 worker_id="tool-worker-1",
             )
             self.assertIsNotNone(finished_tool_run)
             assert finished_tool_run is not None
             self.assertEqual(finished_tool_run.status, ToolRunStatus.SUCCEEDED)
+            container.orchestration_scheduler_service.process_runtime_events(
+                limit_per_subscription=10,
+            )
+            processed_signal = container.orchestration_scheduler_service.process_next_signal(
+                worker_id="scheduler-1",
+            )
+            self.assertIsNotNone(processed_signal)
 
-            resumed = container.orchestration_service.get_run(run.id)
+            resumed = container.orchestration_run_query_service.get_run(run.id)
             self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
             self.assertEqual(resumed.stage, OrchestrationRunStage.QUEUED)
 
-            completed = container.orchestration_service.process_next_queued_run(
+            completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             self.assertIsNotNone(completed)
@@ -1404,13 +1488,13 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
 
             container.local_tool_catalog.register(tool, background_echo)
 
-            run = container.orchestration_service.accept(
+            run = container.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-background-approval-target-mismatch",
                     inbound_instruction=InboundInstruction(source="cli", content="search"),
                 ),
             )
-            container.orchestration_service.prepare_session_run(
+            container.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1420,11 +1504,11 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_service.enqueue(
+            container.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
-            waiting_for_approval = container.orchestration_service.process_next_queued_run(
+            waiting_for_approval = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )
             self.assertIsNotNone(waiting_for_approval)
@@ -1435,7 +1519,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             self.assertEqual(pending_request.tool_name, "background_echo")
             self.assertEqual(pending_request.execution_mode, ToolMode.BACKGROUND.value)
 
-            container.tool_service._manual_tools["background_echo"] = replace(
+            container.tool_service.catalog_service._manual_tools["background_echo"] = replace(
                 tool,
                 execution_support=ToolExecutionSupport(
                     supported_modes=(ToolMode.INLINE,),
@@ -1445,7 +1529,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             )
 
             with self.assertRaises(OrchestrationValidationError) as exc_info:
-                container.orchestration_service.resolve_approval_request(
+                container.orchestration_approval_control_service.resolve_approval_request(
                     ResolveApprovalRequestInput(
                         run_id=run.id,
                         request_id=pending_request.request_id,

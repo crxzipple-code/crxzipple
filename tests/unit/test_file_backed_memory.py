@@ -14,7 +14,18 @@ from crxzipple.modules.memory.infrastructure.indexing import (
     FileMemoryIndexManager,
     OpenAICompatibleMemoryEmbeddingProvider,
 )
+from crxzipple.modules.memory.infrastructure.storage import FileMemoryStore
 from tests.unit.support import SampleEmbeddingApiServer
+
+
+def _file_backed_memory_service(
+    *,
+    index_manager: FileMemoryIndexManager | None = None,
+) -> FileBackedMemoryService:
+    return FileBackedMemoryService(
+        store=FileMemoryStore(),
+        index_manager=index_manager or FileMemoryIndexManager(),
+    )
 
 
 class FileBackedMemoryTestCase(unittest.TestCase):
@@ -26,7 +37,7 @@ class FileBackedMemoryTestCase(unittest.TestCase):
             storage_root=str(self.root),
             retrieval_backend="hybrid",
         )
-        self.service = FileBackedMemoryService()
+        self.service = _file_backed_memory_service()
 
     def tearDown(self) -> None:
         self.workspace.cleanup()
@@ -193,10 +204,10 @@ class FileBackedMemoryTestCase(unittest.TestCase):
         self.assertNotEqual(first_hash, second_hash)
         self.assertEqual(stale_hits, [])
 
-    def test_archive_session_writes_slugged_markdown_file(self) -> None:
-        written = self.service.archive_session(
+    def test_write_archive_writes_slugged_markdown_file(self) -> None:
+        written = self.service.write_archive(
             context=self.context,
-            content="# Session\nUser asked for the release checklist.",
+            content="# Archive\nUser asked for the release checklist.",
             slug="Release Checklist",
             now=datetime(2026, 3, 27, 10, 15, tzinfo=timezone.utc),
         )
@@ -210,7 +221,7 @@ class FileBackedMemoryTestCase(unittest.TestCase):
         self.assertIsNotNone(excerpt)
         assert excerpt is not None
         self.assertEqual(excerpt.kind, "archive")
-        self.assertIn("# Session", excerpt.text)
+        self.assertIn("# Archive", excerpt.text)
 
     def test_vector_search_handles_typos_with_local_embeddings(self) -> None:
         vector_context = MemoryUseContext(
@@ -280,7 +291,7 @@ class FileBackedMemoryTestCase(unittest.TestCase):
         server = SampleEmbeddingApiServer()
         server.start()
         try:
-            service = FileBackedMemoryService(
+            service = _file_backed_memory_service(
                 index_manager=FileMemoryIndexManager(
                     embedding_provider=OpenAICompatibleMemoryEmbeddingProvider(
                         base_url=server.base_url + "/v1",

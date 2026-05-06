@@ -12,7 +12,6 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
-    AgentToolPreferences,
 )
 
 
@@ -62,7 +61,6 @@ def profile_from_agent_home_config_payload(
     llm_payload = _section_payload(payload, "llm_routing_policy")
     execution_payload = _section_payload(payload, "execution_policy")
     runtime_payload = _section_payload(payload, "runtime_preferences")
-    tool_payload = _section_payload(payload, "tool_preferences")
 
     if not instruction_payload and _optional_text(payload.get("system_prompt")) is not None:
         instruction_payload = {
@@ -120,19 +118,6 @@ def profile_from_agent_home_config_payload(
             ),
         }
 
-    if not tool_payload and (
-        payload.get("requested_effect_ids") is not None
-        or payload.get("requested_tool_ids") is not None
-        or payload.get("preferred_tags") is not None
-    ):
-        tool_payload = {
-            "requested_effect_ids": payload.get("requested_effect_ids", ()),
-            "requested_tool_ids": payload.get("requested_tool_ids", ()),
-            "preferred_tags": payload.get("preferred_tags", ()),
-            "prefers_background_tools": payload.get("prefers_background_tools", True),
-            "prefers_mutating_tools": payload.get("prefers_mutating_tools", True),
-        }
-
     return AgentProfile(
         id=profile_id,
         name=_optional_text(payload.get("name")) or profile_id,
@@ -143,7 +128,6 @@ def profile_from_agent_home_config_payload(
         llm_routing_policy=AgentLlmRoutingPolicy.from_payload(llm_payload),
         execution_policy=AgentExecutionPolicy.from_payload(execution_payload),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
-        tool_preferences=AgentToolPreferences.from_payload(tool_payload),
     )
 
 
@@ -168,7 +152,6 @@ def apply_agent_home_config_payload(
         payload,
         home_dir=home_dir,
     )
-    tool_payload = _section_payload(payload, "tool_preferences")
 
     if not llm_payload and _optional_text(payload.get("default_llm_id")) is not None:
         llm_payload = {
@@ -207,11 +190,6 @@ def apply_agent_home_config_payload(
             else profile.execution_policy
         ),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
-        tool_preferences=(
-            AgentToolPreferences.from_payload(tool_payload)
-            if tool_payload
-            else profile.tool_preferences
-        ),
     )
     return profile
 
@@ -246,7 +224,6 @@ def build_agent_home_config_payload(
         "llm_routing_policy": profile.llm_routing_policy.to_payload(),
         "execution_policy": profile.execution_policy.to_payload(),
         "runtime_preferences": runtime_payload,
-        "tool_preferences": profile.tool_preferences.to_payload(),
     }
 
 

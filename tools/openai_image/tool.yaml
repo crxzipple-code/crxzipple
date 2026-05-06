@@ -1,0 +1,143 @@
+kind: local_package
+namespace: openai_image
+local_tools:
+  - id: openai_image_generate
+    name: OpenAI Image Generate
+    description: Generate one or more images with OpenAI image models. Use this for text-to-image requests. Runs as a background tool because image generation can be slow. The default model is gpt-image-2, or OPENAI_IMAGE_MODEL when configured. Returns generated images as artifacts, not inline base64.
+    provider_name: openai
+    entrypoint: tools.openai_image.local:openai_image_generate
+    tool_kind: function
+    parameters:
+      - name: prompt
+        data_type: string
+        description: Image generation prompt. Describe the subject, style, layout, text to render, and constraints.
+        required: true
+      - name: model
+        data_type: string
+        description: Optional OpenAI image model. Defaults to gpt-image-2, or OPENAI_IMAGE_MODEL when configured.
+        required: false
+      - name: size
+        data_type: string
+        description: Optional image size, for example auto, 1024x1024, 1536x1024, or 1024x1536.
+        required: false
+      - name: quality
+        data_type: string
+        description: Optional quality hint, for example auto, low, medium, or high.
+        required: false
+      - name: background
+        data_type: string
+        description: Optional background hint, for example auto, transparent, or opaque.
+        required: false
+      - name: output_format
+        data_type: string
+        description: Optional output image format, for example png, jpeg, or webp.
+        required: false
+      - name: output_compression
+        data_type: integer
+        description: Optional compression percentage for jpeg or webp output.
+        required: false
+      - name: n
+        data_type: integer
+        description: Optional number of images to generate. Defaults to 1.
+        required: false
+    tags:
+      - openai
+      - image
+      - generation
+      - builtin
+      - surface:interactive
+      - surface:creative
+    required_effect_ids:
+      - remote_tool_access
+    access_requirements:
+      - env:OPENAI_API_KEY
+    mutates_state: false
+    timeout_seconds: 300
+    supported_modes:
+      - background
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: openai_image_generate
+
+  - id: openai_image_edit
+    name: OpenAI Image Edit
+    description: Edit one or more existing images with OpenAI image models. Use artifact ids from prior screenshots, uploads, or generated images. Runs as a background tool because image editing can be slow. The default model is gpt-image-2, or OPENAI_IMAGE_MODEL when configured. Returns edited images as artifacts.
+    provider_name: openai
+    entrypoint: tools.openai_image.local:openai_image_edit
+    tool_kind: function
+    parameters:
+      - name: prompt
+        data_type: string
+        description: Edit instruction. Describe exactly what should change and what should remain unchanged.
+        required: true
+      - name: image_artifact_id
+        data_type: string
+        description: Optional single input image artifact id.
+        required: false
+      - name: image_artifact_ids
+        data_type: array
+        description: Optional list of input image artifact ids.
+        required: false
+      - name: image_urls
+        data_type: array
+        description: Optional list of remote image URLs. Prefer artifact ids when images already exist in this runtime.
+        required: false
+      - name: mask_artifact_id
+        data_type: string
+        description: Optional mask image artifact id for inpainting-style edits.
+        required: false
+      - name: mask_url
+        data_type: string
+        description: Optional remote mask image URL.
+        required: false
+      - name: model
+        data_type: string
+        description: Optional OpenAI image model. Defaults to gpt-image-2, or OPENAI_IMAGE_MODEL when configured.
+        required: false
+      - name: size
+        data_type: string
+        description: Optional image size, for example auto, 1024x1024, 1536x1024, or 1024x1536.
+        required: false
+      - name: quality
+        data_type: string
+        description: Optional quality hint, for example auto, low, medium, or high.
+        required: false
+      - name: background
+        data_type: string
+        description: Optional background hint, for example auto, transparent, or opaque.
+        required: false
+      - name: output_format
+        data_type: string
+        description: Optional output image format, for example png, jpeg, or webp.
+        required: false
+      - name: output_compression
+        data_type: integer
+        description: Optional compression percentage for jpeg or webp output.
+        required: false
+      - name: n
+        data_type: integer
+        description: Optional number of edited images to return. Defaults to 1.
+        required: false
+    tags:
+      - openai
+      - image
+      - edit
+      - builtin
+      - surface:interactive
+      - surface:creative
+    required_effect_ids:
+      - remote_tool_access
+      - sensitive_access
+    access_requirements:
+      - env:OPENAI_API_KEY
+    mutates_state: false
+    timeout_seconds: 300
+    supported_modes:
+      - background
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: openai_image_edit

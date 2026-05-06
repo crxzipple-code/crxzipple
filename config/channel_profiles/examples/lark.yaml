@@ -1,0 +1,15 @@
+channel_type: lark
+enabled: true
+accounts:
+  - account_id: default
+    enabled: true
+    transport_mode: long_connection
+    metadata:
+      agent_id: crxzipple
+      lark_app_id_binding: env:LARK_APP_ID
+      lark_app_secret_binding: env:LARK_APP_SECRET
+      lark_verification_token_binding: env:LARK_VERIFICATION_TOKEN
+      lark_encrypt_key_binding: env:LARK_ENCRYPT_KEY
+      lark_group_require_bot_mention: true
+      # Optional. If omitted, runtime will discover it via bot/v3/info.
+      lark_bot_open_id_binding: env:LARK_BOT_OPEN_ID

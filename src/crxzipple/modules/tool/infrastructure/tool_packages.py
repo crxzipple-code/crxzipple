@@ -132,6 +132,14 @@ def register_scanned_tool_packages(
             register_openapi_remote_handlers(
                 remote_tool_registry,
                 provider.operations(),
+                max_concurrency=(
+                    namespace.openapi_provider.max_concurrency
+                    or getattr(
+                        getattr(container, "settings", None),
+                        "tool_remote_default_max_concurrency",
+                        None,
+                    )
+                ),
             )
         registered_namespaces.append(namespace.name)
     return tuple(registered_namespaces)
@@ -256,6 +264,16 @@ def _build_tool(
             "required_effect_ids",
             manifest_path,
         ),
+        access_requirements=_parse_string_list(
+            payload.get("access_requirements", []),
+            "access_requirements",
+            manifest_path,
+        ),
+        access_requirement_sets=_parse_string_sets(
+            payload.get("access_requirement_sets", []),
+            "access_requirement_sets",
+            manifest_path,
+        ),
         execution_policy=ToolExecutionPolicy(
             timeout_seconds=max(int(payload.get("timeout_seconds", 30)), 1),
             requires_confirmation=bool(payload.get("requires_confirmation", False)),
@@ -326,6 +344,11 @@ def _load_openapi_provider(
         ),
         description=str(payload.get("description", "")).strip(),
         timeout_seconds=max(int(payload.get("timeout_seconds", 30)), 1),
+        max_concurrency=_parse_optional_positive_int(
+            payload.get("max_concurrency"),
+            field_name="max_concurrency",
+            manifest_path=manifest_path,
+        ),
         credential_bindings=_parse_openapi_credentials(
             payload.get("credentials", {}),
             manifest_path,
@@ -336,6 +359,29 @@ def _load_openapi_provider(
             manifest_path,
         ),
     )
+
+
+def _parse_optional_positive_int(
+    raw_value: object,
+    *,
+    field_name: str,
+    manifest_path: Path,
+) -> int | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str) and not raw_value.strip():
+        return None
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ToolValidationError(
+            f"Tool namespace manifest '{manifest_path}' field '{field_name}' must be a positive integer.",
+        ) from exc
+    if parsed < 1:
+        raise ToolValidationError(
+            f"Tool namespace manifest '{manifest_path}' field '{field_name}' must be a positive integer.",
+        )
+    return parsed
 
 
 def _parse_openapi_credentials(
@@ -429,6 +475,21 @@ def _parse_string_list(
         str(item).strip()
         for item in raw_values
         if str(item).strip()
+    )
+
+
+def _parse_string_sets(
+    raw_values: object,
+    field_name: str,
+    manifest_path: Path,
+) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(raw_values, list):
+        raise ToolValidationError(
+            f"Tool namespace manifest '{manifest_path}' field '{field_name}' must be a list.",
+        )
+    return tuple(
+        _parse_string_list(item, field_name, manifest_path)
+        for item in raw_values
     )
 
 

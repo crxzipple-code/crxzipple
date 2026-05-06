@@ -36,9 +36,35 @@ class _FakePage:
         self.context = context
         self.target_id = target_id
         self._closed = False
+        self._event_listeners: dict[str, list[object]] = {}
 
     def is_closed(self) -> bool:
         return self._closed
+
+    def on(self, event_name: str, callback) -> None:  # noqa: ANN001
+        listeners = self._event_listeners.setdefault(event_name, [])
+        listeners.append(callback)
+
+    def emit_console(
+        self,
+        *,
+        message_type: str,
+        text: str,
+        location: dict[str, object] | None = None,
+    ) -> None:
+        class _FakeConsoleMessage:
+            def __init__(self, *, message_type: str, text: str, location: dict[str, object] | None) -> None:
+                self.type = message_type
+                self.text = text
+                self.location = dict(location or {})
+
+        message = _FakeConsoleMessage(
+            message_type=message_type,
+            text=text,
+            location=location,
+        )
+        for callback in list(self._event_listeners.get("console", ())):
+            callback(message)
 
 
 class _FakeBrowser:
@@ -227,6 +253,54 @@ class BrowserPlaywrightPoolTestCase(unittest.TestCase):
                     pool.resolve_page(profile=profile, target_id="tab-1")
 
                 self.assertEqual(len(connect_calls), 2)
+            finally:
+                pool.close()
+
+    def test_console_messages_are_captured_and_can_be_cleared(self) -> None:
+        connect_calls: list[tuple[str, int]] = []
+
+        def _fake_sync_playwright() -> _FakeManager:
+            return _FakeManager(connect_calls)
+
+        profile = ResolvedBrowserProfile(
+            name="crxzipple",
+            driver="managed",
+            cdp_url="http://127.0.0.1:18800",
+            cdp_port=18800,
+            user_data_dir=None,
+            attach_only=False,
+            is_loopback=True,
+        )
+
+        with patch(
+            "crxzipple.modules.browser.infrastructure.playwright.sync_playwright",
+            _fake_sync_playwright,
+        ):
+            pool = PlaywrightCdpSessionPool(connect_timeout_ms=1234)
+            try:
+                page = pool.resolve_page(profile=profile, target_id="tab-1")
+                page.emit_console(
+                    message_type="warning",
+                    text="Route fallback",
+                    location={"url": "https://example.com/app.js", "lineNumber": 12, "columnNumber": 4},
+                )
+
+                messages = pool.get_console_messages(page=page, level="warn")
+                self.assertEqual(len(messages), 1)
+                self.assertEqual(messages[0]["level"], "warn")
+                self.assertEqual(messages[0]["text"], "Route fallback")
+                self.assertEqual(
+                    messages[0]["location"],
+                    {
+                        "url": "https://example.com/app.js",
+                        "line_number": 12,
+                        "column_number": 4,
+                    },
+                )
+
+                cleared = pool.get_console_messages(page=page, clear=True)
+                self.assertEqual(len(cleared), 1)
+                self.assertEqual(pool.get_console_messages(page=page), [])
             finally:
                 pool.close()
 

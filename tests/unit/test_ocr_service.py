@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+import io
+import tempfile
+import unittest
+
+from PIL import Image
+
+from crxzipple.modules.artifacts.application.services import ArtifactApplicationService
+from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
+from crxzipple.modules.artifacts.infrastructure.filesystem_store import (
+    FilesystemArtifactStore,
+)
+from crxzipple.modules.ocr.application import OcrApplicationService
+from crxzipple.modules.ocr.domain import OcrResult, OcrTextBlock, OcrValidationError
+
+
+class _FakeOcrEngine:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def health(self) -> dict[str, object]:
+        return {"status": "ok", "backend": "fake-ocr"}
+
+    def analyze_image(self, **kwargs) -> OcrResult:  # noqa: ANN003
+        self.calls.append(dict(kwargs))
+        return OcrResult(
+            backend="fake-ocr",
+            language=str(kwargs["language"]),
+            blocks=(OcrTextBlock(text="Hello", confidence=0.99),),
+        )
+
+
+class OcrApplicationServiceTestCase(unittest.TestCase):
+    def test_analyze_artifact_resolves_image_variant_and_calls_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifact_service = ArtifactApplicationService(FilesystemArtifactStore(tempdir))
+            image = Image.new("RGB", (320, 120), color="white")
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            artifact = artifact_service.create_artifact(
+                data=buffer.getvalue(),
+                mime_type="image/png",
+                name="sample.png",
+            )
+            engine = _FakeOcrEngine()
+            service = OcrApplicationService(
+                engine=engine,
+                artifact_service=artifact_service,
+                default_language="ch",
+            )
+
+            result = service.analyze_artifact(
+                artifact_id=artifact.id,
+                variant=ArtifactVariant.PREVIEW,
+                language="en",
+                detect_orientation=False,
+            )
+
+        self.assertEqual(result.backend, "fake-ocr")
+        self.assertEqual(result.language, "en")
+        self.assertEqual(result.artifact_id, artifact.id)
+        self.assertEqual(result.variant, ArtifactVariant.PREVIEW.value)
+        self.assertEqual(len(result.blocks), 1)
+        self.assertEqual(engine.calls[0]["language"], "en")
+        self.assertFalse(engine.calls[0]["detect_orientation"])
+        self.assertTrue(str(engine.calls[0]["image_path"]).endswith("preview.png"))
+
+    def test_analyze_artifact_rejects_non_image_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifact_service = ArtifactApplicationService(FilesystemArtifactStore(tempdir))
+            artifact = artifact_service.create_artifact(
+                data=b"plain-text",
+                mime_type="text/plain",
+                name="sample.txt",
+            )
+            service = OcrApplicationService(
+                engine=_FakeOcrEngine(),
+                artifact_service=artifact_service,
+            )
+
+            with self.assertRaises(OcrValidationError):
+                service.analyze_artifact(artifact_id=artifact.id)

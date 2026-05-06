@@ -1,4 +1,9 @@
-from crxzipple.modules.tool.domain.entities import Tool, ToolRun
+from crxzipple.modules.tool.domain.entities import (
+    Tool,
+    ToolRun,
+    ToolRunAssignment,
+    ToolWorkerRegistration,
+)
 from crxzipple.modules.tool.domain.exceptions import (
     ToolAlreadyExistsError,
     ToolDiscoveryProviderNotFoundError,
@@ -9,7 +14,11 @@ from crxzipple.modules.tool.domain.exceptions import (
     ToolRunNotFoundError,
     ToolValidationError,
 )
-from crxzipple.modules.tool.domain.repositories import ToolRunRepository
+from crxzipple.modules.tool.domain.repositories import (
+    ToolRunAssignmentRepository,
+    ToolRunRepository,
+    ToolWorkerRepository,
+)
 from crxzipple.modules.tool.domain.value_objects import (
     ToolEnvironment,
     ToolExecutionContext,
@@ -19,11 +28,13 @@ from crxzipple.modules.tool.domain.value_objects import (
     ToolExecutionTarget,
     ToolKind,
     ToolMode,
+    ToolRunAssignmentStatus,
     ToolParameter,
     ToolRunError,
     ToolRunResult,
     ToolRunStatus,
     ToolSourceKind,
+    ToolWorkerStatus,
 )
 
 __all__ = [
@@ -44,6 +55,9 @@ __all__ = [
     "ToolNotFoundError",
     "ToolParameter",
     "ToolRun",
+    "ToolRunAssignment",
+    "ToolRunAssignmentRepository",
+    "ToolRunAssignmentStatus",
     "ToolRunError",
     "ToolRunNotFoundError",
     "ToolRunRepository",
@@ -51,4 +65,7 @@ __all__ = [
     "ToolRunStatus",
     "ToolSourceKind",
     "ToolValidationError",
+    "ToolWorkerRegistration",
+    "ToolWorkerRepository",
+    "ToolWorkerStatus",
 ]

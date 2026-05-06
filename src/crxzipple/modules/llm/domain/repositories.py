@@ -23,5 +23,11 @@ class LlmInvocationRepository(Protocol):
     def get(self, invocation_id: str) -> LlmInvocation | None:
         ...
 
-    def list(self, *, llm_id: str | None = None) -> list[LlmInvocation]:
+    def list(
+        self,
+        *,
+        llm_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[LlmInvocation]:
         ...

@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from crxzipple.modules.skills.domain import SkillInstallScope, SkillManifest
+from crxzipple.modules.skills.domain import (
+    SkillInstallScope,
+    SkillManifest,
+    SkillRequirements,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SkillResource:
+    path: str
+    kind: str
+    size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +23,7 @@ class SkillPackage:
     manifest_path: str
     instructions_path: str
     source: str
+    resources: tuple[SkillResource, ...] = ()
 
     @property
     def name(self) -> str:
@@ -34,8 +46,16 @@ class SkillPackage:
         return self.manifest.allowed_tools
 
     @property
+    def requirements(self) -> SkillRequirements:
+        return SkillRequirements.from_manifest(self.manifest)
+
+    @property
+    def suggested_tools(self) -> tuple[str, ...]:
+        return self.requirements.suggested_tools
+
+    @property
     def required_tools(self) -> tuple[str, ...]:
-        return self.manifest.required_tools
+        return self.requirements.required_tools
 
 
 @dataclass(frozen=True, slots=True)

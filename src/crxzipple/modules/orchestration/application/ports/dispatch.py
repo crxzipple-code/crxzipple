@@ -29,10 +29,11 @@ class RunDispatchPort(Protocol):
     ) -> None:
         ...
 
-    def claim_next_queued(
+    def claim_queued(
         self,
         dispatch_tasks: DispatchTaskRepository,
         collector: DispatchAggregateCollector,
+        run: OrchestrationRun,
         *,
         worker_id: str,
         lease_seconds: int | None = None,

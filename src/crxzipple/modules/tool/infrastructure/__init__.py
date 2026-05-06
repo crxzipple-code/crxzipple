@@ -1,5 +1,7 @@
 from crxzipple.modules.tool.infrastructure.in_memory_repository import (
+    InMemoryToolRunAssignmentRepository,
     InMemoryToolRunRepository,
+    InMemoryToolWorkerRepository,
 )
 from crxzipple.modules.tool.infrastructure.mcp_client import McpStdioClient
 from crxzipple.modules.tool.infrastructure.discovery import (
@@ -15,12 +17,17 @@ from crxzipple.modules.tool.infrastructure.discovery import (
     ToolDiscoveryRegistry,
 )
 from crxzipple.modules.tool.infrastructure.executors import LocalAsyncToolExecutor
-from crxzipple.modules.tool.infrastructure.persistence import SqlAlchemyToolRunRepository
+from crxzipple.modules.tool.infrastructure.persistence import (
+    SqlAlchemyToolRunAssignmentRepository,
+    SqlAlchemyToolRunRepository,
+    SqlAlchemyToolWorkerRepository,
+)
 from crxzipple.modules.tool.infrastructure.runtimes import (
     DockerSandboxBackend,
     RemoteAsyncToolExecutor,
     SandboxAsyncToolExecutor,
     SubprocessSandboxBackend,
+    ToolRuntimeRegistration,
     ToolRuntimeRegistry,
     ToolRuntimeRouter,
     build_sandbox_backend,
@@ -40,7 +47,9 @@ __all__ = [
     "DockerSandboxBackend",
     "FilesystemLocalToolDiscoveryProvider",
     "FilesystemLocalToolHandler",
+    "InMemoryToolRunAssignmentRepository",
     "InMemoryToolRunRepository",
+    "InMemoryToolWorkerRepository",
     "LocalCatalogDiscoveryProvider",
     "LocalAsyncToolExecutor",
     "LocalToolCatalog",
@@ -53,8 +62,11 @@ __all__ = [
     "ToolDiscoveryRegistry",
     "RemoteAsyncToolExecutor",
     "SandboxAsyncToolExecutor",
+    "SqlAlchemyToolRunAssignmentRepository",
     "SqlAlchemyToolRunRepository",
+    "SqlAlchemyToolWorkerRepository",
     "SubprocessSandboxBackend",
+    "ToolRuntimeRegistration",
     "ToolRuntimeRegistry",
     "ToolRuntimeRouter",
     "DEFAULT_TOOL_ROOT",

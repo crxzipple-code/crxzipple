@@ -14,6 +14,7 @@ from crxzipple.modules.orchestration.application.coordinators.waiting import (
     RunWaitCoordinator,
 )
 from crxzipple.modules.orchestration.domain import (
+    OrchestrationExecutorLease,
     OrchestrationRun,
     OrchestrationRunRepository,
     OrchestrationRunStatus,
@@ -44,6 +45,9 @@ class RunRecoveryCoordinator:
     lease_manager: OrchestrationLeaseManager
     wait_coordinator: RunWaitCoordinator
     tool_resume: OrchestrationToolResumeCoordinator | None
+
+    def expire_executor_leases(self) -> list[OrchestrationExecutorLease]:
+        return self.lease_manager.mark_expired_executor_leases_offline()
 
     def recover_abandoned_runs(self) -> list[OrchestrationRun]:
         recovered: dict[str, OrchestrationRun] = {

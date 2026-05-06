@@ -41,6 +41,9 @@ class SkillsCliTestCase(CliModuleTestCase):
             self.assertEqual(validate_result.exit_code, 0)
             self.assertIn('"name": "release-ops"', validate_result.stdout)
             self.assertIn('"version": "1.2.0"', validate_result.stdout)
+            self.assertIn('"requirements"', validate_result.stdout)
+            self.assertIn('"suggested_tools": [', validate_result.stdout)
+            self.assertNotIn('"allowed_tools"', validate_result.stdout)
 
             install_result = self.runner.invoke(
                 app,

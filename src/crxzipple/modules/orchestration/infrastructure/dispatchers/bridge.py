@@ -34,15 +34,17 @@ class OrchestrationDispatchBridge:
         collector.collect(task)
         return task
 
-    def claim_next_queued(
+    def claim_queued(
         self,
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
+        run: OrchestrationRun,
         *,
         worker_id: str,
         lease_seconds: int | None = None,
     ) -> DispatchTask | None:
-        task = dispatch_tasks.claim_next_queued(
+        task = dispatch_tasks.claim_queued(
+            task_id=run.id,
             owner_kind=DISPATCH_OWNER_KIND,
             worker_id=worker_id,
             claim_token=self._claim_token_for_worker(worker_id),

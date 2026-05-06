@@ -14,6 +14,7 @@ from crxzipple.core.logger import configure_logging, get_logger
 from crxzipple.interfaces.http.router import api_router
 from crxzipple.modules.authorization.domain import AuthorizationDeniedError
 from crxzipple.shared.infrastructure.event_bus import EventBus
+from crxzipple.shared.infrastructure.http import install_json_exception_handler
 
 logger = get_logger(__name__)
 
@@ -59,6 +60,7 @@ def create_app(
         event_bus=event_bus,
         enable_memory_watchers=True,
     )
+    install_json_exception_handler(app, logger=logger)
 
     @app.exception_handler(AuthorizationDeniedError)
     async def handle_authorization_denied(

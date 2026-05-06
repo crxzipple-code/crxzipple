@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -49,28 +50,111 @@ class _FakeStreamResponse:
         self,
         *,
         status_code: int = 200,
-        events: tuple[tuple[str, dict[str, object]], ...] = (),
+        events: tuple[tuple[str | None, dict[str, object]], ...] = (),
         text: str = "",
     ) -> None:
         self.status_code = status_code
         self._events = events
         self.text = text
+        self.iter_lines_chunk_size: int | None = None
 
-    def iter_lines(self, decode_unicode: bool = False):  # noqa: ANN001
+    def iter_lines(
+        self,
+        chunk_size: int | None = None,
+        decode_unicode: bool = False,
+    ):  # noqa: ANN001
+        self.iter_lines_chunk_size = chunk_size
         del decode_unicode
         for event_name, payload in self._events:
-            yield f"event: {event_name}".encode("utf-8")
+            if event_name is not None:
+                yield f"event: {event_name}".encode("utf-8")
             yield f"data: {json.dumps(payload)}".encode("utf-8")
             yield b""
+
+
+class _FakeAsyncResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        payload: dict[str, object] | None = None,
+        events: tuple[tuple[str | None, dict[str, object]], ...] = (),
+        text: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self._payload = payload or {}
+        self._events = events
+        self._text = text
+        self.headers = headers or {}
+
+    @property
+    def text(self) -> str:
+        if self._text:
+            return self._text
+        if self._payload:
+            return json.dumps(self._payload)
+        return ""
+
+    def json(self) -> dict[str, object]:
+        return dict(self._payload)
+
+    async def aread(self) -> bytes:
+        return self.text.encode("utf-8")
+
+    async def aiter_lines(self):  # noqa: ANN201
+        for event_name, payload in self._events:
+            if event_name is not None:
+                yield f"event: {event_name}"
+            yield f"data: {json.dumps(payload)}"
+            yield ""
+
+
+class _FakeAsyncStreamContext:
+    def __init__(self, response: _FakeAsyncResponse) -> None:
+        self.response = response
+
+    async def __aenter__(self) -> _FakeAsyncResponse:
+        return self.response
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+        return None
+
+
+class _FakeAsyncClient:
+    response = _FakeAsyncResponse()
+    instances: list["_FakeAsyncClient"] = []
+
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        self.args = args
+        self.kwargs = kwargs
+        self.requests: list[tuple[str, str, dict[str, object]]] = []
+        type(self).instances.append(self)
+
+    async def __aenter__(self) -> "_FakeAsyncClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+        return None
+
+    async def post(self, url: str, **kwargs):  # noqa: ANN003, ANN201
+        self.requests.append(("POST", url, dict(kwargs)))
+        return type(self).response
+
+    def stream(self, method: str, url: str, **kwargs):  # noqa: ANN003, ANN201
+        self.requests.append((method, url, dict(kwargs)))
+        return _FakeAsyncStreamContext(type(self).response)
 
 
 class LlmAdapterTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_env = dict(os.environ)
+        _FakeAsyncClient.instances = []
 
     def tearDown(self) -> None:
         os.environ.clear()
         os.environ.update(self.previous_env)
+        _FakeAsyncClient.response = _FakeAsyncResponse()
 
     def test_openai_responses_adapter_shapes_request_and_result(self) -> None:
         os.environ["OPENAI_API_KEY"] = "openai-secret"
@@ -214,7 +298,10 @@ class LlmAdapterTestCase(unittest.TestCase):
             "sample_api.search_docs",
         )
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["json"]["tools"][0]["name"], "sample_api_search_docs")
+        self.assertEqual(
+            kwargs["json"]["tools"][0]["name"],
+            "sample_api_search_docs",
+        )
 
     def test_openai_responses_adapter_stream_invoke_emits_text_delta_and_completed(self) -> None:
         profile = LlmProfile(
@@ -271,6 +358,68 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["text_delta", "completed"])
         self.assertEqual(events[0].data["text"], "stream-")
         self.assertEqual(events[1].data["result"]["text"], "stream-openai")
+
+    def test_openai_responses_adapter_stream_invoke_async_uses_async_stream(self) -> None:
+        profile = LlmProfile(
+            id="writer-stream-async",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding="inline-openai-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Reply async."),
+            ),
+        )
+        _FakeAsyncClient.response = _FakeAsyncResponse(
+            headers={"content-type": "text/event-stream"},
+            events=(
+                (
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": "async-",
+                    },
+                ),
+                (
+                    "response.completed",
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_stream_async_123",
+                            "model": "gpt-5",
+                            "status": "completed",
+                            "output_text": "async-openai",
+                        },
+                    },
+                ),
+            ),
+        )
+
+        async def collect_events():
+            with patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_responses.httpx.AsyncClient",
+                _FakeAsyncClient,
+            ):
+                return [
+                    event
+                    async for event in OpenAIResponsesAdapter().stream_invoke_async(
+                        profile,
+                        request,
+                    )
+                ]
+
+        events = asyncio.run(collect_events())
+
+        self.assertEqual([event.type for event in events], ["text_delta", "completed"])
+        self.assertEqual(events[0].data["text"], "async-")
+        self.assertEqual(events[1].data["result"]["text"], "async-openai")
+        self.assertEqual(len(_FakeAsyncClient.instances), 1)
+        method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://api.openai.com/v1/responses")
+        self.assertTrue(kwargs["json"]["stream"])
 
     def test_openai_responses_adapter_encodes_user_image_blocks(self) -> None:
         profile = LlmProfile(
@@ -429,7 +578,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 LlmMessage(
                     role=LlmMessageRole.TOOL,
                     tool_call_id="call_browser_1",
-                    name="browser",
+                    name="browser_action",
                     content=[
                         {
                             "type": "text",
@@ -442,7 +591,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                         },
                     ],
                     metadata={
-                        "tool_name": "browser",
+                        "tool_name": "browser_action",
                         "tool_details": {
                             "ok": True,
                             "value": {
@@ -516,7 +665,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 LlmMessage(
                     role=LlmMessageRole.TOOL,
                     tool_call_id="call_pdf_1",
-                    name="browser",
+                    name="browser_action",
                     content=[
                         {"type": "text", "text": "Exported PDF."},
                         {
@@ -527,7 +676,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                         },
                     ],
                     metadata={
-                        "tool_name": "browser",
+                        "tool_name": "browser_action",
                         "tool_details": {
                             "ok": True,
                             "value": {
@@ -890,6 +1039,260 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(kwargs["json"]["messages"][0]["role"], "user")
         self.assertEqual(kwargs["json"]["response_format"]["type"], "json_object")
         self.assertEqual(kwargs["json"]["max_tokens"], 256)
+        self.assertEqual(kwargs["json"]["tools"][0]["type"], "function")
+        self.assertEqual(
+            kwargs["json"]["tools"][0]["function"]["name"],
+            "echo_tool",
+        )
+        self.assertEqual(
+            kwargs["json"]["tools"][0]["function"]["parameters"],
+            {"type": "object"},
+        )
+
+    def test_openai_chat_compatible_adapter_stream_invoke_emits_text_delta_and_completed(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="local-chat-stream",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            base_url="http://localhost:8010/v1",
+            credential_binding="inline-vllm-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "chat.completion.chunk",
+                        {
+                            "id": "chatcmpl_stream_1",
+                            "model": "qwen3.5-35b",
+                            "choices": [
+                                {
+                                    "delta": {"content": "你"},
+                                    "finish_reason": None,
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        "chat.completion.chunk",
+                        {
+                            "id": "chatcmpl_stream_1",
+                            "model": "qwen3.5-35b",
+                            "choices": [
+                                {
+                                    "delta": {"content": "好"},
+                                    "finish_reason": None,
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        "chat.completion.chunk",
+                        {
+                            "id": "chatcmpl_stream_1",
+                            "model": "qwen3.5-35b",
+                            "choices": [
+                                {
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                },
+                            ],
+                            "usage": {
+                                "prompt_tokens": 4,
+                                "completion_tokens": 2,
+                                "total_tokens": 6,
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ) as post:
+            events = list(OpenAIChatCompatibleAdapter().stream_invoke(profile, request))
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["text_delta", "text_delta", "completed"],
+        )
+        self.assertEqual(events[0].data["text"], "你")
+        self.assertEqual(events[1].data["text"], "好")
+        result = events[2].data["result"]
+        self.assertEqual(result["text"], "你好")
+        self.assertEqual(result["finish_reason"], "stop")
+        self.assertEqual(result["usage"]["total_tokens"], 6)
+
+        _, kwargs = post.call_args
+        self.assertTrue(kwargs["stream"])
+        self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
+        self.assertTrue(kwargs["json"]["stream"])
+
+    def test_openai_chat_compatible_adapter_stream_invoke_async_handles_json_fallback(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="local-chat-async-json",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            base_url="http://localhost:8010/v1",
+            credential_binding="inline-vllm-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
+            ),
+        )
+        _FakeAsyncClient.response = _FakeAsyncResponse(
+            headers={"content-type": "application/json"},
+            payload={
+                "id": "chatcmpl_async_json_1",
+                "model": "qwen3.5-35b",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "async hello"},
+                    },
+                ],
+            },
+        )
+
+        async def collect_events():
+            with patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.httpx.AsyncClient",
+                _FakeAsyncClient,
+            ):
+                return [
+                    event
+                    async for event in OpenAIChatCompatibleAdapter().stream_invoke_async(
+                        profile,
+                        request,
+                    )
+                ]
+
+        events = asyncio.run(collect_events())
+
+        self.assertEqual([event.type for event in events], ["completed"])
+        self.assertEqual(events[0].data["result"]["text"], "async hello")
+        method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "http://localhost:8010/v1/chat/completions")
+        self.assertTrue(kwargs["json"]["stream"])
+
+    def test_openai_chat_compatible_adapter_does_not_buffer_sse_body(self) -> None:
+        class StrictStreamResponse:
+            status_code = 200
+            headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+
+            @property
+            def text(self) -> str:
+                raise AssertionError("SSE body should not be read through response.text")
+
+            def iter_lines(
+                self,
+                chunk_size: int | None = None,
+                decode_unicode: bool = False,
+            ):  # noqa: ANN001
+                self.chunk_size = chunk_size
+                del decode_unicode
+                yield b'data: {"id":"chatcmpl_stream_2","model":"qwen","choices":[{"delta":{"content":"A"},"finish_reason":null}]}'
+                yield b""
+                yield b'data: {"id":"chatcmpl_stream_2","model":"qwen","choices":[{"delta":{},"finish_reason":"stop"}]}'
+                yield b""
+
+        profile = LlmProfile(
+            id="local-chat-stream-strict",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen",
+            base_url="http://localhost:8010/v1",
+            credential_binding="inline-vllm-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Say A"),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=StrictStreamResponse(),
+        ):
+            events = list(OpenAIChatCompatibleAdapter().stream_invoke(profile, request))
+
+        self.assertEqual([event.type for event in events], ["text_delta", "completed"])
+        self.assertEqual(events[0].data["text"], "A")
+
+    def test_openai_chat_compatible_adapter_merges_extra_body_from_defaults_and_overrides(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="qwen-chat",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            base_url="http://localhost:8010/v1",
+            credential_binding="EMPTY",
+            default_params=LlmDefaults(
+                temperature=0.7,
+                extra_body={
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "seed": 7,
+                },
+            ),
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
+            ),
+            overrides={
+                "max_tokens": 80,
+                "extra_body": {
+                    "chat_template_kwargs": {"user_role": "user"},
+                    "repetition_penalty": 1.05,
+                },
+            },
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "chatcmpl_qwen_1",
+                    "model": "qwen3.5-35b",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": "你好",
+                                "tool_calls": [],
+                            },
+                        },
+                    ],
+                },
+            ),
+        ) as post:
+            response = OpenAIChatCompatibleAdapter().invoke(profile, request)
+
+        self.assertEqual(response.result.text, "你好")
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["temperature"], 0.7)
+        self.assertEqual(kwargs["json"]["max_tokens"], 80)
+        self.assertEqual(kwargs["json"]["seed"], 7)
+        self.assertEqual(kwargs["json"]["repetition_penalty"], 1.05)
+        self.assertEqual(
+            kwargs["json"]["chat_template_kwargs"],
+            {"enable_thinking": False, "user_role": "user"},
+        )
+        self.assertNotIn("extra_body", kwargs["json"])
 
     def test_openai_chat_compatible_adapter_encodes_tool_history_messages(self) -> None:
         profile = LlmProfile(
@@ -974,6 +1377,146 @@ class LlmAdapterTestCase(unittest.TestCase):
                 },
             ],
         )
+
+    def test_openai_chat_compatible_adapter_parses_xmlish_tool_call_content(self) -> None:
+        profile = LlmProfile(
+            id="local-chat-xmlish-tools",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            credential_binding="compat-inline-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Call a tool."),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="echo_tool",
+                    description="Echo text",
+                    input_schema={"type": "object"},
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "chatcmpl_xml_tool_1",
+                    "model": "qwen3.5-35b",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": (
+                                    "<tool_call>\n"
+                                    "<function=echo_tool>\n"
+                                    "<parameter=text>\n"
+                                    "auto-ping\n"
+                                    "</parameter>\n"
+                                    "</function>\n"
+                                    "</tool_call>"
+                                ),
+                                "tool_calls": [],
+                            },
+                        },
+                    ],
+                },
+            ),
+        ):
+            response = OpenAIChatCompatibleAdapter().invoke(profile, request)
+
+        self.assertIsNone(response.result.text)
+        self.assertEqual(len(response.result.tool_calls), 1)
+        self.assertEqual(response.result.tool_calls[0].name, "echo_tool")
+        self.assertEqual(
+            response.result.tool_calls[0].arguments,
+            {"text": "auto-ping"},
+        )
+
+    def test_openai_chat_compatible_adapter_merges_system_messages_to_single_front_message(
+        self,
+    ) -> None:
+        profile = LlmProfile(
+            id="local-chat-system-order",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            credential_binding="compat-inline-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="system-late"),
+                LlmMessage(role=LlmMessageRole.ASSISTANT, content="hi"),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "chatcmpl_system_order_1",
+                    "model": "qwen3.5-35b",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": "ok", "tool_calls": []},
+                        },
+                    ],
+                },
+            ),
+        ) as post:
+            response = OpenAIChatCompatibleAdapter().invoke(profile, request)
+
+        self.assertEqual(response.result.text, "ok")
+        _, kwargs = post.call_args
+        self.assertEqual(kwargs["json"]["messages"][0]["role"], "system")
+        self.assertEqual(kwargs["json"]["messages"][0]["content"], "system-late")
+        self.assertEqual(kwargs["json"]["messages"][1]["role"], "user")
+        self.assertEqual(kwargs["json"]["messages"][2]["role"], "assistant")
+        self.assertEqual(len(kwargs["json"]["messages"]), 3)
+
+    def test_openai_chat_compatible_adapter_combines_multiple_system_messages(self) -> None:
+        profile = LlmProfile(
+            id="local-chat-multi-system",
+            provider=LlmProviderKind.OPENAI_COMPATIBLE,
+            api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            model_name="qwen3.5-35b",
+            credential_binding="compat-inline-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="sys1"),
+                LlmMessage(role=LlmMessageRole.SYSTEM, content="sys2"),
+                LlmMessage(role=LlmMessageRole.USER, content="hello"),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_chat_compatible.requests.post",
+            return_value=_FakeResponse(
+                payload={
+                    "id": "chatcmpl_multi_system_1",
+                    "model": "qwen3.5-35b",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": "ok", "tool_calls": []},
+                        },
+                    ],
+                },
+            ),
+        ) as post:
+            response = OpenAIChatCompatibleAdapter().invoke(profile, request)
+
+        self.assertEqual(response.result.text, "ok")
+        _, kwargs = post.call_args
+        self.assertEqual(len(kwargs["json"]["messages"]), 2)
+        self.assertEqual(kwargs["json"]["messages"][0]["role"], "system")
+        self.assertEqual(kwargs["json"]["messages"][0]["content"], "sys1\n\nsys2")
+        self.assertEqual(kwargs["json"]["messages"][1]["role"], "user")
 
     def test_openai_chat_compatible_adapter_encodes_user_file_blocks(self) -> None:
         profile = LlmProfile(
@@ -1085,7 +1628,10 @@ class LlmAdapterTestCase(unittest.TestCase):
             "sample_api.search_docs",
         )
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["json"]["tools"][0]["name"], "sample_api_search_docs")
+        self.assertEqual(
+            kwargs["json"]["tools"][0]["function"]["name"],
+            "sample_api_search_docs",
+        )
 
     def test_openai_codex_responses_adapter_reads_auth_json_and_sse(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1294,6 +1840,25 @@ class LlmAdapterTestCase(unittest.TestCase):
                         },
                     ),
                     (
+                        "response.output_item.done",
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": {
+                                "id": "msg_codex_stream",
+                                "type": "message",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "codex-stream",
+                                    },
+                                ],
+                            },
+                        },
+                    ),
+                    (
                         "response.completed",
                         {
                             "type": "response.completed",
@@ -1301,17 +1866,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                                 "id": "resp_codex_stream",
                                 "status": "completed",
                                 "model": "gpt-5.1-codex",
-                                "output": [
-                                    {
-                                        "type": "message",
-                                        "content": [
-                                            {
-                                                "type": "output_text",
-                                                "text": "codex-stream",
-                                            },
-                                        ],
-                                    },
-                                ],
+                                "output": [],
                             },
                         },
                     ),
@@ -1323,6 +1878,164 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["text_delta", "completed"])
         self.assertEqual(events[0].data["text"], "codex-")
         self.assertEqual(events[1].data["result"]["text"], "codex-stream")
+
+    def test_openai_codex_responses_adapter_stream_invoke_async_uses_async_stream(self) -> None:
+        profile = LlmProfile(
+            id="codex-stream-async",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5-codex",
+            model_family=LlmModelFamily.CODEX,
+            credential_binding="codex-inline-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Reply with async codex stream.",
+                ),
+            ),
+        )
+        _FakeAsyncClient.response = _FakeAsyncResponse(
+            headers={"content-type": "text/event-stream"},
+            events=(
+                (
+                    "response.output_item.done",
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "id": "msg_codex_stream_async",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "async-codex-stream",
+                                },
+                            ],
+                        },
+                    },
+                ),
+                (
+                    "response.completed",
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_codex_stream_async",
+                            "status": "completed",
+                            "model": "gpt-5.1-codex",
+                            "output": [],
+                        },
+                    },
+                ),
+            ),
+        )
+
+        async def collect_events():
+            with patch(
+                "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.httpx.AsyncClient",
+                _FakeAsyncClient,
+            ):
+                return [
+                    event
+                    async for event in OpenAICodexResponsesAdapter().stream_invoke_async(
+                        profile,
+                        request,
+                    )
+                ]
+
+        events = asyncio.run(collect_events())
+
+        self.assertEqual([event.type for event in events], ["completed"])
+        self.assertEqual(events[0].data["result"]["text"], "async-codex-stream")
+        method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://chatgpt.com/backend-api/codex/responses")
+        self.assertTrue(kwargs["json"]["stream"])
+
+    def test_openai_codex_responses_adapter_stream_invoke_uses_data_type_without_event_line(self) -> None:
+        profile = LlmProfile(
+            id="codex-stream-data-type",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.4",
+            model_family=LlmModelFamily.CODEX,
+            credential_binding="codex-inline-token",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Reply with codex data type stream.",
+                ),
+            ),
+        )
+        stream_response = _FakeStreamResponse(
+            events=(
+                (
+                    None,
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": "data-",
+                    },
+                ),
+                (
+                    None,
+                    {
+                        "type": "response.output_text.delta",
+                        "text": "type",
+                    },
+                ),
+                (
+                    None,
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "id": "msg_codex_stream_data_type",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "data-type",
+                                },
+                            ],
+                        },
+                    },
+                ),
+                (
+                    None,
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_codex_stream_data_type",
+                            "status": "completed",
+                            "model": "gpt-5.4",
+                            "output": [],
+                        },
+                    },
+                ),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_codex_responses.requests.post",
+            return_value=stream_response,
+        ):
+            events = list(OpenAICodexResponsesAdapter().stream_invoke(profile, request))
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["text_delta", "text_delta", "completed"],
+        )
+        self.assertEqual(events[0].data["text"], "data-")
+        self.assertEqual(events[1].data["text"], "type")
+        self.assertEqual(events[2].data["result"]["text"], "data-type")
+        self.assertEqual(stream_response.iter_lines_chunk_size, 1)
 
     def test_openai_codex_responses_adapter_retries_transient_server_error_before_output(self) -> None:
         profile = LlmProfile(
@@ -1472,6 +2185,48 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(kwargs["json"]["system"], "Return concise answers.")
         self.assertEqual(kwargs["json"]["tools"][0]["name"], "search_docs")
         self.assertEqual(kwargs["json"]["max_tokens"], 1024)
+
+    def test_anthropic_messages_adapter_invoke_async_uses_async_http(self) -> None:
+        os.environ["ANTHROPIC_API_KEY"] = "anthropic-secret"
+        profile = LlmProfile(
+            id="claude-async",
+            provider=LlmProviderKind.ANTHROPIC,
+            api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
+            model_name="claude-sonnet-4-5",
+            credential_binding="env:ANTHROPIC_API_KEY",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Need async docs",
+                ),
+            ),
+        )
+        _FakeAsyncClient.response = _FakeAsyncResponse(
+            payload={
+                "id": "msg_async_123",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "async anthropic"}],
+            },
+        )
+
+        async def invoke():
+            with patch(
+                "crxzipple.modules.llm.infrastructure.adapters.anthropic_messages.httpx.AsyncClient",
+                _FakeAsyncClient,
+            ):
+                return await AnthropicMessagesAdapter().invoke_async(profile, request)
+
+        response = asyncio.run(invoke())
+
+        self.assertEqual(response.provider_request_id, "msg_async_123")
+        self.assertEqual(response.result.text, "async anthropic")
+        method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(kwargs["headers"]["x-api-key"], "anthropic-secret")
 
     def test_anthropic_messages_adapter_encodes_tool_history_messages(self) -> None:
         profile = LlmProfile(
@@ -1807,6 +2562,57 @@ class LlmAdapterTestCase(unittest.TestCase):
             kwargs["json"]["toolConfig"]["functionCallingConfig"]["mode"],
             "AUTO",
         )
+
+    def test_gemini_generate_content_adapter_invoke_async_uses_async_http(self) -> None:
+        os.environ["GEMINI_API_KEY"] = "gemini-secret"
+        profile = LlmProfile(
+            id="gemini-async",
+            provider=LlmProviderKind.GOOGLE,
+            api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
+            model_name="gemini-2.5-pro",
+            credential_binding="env:GEMINI_API_KEY",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Find docs async",
+                ),
+            ),
+        )
+        _FakeAsyncClient.response = _FakeAsyncResponse(
+            payload={
+                "responseId": "gemini-response-async",
+                "modelVersion": "gemini-2.5-pro",
+                "candidates": [
+                    {
+                        "finishReason": "STOP",
+                        "content": {
+                            "parts": [{"text": "async gemini"}],
+                        },
+                    },
+                ],
+            },
+        )
+
+        async def invoke():
+            with patch(
+                "crxzipple.modules.llm.infrastructure.adapters.gemini_generate_content.httpx.AsyncClient",
+                _FakeAsyncClient,
+            ):
+                return await GeminiGenerateContentAdapter().invoke_async(profile, request)
+
+        response = asyncio.run(invoke())
+
+        self.assertEqual(response.provider_request_id, "gemini-response-async")
+        self.assertEqual(response.result.text, "async gemini")
+        method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+        )
+        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "gemini-secret")
 
     def test_gemini_generate_content_adapter_encodes_tool_history_messages(self) -> None:
         profile = LlmProfile(

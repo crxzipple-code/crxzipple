@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 
 from crxzipple.bootstrap import AppContainer
 from crxzipple.interfaces.http.dependencies import get_container
+from crxzipple.modules.orchestration.application.ports import OrchestrationRunQueryPort
+from crxzipple.modules.orchestration.interfaces.dto import OrchestrationRunDTO
+from crxzipple.modules.orchestration.interfaces.http_models import OrchestrationRunResponse
 from crxzipple.modules.session.application import ListSessionMessagesInput
 from crxzipple.modules.session.domain import SessionNotFoundError
 from crxzipple.modules.session.interfaces.dto import SessionMessageDTO
@@ -17,6 +20,7 @@ from crxzipple.modules.session.interfaces.http_models import (
     SessionMessageResponse,
     SessionRuntimeBindingPayload,
 )
+from crxzipple.shared.time import format_datetime_utc
 
 
 router = APIRouter()
@@ -104,6 +108,16 @@ def _truncate_title(value: str) -> str:
     return f"{value[: _TITLE_MAX_CHARS - 3].rstrip()}..."
 
 
+def _humanize_source_label(value: str | None) -> str | None:
+    normalized = _normalize_preview_text(value)
+    if normalized is None:
+        return None
+    collapsed = re.sub(r"[_\-\s]+", " ", normalized).strip()
+    if not collapsed:
+        return None
+    return " ".join(part[:1].upper() + part[1:] for part in collapsed.split())
+
+
 def _is_substantive_title_candidate(value: str) -> bool:
     return value.casefold() not in _LOW_SIGNAL_TITLES and len(value) >= 3
 
@@ -115,6 +129,7 @@ class ConversationSummaryDTO:
     title: str
     runtime_binding: SessionRuntimeBindingPayload
     status: str
+    source_label: str | None
     channel: str | None
     chat_type: str | None
     latest_run_id: str | None
@@ -134,6 +149,7 @@ class ConversationResponse(BaseModel):
     title: str
     runtime_binding: SessionRuntimeBindingPayload
     status: str
+    source_label: str | None = None
     channel: str | None = None
     chat_type: str | None = None
     latest_run_id: str | None = None
@@ -154,6 +170,7 @@ class ConversationResponse(BaseModel):
             title=dto.title,
             runtime_binding=dto.runtime_binding,
             status=dto.status,
+            source_label=dto.source_label,
             channel=dto.channel,
             chat_type=dto.chat_type,
             latest_run_id=dto.latest_run_id,
@@ -168,10 +185,14 @@ class ConversationResponse(BaseModel):
         )
 
 
-def _latest_run_by_session_key(container: AppContainer) -> dict[str, object]:
+def _run_query_port(container: AppContainer) -> OrchestrationRunQueryPort:
+    return container.orchestration_run_query_service
+
+
+def _latest_run_by_session_key(run_query: OrchestrationRunQueryPort) -> dict[str, object]:
     latest: dict[str, object] = {}
     for run in sorted(
-        container.orchestration_service.list_runs(),
+        run_query.list_runs(),
         key=lambda item: item.updated_at,
         reverse=True,
     ):
@@ -187,10 +208,10 @@ def _is_maintenance_run(run) -> bool:  # noqa: ANN001
     return source in {"compaction", "memory_flush", "heartbeat"}
 
 
-def _display_run_by_session_key(container: AppContainer) -> dict[str, object]:
+def _display_run_by_session_key(run_query: OrchestrationRunQueryPort) -> dict[str, object]:
     display: dict[str, object] = {}
     for run in sorted(
-        container.orchestration_service.list_runs(),
+        run_query.list_runs(),
         key=lambda item: item.updated_at,
         reverse=True,
     ):
@@ -278,6 +299,18 @@ def _conversation_title(container: AppContainer, *, session_key: str) -> str | N
     return None
 
 
+def _conversation_source_label(session) -> str | None:  # noqa: ANN001
+    if session.channel and session.channel.strip():
+        return None
+    label = _humanize_source_label(session.origin.label)
+    if label is not None:
+        return label
+    surface = (session.origin.surface or "").strip().lower()
+    if surface == "session_tool":
+        return "Subagent"
+    return _humanize_source_label(session.origin.surface)
+
+
 def _build_conversation_summary(
     container: AppContainer,
     *,
@@ -295,6 +328,7 @@ def _build_conversation_summary(
             agent_id=binding.agent_id,
         ),
         status=session.status,
+        source_label=_conversation_source_label(session),
         channel=session.channel,
         chat_type=session.chat_type,
         latest_run_id=latest_run.id if latest_run is not None else None,
@@ -304,8 +338,8 @@ def _build_conversation_summary(
         display_run_status=display_run.status.value if display_run is not None else None,
         display_run_stage=display_run.stage.value if display_run is not None else None,
         last_message_preview=_last_message_preview(container, session_key=session_key),
-        created_at=session.created_at.isoformat(),
-        updated_at=session.updated_at.isoformat(),
+        created_at=format_datetime_utc(session.created_at),
+        updated_at=format_datetime_utc(session.updated_at),
     )
 
 
@@ -313,8 +347,9 @@ def _list_conversation_summaries(
     container: AppContainer,
 ) -> list[ConversationSummaryDTO]:
     items: list[ConversationSummaryDTO] = []
-    latest_by_session = _latest_run_by_session_key(container)
-    display_by_session = _display_run_by_session_key(container)
+    run_query = _run_query_port(container)
+    latest_by_session = _latest_run_by_session_key(run_query)
+    display_by_session = _display_run_by_session_key(run_query)
     for session_key, latest_run in latest_by_session.items():
         try:
             items.append(
@@ -343,18 +378,44 @@ def get_conversation(
     session_key: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ConversationResponse:
-    latest_run = _latest_run_by_session_key(container).get(session_key)
+    run_query = _run_query_port(container)
+    latest_run = _latest_run_by_session_key(run_query).get(session_key)
     try:
         container.session_service.get_session(session_key)
         dto = _build_conversation_summary(
             container,
             session_key=session_key,
             latest_run=latest_run,
-            display_run=_display_run_by_session_key(container).get(session_key),
+            display_run=_display_run_by_session_key(run_query).get(session_key),
         )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     return ConversationResponse.from_dto(dto)
+
+
+@router.get(
+    "/conversations/{session_key}/runs",
+    response_model=list[OrchestrationRunResponse],
+)
+def list_conversation_runs(
+    session_key: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[OrchestrationRunResponse]:
+    try:
+        container.session_service.get_session(session_key)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    runs = [
+        run
+        for run in _run_query_port(container).list_runs()
+        if run.session_key == session_key
+    ]
+    runs.sort(key=lambda item: item.created_at, reverse=True)
+    return [
+        OrchestrationRunResponse.from_dto(OrchestrationRunDTO.from_entity(run))
+        for run in runs
+    ]
 
 
 @router.get(
@@ -367,6 +428,8 @@ def list_conversation_messages(
     limit: Annotated[int | None, Query(ge=1)] = None,
     active_session_only: Annotated[bool, Query()] = False,
     include_archived: Annotated[bool, Query()] = False,
+    after_sequence_no: Annotated[int | None, Query(ge=0)] = None,
+    before_sequence_no: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[SessionMessageResponse]:
     try:
         items = container.session_service.list_messages(
@@ -375,6 +438,8 @@ def list_conversation_messages(
                 limit=limit,
                 active_session_only=active_session_only,
                 include_archived=include_archived,
+                after_sequence_no=after_sequence_no,
+                before_sequence_no=before_sequence_no,
             ),
         )
     except SessionNotFoundError as exc:

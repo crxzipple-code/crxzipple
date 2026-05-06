@@ -1,38 +1,37 @@
 # Memory Rewrite Cutover
 
-## Decision
+## Status
 
-`memory` will be rewritten as a new subsystem.
+The memory rewrite cutover is complete for the current architecture.
 
-We will not preserve the current memory product model as the target shape.
-Other modules should adapt to the new memory contract instead of forcing the
-new memory implementation to preserve legacy `candidate / review / entry`
-semantics.
+The old product model based on automatic turn memory candidates, candidate
+review queues, and business-entry persistence is not the target runtime shape.
+Current memory is file-backed durable knowledge plus derived indexing and
+explicit tool-based writes.
 
-This means:
+## Current Runtime Shape
 
-- the current `modules/memory` implementation is legacy
-- the new target is OpenClaw-style file-backed memory
-- orchestration, HTTP, and frontend must follow the new memory interface
-
-## Target Shape
-
-The new `memory` subsystem should have these properties:
+The memory subsystem now centers on:
 
 - file source of truth
+- neutral `MemoryUseContext`
 - per-space storage roots
-- per-space derived SQLite index
+- derived index data
 - chunk-based search
-- file-slice reads
-- daily memory writes
-- long-term memory writes
-- session archive writes
+- file excerpt reads
+- explicit daily memory writes
+- explicit long-term write helpers for local/API use
+- neutral archive writes for archive-kind memory files
 
-It should **not** own:
+The memory subsystem does not own:
 
 - agent identity
+- run routing
+- session transcript truth
+- prompt assembly
+- worker scheduling
 - candidate review workflow
-- memory approval queue
+- memory approval queues
 - business-entry persistence tables
 
 ## Slotting Model
@@ -56,23 +55,16 @@ The memory subsystem only receives:
 - `storage_root`
 - retrieval backend choice
 
-## New Runtime Contract
+## Orchestration-Facing Contract
 
-The new orchestration-facing contract should be centered on:
-
-```python
-@dataclass(frozen=True, slots=True)
-class MemoryUseContext:
-    space_id: str
-    storage_root: str
-    retrieval_backend: Literal["keyword", "hybrid", "vector"] = "hybrid"
-```
-
-The new memory port should look like:
+The orchestration-facing memory port is read-oriented:
 
 ```python
 class MemoryPort(Protocol):
     def resolve_context(self, *, space_id: str | None) -> MemoryUseContext | None:
+        ...
+
+    def warm_context(self, *, context: MemoryUseContext) -> bool:
         ...
 
     def search(
@@ -91,124 +83,47 @@ class MemoryPort(Protocol):
         path: str,
         start_line: int | None = None,
         line_count: int | None = None,
-    ) -> MemoryExcerpt:
-        ...
-
-    def append_daily(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-        title: str | None = None,
-    ) -> MemoryWriteResult:
-        ...
-
-    def write_long_term(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-    ) -> MemoryWriteResult:
-        ...
-
-    def archive_session(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-        slug: str | None = None,
-    ) -> MemoryWriteResult:
+    ) -> MemoryExcerpt | None:
         ...
 ```
 
-## What Gets Removed
+Direct durable write methods are intentionally not part of this port.
 
-The following concepts are legacy and should be removed from the new memory
-subsystem:
+Orchestration can still cause memory writes, but only by creating a normal
+tool-using run such as memory flush. The write itself is performed by a memory
+tool, which keeps the behavior visible in the run lifecycle.
 
-- `MemoryCandidate`
+## Removed Concepts
+
+The following concepts are no longer part of the target runtime:
+
+- automatic turn memory extraction
 - candidate review status
-- approve / reject endpoints
-- `memory_entries` as a business truth store
-- turn-completion candidate extraction
+- approve/reject memory endpoints
+- memory entry database as business truth
 - review queue UI
 - memory drawer review workflow
+- orchestration direct memory writes through its memory port
 
-They may survive temporarily during cutover, but they are not part of the new
-target design.
+## Current Orchestration Integration
 
-## What Orchestration Must Change
+Current integration points:
 
-Orchestration should adapt to the new memory model in these ways:
+- resolve memory context from the active run/profile
+- optionally inject bounded bootstrap memory from `MEMORY.md` or `memory.md`
+- expose file-oriented memory tools according to prompt mode and surface
+- schedule memory flush maintenance before compaction when needed
+- require memory flush runs to call either `memory_write_daily` or
+  `memory_flush_skip`
+- prevent memory flush runs from becoming normal assistant transcript replies
 
-1. Resolve memory context for each run.
-2. Auto-inject root `MEMORY.md` only.
-3. Expose file-oriented memory tools.
-4. Stop creating turn-based memory candidates.
-5. Use pre-compaction flush to append daily memory.
-6. Use `/new` and `/reset` hooks or orchestration-side archive flow for
-   session summaries.
+## Verification Focus
 
-The current orchestration integration points that must be rewritten are:
+When changing this area, verify:
 
-- prompt recall
-- tool execution context injection
-- post-turn memory capture
-- memory flush path
-- HTTP memory APIs
-
-## What Frontend Must Change
-
-The current memory UI is shaped around the legacy workflow:
-
-- pending candidates
-- approvals
-- rejections
-- approved entry list
-
-The new UI should instead be shaped around:
-
-- recent daily memory
-- long-term memory
-- memory search results
-- file citations
-- optional manual pin / write actions
-
-## Cutover Plan
-
-### Phase 1
-
-- freeze legacy memory behavior
-- stop rebuilding domain abstractions around it
-- treat current implementation as transitional only
-
-### Phase 2
-
-- build new file-first memory core
-- add search/get/daily-write/session-archive APIs
-- keep old memory routes available only if needed for transition
-
-### Phase 3
-
-- update orchestration to use the new port
-- remove turn-based candidate creation
-- rewire flush and recall to file-backed memory
-
-### Phase 4
-
-- remove review-oriented HTTP and frontend flows
-- remove legacy DB-backed memory tables from active code paths
-
-### Phase 5
-
-- delete legacy memory implementation
-
-## Rule For Future Work
-
-Until cutover completes:
-
-- do not add new product behavior to legacy candidate/review memory
-- do not deepen the current memory application service
-- do not introduce new UI that depends on candidate approval semantics
-
-New work should move the codebase toward the file-backed memory contract.
+- normal runs do not implicitly write durable memory
+- memory flush runs have restricted memory tool surface
+- memory flush runs require a tool call
+- session transcript archival remains in `session`, not `memory`
+- orchestration memory port stays read-only
+- memory files remain the durable source of truth

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from tests.unit.tool_test_support import *  # noqa: F403
 
 
@@ -16,8 +18,11 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 "debug",
                 "itick_market",
                 "memory",
+                "mobile",
                 "open_meteo_geocoding",
                 "open_meteo_weather",
+                "openai_image",
+                "sessions",
                 "skills",
                 "workspace",
             ],
@@ -31,8 +36,11 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 "local_package",
                 "openapi",
                 "local_package",
+                "local_package",
                 "openapi",
                 "openapi",
+                "local_package",
+                "local_package",
                 "local_package",
                 "local_package",
             ],
@@ -45,15 +53,15 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
         self.assertEqual(
             [len(namespace.local_bindings) for namespace in namespaces],
-            [0, 18, 2, 1, 0, 4, 0, 0, 1, 6],
+            [0, 5, 2, 1, 0, 4, 9, 0, 0, 2, 8, 1, 6],
         )
         self.assertEqual(
             [len(namespace.remote_bindings) for namespace in namespaces],
-            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
         self.assertEqual(
             [len(namespace.sandbox_bindings) for namespace in namespaces],
-            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
 
         catalog = LocalToolCatalog()
@@ -67,7 +75,17 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 file_memory_service=self.container.file_memory_service,
                 memory_context_resolver=self.container.memory_context_resolver,
                 process_service=self.container.process_service,
+                session_service=self.container.session_service,
                 session_workspace_lookup=lambda _session_key: "/tmp/workspace",
+                orchestration_run_query_service_lookup=(
+                    lambda: self.container.orchestration_run_query_service
+                ),
+                orchestration_cancellation_service_lookup=(
+                    lambda: self.container.orchestration_cancellation_service
+                ),
+                orchestration_scheduler_service_lookup=(
+                    lambda: self.container.orchestration_scheduler_service
+                ),
                 skill_manager=self.container.skill_manager,
             ),
         )
@@ -85,8 +103,18 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     "memory_read",
                     "memory_search",
                     "memory_write_daily",
+                    "openai_image_edit",
+                    "openai_image_generate",
                     "edit",
                     "read",
+                    "session_status",
+                    "sessions_history",
+                    "sessions_list",
+                    "sessions_send",
+                    "sessions_spawn",
+                    "subagents",
+                    "sessions_stop",
+                    "sessions_yield",
                     "skill_read",
                     "workspace_list",
                     "write",
@@ -132,6 +160,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     base_url=server.base_url,
                     description="Sample OpenAPI provider",
                     timeout_seconds=5,
+                    max_concurrency=2,
                     credential_bindings=(
                         OpenApiCredentialBinding(
                             scheme_name="ApiKeyQuery",
@@ -167,16 +196,29 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 (ToolEnvironment.REMOTE,),
             )
             self.assertEqual(discovered[1].parameters[-1].name, "body")
-
-            echo_run = asyncio.run(
-                container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="sample_api.echo_message",
-                        arguments={"message": "hello", "uppercase": True},
-                        environment=ToolEnvironment.REMOTE,
-                    ),
-                ),
+            registration = container.remote_tool_registry.get_registration(
+                "openapi.sample_api.echo_message",
             )
+            self.assertIsNotNone(registration)
+            assert registration is not None
+            self.assertEqual(registration.concurrency_key, "openapi:sample_api")
+            self.assertEqual(registration.max_concurrency, 2)
+
+            with patch(
+                "requests.request",
+                side_effect=AssertionError(
+                    "OpenAPI remote tools must use async HTTP transport",
+                ),
+            ):
+                echo_run = asyncio.run(
+                    container.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="sample_api.echo_message",
+                            arguments={"message": "hello", "uppercase": True},
+                            environment=ToolEnvironment.REMOTE,
+                        ),
+                    ),
+                )
             self.assertEqual(echo_run.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(echo_run.output_payload["message"], "HELLO")
             self.assertEqual(echo_run.result.metadata["status_code"], 200)
@@ -185,15 +227,21 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 echo_run.result.metadata["request"]["url"],
             )
 
-            search_run = asyncio.run(
-                container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="sample_api.search_docs",
-                        arguments={"body": {"query": "ddd", "limit": 2}},
-                        environment=ToolEnvironment.REMOTE,
-                    ),
+            with patch(
+                "requests.request",
+                side_effect=AssertionError(
+                    "OpenAPI remote tools must use async HTTP transport",
                 ),
-            )
+            ):
+                search_run = asyncio.run(
+                    container.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="sample_api.search_docs",
+                            arguments={"body": {"query": "ddd", "limit": 2}},
+                            environment=ToolEnvironment.REMOTE,
+                        ),
+                    ),
+                )
             self.assertEqual(search_run.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(search_run.output_payload["query"], "ddd")
             self.assertEqual(search_run.output_payload["limit"], 2)
@@ -273,6 +321,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     command=(sys.executable, fixture_path("mcp_sample_server.py")),
                     description="Sample MCP provider",
                     timeout_seconds=5,
+                    max_concurrency=3,
                 ),
             ),
         )
@@ -297,16 +346,29 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 discovered[0].execution_support.supported_environments,
                 (ToolEnvironment.REMOTE,),
             )
-
-            echo_run = asyncio.run(
-                container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="sample_mcp.echo",
-                        arguments={"message": "hello mcp", "uppercase": True},
-                        environment=ToolEnvironment.REMOTE,
-                    ),
-                ),
+            registration = container.remote_tool_registry.get_registration(
+                "mcp.sample_mcp.echo",
             )
+            self.assertIsNotNone(registration)
+            assert registration is not None
+            self.assertEqual(registration.concurrency_key, "mcp:sample_mcp")
+            self.assertEqual(registration.max_concurrency, 3)
+
+            with patch(
+                "crxzipple.modules.tool.infrastructure.mcp_client.McpStdioClient.call_tool",
+                side_effect=AssertionError(
+                    "MCP remote tools must use async stdio transport",
+                ),
+            ):
+                echo_run = asyncio.run(
+                    container.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="sample_mcp.echo",
+                            arguments={"message": "hello mcp", "uppercase": True},
+                            environment=ToolEnvironment.REMOTE,
+                        ),
+                    ),
+                )
             self.assertEqual(echo_run.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(
                 echo_run.output_payload["content"]["message"],
@@ -316,15 +378,21 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             first_server_pid = echo_run.output_payload["content"]["server_pid"]
             first_request_count = echo_run.output_payload["content"]["request_count"]
 
-            sum_run = asyncio.run(
-                container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="sample_mcp.sum",
-                        arguments={"left": 2, "right": 5},
-                        environment=ToolEnvironment.REMOTE,
-                    ),
+            with patch(
+                "crxzipple.modules.tool.infrastructure.mcp_client.McpStdioClient.call_tool",
+                side_effect=AssertionError(
+                    "MCP remote tools must use async stdio transport",
                 ),
-            )
+            ):
+                sum_run = asyncio.run(
+                    container.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="sample_mcp.sum",
+                            arguments={"left": 2, "right": 5},
+                            environment=ToolEnvironment.REMOTE,
+                        ),
+                    ),
+                )
             self.assertEqual(sum_run.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(sum_run.output_payload["content"]["total"], 7)
             self.assertEqual(

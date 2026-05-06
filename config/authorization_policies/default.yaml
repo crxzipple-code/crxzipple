@@ -17,6 +17,34 @@
     match:
       mutates_state: false
 
+- id: allow_session_context_tool_execution
+  description: Allow executing session-context tools inside a bound session run.
+  effect: allow
+  actions:
+    - tool.run
+  resource:
+    kind: tool
+  condition:
+    eq:
+      - resource.scope_required
+      - session_context
+
+- id: allow_session_context_tool_mutation_effect
+  description: Allow the state_mutation effect for session-context tools inside a bound session run.
+  effect: allow
+  actions:
+    - tool.access_effect
+  resource:
+    kind: tool
+  condition:
+    all:
+      - eq:
+          - resource.scope_required
+          - session_context
+      - eq:
+          - context.requested_effect_id
+          - state_mutation
+
 - id: deny_tool_access_when_required_scope_missing
   description: Hide tools when the current run context does not provide the required scope.
   effect: deny

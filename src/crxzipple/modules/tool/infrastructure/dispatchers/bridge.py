@@ -55,6 +55,34 @@ class ToolDispatchBridge:
         collector.collect(task)
         return task
 
+    def claim_queued(
+        self,
+        dispatch_tasks: DispatchTaskRepository,
+        collector: "_AggregateCollector",
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: int | None = None,
+    ) -> DispatchTask | None:
+        task = dispatch_tasks.claim_queued(
+            task_id=run_id,
+            owner_kind=DISPATCH_OWNER_KIND,
+            worker_id=worker_id,
+            claim_token=self._claim_token_for_worker(worker_id),
+            lease_seconds=lease_seconds,
+        )
+        if task is None:
+            return None
+        task.claim(
+            worker_id=worker_id,
+            claim_token=task.claim_token or self._claim_token_for_worker(worker_id),
+            lease_seconds=lease_seconds,
+            claimed_at=task.claimed_at,
+        )
+        dispatch_tasks.add(task)
+        collector.collect(task)
+        return task
+
     def heartbeat(
         self,
         dispatch_tasks: DispatchTaskRepository,

@@ -1,9 +1,47 @@
 from __future__ import annotations
 
 from tests.unit.http_test_support import *
+from tests.unit.tool_runtime_test_support import process_next_background_tool_run
+from crxzipple.modules.mobile.domain import (
+    MobileActionCommand,
+    MobileActionResult,
+    MobileActionTarget,
+)
+from crxzipple.modules.tool.domain import (
+    ToolEnvironment,
+    ToolExecutionStrategy,
+    ToolExecutionTarget,
+    ToolMode,
+    ToolRun,
+)
+from crxzipple.modules.tool.interfaces.dto import ToolRunDTO
 
 
 class ToolHttpTestCase(HttpModuleTestCase):
+    def test_tool_run_dto_serializes_naive_datetimes_as_utc(self) -> None:
+        tool_run = ToolRun(
+            id="tool-run-naive-time",
+            tool_id="echo",
+            target=ToolExecutionTarget(
+                mode=ToolMode.INLINE,
+                strategy=ToolExecutionStrategy.ASYNC,
+                environment=ToolEnvironment.LOCAL,
+            ),
+            created_at=datetime(2026, 4, 18, 7, 0, 0),
+            started_at=datetime(2026, 4, 18, 7, 0, 1),
+            completed_at=datetime(2026, 4, 18, 7, 0, 2),
+            heartbeat_at=datetime(2026, 4, 18, 7, 0, 3),
+            lease_expires_at=datetime(2026, 4, 18, 7, 0, 4),
+            cancel_requested_at=datetime(2026, 4, 18, 7, 0, 5),
+        )
+
+        dto = ToolRunDTO.from_entity(tool_run)
+
+        self.assertEqual(dto.created_at, "2026-04-18T07:00:00+00:00")
+        self.assertEqual(dto.started_at, "2026-04-18T07:00:01+00:00")
+        self.assertEqual(dto.completed_at, "2026-04-18T07:00:02+00:00")
+        self.assertEqual(dto.heartbeat_at, "2026-04-18T07:00:03+00:00")
+
     def test_tool_endpoints_list_roots_and_tools(self) -> None:
         roots_response = self.client.get("/tools/roots")
         list_response = self.client.get("/tools")
@@ -14,6 +52,18 @@ class ToolHttpTestCase(HttpModuleTestCase):
         tool_ids = [item["id"] for item in list_response.json()]
         self.assertIn("echo", tool_ids)
         self.assertIn("memory_search", tool_ids)
+        self.assertIn("mobile_script", tool_ids)
+        self.assertIn("mobile_snapshot", tool_ids)
+        self.assertIn("mobile_screenshot", tool_ids)
+        self.assertIn("session_status", tool_ids)
+        self.assertIn("sessions_list", tool_ids)
+        self.assertIn("sessions_history", tool_ids)
+        self.assertIn("sessions_send", tool_ids)
+        self.assertIn("sessions_spawn", tool_ids)
+        self.assertIn("subagents", tool_ids)
+        self.assertIn("sessions_stop", tool_ids)
+        self.assertIn("sessions_yield", tool_ids)
+        self.assertNotIn("mobile_session", tool_ids)
 
     def test_tool_runtime_endpoints_discover_execute_and_fetch_runs(self) -> None:
         discover_response = self.client.post("/tools/discover-local")
@@ -62,6 +112,56 @@ class ToolHttpTestCase(HttpModuleTestCase):
         self.assertEqual(discover_response.status_code, 200)
         discover_payload = discover_response.json()
         self.assertEqual([item["id"] for item in discover_payload], ["echo"])
+
+    def test_mobile_tool_runtime_endpoint_executes_local_mobile_handler(self) -> None:
+        container = self.client.app.state.container
+        captured_requests: list[object] = []
+
+        def _execute(request):  # noqa: ANN001, ANN202
+            captured_requests.append(request)
+            return MobileActionResult(
+                ok=True,
+                device_name=request.device_name,
+                message="Captured mobile UI snapshot.",
+                command=MobileActionCommand(
+                    device_name=request.device_name,
+                    kind=request.kind,
+                    target=MobileActionTarget(
+                        ref=request.ref,
+                        selector=request.selector,
+                    ),
+                    payload=request.payload,
+                    timeout_ms=request.timeout_ms,
+                ),
+                value={
+                    "format": "interactive_text",
+                    "snapshot": '- android.widget.EditText "To" [ref=m1]',
+                    "text": "To\nSubject\nMessage Body",
+                },
+            )
+
+        with patch.object(
+            type(container.mobile_facade),
+            "execute",
+            autospec=True,
+            side_effect=lambda _self, request: _execute(request),
+        ):
+            execute_response = self.client.post(
+                "/tools/mobile_snapshot/runs",
+                json={
+                    "arguments": {
+                        "device": "pixel",
+                        "format": "interactive_text",
+                    }
+                },
+            )
+
+        self.assertEqual(execute_response.status_code, 201)
+        payload = execute_response.json()
+        self.assertEqual(payload["tool_id"], "mobile_snapshot")
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertEqual(payload["result"]["content"][0]["type"], "text")
+        self.assertIn("Message Body", payload["result"]["content"][0]["text"])
 
     def test_openapi_provider_endpoints_discover_and_execute_remote_tools(self) -> None:
         server = SampleApiServer()
@@ -320,7 +420,8 @@ class ToolHttpTestCase(HttpModuleTestCase):
         deadline = time.monotonic() + 5
         fetched = None
         while time.monotonic() < deadline:
-            worker_response = self.client.app.state.container.tool_service.process_next_queued_run(
+            worker_response = process_next_background_tool_run(
+                self.client.app.state.container,
                 worker_id="http-test-worker",
             )
             get_run_response = self.client.get(f"/tools/runs/{run_payload['id']}")
@@ -361,7 +462,8 @@ class ToolHttpTestCase(HttpModuleTestCase):
         deadline = time.monotonic() + 5
         fetched = None
         while time.monotonic() < deadline:
-            self.client.app.state.container.tool_service.process_next_queued_run(
+            process_next_background_tool_run(
+                self.client.app.state.container,
                 worker_id="http-thread-worker",
             )
             get_run_response = self.client.get(f"/tools/runs/{run_payload['id']}")
@@ -404,6 +506,32 @@ class ToolHttpTestCase(HttpModuleTestCase):
         cancel_payload = cancel_response.json()
         self.assertEqual(cancel_payload["status"], "cancelled")
         self.assertIsNotNone(cancel_payload["cancel_requested_at"])
+
+    def test_tool_run_can_be_retried_via_http(self) -> None:
+        discover_response = self.client.post("/tools/discover-local")
+        self.assertEqual(discover_response.status_code, 200)
+
+        failed_run = ToolRun.create(
+            run_id="http-failed-tool-run",
+            tool_id="echo",
+            input_payload={"message": "retry http"},
+            invocation_context_payload={"trace_id": "trace-retry-http"},
+            target=ToolExecutionTarget(mode=ToolMode.INLINE),
+        )
+        failed_run.start()
+        failed_run.fail("failed before retry")
+        with self.client.app.state.container.uow_factory() as uow:
+            uow.tool_runs.add(failed_run)
+            uow.commit()
+
+        retry_response = self.client.post(f"/tools/runs/{failed_run.id}/retry")
+
+        self.assertEqual(retry_response.status_code, 201)
+        retry_payload = retry_response.json()
+        self.assertNotEqual(retry_payload["id"], failed_run.id)
+        self.assertEqual(retry_payload["tool_id"], "echo")
+        self.assertEqual(retry_payload["status"], "succeeded")
+        self.assertEqual(retry_payload["output_payload"]["message"], "retry http")
 
     def test_tool_runtime_endpoint_executes_sandbox_adapter(self) -> None:
         self.client.app.state.container.tool_service.register(

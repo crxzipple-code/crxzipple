@@ -17,7 +17,6 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
-    AgentToolPreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
 from crxzipple.modules.orchestration.infrastructure import MemoryBindingService
@@ -46,7 +45,6 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         home_sidecar_files=_memory_binding_service.sidecar_files_from_runtime_preferences_payload(
             profile.runtime_preferences,
         ),
-        tool_preferences=AgentToolPreferences.from_payload(profile.tool_preferences),
     )
 
 
@@ -117,31 +115,6 @@ def build_cli() -> typer.Typer:
         emoji: str | None = typer.Option(None, help="Optional identity emoji."),
         avatar: str | None = typer.Option(None, help="Optional identity avatar."),
         enabled: bool = typer.Option(True, "--enabled/--disabled"),
-        requested_effect: list[str] = typer.Option(
-            None,
-            "--requested-effect",
-            help="Effect id this agent prefers to use when available.",
-        ),
-        requested_tool: list[str] = typer.Option(
-            None,
-            "--requested-tool",
-            help="Tool id this agent prefers to use when available.",
-        ),
-        preferred_tool_tag: list[str] = typer.Option(
-            None,
-            "--preferred-tool-tag",
-            help="Tool tag this agent prefers when multiple tools fit.",
-        ),
-        prefers_background_tools: bool = typer.Option(
-            True,
-            "--prefers-background-tools/--no-prefers-background-tools",
-            help="Whether this agent prefers background-capable tools.",
-        ),
-        prefers_mutating_tools: bool = typer.Option(
-            True,
-            "--prefers-mutating-tools/--no-prefers-mutating-tools",
-            help="Whether this agent prefers mutating tools when available.",
-        ),
     ) -> None:
         container = ensure_container(ctx)
         profile = container.agent_service.register_profile(
@@ -178,13 +151,6 @@ def build_cli() -> typer.Typer:
                     workspace=workspace,
                     sandbox_mode=sandbox_mode,
                     memory_retrieval_backend=memory_retrieval_backend,
-                ),
-                tool_preferences=AgentToolPreferences(
-                    requested_effect_ids=tuple(requested_effect or ()),
-                    requested_tool_ids=tuple(requested_tool or ()),
-                    preferred_tags=tuple(preferred_tool_tag or ()),
-                    prefers_background_tools=prefers_background_tools,
-                    prefers_mutating_tools=prefers_mutating_tools,
                 ),
             ),
         )

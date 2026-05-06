@@ -50,5 +50,14 @@ The namespace name is used as the provider name.
 
 - `command`: local command-execution tools bound to the current session workspace.
   See [command/README.md](/Users/crxzy/Documents/crxzipple/tools/command/README.md).
+- `openai_image`: OpenAI image generation and editing tools backed by the Images API.
+  These tools are background-only because image generation/editing can be slow;
+  orchestration waits for tool completion and resumes the run instead of blocking
+  the inline agent worker. Requires `OPENAI_API_KEY`. Defaults to `gpt-image-2`; set
+  `OPENAI_IMAGE_MODEL` to override the default model for this namespace. If
+  OpenAI returns an organization-verification 403 for a GPT Image model, verify
+  the API organization in Platform settings or retry with a model the
+  organization can access. Long image runs default to a 300 second timeout; set
+  `OPENAI_IMAGE_TIMEOUT_SECONDS` to tune it.
 - `workspace`: local filesystem tools bound to the current session workspace.
   See [workspace/README.md](/Users/crxzy/Documents/crxzipple/tools/workspace/README.md).

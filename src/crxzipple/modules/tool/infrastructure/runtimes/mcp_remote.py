@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from crxzipple.modules.tool.domain import ToolRunResult
@@ -19,8 +18,7 @@ class McpRemoteInvoker:
         definition: McpToolDefinition,
         arguments: dict[str, Any],
     ) -> Any:
-        result = await asyncio.to_thread(
-            self.client.call_tool,
+        result = await self.client.call_tool_async(
             tool_name=definition.tool_name,
             arguments=dict(arguments),
         )
@@ -40,6 +38,7 @@ def register_mcp_remote_handlers(
     definitions: list[McpToolDefinition] | tuple[McpToolDefinition, ...],
     *,
     client: McpStdioClient,
+    max_concurrency: int | None = None,
 ) -> None:
     invoker = McpRemoteInvoker(client)
     for definition in definitions:
@@ -52,4 +51,9 @@ def register_mcp_remote_handlers(
         ) -> Any:
             return await _invoker.execute(_definition, arguments)
 
-        registry.register(definition.runtime_key, handler)
+        registry.register(
+            definition.runtime_key,
+            handler,
+            concurrency_key=f"mcp:{definition.provider_name}",
+            max_concurrency=max_concurrency,
+        )

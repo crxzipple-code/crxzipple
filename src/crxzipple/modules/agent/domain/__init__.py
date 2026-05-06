@@ -11,7 +11,6 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
-    AgentToolPreferences,
 )
 
 __all__ = [
@@ -24,6 +23,5 @@ __all__ = [
     "AgentNotFoundError",
     "AgentProfile",
     "AgentRuntimePreferences",
-    "AgentToolPreferences",
     "AgentValidationError",
 ]

@@ -18,20 +18,37 @@ from crxzipple.modules.session.domain.repositories import (
     SessionRepository,
 )
 from crxzipple.modules.session.domain.value_objects import (
-    SessionDelivery,
     SessionKind,
     SessionKeyResolution,
     SessionMessage,
     SessionMessageKind,
     SessionMessageVisibility,
     SessionOrigin,
+    SessionReply,
     SessionResetDecision,
     SessionResetPolicy,
     utcnow,
 )
 from crxzipple.shared.content_blocks import content_blocks_from_payload
 from crxzipple.shared.domain.aggregates import AggregateRoot
-from crxzipple.shared.domain.events import DomainEvent
+from crxzipple.shared.domain.events import Event
+from crxzipple.shared.time import format_datetime_utc as _format_datetime_utc
+
+
+def _session_message_fact_payload(message: SessionMessage) -> dict[str, object]:
+    return {
+        "message_id": message.id,
+        "session_key": message.session_key,
+        "session_id": message.session_id,
+        "role": message.role,
+        "kind": message.kind.value,
+        "source_kind": message.source_kind,
+        "source_id": message.source_id,
+        "message": {
+            **message.to_payload(),
+            "created_at": _format_datetime_utc(message.created_at),
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +60,7 @@ class EnsureSessionInput:
     channel: str | None = None
     chat_type: str | None = None
     origin: SessionOrigin | None = None
-    delivery: SessionDelivery | None = None
+    reply: SessionReply | None = None
     metadata: dict[str, object] | None = None
     active_session_id: str | None = None
 
@@ -59,6 +76,11 @@ class AppendSessionMessageInput:
     visibility: SessionMessageVisibility = SessionMessageVisibility.DEFAULT
     metadata: dict[str, object] = field(default_factory=dict)
     session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AppendSessionMessagesInput:
+    messages: tuple[AppendSessionMessageInput, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,11 +100,26 @@ class MergeSessionMetadataInput:
 
 
 @dataclass(frozen=True, slots=True)
+class MergeSessionMessageMetadataInput:
+    message_id: str
+    metadata: dict[str, object] = field(default_factory=dict)
+    touch_activity: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ListSessionMessagesInput:
     session_key: str
     limit: int | None = None
     active_session_only: bool = False
     include_archived: bool = True
+    after_sequence_no: int | None = None
+    before_sequence_no: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMessagesBundle:
+    session: Session
+    messages: tuple[SessionMessage, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +142,7 @@ class SyncRoutedSessionInput:
     workspace: str | None = None
     status: str = "active"
     origin: SessionOrigin = field(default_factory=SessionOrigin)
-    delivery: SessionDelivery = field(default_factory=SessionDelivery)
+    reply: SessionReply = field(default_factory=SessionReply)
     metadata: dict[str, object] = field(default_factory=dict)
     ensure: bool = False
     touch_activity: bool = True
@@ -148,6 +185,9 @@ class SessionUnitOfWork(Protocol):
     def collect(self, aggregate: AggregateRoot[Any]) -> None:
         ...
 
+    def flush(self) -> None:
+        ...
+
     def commit(self) -> None:
         ...
 
@@ -180,7 +220,7 @@ class SessionApplicationService:
                     channel=data.channel,
                     chat_type=data.chat_type,
                     origin=data.origin or SessionOrigin(),
-                    delivery=data.delivery or SessionDelivery(),
+                    reply=data.reply or SessionReply(),
                     metadata=data.metadata,
                     active_session_id=data.active_session_id,
                 )
@@ -193,9 +233,11 @@ class SessionApplicationService:
                     ),
                     instance_id=session.active_session_id,
                 )
+                uow.sessions.add(session)
+                uow.flush()
                 uow.session_instances.add(instance)
                 session.record_event(
-                    DomainEvent(
+                    Event(
                         name="session.started",
                         payload={
                             "session_key": session.id,
@@ -210,7 +252,7 @@ class SessionApplicationService:
                     channel=data.channel,
                     chat_type=data.chat_type,
                     origin=data.origin,
-                    delivery=data.delivery,
+                    reply=data.reply,
                     metadata=data.metadata,
                     workspace=data.workspace,
                 )
@@ -227,7 +269,7 @@ class SessionApplicationService:
                     self._sync_instance_runtime_binding(active_instance, session=session)
                     uow.session_instances.add(active_instance)
                 session.record_event(
-                    DomainEvent(
+                    Event(
                         name="session.updated",
                         payload={
                             "session_key": session.id,
@@ -279,7 +321,7 @@ class SessionApplicationService:
                     channel=data.key_resolution.channel,
                     chat_type=data.key_resolution.chat_type,
                     origin=data.origin,
-                    delivery=data.delivery,
+                    reply=data.reply,
                     metadata=data.metadata,
                     created_at=now,
                     updated_at=now,
@@ -292,10 +334,11 @@ class SessionApplicationService:
                     opened_at=now,
                     instance_id=session.active_session_id,
                 )
-                uow.session_instances.add(active_instance)
                 uow.sessions.add(session)
+                uow.flush()
+                uow.session_instances.add(active_instance)
                 session.record_event(
-                    DomainEvent(
+                    Event(
                         name="session.started",
                         payload={
                             "session_key": session.id,
@@ -328,7 +371,7 @@ class SessionApplicationService:
                 channel=data.key_resolution.channel,
                 chat_type=data.key_resolution.chat_type,
                 origin=data.origin,
-                delivery=data.delivery,
+                reply=data.reply,
                 metadata=data.metadata,
                 workspace=data.workspace,
                 updated_at=now if data.touch_activity else session.updated_at,
@@ -373,7 +416,7 @@ class SessionApplicationService:
                 )
                 uow.session_instances.add(active_instance)
                 session.record_event(
-                    DomainEvent(
+                    Event(
                         name="session.reset",
                         payload={
                             "session_key": session.id,
@@ -392,7 +435,7 @@ class SessionApplicationService:
                 )
             else:
                 session.record_event(
-                    DomainEvent(
+                    Event(
                         name="session.updated",
                         payload={
                             "session_key": session.id,
@@ -449,7 +492,7 @@ class SessionApplicationService:
                 self._sync_instance_runtime_binding(active_instance, session=session)
                 uow.session_instances.add(active_instance)
             session.record_event(
-                DomainEvent(
+                Event(
                     name="session.updated",
                     payload={
                         "session_key": session.id,
@@ -493,66 +536,127 @@ class SessionApplicationService:
                 )
             return message
 
-    def append_message(self, data: AppendSessionMessageInput) -> SessionMessage:
+    def merge_message_metadata(
+        self,
+        data: MergeSessionMessageMetadataInput,
+    ) -> SessionMessage:
         with self.uow_factory() as uow:
-            session = uow.sessions.get(data.session_key)
+            message = uow.session_messages.get(data.message_id)
+            if message is None:
+                raise SessionMessageNotFoundError(
+                    f"Session message '{data.message_id}' was not found.",
+                )
+            metadata = dict(message.metadata)
+            metadata.update(data.metadata)
+            updated_message = replace(message, metadata=metadata)
+            uow.session_messages.add(updated_message)
+            session = uow.sessions.get(updated_message.session_key)
+            if session is not None and data.touch_activity:
+                session.apply_updates(updated_at=utcnow())
+                uow.sessions.add(session)
+                uow.collect(session)
+            uow.commit()
+            return updated_message
+
+    def append_message(self, data: AppendSessionMessageInput) -> SessionMessage:
+        return self.append_messages(
+            AppendSessionMessagesInput(messages=(data,)),
+        )[0]
+
+    def append_messages(
+        self,
+        data: AppendSessionMessagesInput,
+    ) -> tuple[SessionMessage, ...]:
+        if not data.messages:
+            return ()
+        with self.uow_factory() as uow:
+            first = data.messages[0]
+            session = uow.sessions.get(first.session_key)
             if session is None:
                 raise SessionNotFoundError(
-                    f"Session '{data.session_key}' was not found.",
+                    f"Session '{first.session_key}' was not found.",
                 )
-            target_session_id = data.session_id or session.active_session_id
+            target_session_id = first.session_id or session.active_session_id
             if uow.session_instances.get(target_session_id) is None:
                 raise SessionInstanceNotFoundError(
                     f"Session instance '{target_session_id}' was not found.",
                 )
-            content_payload = dict(data.content_payload)
-            content_blocks = content_blocks_from_payload(content_payload)
-            is_function_call_message = (
-                data.kind is SessionMessageKind.MESSAGE
-                and content_payload.get("type") == "function_call"
-            )
-            if (
-                not content_blocks
-                and data.kind is SessionMessageKind.MESSAGE
-                and not is_function_call_message
-            ):
-                raise SessionValidationError(
-                    "Session message content_payload.blocks is required for message content.",
-                )
-            message = SessionMessage(
-                id=str(uuid4()),
+            next_sequence_no = self._next_message_sequence(
+                uow,
                 session_key=session.id,
                 session_id=target_session_id,
-                sequence_no=self._next_message_sequence(
-                    uow,
+            )
+            messages: list[SessionMessage] = []
+            for offset, item in enumerate(data.messages):
+                if item.session_key != session.id:
+                    raise SessionValidationError(
+                        "Batched session messages must share a session_key.",
+                    )
+                item_session_id = item.session_id or session.active_session_id
+                if item_session_id != target_session_id:
+                    raise SessionValidationError(
+                        "Batched session messages must share a session_id.",
+                    )
+                message = self._build_message(
+                    item,
                     session_key=session.id,
                     session_id=target_session_id,
-                ),
-                role=data.role,
-                kind=data.kind,
-                content_payload=content_payload,
-                source_kind=data.source_kind,
-                source_id=data.source_id,
-                visibility=data.visibility,
-                metadata=dict(data.metadata),
-            )
-            uow.session_messages.add(message)
-            session.apply_updates(updated_at=message.created_at)
-            session.record_event(
-                DomainEvent(
-                    name="session.message.appended",
-                    payload={
-                        "session_key": session.id,
-                        "active_session_id": session.active_session_id,
-                        "message_id": message.id,
-                        "role": message.role,
-                    },
-                ),
-            )
-            uow.sessions.add(session)
+                    sequence_no=next_sequence_no + offset,
+                )
+                messages.append(message)
+            uow.session_messages.add_many_new(tuple(messages))
+            if messages:
+                session.updated_at = messages[-1].created_at
+                uow.sessions.touch_updated_at(
+                    session_key=session.id,
+                    updated_at=session.updated_at,
+                )
+            for message in messages:
+                session.record_event(
+                    Event(
+                        name="session.message.appended",
+                        payload=_session_message_fact_payload(message),
+                    ),
+                )
             uow.collect(session)
             uow.commit()
-            return message
+            return tuple(messages)
+
+    def _build_message(
+        self,
+        data: AppendSessionMessageInput,
+        *,
+        session_key: str,
+        session_id: str,
+        sequence_no: int,
+    ) -> SessionMessage:
+        content_payload = dict(data.content_payload)
+        content_blocks = content_blocks_from_payload(content_payload)
+        is_function_call_message = (
+            data.kind is SessionMessageKind.MESSAGE
+            and content_payload.get("type") == "function_call"
+        )
+        if (
+            not content_blocks
+            and data.kind is SessionMessageKind.MESSAGE
+            and not is_function_call_message
+        ):
+            raise SessionValidationError(
+                "Session message content_payload.blocks is required for message content.",
+            )
+        return SessionMessage(
+            id=str(uuid4()),
+            session_key=session_key,
+            session_id=session_id,
+            sequence_no=sequence_no,
+            role=data.role,
+            kind=data.kind,
+            content_payload=content_payload,
+            source_kind=data.source_kind,
+            source_id=data.source_id,
+            visibility=data.visibility,
+            metadata=dict(data.metadata),
+        )
 
     def archive_messages(self, data: ArchiveSessionMessagesInput) -> int:
         with self.uow_factory() as uow:
@@ -591,7 +695,7 @@ class SessionApplicationService:
             if archived_count > 0:
                 session.apply_updates(updated_at=utcnow())
                 session.record_event(
-                    DomainEvent(
+                    Event(
                         name="session.messages.archived",
                         payload={
                             "session_key": session.id,
@@ -634,6 +738,12 @@ class SessionApplicationService:
         self,
         data: ListSessionMessagesInput,
     ) -> list[SessionMessage]:
+        return list(self.get_session_with_messages(data).messages)
+
+    def get_session_with_messages(
+        self,
+        data: ListSessionMessagesInput,
+    ) -> SessionMessagesBundle:
         with self.uow_factory() as uow:
             session = uow.sessions.get(data.session_key)
             if session is None:
@@ -641,11 +751,17 @@ class SessionApplicationService:
                     f"Session '{data.session_key}' was not found.",
                 )
             session_id = session.active_session_id if data.active_session_only else None
-            return uow.session_messages.list(
+            messages = uow.session_messages.list(
                 session_key=session.id,
                 session_id=session_id,
                 limit=data.limit,
                 include_archived=data.include_archived,
+                after_sequence_no=data.after_sequence_no,
+                before_sequence_no=data.before_sequence_no,
+            )
+            return SessionMessagesBundle(
+                session=session,
+                messages=tuple(messages),
             )
 
     def reset_session(self, data: ResetSessionInput) -> Session:
@@ -679,7 +795,7 @@ class SessionApplicationService:
             )
             uow.session_instances.add(next_instance)
             session.record_event(
-                DomainEvent(
+                Event(
                     name="session.reset",
                     payload={
                         "session_key": session.id,
@@ -704,7 +820,7 @@ class SessionApplicationService:
         channel: str | None,
         chat_type: str | None,
         origin: SessionOrigin,
-        delivery: SessionDelivery,
+        reply: SessionReply,
         metadata: dict[str, object] | None,
         active_session_id: str | None = None,
         created_at: datetime | None = None,
@@ -720,7 +836,7 @@ class SessionApplicationService:
             channel=(channel.strip() or None) if channel else None,
             chat_type=(chat_type.strip() or None) if chat_type else None,
             origin=origin,
-            delivery=delivery,
+            reply=reply,
             metadata=dict(metadata or {}),
             created_at=timestamp,
             updated_at=updated_at or timestamp,

@@ -44,7 +44,7 @@ class SessionDTO:
     channel: str | None
     chat_type: str | None
     origin: dict[str, object]
-    delivery: dict[str, object]
+    reply: dict[str, object]
     metadata: dict[str, object]
     created_at: datetime
     updated_at: datetime
@@ -61,7 +61,7 @@ class SessionDTO:
             channel=session.channel,
             chat_type=session.chat_type,
             origin=session.origin.to_payload(),
-            delivery=session.delivery.to_payload(),
+            reply=session.reply.to_payload(),
             metadata=dict(session.metadata),
             created_at=session.created_at,
             updated_at=session.updated_at,

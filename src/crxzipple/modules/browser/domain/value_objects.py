@@ -28,6 +28,9 @@ DEFAULT_BROWSER_MCP_COMMAND: tuple[str, ...] = (
     "--experimental-page-id-routing",
 )
 BrowserControlKind: TypeAlias = Literal[
+    "status",
+    "start",
+    "stop",
     "navigate",
     "open-tab",
     "focus-tab",
@@ -37,6 +40,9 @@ BrowserControlKind: TypeAlias = Literal[
 ]
 BrowserPageActionKind: TypeAlias = Literal[
     "click",
+    "console",
+    "cookies",
+    "dialog",
     "type",
     "press",
     "hover",
@@ -46,11 +52,15 @@ BrowserPageActionKind: TypeAlias = Literal[
     "scroll-into-view",
     "select",
     "fill",
+    "upload",
+    "download",
+    "wait-download",
     "wait",
     "snapshot",
     "screenshot",
     "pdf",
     "evaluate",
+    "storage",
 ]
 
 

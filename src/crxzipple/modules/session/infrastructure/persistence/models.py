@@ -22,7 +22,7 @@ class SessionModel(Base):
         nullable=False,
         default=dict,
     )
-    delivery_payload: Mapped[dict[str, object]] = mapped_column(
+    reply_payload: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,
         default=dict,

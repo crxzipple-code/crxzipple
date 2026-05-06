@@ -26,6 +26,12 @@ class PromptContextFile:
 
 
 @dataclass(frozen=True, slots=True)
+class _LoadedBootstrapFile:
+    context_file: PromptContextFile
+    resolved_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class _CachedWorkspaceFile:
     identity: str
     content: str
@@ -48,21 +54,18 @@ def load_workspace_context_files(
             break
         bootstrap_file = None
         for relative_name in candidate_names:
-            bootstrap_file = _load_bootstrap_file(
+            loaded_file = _load_bootstrap_file(
                 root=root,
                 relative_name=relative_name,
             )
-            if bootstrap_file is not None:
+            if loaded_file is not None:
                 break
-        if bootstrap_file is None:
+        if loaded_file is None:
             continue
-        try:
-            resolved_path = (root / relative_name).resolve(strict=True)
-        except OSError:
+        bootstrap_file = loaded_file.context_file
+        if loaded_file.resolved_path in seen_paths:
             continue
-        if resolved_path in seen_paths:
-            continue
-        seen_paths.add(resolved_path)
+        seen_paths.add(loaded_file.resolved_path)
         if len(bootstrap_file.content) > remaining_budget:
             bootstrap_file = PromptContextFile(
                 path=bootstrap_file.path,
@@ -91,7 +94,7 @@ def _resolve_workspace_root(workspace_dir: str | None) -> Path | None:
     return root
 
 
-def _load_bootstrap_file(*, root: Path, relative_name: str) -> PromptContextFile | None:
+def _load_bootstrap_file(*, root: Path, relative_name: str) -> _LoadedBootstrapFile | None:
     candidate = root / relative_name
     try:
         resolved = candidate.resolve(strict=True)
@@ -113,13 +116,16 @@ def _load_bootstrap_file(*, root: Path, relative_name: str) -> PromptContextFile
         return None
     if not content:
         return None
-    return PromptContextFile(
-        path=relative_name,
-        content=_truncate_content(
-            content,
+    return _LoadedBootstrapFile(
+        context_file=PromptContextFile(
             path=relative_name,
-            max_chars=MAX_WORKSPACE_BOOTSTRAP_CHARS,
+            content=_truncate_content(
+                content,
+                path=relative_name,
+                max_chars=MAX_WORKSPACE_BOOTSTRAP_CHARS,
+            ),
         ),
+        resolved_path=resolved,
     )
 
 

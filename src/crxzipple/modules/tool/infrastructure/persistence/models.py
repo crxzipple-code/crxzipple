@@ -46,3 +46,50 @@ class ToolRunModel(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+
+class ToolRunAssignmentModel(Base):
+    __tablename__ = "tool_run_assignments"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    tool_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    worker_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=1)
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    terminal_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
+
+
+class ToolWorkerModel(Base):
+    __tablename__ = "tool_workers"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    max_in_flight: Mapped[int] = mapped_column(Integer(), nullable=False, default=1)
+    current_in_flight: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
+    capabilities_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON(),
+        nullable=False,
+    )
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )

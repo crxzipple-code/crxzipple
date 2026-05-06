@@ -3,23 +3,23 @@ from __future__ import annotations
 from datetime import timedelta
 import unittest
 
-from crxzipple.modules.orchestration.application import (
-    OrchestrationRouter,
-    ResolveSessionBundleInput,
-    SessionResolver,
-)
 from crxzipple.modules.session.application import (
     ArchiveSessionMessagesInput,
     AppendSessionMessageInput,
+    AppendSessionMessagesInput,
     EnsureSessionInput,
     ListSessionInstancesInput,
     ListSessionMessagesInput,
+    MergeSessionMessageMetadataInput,
+    ResolveSessionInput,
     SessionApplicationService,
+    SessionResolutionService,
 )
 from crxzipple.modules.session.domain import (
     DirectSessionScope,
     SessionMessageKind,
     SessionMessageVisibility,
+    SessionReply,
     SessionResetPolicy,
     SessionRouteContext,
 )
@@ -60,14 +60,11 @@ class SessionServiceTestCase(unittest.TestCase):
             lambda: self.uow,
             workspace_defaults_resolver=lambda agent_id: f"/tmp/{agent_id}-home",
         )
-        self.resolver = SessionResolver(
-            session_service=self.service,
-            router=OrchestrationRouter(),
-        )
+        self.resolver = SessionResolutionService(session_service=self.service)
 
     def test_resolve_session_ensures_main_session_with_main_instance_kind(self) -> None:
         result = self.resolver.resolve(
-            ResolveSessionBundleInput(
+            ResolveSessionInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
                     channel="webchat",
@@ -98,7 +95,7 @@ class SessionServiceTestCase(unittest.TestCase):
     def test_resolve_session_applies_idle_reset_policy_with_new_instance(self) -> None:
         started_at = utcnow()
         initial = self.resolver.resolve(
-            ResolveSessionBundleInput(
+            ResolveSessionInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
                     channel="webchat",
@@ -117,7 +114,7 @@ class SessionServiceTestCase(unittest.TestCase):
         )
 
         resolved = self.resolver.resolve(
-            ResolveSessionBundleInput(
+            ResolveSessionInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
                     channel="webchat",
@@ -180,6 +177,22 @@ class SessionServiceTestCase(unittest.TestCase):
         binding = session.runtime_binding()
         self.assertEqual(binding.workspace, "/tmp/assistant-home")
 
+    def test_ensure_session_persists_reply(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+                reply=SessionReply(
+                    channel="webhook",
+                    to_id="conv-reply-1",
+                    account_id="default",
+                ),
+            ),
+        )
+
+        self.assertEqual(session.reply.channel, "webhook")
+        self.assertEqual(session.reply.to_id, "conv-reply-1")
+
     def test_append_message_creates_structured_transcript_payload_and_sequence(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
@@ -226,6 +239,73 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(second.visibility.value, "internal")
         self.assertEqual([item.sequence_no for item in history], [1, 2])
 
+    def test_append_messages_batches_sequence_assignment(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+
+        messages = self.service.append_messages(
+            AppendSessionMessagesInput(
+                messages=(
+                    AppendSessionMessageInput(
+                        session_key=session.id,
+                        role="assistant",
+                        content_payload={
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "search",
+                            "arguments": {"query": "hello"},
+                        },
+                    ),
+                    AppendSessionMessageInput(
+                        session_key=session.id,
+                        role="tool",
+                        kind=SessionMessageKind.TOOL_RESULT,
+                        content_payload={"tool": "search", "result": "ok"},
+                        source_kind="tool_run",
+                        source_id="tool-run-1",
+                    ),
+                ),
+            ),
+        )
+
+        history = self.service.list_messages(
+            ListSessionMessagesInput(session_key=session.id),
+        )
+
+        self.assertEqual([message.sequence_no for message in messages], [1, 2])
+        self.assertEqual([message.id for message in history], [message.id for message in messages])
+        self.assertEqual(history[0].content_payload["type"], "function_call")
+        self.assertEqual(history[1].kind.value, "tool_result")
+
+    def test_get_session_with_messages_returns_bundle_from_one_read(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        message = self.service.append_message(
+            AppendSessionMessageInput(
+                session_key=session.id,
+                role="user",
+                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
+            ),
+        )
+
+        bundle = self.service.get_session_with_messages(
+            ListSessionMessagesInput(
+                session_key=session.id,
+                active_session_only=True,
+            ),
+        )
+
+        self.assertEqual(bundle.session.id, session.id)
+        self.assertEqual([item.id for item in bundle.messages], [message.id])
+
     def test_archive_messages_marks_existing_messages_without_duplication(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
@@ -271,9 +351,40 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(history[1].id, second.id)
         self.assertEqual(history[1].visibility.value, "default")
 
+    def test_merge_message_metadata_keeps_message_inside_session_service(self) -> None:
+        session = self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+            ),
+        )
+        message = self.service.append_message(
+            AppendSessionMessageInput(
+                session_key=session.id,
+                role="assistant",
+                content_payload={"blocks": [{"type": "text", "text": "summary"}]},
+                metadata={"kind": "summary"},
+            ),
+        )
+
+        updated = self.service.merge_message_metadata(
+            MergeSessionMessageMetadataInput(
+                message_id=message.id,
+                metadata={"maintenance_kind": "compaction_summary"},
+            ),
+        )
+
+        self.assertEqual(updated.id, message.id)
+        self.assertEqual(updated.metadata["kind"], "summary")
+        self.assertEqual(updated.metadata["maintenance_kind"], "compaction_summary")
+        self.assertEqual(
+            self.service.get_message(message.id).metadata["maintenance_kind"],
+            "compaction_summary",
+        )
+
     def test_sync_routed_session_records_runtime_binding_snapshots(self) -> None:
         result = self.resolver.resolve(
-            ResolveSessionBundleInput(
+            ResolveSessionInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
                     channel="webchat",
@@ -317,7 +428,7 @@ class SessionServiceTestCase(unittest.TestCase):
 
     def test_resolve_session_routes_thread_sessions_under_parent_conversation(self) -> None:
         result = self.resolver.resolve(
-            ResolveSessionBundleInput(
+            ResolveSessionInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
                     channel="slack",

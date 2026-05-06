@@ -18,5 +18,14 @@ class ToolExecutionPort(Protocol):
     async def execute(self, data: ExecuteToolInput) -> ToolRun:
         ...
 
+    async def execute_many(
+        self,
+        items: tuple[ExecuteToolInput, ...],
+    ) -> tuple[ToolRun, ...]:
+        ...
+
     def get_tool_run(self, run_id: str) -> ToolRun:
+        ...
+
+    def cancel_tool_run(self, run_id: str) -> ToolRun:
         ...

@@ -1,6 +1,9 @@
 # crxzipple
 
-A DDD-oriented Python project skeleton.
+CRXZipple is a DDD-oriented local Agent Runtime console and runtime. It
+coordinates agent runs, tool and LLM execution, daemon-managed workers,
+event-backed observation, Operations projections, and the fullscreen
+`frontend` Workbench / Trace / Operations / Settings console.
 
 ## Layout
 
@@ -11,13 +14,32 @@ A DDD-oriented Python project skeleton.
 
 ## Current modules
 
-- `tool`
+- `access`
+- `agent`
+- `artifacts`
+- `authorization`
+- `browser`
+- `channels`
+- `daemon`
+- `dispatch`
+- `events`
+- `llm`
+- `memory`
+- `mobile`
+- `ocr`
+- `operations`
+- `orchestration`
 - `process`
 - `session`
-- `llm`
-- `agent`
-- `authorization`
-- `dispatch`
+- `skills`
+- `tool`
+
+## Agent Development Contract
+
+Hosted coding agents should start from `AGENTS.md`. Larger follow-up work should
+also read `docs/agents/hosted-agent-operating-contract.md` before changing code.
+The active documentation index lives in `docs/README.md`; archived design notes
+under `docs/archive/` are historical background only.
 
 ## CLI
 
@@ -38,22 +60,31 @@ APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server
 PYTHONPATH=src python3 -m crxzipple.main tool run echo --strategy thread --input '{"message":"hello from thread"}'
 PYTHONPATH=src python3 -m crxzipple.main tool run echo --strategy process --input '{"message":"hello from process"}'
 PYTHONPATH=src python3 -m crxzipple.main tool run echo --mode background --strategy process --input '{"message":"hello from background process"}'
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process start "sleep 30" --working-directory /tmp
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process list
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process output <process-id>
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process terminate <process-id>
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main process remove <process-id>
 APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers PYTHONPATH=src python3 -m crxzipple.main tool run sample_api.search_docs --environment remote --input '{"body":{"query":"ddd","limit":3}}'
 APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"]}]' PYTHONPATH=src python3 -m crxzipple.main tool run sample_mcp.echo --environment remote --input '{"message":"hello","uppercase":true}'
 ```
 
-Background tool runs are processed by a dedicated worker:
+Background tool runs are processed by daemon-managed scheduler and worker
+services. Start the local infra first, then start the worker stack through
+daemon, not by launching an unmanaged long-running worker:
 
 ```bash
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main tool-worker run
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main tool-worker once --worker-id local-dev-worker
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main tool cancel-run <run-id>
+bash scripts/dev/up-infra.sh
+source scripts/dev/infra-env.sh
+python3 -m crxzipple.main daemon run --service-set workers
+python3 -m crxzipple.main daemon status
+python3 -m crxzipple.main daemon show worker:tool
+python3 -m crxzipple.main tool cancel-run <run-id>
 ```
+
+The `tool-worker` and `tool-scheduler` CLI entrypoints are hidden from root
+help, but remain invokable for daemon service specs and short diagnostic `once`
+commands.
+
+The `process` CLI group is a local diagnostic primitive used underneath daemon.
+Do not use it as the application runtime entrypoint for long-lived internal
+services; start those through `daemon run` / `daemon ensure` so ownership,
+health, and shutdown stay centralized.
 
 ## HTTP
 
@@ -64,20 +95,23 @@ Examples:
 ```bash
 PYTHONPATH=src python3 -c "from crxzipple.interfaces.http.app import app; print(app.title)"
 PYTHONPATH=src python3 -m uvicorn crxzipple.interfaces.http.app:app --reload
-curl -X POST http://127.0.0.1:8000/processes \
-  -H 'Content-Type: application/json' \
-  -d '{"command":"sleep 30","working_directory":"/tmp"}'
-curl http://127.0.0.1:8000/processes
-curl http://127.0.0.1:8000/processes/<process-id>/output
-curl -X POST http://127.0.0.1:8000/processes/<process-id>/terminate
-curl -X DELETE http://127.0.0.1:8000/processes/<process-id>
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/daemon/status
 ```
 
 ## Database
 
-The default local database URL is `sqlite:///./crxzipple.db`.
+The default lightweight database URL is `sqlite:///./crxzipple.db`. The
+recommended local worker/runtime database is Postgres from `compose.yaml`:
 
-Run the initial migration before using the CLI or HTTP app against SQLite:
+```bash
+bash scripts/dev/up-infra.sh
+source scripts/dev/infra-env.sh
+python -m crxzipple.main db upgrade head
+```
+
+Run the initial migration before using the CLI or HTTP app against SQLite only
+when you intentionally want the single-file fallback:
 
 ```bash
 APP_DATABASE_URL=sqlite:///./crxzipple.db alembic upgrade head
@@ -99,6 +133,74 @@ Future revisions can be generated with:
 
 ```bash
 APP_DATABASE_URL=sqlite:///./crxzipple.db alembic revision --autogenerate -m "describe change"
+```
+
+## Local Dev
+
+The default local development path runs Postgres and Redis through Docker
+Compose, then starts API, daemon, and frontend as local processes:
+
+```bash
+make dev-up
+```
+
+This starts:
+
+- Postgres on `127.0.0.1:5432`
+- Redis on `127.0.0.1:6379`
+- API on `http://127.0.0.1:8000`
+- daemon supervisor through `daemon run` for `workers` and `channels-stack`
+- frontend Vite dev server on `http://127.0.0.1:4173`
+
+Useful companion commands:
+
+```bash
+make dev-status
+make dev-down
+```
+
+Infra-only commands are also available:
+
+```bash
+make dev-infra-up
+make dev-infra-status
+make dev-infra-down
+```
+
+If you prefer the explicit multi-terminal flow, keep using:
+
+```bash
+# terminal 1
+cd /path/to/crxzipple
+source scripts/dev/infra-env.sh
+python -m crxzipple.main db upgrade head
+python -m crxzipple.main serve
+```
+
+```bash
+# terminal 2
+cd /path/to/crxzipple
+source scripts/dev/infra-env.sh
+python -m crxzipple.main daemon run --service-set workers --service-set channels-stack
+python -m crxzipple.main daemon status
+```
+
+```bash
+# terminal 3
+cd /path/to/crxzipple/frontend
+npm run dev
+```
+
+To stop only Postgres and Redis:
+
+```bash
+bash scripts/dev/down-infra.sh
+```
+
+If you need the old file-backed fallback explicitly:
+
+```bash
+export APP_EVENTS_BACKEND=file
 ```
 
 ## Logging
@@ -140,7 +242,9 @@ explicit config/env path flow for custom provider files; the variable accepts an
 LLM profile configs are loaded from `config/llm_profiles/*.yaml`, `*.yml`, or
 `*.json` by default when that directory exists. Override the search path with
 `APP_LLM_PROFILE_PATHS`, which also accepts an `os.pathsep`-separated list of
-files or directories.
+files or directories. Profiles can set `max_concurrency` and an optional shared
+`concurrency_key` to protect slower model backends while the executor advances
+other runs concurrently.
 
 Agent profile configs are loaded from `config/agent_profiles/*.yaml`, `*.yml`,
 or `*.json` by default when that directory exists. Override the search path

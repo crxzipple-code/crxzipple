@@ -71,6 +71,7 @@ class OpenApiOperation:
             parameters=self.parameters,
             tags=self.tags,
             required_effect_ids=self.required_effect_ids,
+            access_requirement_sets=_operation_access_requirement_sets(self),
             execution_policy=ToolExecutionPolicy(
                 timeout_seconds=self.timeout_seconds,
                 requires_confirmation=False,
@@ -106,6 +107,51 @@ class OpenApiDiscoveryProvider:
         if self._operations_cache is None:
             self._operations_cache = tuple(_parse_operations(self.config))
         return self._operations_cache
+
+
+def _operation_access_requirement_sets(
+    operation: OpenApiOperation,
+) -> tuple[tuple[str, ...], ...]:
+    if not operation.security_requirements:
+        return ()
+    bindings_by_name = {
+        binding.scheme_name: binding for binding in operation.credential_bindings
+    }
+    requirement_sets: list[tuple[str, ...]] = []
+    for requirement in operation.security_requirements:
+        if not requirement.scheme_names:
+            requirement_sets.append(())
+            continue
+        requirements: list[str] = []
+        for scheme_name in requirement.scheme_names:
+            binding = bindings_by_name.get(scheme_name)
+            if binding is None:
+                requirements.append("credential")
+                continue
+            requirements.extend(_credential_binding_requirements(binding))
+        requirement_sets.append(
+            tuple(dict.fromkeys(item for item in requirements if item)),
+        )
+    if any(not requirement_set for requirement_set in requirement_sets):
+        return ((),)
+    return tuple(dict.fromkeys(requirement_sets))
+
+
+def _credential_binding_requirements(
+    binding: OpenApiCredentialBinding,
+) -> tuple[str, ...]:
+    values = (
+        binding.source,
+        binding.username_source,
+        binding.password_source,
+    )
+    return tuple(
+        dict.fromkeys(
+            value.strip()
+            for value in values
+            if isinstance(value, str) and value.strip()
+        ),
+    )
 
 
 def _parse_operations(config: OpenApiProviderSettings) -> list[OpenApiOperation]:

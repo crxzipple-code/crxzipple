@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.value_objects import (
     SessionMessage,
@@ -28,6 +30,11 @@ class InMemorySessionRepository:
             ]
         return sorted(items, key=lambda item: (item.updated_at, item.id), reverse=True)
 
+    def touch_updated_at(self, *, session_key: str, updated_at: datetime) -> None:
+        session = self._items.get(session_key)
+        if session is not None:
+            session.updated_at = updated_at
+
 
 class InMemorySessionMessageRepository:
     def __init__(self) -> None:
@@ -39,6 +46,12 @@ class InMemorySessionMessageRepository:
                 self._items[index] = message
                 return
         self._items.append(message)
+
+    def add_new(self, message: SessionMessage) -> None:
+        self._items.append(message)
+
+    def add_many_new(self, messages: tuple[SessionMessage, ...]) -> None:
+        self._items.extend(messages)
 
     def get(self, message_id: str) -> SessionMessage | None:
         for item in self._items:
@@ -84,10 +97,20 @@ class InMemorySessionMessageRepository:
         session_id: str | None = None,
         limit: int | None = None,
         include_archived: bool = True,
+        after_sequence_no: int | None = None,
+        before_sequence_no: int | None = None,
     ) -> list[SessionMessage]:
         items = [item for item in self._items if item.session_key == session_key]
         if session_id is not None:
             items = [item for item in items if item.session_id == session_id]
+        if after_sequence_no is not None and after_sequence_no > 0:
+            items = [
+                item for item in items if item.sequence_no > after_sequence_no
+            ]
+        if before_sequence_no is not None and before_sequence_no > 0:
+            items = [
+                item for item in items if item.sequence_no < before_sequence_no
+            ]
         if not include_archived:
             items = [
                 item

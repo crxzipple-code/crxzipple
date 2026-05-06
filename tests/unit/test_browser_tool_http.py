@@ -11,17 +11,357 @@ from crxzipple.modules.artifacts.application.services import ArtifactApplication
 from crxzipple.modules.artifacts.infrastructure.filesystem_store import FilesystemArtifactStore
 from crxzipple.modules.browser.domain import BrowserValidationError
 from tools.browser.local import browser_action
-from tools.browser.local import browser_click
-from tools.browser.local import browser_fill
-from tools.browser.local import browser_profile_diagnose
-from tools.browser.local import browser_profiles
+from tools.browser.local import browser_control
+from tools.browser.local import browser_profile
 from tools.browser.local import browser_script
 from tools.browser.local import browser_snapshot
-from tools.browser.local import browser_wait
 from tests.unit.http_test_support import *
 
 
 class BrowserToolHttpTestCase(HttpModuleTestCase):
+    def test_browser_profile_handler_lists_profiles_by_default(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(
+                    default_profile="user",
+                    managed_tab_limit=None,
+                    profiles=(
+                        SimpleNamespace(
+                            name="crxzipple",
+                            driver="managed",
+                            attach_only=False,
+                            cdp_url="http://127.0.0.1:18800",
+                            cdp_port=None,
+                            user_data_dir="/tmp/browser-crxzipple",
+                        ),
+                        SimpleNamespace(
+                            name="user",
+                            driver="existing-session",
+                            attach_only=False,
+                            cdp_url=None,
+                            cdp_port=None,
+                            user_data_dir="/tmp/browser-user",
+                        ),
+                    ),
+                )
+
+        class _ProfileResolver:
+            def resolve(self, *, system, profile_name):  # noqa: ANN001, ANN201
+                profile = next(item for item in system.profiles if item.name == profile_name)
+                return SimpleNamespace(
+                    name=profile.name,
+                    driver=profile.driver,
+                    cdp_url=profile.cdp_url,
+                    cdp_port=profile.cdp_port,
+                )
+
+        class _CapabilitiesResolver:
+            def resolve(self, *, profile):  # noqa: ANN001, ANN201
+                if profile.driver == "existing-session":
+                    return SimpleNamespace(
+                        mode="local-existing-session",
+                        control_family="mcp-control",
+                        action_family="mcp-backed",
+                        is_remote=False,
+                        supports_reset=False,
+                        supports_per_tab_ws=False,
+                        supports_json_tab_endpoints=False,
+                        supports_managed_tab_limit=False,
+                    )
+                return SimpleNamespace(
+                    mode="local-managed",
+                    control_family="cdp-control",
+                    action_family="cdp-backed-playwright",
+                    is_remote=False,
+                    supports_reset=True,
+                    supports_per_tab_ws=True,
+                    supports_json_tab_endpoints=True,
+                    supports_managed_tab_limit=True,
+                )
+
+        class _RuntimeStateStore:
+            def get(self, *, profile_name):  # noqa: ANN201
+                del profile_name
+                return None
+
+        container = SimpleNamespace(
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=_ProfileResolver(),
+            browser_capabilities_resolver=_CapabilitiesResolver(),
+            browser_runtime_state_store=_RuntimeStateStore(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_profile(container)
+        self.assertIsNotNone(handler)
+        assert handler is not None
+
+        result = asyncio.run(handler({}))
+
+        self.assertEqual(result.details["default_profile"], "user")
+        self.assertEqual(result.details["guidance"]["recommended_profile"], "user")
+
+    def test_browser_profile_handler_routes_diagnose_kind(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(
+                    default_profile="crxzipple",
+                    managed_tab_limit=None,
+                    profiles=(
+                        SimpleNamespace(
+                            name="crxzipple",
+                            driver="managed",
+                            attach_only=False,
+                            cdp_url="http://127.0.0.1:18800",
+                            cdp_port=None,
+                            user_data_dir="/tmp/browser-crxzipple",
+                        ),
+                        SimpleNamespace(
+                            name="user",
+                            driver="existing-session",
+                            attach_only=False,
+                            cdp_url=None,
+                            cdp_port=None,
+                            user_data_dir="/tmp/browser-user",
+                        ),
+                    ),
+                )
+
+        class _ProfileResolver:
+            def resolve(self, *, system, profile_name):  # noqa: ANN001, ANN201
+                profile = next(item for item in system.profiles if item.name == profile_name)
+                return SimpleNamespace(
+                    name=profile.name,
+                    driver=profile.driver,
+                    cdp_url=profile.cdp_url,
+                    cdp_port=profile.cdp_port,
+                )
+
+        class _CapabilitiesResolver:
+            def resolve(self, *, profile):  # noqa: ANN001, ANN201
+                if profile.driver == "existing-session":
+                    return SimpleNamespace(
+                        mode="local-existing-session",
+                        control_family="mcp-control",
+                        action_family="mcp-backed",
+                        is_remote=False,
+                        supports_reset=False,
+                        supports_per_tab_ws=False,
+                        supports_json_tab_endpoints=False,
+                        supports_managed_tab_limit=False,
+                    )
+                return SimpleNamespace(
+                    mode="local-managed",
+                    control_family="cdp-control",
+                    action_family="cdp-backed-playwright",
+                    is_remote=False,
+                    supports_reset=True,
+                    supports_per_tab_ws=True,
+                    supports_json_tab_endpoints=True,
+                    supports_managed_tab_limit=True,
+                )
+
+        class _RuntimeStateStore:
+            def get(self, *, profile_name):  # noqa: ANN201
+                del profile_name
+                return None
+
+        class _ProbeService:
+            def probe(self, **kwargs):  # noqa: ANN003, ANN201
+                del kwargs
+                return {
+                    "attempted": True,
+                    "ok": False,
+                    "status": "mcp-unavailable",
+                    "message": "Chrome MCP is not available.",
+                }
+
+        container = SimpleNamespace(
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=_ProfileResolver(),
+            browser_capabilities_resolver=_CapabilitiesResolver(),
+            browser_runtime_state_store=_RuntimeStateStore(),
+            browser_profile_probe_service=_ProbeService(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_profile(container)
+        self.assertIsNotNone(handler)
+        assert handler is not None
+
+        result = asyncio.run(handler({"kind": "diagnose", "profile": "user"}))
+
+        self.assertEqual(result.details["profile"]["name"], "user")
+        self.assertEqual(result.details["guidance"]["fallback_profile"], "crxzipple")
+
+    def test_browser_click_handler_treats_current_target_alias_as_active_tab(self) -> None:
+        captured_requests: list[object] = []
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                captured_requests.append(request)
+                return {"ok": True, "target_id": request.target_id, "message": "Clicked."}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        asyncio.run(
+            handler(
+                {
+                    "kind": "click",
+                    "target_id": "current",
+                    "ref": "r1",
+                },
+            ),
+        )
+
+        self.assertEqual(len(captured_requests), 1)
+        self.assertIsNone(captured_requests[0].target_id)
+
+    def test_browser_control_list_tabs_includes_target_ids_in_content_blocks(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                return {
+                    "ok": True,
+                    "message": "Listed 2 tabs.",
+                    "command": {"kind": "list-tabs"},
+                    "value": [
+                        {
+                            "target_id": "tab-1",
+                            "title": "Example One",
+                            "type": "page",
+                            "url": "https://one.example",
+                        },
+                        {
+                            "target_id": "tab-2",
+                            "title": "Example Two",
+                            "type": "page",
+                            "url": "https://two.example",
+                        },
+                    ],
+                }
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_control(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "list-tabs",
+                },
+            ),
+        )
+
+        self.assertEqual(len(result.blocks), 1)
+        self.assertIn("Browser tabs:", result.blocks[0]["text"])
+        self.assertIn("[tab-1] (page) Example One", result.blocks[0]["text"])
+        self.assertIn("[tab-2] (page) Example Two", result.blocks[0]["text"])
+
+    def test_browser_control_handler_accepts_status_start_and_stop(self) -> None:
+        captured_kinds: list[str] = []
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                captured_kinds.append(request.kind)
+                return {"ok": True, "message": f"Ran {request.kind}."}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_control(container)
+        assert handler is not None
+
+        for kind in ("status", "start", "stop"):
+            asyncio.run(handler({"kind": kind}))
+
+        self.assertEqual(captured_kinds, ["status", "start", "stop"])
+
+    def test_browser_script_handler_resolves_current_target_alias_from_open_tab(self) -> None:
+        captured_requests: list[object] = []
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                captured_requests.append(request)
+                if request.kind == "open-tab":
+                    return {
+                        "ok": True,
+                        "target_id": "tab-1",
+                        "message": "Opened tab.",
+                    }
+                return {"ok": True, "target_id": request.target_id, "message": f"Ran {request.kind}."}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_script(container)
+        assert handler is not None
+
+        asyncio.run(
+            handler(
+                {
+                    "steps": [
+                        {"kind": "open-tab", "family": "control", "url": "https://example.com"},
+                        {"kind": "click", "family": "page-action", "target_id": "current", "ref": "r1"},
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual([request.kind for request in captured_requests], ["open-tab", "click"])
+        self.assertEqual(captured_requests[1].target_id, "tab-1")
+
     def test_browser_script_handler_inherits_target_id_and_final_observe(self) -> None:
         captured_requests: list[object] = []
 
@@ -239,72 +579,11 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         )
 
         self.assertEqual([request.kind for request in captured_requests], ["open-tab", "wait", "snapshot"])
+        self.assertEqual(result.details["step_count"], 1)
         self.assertEqual(result.details["steps"][0]["stabilize"], "navigation")
         self.assertEqual(result.details["steps"][0]["observe_after"], "interactive")
         self.assertEqual(result.details["post_state_summary"], "Browser snapshot completed.")
         self.assertIn("Snapshot (interactive):", result.blocks[-1]["text"])
-
-    def test_browser_script_handler_avoids_duplicate_observe_for_single_open_tab_with_final_observe(self) -> None:
-        captured_requests: list[object] = []
-
-        class _Store:
-            def load(self):  # noqa: ANN201
-                return SimpleNamespace(default_profile="crxzipple")
-
-        class _Facade:
-            def execute(self, request):  # noqa: ANN001, ANN201
-                captured_requests.append(request)
-                if request.kind == "open-tab":
-                    return {
-                        "ok": True,
-                        "target_id": "tab-1",
-                        "message": "Opened tab.",
-                    }
-                if request.kind == "snapshot":
-                    return {
-                        "ok": True,
-                        "command": {"kind": "snapshot"},
-                        "value": {
-                            "format": "interactive",
-                            "value": {"snapshot": '- link "Inbox" [ref=r1]'},
-                        },
-                    }
-                return {"ok": True, "target_id": request.target_id, "message": f"Ran {request.kind}."}
-
-        class _Serializer:
-            @staticmethod
-            def serialize(result):  # noqa: ANN001, ANN201
-                return result
-
-        container = SimpleNamespace(
-            browser_facade=_Facade(),
-            browser_result_serializer=_Serializer(),
-            browser_system_config_store=_Store(),
-            settings=SimpleNamespace(browser_enabled=True),
-        )
-        handler = browser_script(container)
-        assert handler is not None
-
-        result = asyncio.run(
-            handler(
-                {
-                    "steps": [
-                        {
-                            "kind": "open-tab",
-                            "family": "control",
-                            "payload": {"url": "https://mail.google.com/"},
-                        }
-                    ],
-                    "default_stabilize": "auto",
-                    "default_observe_after": "interactive",
-                    "observe_after": True,
-                },
-            ),
-        )
-
-        self.assertEqual([request.kind for request in captured_requests], ["open-tab", "wait", "snapshot"])
-        self.assertEqual(result.details["steps"][0]["observe_after"], "none")
-        self.assertEqual(result.details["post_state_summary"], "Browser snapshot completed.")
 
     def test_browser_script_handler_promotes_wait_fields_and_skips_default_observe_for_control_steps(self) -> None:
         captured_requests: list[object] = []
@@ -373,7 +652,7 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         self.assertEqual(result.details["steps"][0]["observe_after"], "none")
         self.assertEqual(result.details["steps"][1]["observe_after"], "interactive")
 
-    def test_browser_click_handler_defaults_to_post_state_when_target_is_available(self) -> None:
+    def test_browser_script_handler_avoids_duplicate_observe_for_single_open_tab_with_final_observe(self) -> None:
         captured_requests: list[object] = []
 
         class _Store:
@@ -383,17 +662,68 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         class _Facade:
             def execute(self, request):  # noqa: ANN001, ANN201
                 captured_requests.append(request)
+                if request.kind == "open-tab":
+                    return {
+                        "ok": True,
+                        "target_id": "tab-1",
+                        "message": "Opened tab.",
+                    }
                 if request.kind == "snapshot":
                     return {
                         "ok": True,
                         "command": {"kind": "snapshot"},
                         "value": {
-                            "result": {
-                                "format": "interactive",
-                                "value": {"snapshot": '- button "Done" [ref=r8]'},
-                            }
+                            "format": "interactive",
+                            "value": {"snapshot": '- link "Inbox" [ref=r1]'},
                         },
                     }
+                return {"ok": True, "target_id": request.target_id, "message": f"Ran {request.kind}."}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_script(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "steps": [
+                        {
+                            "kind": "open-tab",
+                            "family": "control",
+                            "payload": {"url": "https://mail.google.com/"},
+                        },
+                    ],
+                    "default_stabilize": "auto",
+                    "default_observe_after": "interactive",
+                    "observe_after": True,
+                },
+            ),
+        )
+
+        self.assertEqual([request.kind for request in captured_requests], ["open-tab", "wait", "snapshot"])
+        self.assertEqual(result.details["steps"][0]["observe_after"], "none")
+        self.assertEqual(result.details["post_state_summary"], "Browser snapshot completed.")
+
+    def test_browser_click_handler_defaults_to_single_step_action(self) -> None:
+        captured_requests: list[object] = []
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                captured_requests.append(request)
                 return {"ok": True, "target_id": request.target_id}
 
         class _Serializer:
@@ -407,20 +737,21 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_click(container)
+        handler = browser_action(container)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "click",
                     "target_id": "tab-1",
                     "selector": "#confirm",
                 },
             ),
         )
 
-        self.assertEqual([request.kind for request in captured_requests], ["click", "wait", "snapshot"])
-        self.assertIn("Snapshot (interactive):", result.blocks[-1]["text"])
+        self.assertEqual([request.kind for request in captured_requests], ["click"])
+        self.assertEqual(result.details, {"ok": True, "target_id": "tab-1"})
 
     def test_browser_click_handler_allows_explicit_stabilize_and_observe_override(self) -> None:
         captured_requests: list[object] = []
@@ -445,12 +776,13 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_click(container)
+        handler = browser_action(container)
         assert handler is not None
 
         asyncio.run(
             handler(
                 {
+                    "kind": "click",
                     "target_id": "tab-1",
                     "selector": "#confirm",
                     "stabilize": "none",
@@ -500,13 +832,14 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_click(container)
+        handler = browser_action(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "click",
                     "selector": "#confirm",
                 },
             ),
@@ -553,12 +886,13 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_fill(container)
+        handler = browser_action(container)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "fill",
                     "target_id": "tab-1",
                     "selector": "#query",
                     "text": "frog",
@@ -567,7 +901,7 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             ),
         )
 
-        self.assertEqual([request.kind for request in captured_requests], ["fill", "wait", "snapshot"])
+        self.assertEqual([request.kind for request in captured_requests], ["fill", "snapshot"])
         self.assertIn("Snapshot (interactive):", result.blocks[-1]["text"])
 
     def test_browser_wait_handler_promotes_top_level_text_argument(self) -> None:
@@ -606,13 +940,14 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_wait(container)
+        handler = browser_action(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "wait",
                     "text": "Ready to search",
                     "timeout_ms": 3000,
                 },
@@ -648,12 +983,13 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_wait(container)
+        handler = browser_action(container)
         assert handler is not None
 
         asyncio.run(
             handler(
                 {
+                    "kind": "wait",
                     "target_id": "tab-1",
                     "load_state": "load",
                     "observe_after": "none",
@@ -746,11 +1082,11 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_profile_probe_service=_ProbeService(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_profile_diagnose(container)
+        handler = browser_profile(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
-        result = asyncio.run(handler({"profile": "user"}))
+        result = asyncio.run(handler({"kind": "diagnose", "profile": "user"}))
 
         self.assertEqual(result.details["profile"]["name"], "user")
         self.assertEqual(
@@ -850,7 +1186,7 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_runtime_state_store=_RuntimeStateStore(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_profiles(container)
+        handler = browser_profile(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
@@ -951,12 +1287,12 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_runtime_state_store=_RuntimeStateStore(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_click(container)
+        handler = browser_action(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
         with self.assertRaises(BrowserValidationError) as exc_info:
-            asyncio.run(handler({"profile": "user", "ref": "r1"}))
+            asyncio.run(handler({"kind": "click", "profile": "user", "ref": "r1"}))
 
         message = str(exc_info.exception)
         self.assertIn("Next: open-signed-in-browser-and-retry with profile 'user'.", message)
@@ -1149,13 +1485,14 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_wait(container)
+        handler = browser_action(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "wait",
                     "text_gone": "Loading",
                     "load_state": "domcontentloaded",
                     "fn": "() => window.ready === true",
@@ -1196,13 +1533,14 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_wait(container)
+        handler = browser_action(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "wait",
                     "text": "Done",
                     "scope_selector": "#results",
                     "exact": True,
@@ -1242,12 +1580,13 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_wait(container)
+        handler = browser_action(container)
         assert handler is not None
 
         asyncio.run(
             handler(
                 {
+                    "kind": "wait",
                     "text": "Done",
                     "overlay_source_selector": "#depart-city",
                 },
@@ -1282,13 +1621,14 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             browser_system_config_store=_Store(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handler = browser_click(container)
+        handler = browser_action(container)
         self.assertIsNotNone(handler)
         assert handler is not None
 
         result = asyncio.run(
             handler(
                 {
+                    "kind": "click",
                     "selector": ".result",
                     "scope_ref": "r9",
                     "ordinal": 2,
@@ -1346,6 +1686,158 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         self.assertEqual(captured_request.payload["end_ref"], "r2")
         self.assertEqual(result.details, {"ok": True})
 
+    def test_browser_action_handler_promotes_fill_fields_payload(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                if captured_request is None:
+                    captured_request = request
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "fill",
+                    "fields": [
+                        {"ref": "r1", "type": "text", "value": "昆明"},
+                        {"ref": "r2", "type": "checkbox", "value": True},
+                    ],
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.kind, "fill")
+        self.assertEqual(
+            captured_request.payload["fields"],
+            [
+                {"ref": "r1", "type": "text", "value": "昆明"},
+                {"ref": "r2", "type": "checkbox", "value": True},
+            ],
+        )
+
+    def test_browser_action_handler_promotes_upload_paths_payload(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                captured_request = request
+                return {"ok": True, "message": "Uploaded."}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "upload",
+                    "ref": "r7",
+                    "paths": ["/tmp/a.txt", "/tmp/b.txt"],
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        assert captured_request is not None
+        self.assertEqual(captured_request.kind, "upload")
+        self.assertEqual(captured_request.ref, "r7")
+        self.assertEqual(captured_request.payload["paths"], ["/tmp/a.txt", "/tmp/b.txt"])
+        self.assertEqual(result.details, {"ok": True, "message": "Uploaded."})
+
+    def test_browser_action_handler_persists_download_as_artifact_ref(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                del request
+                return {
+                    "ok": True,
+                    "value": {
+                        "kind": "download",
+                        "content_type": "text/csv",
+                        "name": "report.csv",
+                        "data": "Y2l0eSxwcmljZQpra3VubWluZywzMjAK",
+                    },
+                }
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return dict(result)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_service = ArtifactApplicationService(
+                FilesystemArtifactStore(temp_dir),
+            )
+            container = SimpleNamespace(
+                browser_facade=_Facade(),
+                browser_result_serializer=_Serializer(),
+                browser_system_config_store=_Store(),
+                artifact_service=artifact_service,
+                settings=SimpleNamespace(browser_enabled=True),
+            )
+            handler = browser_action(container)
+            assert handler is not None
+
+            result = asyncio.run(handler({"kind": "wait-download"}))
+
+            self.assertEqual(result.content[0], {"type": "text", "text": "Browser download captured."})
+            attachment_block = result.content[1]
+            self.assertEqual(attachment_block["type"], "file_ref")
+            artifact = artifact_service.get_artifact(attachment_block["artifact_id"])
+            self.assertEqual(artifact.mime_type, "text/csv")
+            self.assertEqual(artifact.name, "report.csv")
+            self.assertEqual(
+                result.details,
+                {
+                    "ok": True,
+                    "value": {
+                        "kind": "download",
+                        "content_type": "text/csv",
+                        "name": "report.csv",
+                        "attachment_in_content": True,
+                    },
+                },
+            )
+
     def test_browser_action_handler_accepts_single_step_observe_controls(self) -> None:
         captured_requests: list[object] = []
 
@@ -1385,6 +1877,208 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         )
 
         self.assertEqual([request.kind for request in captured_requests], ["press"])
+
+    def test_browser_action_handler_promotes_dialog_arguments(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                captured_request = request
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        asyncio.run(
+            handler(
+                {
+                    "kind": "dialog",
+                    "accept": False,
+                    "prompt_text": "ignored",
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.kind, "dialog")
+        self.assertEqual(
+            dict(captured_request.payload),
+            {
+                "accept": False,
+                "prompt_text": "ignored",
+            },
+        )
+
+    def test_browser_action_handler_promotes_console_arguments(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                captured_request = request
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        asyncio.run(
+            handler(
+                {
+                    "kind": "console",
+                    "level": "error",
+                    "clear": True,
+                    "limit": 5,
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.kind, "console")
+        self.assertEqual(
+            dict(captured_request.payload),
+            {
+                "level": "error",
+                "clear": True,
+                "limit": 5,
+            },
+        )
+
+    def test_browser_action_handler_promotes_storage_arguments(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                captured_request = request
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        asyncio.run(
+            handler(
+                {
+                    "kind": "storage",
+                    "storage_kind": "session",
+                    "storage_operation": "set",
+                    "storage_key": "theme",
+                    "storage_value": "dark",
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.kind, "storage")
+        self.assertEqual(
+            dict(captured_request.payload),
+            {
+                "storage_kind": "session",
+                "storage_operation": "set",
+                "storage_key": "theme",
+                "storage_value": "dark",
+            },
+        )
+
+    def test_browser_action_handler_promotes_cookies_arguments(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                captured_request = request
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = browser_action(container)
+        assert handler is not None
+
+        asyncio.run(
+            handler(
+                {
+                    "kind": "cookies",
+                    "cookies_operation": "set",
+                    "cookie": {
+                        "name": "session",
+                        "value": "abc123",
+                        "url": "https://example.com",
+                    },
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.kind, "cookies")
+        self.assertEqual(
+            dict(captured_request.payload),
+            {
+                "cookies_operation": "set",
+                "cookie": {
+                    "name": "session",
+                    "value": "abc123",
+                    "url": "https://example.com",
+                },
+            },
+        )
 
     def test_browser_action_handler_promotes_evaluate_fn_alias(self) -> None:
         captured_request = None
@@ -2095,15 +2789,11 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
 
             self.assertEqual(list_response.status_code, 200)
             tool_ids = [item["id"] for item in list_response.json()]
-            self.assertIn("browser_profiles", tool_ids)
-            self.assertIn("browser_profile_diagnose", tool_ids)
+            self.assertIn("browser_profile", tool_ids)
             self.assertIn("browser_control", tool_ids)
             self.assertIn("browser_script", tool_ids)
             self.assertIn("browser_snapshot", tool_ids)
-            self.assertIn("browser_click", tool_ids)
-            self.assertIn("browser_fill", tool_ids)
-            self.assertIn("browser_wait", tool_ids)
-            self.assertIn("browser", tool_ids)
+            self.assertIn("browser_action", tool_ids)
 
             run_response = client.post(
                 "/tools/browser_control/runs",

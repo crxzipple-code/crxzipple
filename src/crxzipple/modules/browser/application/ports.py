@@ -197,6 +197,14 @@ class BrowserControlEngine(Protocol):
     ) -> None:
         ...
 
+    def stop_profile(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        runtime_state: BrowserProfileRuntimeState,
+    ) -> None:
+        ...
+
     def reset_profile(
         self,
         *,

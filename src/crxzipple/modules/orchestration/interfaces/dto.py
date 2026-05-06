@@ -7,10 +7,11 @@ from typing import Any
 from crxzipple.modules.llm.interfaces.dto import LlmMessageDTO, ToolSchemaDTO
 from crxzipple.modules.orchestration.application import PromptPreview
 from crxzipple.modules.orchestration.domain import (
-    DeliveryTarget,
     InboundInstruction,
     OrchestrationErrorPayload,
+    OrchestrationExecutorLease,
     OrchestrationRun,
+    ReplyTarget,
 )
 
 
@@ -33,21 +34,20 @@ class InboundInstructionDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class DeliveryTargetDTO:
+class ReplyTargetDTO:
     interface_name: str
     address: str | None
     reply_to: str | None
     metadata: dict[str, object]
 
     @classmethod
-    def from_value_object(cls, target: DeliveryTarget) -> "DeliveryTargetDTO":
+    def from_value_object(cls, target: ReplyTarget) -> "ReplyTargetDTO":
         return cls(
             interface_name=target.interface_name,
             address=target.address,
             reply_to=target.reply_to,
             metadata=dict(target.metadata),
         )
-
 
 @dataclass(frozen=True, slots=True)
 class OrchestrationErrorDTO:
@@ -83,7 +83,7 @@ class OrchestrationRunDTO:
     pending_tool_run_ids: tuple[str, ...]
     waiting_reason: str | None
     inbound_instruction: InboundInstructionDTO
-    delivery_target: DeliveryTargetDTO | None
+    reply_target: ReplyTargetDTO | None
     result_payload: dict[str, object] | None
     error: OrchestrationErrorDTO | None
     worker_id: str | None
@@ -113,9 +113,9 @@ class OrchestrationRunDTO:
             inbound_instruction=InboundInstructionDTO.from_value_object(
                 run.inbound_instruction,
             ),
-            delivery_target=(
-                DeliveryTargetDTO.from_value_object(run.delivery_target)
-                if run.delivery_target is not None
+            reply_target=(
+                ReplyTargetDTO.from_value_object(run.reply_target)
+                if run.reply_target is not None
                 else None
             ),
             result_payload=(
@@ -135,6 +135,47 @@ class OrchestrationRunDTO:
             queued_at=run.queued_at,
             started_at=run.started_at,
             completed_at=run.completed_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestrationExecutorLeaseDTO:
+    worker_id: str
+    status: str
+    effective_status: str
+    expired: bool
+    counts_toward_capacity: bool
+    max_inflight_assignments: int
+    inflight_assignment_count: int
+    available_assignment_slots: int
+    metadata: dict[str, object]
+    created_at: datetime
+    updated_at: datetime
+    last_heartbeat_at: datetime
+    lease_expires_at: datetime | None
+
+    @classmethod
+    def from_entity(
+        cls,
+        lease: OrchestrationExecutorLease,
+    ) -> "OrchestrationExecutorLeaseDTO":
+        expired = lease.is_expired()
+        effective_status = lease.effective_status().value
+        counts_toward_capacity = lease.counts_toward_capacity()
+        return cls(
+            worker_id=lease.worker_id,
+            status=lease.status.value,
+            effective_status=effective_status,
+            expired=expired,
+            counts_toward_capacity=counts_toward_capacity,
+            max_inflight_assignments=lease.max_inflight_assignments,
+            inflight_assignment_count=lease.inflight_assignment_count,
+            available_assignment_slots=lease.available_assignment_slots(),
+            metadata=dict(lease.metadata),
+            created_at=lease.created_at,
+            updated_at=lease.updated_at,
+            last_heartbeat_at=lease.last_heartbeat_at,
+            lease_expires_at=lease.lease_expires_at,
         )
 
 

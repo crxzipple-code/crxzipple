@@ -9,6 +9,7 @@ from crxzipple.modules.session.application import (
     ListSessionInstancesInput,
     ListSessionMessagesInput,
     ResetSessionInput,
+    SessionResolutionService,
 )
 from crxzipple.modules.session.domain import (
     DirectSessionScope,
@@ -26,7 +27,7 @@ from crxzipple.modules.session.interfaces.dto import (
 from crxzipple.modules.session.interfaces.shared import (
     build_ensure_session_input,
     build_reset_policy,
-    build_resolve_session_bundle_input,
+    build_resolve_session_input,
     parse_json_object,
 )
 
@@ -75,9 +76,9 @@ def build_cli() -> typer.Typer:
             None,
             help="Optional origin JSON object.",
         ),
-        delivery: str | None = typer.Option(
+        reply: str | None = typer.Option(
             None,
-            help="Optional delivery JSON object.",
+            help="Optional reply JSON object.",
         ),
         metadata: str | None = typer.Option(
             None,
@@ -109,9 +110,9 @@ def build_cli() -> typer.Typer:
                     if origin is not None
                     else None
                 ),
-                delivery_payload=(
-                    _parse_json_option(delivery, option_name="--delivery")
-                    if delivery is not None
+                reply_payload=(
+                    _parse_json_option(reply, option_name="--reply")
+                    if reply is not None
                     else None
                 ),
                 metadata=_parse_json_option(metadata, option_name="--metadata"),
@@ -193,8 +194,11 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         container = ensure_container(ctx)
-        bundle = container.orchestration_service.resolve_session_bundle(
-            build_resolve_session_bundle_input(
+        resolution_service: SessionResolutionService = (
+            container.session_resolution_service
+        )
+        bundle = resolution_service.resolve(
+            build_resolve_session_input(
                 agent_id=agent_id,
                 channel=channel,
                 chat_type=chat_type,
@@ -284,6 +288,11 @@ def build_cli() -> typer.Typer:
             "--active-only/--all",
             help="Only show messages for the active session instance.",
         ),
+        before_sequence_no: int | None = typer.Option(
+            None,
+            min=1,
+            help="Optional upper sequence bound for loading older history.",
+        ),
     ) -> None:
         container = ensure_container(ctx)
         try:
@@ -292,6 +301,7 @@ def build_cli() -> typer.Typer:
                     session_key=session_key,
                     limit=limit,
                     active_session_only=active_only,
+                    before_sequence_no=before_sequence_no,
                 ),
             )
         except SessionNotFoundError as exc:

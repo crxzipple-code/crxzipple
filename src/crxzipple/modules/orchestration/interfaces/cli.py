@@ -4,8 +4,10 @@ import typer
 
 from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
-from crxzipple.modules.orchestration.application import (
-    EnqueueOrchestrationRunInput,
+from crxzipple.modules.orchestration.application.ports import (
+    OrchestrationInspectionPort,
+    OrchestrationRunQueryPort,
+    OrchestrationSchedulerSubmitPort,
 )
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
@@ -17,9 +19,8 @@ from crxzipple.modules.orchestration.interfaces.dto import (
     PromptPreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.shared import (
-    build_accept_run_input,
-    build_prepare_session_run_input,
     build_reset_policy,
+    build_submit_turn_input,
     parse_direct_scope,
     parse_json_object,
     parse_queue_policy,
@@ -43,6 +44,18 @@ def _parse_json_option(raw: str | None, *, option_name: str) -> dict[str, object
 def _exit_not_found(exc: OrchestrationRunNotFoundError) -> None:
     typer.secho(str(exc), err=True, fg=typer.colors.RED)
     raise typer.Exit(code=1) from None
+
+
+def _inspection_port(container) -> OrchestrationInspectionPort:  # noqa: ANN001
+    return container.orchestration_inspection_service
+
+
+def _run_query_port(container) -> OrchestrationRunQueryPort:  # noqa: ANN001
+    return container.orchestration_run_query_service
+
+
+def _scheduler_port(container) -> OrchestrationSchedulerSubmitPort:  # noqa: ANN001
+    return container.orchestration_scheduler_service
 
 
 def build_cli() -> typer.Typer:
@@ -112,24 +125,25 @@ def build_cli() -> typer.Typer:
             None,
             help="Optional orchestration run metadata JSON object.",
         ),
-        delivery_interface: str | None = typer.Option(
+        reply_interface: str | None = typer.Option(
             None,
-            help="Optional delivery interface name.",
+            help="Optional reply interface name.",
         ),
-        delivery_address: str | None = typer.Option(
+        reply_address: str | None = typer.Option(
             None,
-            help="Optional delivery target address.",
+            help="Optional reply target address.",
         ),
-        delivery_reply_to: str | None = typer.Option(
+        reply_to: str | None = typer.Option(
             None,
-            help="Optional delivery reply-to token.",
+            help="Optional reply-to token.",
         ),
-        delivery_metadata: str | None = typer.Option(
+        reply_metadata: str | None = typer.Option(
             None,
-            help="Optional delivery metadata JSON object.",
+            help="Optional reply metadata JSON object.",
         ),
     ) -> None:
         container = ensure_container(ctx)
+        scheduler_service = _scheduler_port(container)
         try:
             queue_policy_value = parse_queue_policy(
                 queue_policy,
@@ -140,33 +154,27 @@ def build_cli() -> typer.Typer:
                 run_metadata,
                 option_name="--run-metadata",
             )
-            accepted = container.orchestration_service.accept(
-                build_accept_run_input(
+            run = scheduler_service.submit_turn(
+                build_submit_turn_input(
                     source=source,
                     content=content,
+                    agent_id=agent_id,
+                    llm_id=llm_id,
                     inbound_metadata=_parse_json_option(
                         inbound_metadata,
                         option_name="--inbound-metadata",
                     ),
-                    delivery_interface=delivery_interface,
-                    delivery_address=delivery_address,
-                    delivery_reply_to=delivery_reply_to,
-                    delivery_metadata=_parse_json_option(
-                        delivery_metadata,
-                        option_name="--delivery-metadata",
+                    reply_interface=reply_interface,
+                    reply_address=reply_address,
+                    reply_to=reply_to,
+                    reply_metadata=_parse_json_option(
+                        reply_metadata,
+                        option_name="--reply-metadata",
                     ),
                     run_id=run_id,
                     queue_policy=queue_policy_value or OrchestrationQueuePolicy.FIFO,
                     priority=priority,
                     max_steps=max_steps,
-                    metadata=run_metadata_payload,
-                ),
-            )
-            prepared = container.orchestration_service.prepare_session_run(
-                build_prepare_session_run_input(
-                    run_id=accepted.id,
-                    agent_id=agent_id,
-                    llm_id=llm_id,
                     channel=channel,
                     chat_type=chat_type,
                     peer_id=peer_id,
@@ -191,18 +199,14 @@ def build_cli() -> typer.Typer:
                         idle_minutes=idle_minutes,
                         daily_reset_hour_utc=daily_reset_hour_utc,
                     ),
-                    priority=priority,
                     metadata=run_metadata_payload,
                 ),
+                inline_worker_id=(
+                    f"cli-intake:{run_id or agent_id}"
+                    if enqueue
+                    else None
+                ),
             )
-            run = prepared
-            if enqueue:
-                run = container.orchestration_service.enqueue(
-                    EnqueueOrchestrationRunInput(
-                        run_id=prepared.id,
-                        queue_policy=queue_policy_value,
-                    ),
-                )
         except OrchestrationValidationError as exc:
             typer.secho(str(exc), err=True, fg=typer.colors.RED)
             raise typer.Exit(code=1) from None
@@ -214,8 +218,9 @@ def build_cli() -> typer.Typer:
         run_id: str = typer.Argument(..., help="Orchestration run identifier."),
     ) -> None:
         container = ensure_container(ctx)
+        run_query = _run_query_port(container)
         try:
-            run = container.orchestration_service.get_run(run_id)
+            run = run_query.get_run(run_id)
         except OrchestrationRunNotFoundError as exc:
             _exit_not_found(exc)
         echo_data(OrchestrationRunDTO.from_entity(run))
@@ -226,8 +231,9 @@ def build_cli() -> typer.Typer:
         run_id: str = typer.Argument(..., help="Orchestration run identifier."),
     ) -> None:
         container = ensure_container(ctx)
+        inspection_service = _inspection_port(container)
         try:
-            preview = container.orchestration_service.preview_prompt(run_id)
+            preview = inspection_service.preview_prompt(run_id)
         except OrchestrationRunNotFoundError as exc:
             _exit_not_found(exc)
         except OrchestrationValidationError as exc:
@@ -249,10 +255,11 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         container = ensure_container(ctx)
+        run_query = _run_query_port(container)
         echo_data(
             [
                 OrchestrationRunDTO.from_entity(run)
-                for run in container.orchestration_service.list_runs(
+                for run in run_query.list_runs(
                     status=parse_run_status(
                         status,
                         option_name="--status",

@@ -34,6 +34,8 @@ class LlmProfile(AggregateRoot[str]):
     base_url: str | None = None
     credential_binding: str | None = None
     timeout_seconds: int = 60
+    max_concurrency: int | None = None
+    concurrency_key: str | None = None
     source_kind: LlmSourceKind = LlmSourceKind.MANUAL
     enabled: bool = True
 
@@ -46,6 +48,12 @@ class LlmProfile(AggregateRoot[str]):
             raise LlmValidationError(
                 "LLM context_window_tokens must be greater than zero when provided.",
             )
+        if self.max_concurrency is not None and self.max_concurrency <= 0:
+            raise LlmValidationError(
+                "LLM max_concurrency must be greater than zero when provided.",
+            )
+        if self.concurrency_key is not None:
+            self.concurrency_key = self.concurrency_key.strip() or None
         self.capabilities = tuple(dict.fromkeys(self.capabilities))
 
 

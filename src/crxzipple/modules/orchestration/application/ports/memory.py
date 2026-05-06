@@ -6,7 +6,6 @@ from crxzipple.modules.memory.application import (
     MemoryExcerpt,
     MemorySearchHit,
     MemoryUseContext,
-    MemoryWriteResult,
 )
 
 
@@ -42,30 +41,4 @@ class MemoryPort(Protocol):
         start_line: int | None = None,
         line_count: int | None = None,
     ) -> MemoryExcerpt | None:
-        ...
-
-    def append_daily(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-        title: str | None = None,
-    ) -> MemoryWriteResult:
-        ...
-
-    def write_long_term(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-    ) -> MemoryWriteResult:
-        ...
-
-    def archive_session(
-        self,
-        *,
-        context: MemoryUseContext,
-        content: str,
-        slug: str | None = None,
-    ) -> MemoryWriteResult:
         ...
