@@ -613,6 +613,7 @@ def _actions(agent_id: str) -> tuple[RuntimeActionModel, ...]:
             label="Write Long Term Memory",
             owner="memory",
             risk="controlled",
+            audit_event="memory.long_term.write",
             method="POST",
             endpoint="/operations/memory/long-term",
         ),

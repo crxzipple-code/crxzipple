@@ -3,7 +3,7 @@ import { Copy, ExternalLink, MoreVertical, Pencil } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel, looksLikeRawKey } from "@/shared/i18n/formatters";
 import { useI18n } from "@/shared/i18n";
 import type { UiTableCellValue, UiTableColumn, UiTableRow } from "@/shared/runtime/types";
 
@@ -17,6 +17,7 @@ const props = defineProps<{
   sectionId?: string;
   pageSize?: number;
   clickableRows?: boolean;
+  allowRawKeys?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -105,7 +106,7 @@ function cellText(row: DataRow, key: string): string {
   if (isTimeLikeColumn(key) && isIsoDateTime(text)) {
     return formatLocalTime(text);
   }
-  return isUserContentColumn(key) ? text : localizeText(text);
+  return isUserContentColumn(key) ? text : localizeText(text, key);
 }
 
 function actionIconCount(row: DataRow, key: string): number {
@@ -203,8 +204,27 @@ function isChipColumn(key: string) {
   return normalizeKey(key) === "scope";
 }
 
+function shouldAllowRawKeys() {
+  return props.allowRawKeys === true;
+}
+
+function isRawKeyLikeColumn(key: string) {
+  const normalized = normalizeKey(key);
+  return rawKeyLikeColumns.has(normalized)
+    || normalized.endsWith("-event")
+    || normalized.endsWith("-events")
+    || normalized.endsWith("-topic")
+    || normalized.endsWith("-topics")
+    || normalized.endsWith("-key");
+}
+
+function shouldHumanizeRawKey(value: string, key?: string) {
+  return !shouldAllowRawKeys() && (!key || isRawKeyLikeColumn(key)) && looksLikeRawKey(value);
+}
+
 function isUserContentColumn(key: string) {
   const normalized = normalizeKey(key);
+  if (isRawKeyLikeColumn(key) && !shouldAllowRawKeys()) return false;
   return userContentColumns.has(normalized)
     || normalized.endsWith("-id")
     || normalized.includes("run-id")
@@ -232,7 +252,7 @@ function handleRowClick(event: MouseEvent, row: DataRow) {
   emit("row-click", row);
 }
 
-function localizeText(value: string): string {
+function localizeText(value: string, columnKey?: string): string {
   const key = textKeys[value];
   if (key) return t(key);
 
@@ -242,6 +262,8 @@ function localizeText(value: string): string {
       source: unsupportedCredentialBindingSource[1],
     });
   }
+
+  if (shouldHumanizeRawKey(value, columnKey)) return formatRawKeyLabel(value);
 
   if (locale.value !== "zh-CN") return value;
 
@@ -433,6 +455,7 @@ const textKeys: Record<string, string> = {
   "Trace": "table.trace",
   "Level": "table.level",
   "Event": "table.event",
+  "Event Key": "table.rawEventKey",
   "Event ID": "table.eventId",
   "Topic": "table.topic",
   "Cursor": "table.cursor",
@@ -837,6 +860,23 @@ const userContentColumns = new Set([
   "owner-package",
   "required-access",
   "missing-access",
+]);
+
+const rawKeyLikeColumns = new Set([
+  "event",
+  "event-name",
+  "event-key",
+  "key",
+  "metric",
+  "metric-key",
+  "source",
+  "source-event",
+  "source-events",
+  "source-topic",
+  "target-topic",
+  "topic",
+  "topic-pattern",
+  "input-topics",
 ]);
 </script>
 

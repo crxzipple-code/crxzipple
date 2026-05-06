@@ -3,7 +3,7 @@ import { Brain, CircleX, Clock3, Database, Gauge, HeartPulse, Radio, RefreshCcw,
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import { useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsLlmInvocationDetail,
   OperationsLlmReadModel,
@@ -376,7 +376,7 @@ function opsText(value: string | null | undefined): string {
   if (configuredProfiles) {
     return t("operations.llm.delta.configuredProfiles", { count: configuredProfiles[1] });
   }
-  return value;
+  return formatRawKeyLabel(value);
 }
 
 function selectTab(tabId: string) {

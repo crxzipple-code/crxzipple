@@ -8,7 +8,6 @@ from pathlib import Path
 from urllib.parse import urljoin
 import shlex
 import sys
-from typing import Protocol
 
 import requests
 
@@ -18,7 +17,7 @@ from crxzipple.modules.daemon.domain import (
     DaemonServiceSpec,
     DaemonValidationError,
 )
-from crxzipple.shared.infrastructure import request_url
+from crxzipple.shared.http import request_url
 from crxzipple.modules.process import (
     ProcessApplicationService,
     ProcessNotFoundError,
@@ -26,23 +25,8 @@ from crxzipple.modules.process import (
     ProcessStatus,
 )
 
+from .ports import EndpointProbe, ShellResolver
 from .services import DaemonApplicationService
-
-
-class ShellResolver(Protocol):
-    def __call__(self) -> str:
-        ...
-
-
-class EndpointProbe(Protocol):
-    def __call__(
-        self,
-        *,
-        endpoint: str,
-        healthcheck_policy: str,
-        timeout_seconds: float,
-    ) -> None:
-        ...
 
 
 class DaemonManager:

@@ -101,8 +101,8 @@ curl http://127.0.0.1:8000/daemon/status
 
 ## Database
 
-The default lightweight database URL is `sqlite:///./crxzipple.db`. The
-recommended local worker/runtime database is Postgres from `compose.yaml`:
+The default local runtime path uses Postgres from `compose.yaml` together with
+Redis for cross-process events:
 
 ```bash
 bash scripts/dev/up-infra.sh
@@ -110,8 +110,8 @@ source scripts/dev/infra-env.sh
 python -m crxzipple.main db upgrade head
 ```
 
-Run the initial migration before using the CLI or HTTP app against SQLite only
-when you intentionally want the single-file fallback:
+SQLite is only for explicit lightweight fallback or tests. Run migrations
+against SQLite only when you intentionally want the single-file fallback:
 
 ```bash
 APP_DATABASE_URL=sqlite:///./crxzipple.db alembic upgrade head

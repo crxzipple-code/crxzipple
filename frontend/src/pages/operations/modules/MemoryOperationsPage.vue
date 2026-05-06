@@ -12,7 +12,7 @@ import {
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
 
 import { useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsMemoryFileDetail,
   OperationsMemoryReadModel,
@@ -369,7 +369,7 @@ function memoryText(value: string | null | undefined): string {
   if (value === "Memory state is queryable") return t("operations.memory.delta.queryable");
   if (value === "Memory context needs attention") return t("operations.memory.delta.attention");
   if (value === "Memory service is not connected") return t("operations.memory.delta.disconnected");
-  return value;
+  return formatRawKeyLabel(value);
 }
 
 function emptyTable(id: string, title: string): UiTableSection {

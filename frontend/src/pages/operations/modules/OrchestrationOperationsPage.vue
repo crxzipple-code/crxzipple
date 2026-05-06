@@ -3,7 +3,7 @@ import { Activity, Archive, CircleX, ExternalLink, HeartPulse, Inbox, Network, R
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import { useI18n } from "@/shared/i18n";
 import type {
   OperationsOrchestrationReadModel,
@@ -788,6 +788,7 @@ function rowCellText(row: UiTableRow, key: string): string {
   const text = rawCellText(row, key);
   if (isTimeKey(key) && isIsoDateTime(text)) return formatLocalTime(text);
   if (text === "Orchestration") return t("operations.module.orchestration");
+  if (isRawDisplayKey(key)) return formatRawKeyLabel(text);
   return text;
 }
 
@@ -830,6 +831,11 @@ function capabilityChips(value: string): string[] {
 function isTimeKey(key: string): boolean {
   const normalized = normalizeKey(key);
   return normalized === "time" || normalized.endsWith("-at") || normalized.startsWith("last-");
+}
+
+function isRawDisplayKey(key: string): boolean {
+  const normalized = normalizeKey(key);
+  return ["event", "source", "topic", "event-key"].includes(normalized);
 }
 
 function detailFieldLabel(key: string): string {

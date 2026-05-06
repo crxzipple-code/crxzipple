@@ -18,7 +18,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { RouterLink } from "vue-router";
 
 import { useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsDaemonInstanceDetail,
   OperationsDaemonLeaseDetail,
@@ -488,7 +488,7 @@ function daemonText(value: string | null | undefined): string {
     return t("operations.daemon.delta.processMissingState", { running: processMissingState[1], missing: processMissingState[2] });
   }
   const key = daemonTextKeys[value];
-  return key ? t(key) : value;
+  return key ? t(key) : formatRawKeyLabel(value);
 }
 
 function emptyTable(id: string, title: string): UiTableSection {

@@ -70,6 +70,7 @@ class RuntimeActionResponse(BaseModel):
     disabled_reason: str | None = None
     requires_confirmation: bool = False
     reason_required: bool = False
+    audit_event: str | None = None
     method: str | None = None
     endpoint: str | None = None
 
@@ -85,6 +86,7 @@ class RuntimeActionResponse(BaseModel):
             disabled_reason=getattr(value, "disabled_reason", None),
             requires_confirmation=getattr(value, "requires_confirmation", False),
             reason_required=getattr(value, "reason_required", False),
+            audit_event=getattr(value, "audit_event", None),
             method=getattr(value, "method", None),
             endpoint=getattr(value, "endpoint", None),
         )
@@ -112,6 +114,7 @@ class OperationsActionRequest(BaseModel):
 
 class OperationsActionAuditResponse(BaseModel):
     audit_id: str
+    audit_event: str
     action_type: str
     target_type: str
     target_id: str | None = None
@@ -136,6 +139,7 @@ class OperationsActionAuditResponse(BaseModel):
 
         return cls(
             audit_id=value.audit_id,
+            audit_event=value.action_type,
             action_type=value.action_type,
             target_type=value.target_type,
             target_id=value.target_id,

@@ -15,7 +15,7 @@ import {
 import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import { useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsChannelInteractionDetail,
   OperationsChannelRecordDetail,
@@ -413,7 +413,7 @@ function channelsText(value: string | null | undefined): string {
     });
   }
   const key = channelsTextKeys[value];
-  return key ? t(key) : value;
+  return key ? t(key) : formatRawKeyLabel(value);
 }
 
 function emptyTable(id: string, title: string): UiTableSection {

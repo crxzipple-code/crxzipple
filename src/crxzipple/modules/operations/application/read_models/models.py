@@ -23,6 +23,7 @@ class RuntimeActionModel:
     disabled_reason: str | None = None
     requires_confirmation: bool = False
     reason_required: bool = False
+    audit_event: str | None = None
     method: str | None = None
     endpoint: str | None = None
 

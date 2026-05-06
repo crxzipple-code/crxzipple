@@ -63,8 +63,6 @@ class OrchestrationSchedulerSignalQueryPort(Protocol):
 class OperationsObservationReadPort(Protocol):
     def get_module_observation(self, module: str) -> Any | None: ...
 
-    def get_orchestration_observation(self) -> Any | None: ...
-
 
 @dataclass(frozen=True, slots=True)
 class OrchestrationOperationsPage:
@@ -223,6 +221,7 @@ class OrchestrationOperationsReadModelProvider:
                     owner="orchestration",
                     risk="controlled",
                     requires_confirmation=True,
+                    audit_event="orchestration.run.cancel",
                     method="POST",
                     endpoint="/operations/orchestration/runs/{run_id}/cancel",
                 ),
@@ -253,8 +252,9 @@ class OrchestrationOperationsReadModelProvider:
             module="orchestration",
             limit=60,
         )
-        orchestration_observation = _orchestration_observation(
+        observer_state = _module_observation(
             self.operations_observation,
+            module="orchestration",
         )
         operations_event_records: tuple[Any, ...] = observed_events
         pending_ingress_requests = _pending_ingress_requests(ingress_requests)
@@ -316,6 +316,7 @@ class OrchestrationOperationsReadModelProvider:
                 owner="orchestration",
                 risk="controlled",
                 requires_confirmation=True,
+                audit_event="orchestration.run.cancel",
                 method="POST",
                 endpoint="/operations/orchestration/runs/{run_id}/cancel",
             ),
@@ -325,6 +326,7 @@ class OrchestrationOperationsReadModelProvider:
                 owner="orchestration",
                 risk="controlled",
                 requires_confirmation=True,
+                audit_event="orchestration.run.resume",
                 method="POST",
                 endpoint="/operations/orchestration/runs/{run_id}/resume",
             ),
@@ -433,7 +435,7 @@ class OrchestrationOperationsReadModelProvider:
                     delta="avg runtime",
                     tone="info",
                 ),
-                _observation_metric(orchestration_observation),
+                _observation_metric(observer_state),
             ),
             tabs=(
                 OperationsTabModel(id="overview", label="Overview"),
@@ -465,7 +467,7 @@ class OrchestrationOperationsReadModelProvider:
                 failed_count=len(failed_runs),
                 cancelled_count=len(cancelled_runs),
                 available_executor_slots=available,
-                operations_observation=orchestration_observation,
+                observer_state=observer_state,
                 now=now,
             ),
             backpressure=_backpressure_section(
@@ -762,7 +764,7 @@ def _scheduler_status_section(
     failed_count: int,
     cancelled_count: int,
     available_executor_slots: int,
-    operations_observation: Any | None,
+    observer_state: Any | None,
     now: datetime,
 ) -> OperationsKeyValueSectionModel:
     recent_terminal_runs = [
@@ -860,13 +862,13 @@ def _scheduler_status_section(
             ),
             OperationsKeyValueItemModel(
                 label="Observed Cursor",
-                value=_observation_cursor_label(operations_observation),
-                tone="success" if operations_observation is not None else "warning",
+                value=_observation_cursor_label(observer_state),
+                tone="success" if observer_state is not None else "warning",
             ),
             OperationsKeyValueItemModel(
                 label="Observed Entities",
-                value=_observation_entities_label(operations_observation),
-                tone="info" if operations_observation is not None else "neutral",
+                value=_observation_events_label(observer_state),
+                tone="info" if observer_state is not None else "neutral",
             ),
         ),
     )
@@ -1508,19 +1510,21 @@ def _recent_operations_events(
     )
 
 
-def _orchestration_observation(
+def _module_observation(
     observation: OperationsObservationReadPort | None,
+    *,
+    module: str,
 ) -> Any | None:
     if observation is None:
         return None
-    get_observation = getattr(observation, "get_orchestration_observation", None)
-    if not callable(get_observation):
+    try:
+        return observation.get_module_observation(module)
+    except Exception:
         return None
-    return get_observation()
 
 
-def _observation_metric(observation: Any | None) -> MetricCardModel:
-    if observation is None:
+def _observation_metric(observer_state: Any | None) -> MetricCardModel:
+    if observer_state is None:
         return MetricCardModel(
             id="observed_facts",
             label="Observed Facts",
@@ -1528,35 +1532,36 @@ def _observation_metric(observation: Any | None) -> MetricCardModel:
             delta="runtime facts unavailable",
             tone="warning",
         )
-    runs = len(getattr(observation, "runs", ()) or ())
-    ingress = len(getattr(observation, "ingress_requests", ()) or ())
-    signals = len(getattr(observation, "scheduler_signals", ()) or ())
-    executors = len(getattr(observation, "executors", ()) or ())
+    event_count = _int_from_attr(observer_state, "event_count")
+    recent_count = len(getattr(observer_state, "recent_events", ()) or ())
+    last_event_name = _display(getattr(observer_state, "last_event_name", None))
     return MetricCardModel(
         id="observed_facts",
         label="Observed Facts",
-        value=str(runs + ingress + signals + executors),
-        delta=f"{runs} runs / {executors} executors",
+        value=str(event_count),
+        delta=f"{recent_count} recent / last {last_event_name}",
         tone="info",
     )
 
 
-def _observation_cursor_label(observation: Any | None) -> str:
-    if observation is None:
+def _observation_cursor_label(observer_state: Any | None) -> str:
+    if observer_state is None:
         return "-"
-    return _display(getattr(observation, "last_cursor", None))
+    return _display(getattr(observer_state, "last_cursor", None))
 
 
-def _observation_entities_label(observation: Any | None) -> str:
-    if observation is None:
+def _observation_events_label(observer_state: Any | None) -> str:
+    if observer_state is None:
         return "-"
-    runs = len(getattr(observation, "runs", ()) or ())
-    ingress = len(getattr(observation, "ingress_requests", ()) or ())
-    signals = len(getattr(observation, "scheduler_signals", ()) or ())
-    executors = len(getattr(observation, "executors", ()) or ())
-    return (
-        f"{runs} runs / {ingress} ingress / {signals} signals / {executors} executors"
-    )
+    event_count = _int_from_attr(observer_state, "event_count")
+    recent_count = len(getattr(observer_state, "recent_events", ()) or ())
+    last_event_name = _display(getattr(observer_state, "last_event_name", None))
+    return f"{event_count} total / {recent_count} recent / last {last_event_name}"
+
+
+def _int_from_attr(value: Any, attr: str) -> int:
+    raw = getattr(value, attr, 0)
+    return raw if isinstance(raw, int) else 0
 
 
 def _latest_event_time(event_records: tuple[Any, ...]) -> datetime | None:

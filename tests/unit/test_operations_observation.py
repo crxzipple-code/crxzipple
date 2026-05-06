@@ -11,6 +11,7 @@ from crxzipple.core.db import Base, import_models
 from crxzipple.modules.events import EventsApplicationService, InMemoryEventsBackend
 from crxzipple.modules.events.domain import EventTopicRecord
 from crxzipple.modules.operations.application.observation import (
+    OperationsModuleObservation,
     OperationsProjection,
     observed_event_from_record,
 )
@@ -18,17 +19,30 @@ from crxzipple.modules.operations.application.projections import (
     OPERATIONS_PROJECTION_INVALIDATED_EVENT,
     OperationsProjectionMaterializer,
 )
+from crxzipple.modules.operations.application.read_models.orchestration import (
+    OrchestrationOperationsReadModelProvider,
+)
 from crxzipple.modules.operations.application.runtime import (
     operations_observer_event_names,
 )
 from crxzipple.modules.operations.infrastructure import (
     FileBackedOperationsObservationStore,
 )
+from crxzipple.modules.orchestration.domain import (
+    InboundInstruction,
+    OrchestrationExecutorLease,
+    OrchestrationRun,
+    OrchestrationRunStage,
+    OrchestrationRunStatus,
+)
 from crxzipple.modules.operations.infrastructure.persistence import (
     SqlAlchemyOperationsActionAuditStore,
     SqlAlchemyOperationsProjectionStore,
 )
-from crxzipple.modules.operations.interfaces.http import _validated_operations_action
+from crxzipple.modules.operations.interfaces.http import (
+    _operations_action_audit_payload,
+    _validated_operations_action,
+)
 from crxzipple.modules.operations.interfaces.http_models import (
     OperationsActionReasonRequest,
     OperationsChannelRuntimePruneRequest,
@@ -37,7 +51,7 @@ from crxzipple.shared.domain.events import Event, named_event_topic
 
 
 class OperationsObservationTestCase(unittest.TestCase):
-    def test_file_backed_store_observes_orchestration_operational_state(self) -> None:
+    def test_file_backed_store_records_orchestration_module_observation(self) -> None:
         timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tempdir:
             store = FileBackedOperationsObservationStore(tempdir)
@@ -159,36 +173,27 @@ class OperationsObservationTestCase(unittest.TestCase):
                 occurred_at=timestamp + timedelta(seconds=8),
             )
 
-            observation = store.get_orchestration_observation()
+            observation = store.get_module_observation("orchestration")
             self.assertIsNotNone(observation)
             assert observation is not None
             self.assertEqual(observation.last_cursor, "9")
-
-            runs = {item.run_id: item for item in observation.runs}
-            self.assertEqual(runs["run-ops-1"].status, "completed")
-            self.assertEqual(runs["run-ops-1"].lane_key, "session:assistant:main")
-            self.assertEqual(runs["run-ops-1"].worker_id, "executor-1")
-
-            ingress = {item.request_id: item for item in observation.ingress_requests}
-            self.assertEqual(ingress["ingress-1"].status, "completed")
-            self.assertEqual(ingress["ingress-1"].source, "web")
-
-            signals = {
-                item.signal_id: item for item in observation.scheduler_signals
-            }
-            self.assertEqual(signals["tool-terminal:tool-1"].status, "processing")
-            self.assertEqual(signals["tool-terminal:tool-1"].worker_id, "scheduler-1")
-
-            executors = {item.worker_id: item for item in observation.executors}
-            self.assertEqual(executors["executor-1"].status, "online")
-            self.assertEqual(executors["executor-1"].available_assignment_slots, 2)
-            self.assertEqual(executors["executor-1"].active_run_ids, ("run-ops-1",))
+            self.assertEqual(observation.event_count, 9)
+            self.assertEqual(
+                observation.last_event_name,
+                "orchestration.executor.lease.heartbeated",
+            )
+            self.assertEqual(observation.recent_events[0].run_id, None)
+            self.assertEqual(
+                observation.recent_events[-1].event_name,
+                "orchestration.run.accepted",
+            )
 
             restored = FileBackedOperationsObservationStore(tempdir)
-            restored_observation = restored.get_orchestration_observation()
+            restored_observation = restored.get_module_observation("orchestration")
             self.assertIsNotNone(restored_observation)
             assert restored_observation is not None
-            self.assertEqual(restored_observation.runs[0].run_id, "run-ops-1")
+            self.assertEqual(restored_observation.event_count, 9)
+            self.assertEqual(restored_observation.last_cursor, "9")
 
     def test_operations_observer_subscribes_raw_orchestration_events(self) -> None:
         names = set(operations_observer_event_names())
@@ -381,6 +386,88 @@ class OperationsObservationTestCase(unittest.TestCase):
             ),
         )
 
+    def test_orchestration_page_ignores_rich_file_backed_observation(self) -> None:
+        timestamp = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        observed_event = observed_event_from_record(
+            EventTopicRecord(
+                cursor="cursor-owner",
+                envelope=Event(
+                    name="orchestration.run.queued",
+                    payload={
+                        "run_id": "run-owner-query",
+                        "status": "queued",
+                        "stage": "queued",
+                    },
+                    occurred_at=timestamp,
+                ),
+            ),
+        )
+        provider = OrchestrationOperationsReadModelProvider(
+            run_query=_FakeOrchestrationRunQuery(
+                runs=[
+                    OrchestrationRun(
+                        id="run-owner-query",
+                        inbound_instruction=InboundInstruction(
+                            source="http",
+                            content="owner truth",
+                        ),
+                        status=OrchestrationRunStatus.QUEUED,
+                        stage=OrchestrationRunStage.QUEUED,
+                        lane_key="session:agent:assistant:main",
+                        priority=4,
+                        metadata={"trace_id": "trace-owner-query"},
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                        queued_at=timestamp,
+                    ),
+                ],
+            ),
+            executor_control=_FakeOrchestrationExecutorControl(
+                leases=[
+                    OrchestrationExecutorLease(
+                        id="worker-owner-query",
+                        max_inflight_assignments=3,
+                        inflight_assignment_count=1,
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                        last_heartbeat_at=timestamp,
+                        lease_expires_at=timestamp + timedelta(seconds=30),
+                    ),
+                ],
+            ),
+            operations_observation=_RichOrchestrationObservationMustNotBeRead(
+                OperationsModuleObservation(
+                    module="orchestration",
+                    owner="orchestration",
+                    updated_at=timestamp,
+                    event_count=1,
+                    last_event_name="orchestration.run.queued",
+                    last_cursor="cursor-owner",
+                    last_event_at=timestamp,
+                    recent_events=(observed_event,),
+                ),
+            ),
+        )
+
+        page = provider.page()
+
+        run_ids = {row.cells["run_id"] for row in page.run_queue.rows}
+        executor_ids = {row.cells["worker_id"] for row in page.executor_overview.rows}
+        metrics = {metric.id: metric for metric in page.metrics}
+        scheduler_items = {
+            item.label: item.value for item in page.scheduler_status.items
+        }
+        self.assertEqual(run_ids, {"run-owner-query"})
+        self.assertNotIn("run-poisoned-file-observation", run_ids)
+        self.assertEqual(executor_ids, {"worker-owner-query"})
+        self.assertEqual(metrics["observed_facts"].value, "1")
+        self.assertIn("last orchestration.run.queued", metrics["observed_facts"].delta)
+        self.assertEqual(scheduler_items["Observed Cursor"], "cursor-owner")
+        self.assertEqual(
+            scheduler_items["Observed Entities"],
+            "1 total / 1 recent / last orchestration.run.queued",
+        )
+
     def test_materializer_stores_paginated_tables_outside_page_projection(
         self,
     ) -> None:
@@ -530,7 +617,7 @@ class OperationsObservationTestCase(unittest.TestCase):
         reason = _validated_operations_action(
             request,
             default_reason="Operations default action reason",
-            dangerous=True,
+            risk="dangerous",
         )
 
         self.assertEqual(reason, "operator requested restart")
@@ -546,7 +633,7 @@ class OperationsObservationTestCase(unittest.TestCase):
                     risk_acknowledged=True,
                 ),
                 default_reason="Operations stale channel runtime prune",
-                dangerous=True,
+                risk="dangerous",
             )
         self.assertIn(
             "reason is required for this operations action",
@@ -560,7 +647,7 @@ class OperationsObservationTestCase(unittest.TestCase):
                     risk_acknowledged=True,
                 ),
                 default_reason="Operations stale channel runtime prune",
-                dangerous=True,
+                risk="dangerous",
             )
         self.assertIn(
             "confirmation is required for this operations action",
@@ -574,7 +661,7 @@ class OperationsObservationTestCase(unittest.TestCase):
                     confirmation=True,
                 ),
                 default_reason="Operations stale channel runtime prune",
-                dangerous=True,
+                risk="dangerous",
             )
         self.assertIn(
             "risk acknowledgement is required for this operations action",
@@ -588,6 +675,22 @@ class OperationsObservationTestCase(unittest.TestCase):
         )
 
         self.assertEqual(reason, "Operations tool run retry")
+
+    def test_operations_action_audit_payload_preserves_controlled_risk(self) -> None:
+        payload = _operations_action_audit_payload(
+            OperationsActionReasonRequest(
+                reason="retry tool run",
+                confirmation=True,
+                metadata={"ticket": "OPS-2"},
+            ),
+            reason="retry tool run",
+            risk="controlled",
+        )
+
+        self.assertEqual(payload["risk"], "controlled")
+        self.assertFalse(payload["dangerous"])
+        self.assertTrue(payload["confirmation"])
+        self.assertEqual(payload["metadata"], {"ticket": "OPS-2"})
 
     def test_file_backed_store_observes_tool_module_events(self) -> None:
         timestamp = datetime(2026, 5, 1, 11, 0, tzinfo=timezone.utc)
@@ -671,6 +774,42 @@ class _FakeProjectionStore:
             del self.records[key]
             removed += 1
         return removed
+
+
+class _FakeOrchestrationRunQuery:
+    def __init__(self, runs: list[OrchestrationRun]) -> None:
+        self._runs = tuple(runs)
+
+    def list_runs(self, *, status: object | None = None) -> list[OrchestrationRun]:
+        del status
+        return list(self._runs)
+
+
+class _FakeOrchestrationExecutorControl:
+    def __init__(self, leases: list[OrchestrationExecutorLease]) -> None:
+        self._leases = tuple(leases)
+
+    def list_executor_leases(
+        self,
+        *,
+        status: object | None = None,
+    ) -> list[OrchestrationExecutorLease]:
+        del status
+        return list(self._leases)
+
+
+class _RichOrchestrationObservationMustNotBeRead:
+    def __init__(self, module_observation: OperationsModuleObservation) -> None:
+        self._module_observation = module_observation
+
+    def get_module_observation(
+        self,
+        module: str,
+    ) -> OperationsModuleObservation | None:
+        return self._module_observation if module == "orchestration" else None
+
+    def get_orchestration_observation(self) -> object:
+        raise AssertionError("rich orchestration observation must not drive page truth")
 
 
 class _FakeOperationsSourceProvider:

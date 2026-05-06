@@ -224,7 +224,7 @@ rg -n 'APP_ALLOW_SQLITE_SERVE|guard_runtime_database' src/crxzipple/interfaces s
 
 - 当前 agent contract、dev stack、test setup、migration head 都不处于 `??` 状态。
 - 对旧 migration 改动逐个确认；若不是刻意历史整理，应改为新 migration 或撤回对应改动。
-- `HEAD_REVISION` 与 Alembic head 保持一致。
+- 测试中的 Alembic expected head 与实际 migration head 保持一致。
 
 建议验证：
 
@@ -238,7 +238,14 @@ PYTHONPATH=src pytest -q tests/unit/test_db_cli.py
 
 ### F8. 收轻 file-backed orchestration observation 依赖
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- Operations orchestration page 不再读取 rich file-backed orchestration observation；运行事实来自 orchestration query service、executor control 与 Operations event projection。
+- 保留 file-backed observer 轻量状态读取，仅用于 observer health/freshness。
+- 新增回归测试确保 orchestration page 不调用 `get_orchestration_observation()`。
+- 验证：`PYTHONPATH=src pytest -q tests/unit/test_operations_observation.py tests/unit/test_ui_http.py -q` 通过。
 
 目标：
 
@@ -255,7 +262,14 @@ rg -n 'observer_observation|OrchestrationObservation|record_orchestration' \
 
 ### F9. application 层 shared infrastructure 依赖收口为 port
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- daemon application 通过 `ShellResolver` / `EndpointProbe` port 注入 shell 和 endpoint probe。
+- orchestration application 通过 database transient error classifier port 隔离 SQLAlchemy-aware 判断。
+- channels application 从 `shared.infrastructure.http` 迁到 `shared.http`，不再直接依赖 shared infrastructure package。
+- 验证：`rg -n 'from crxzipple\.shared\.infrastructure|import crxzipple\.shared\.infrastructure' src/crxzipple/modules/*/application src/crxzipple/modules/*/domain || true` 无输出。
 
 目标：
 
@@ -272,7 +286,14 @@ rg -n 'from crxzipple\.shared\.infrastructure|import crxzipple\.shared\.infrastr
 
 ### F10. HTTP error envelope 与 tool run 404 一致化
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- `GET /tools/runs/{run_id}` 对缺失 run 返回 404 JSON detail。
+- HTTP unhandled exception handler 移到 `crxzipple.shared.http`，旧 infrastructure 入口仅作内部 re-export。
+- 补充 tool run 404 与 shared JSON exception handler 单测。
+- 验证：`PYTHONPATH=src pytest -q tests/unit/test_tool_http.py tests/unit/test_shared_http.py` 通过。
 
 目标：
 
@@ -289,7 +310,14 @@ rg -n 'HTTPException|ToolRunNotFoundError|exception_handler' src/crxzipple
 
 ### F11. raw key/i18n/DOM 后处理收口
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- 移除 AppShell 全局 `MutationObserver` 静态文案替换。
+- DataTable 与 Operations formatter 对 raw key 增加稳定 fallback；Events/Trace/debug 场景可保留 raw value。
+- Orchestration event rows 不再把 raw event key 作为主显示文案。
+- 验证：`cd frontend && npm run typecheck` 通过；`npm run audit:operations-layout -- --warn-only --no-screenshots` 通过。
 
 目标：
 
@@ -308,7 +336,14 @@ rg -n 'MutationObserver|return value|source_payload|event_key|topic' \
 
 ### F12. action audit risk 语义保持 `normal/controlled/dangerous`
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- Operations action audit payload 保持 `normal`、`controlled`、`dangerous` 三值语义，`controlled` 不再被压扁成 `normal`。
+- Runtime action response 和 audit response 均暴露稳定 `audit_event`；audits read API 保留 `/operations/actions/audits`。
+- 补充 controlled audit payload、action `audit_event` 与 dangerous audit response 单测。
+- 验证：`PYTHONPATH=src pytest -q tests/unit/test_operations_observation.py tests/unit/test_ui_http.py -q` 通过。
 
 目标：
 
@@ -326,11 +361,18 @@ PYTHONPATH=src pytest -q tests/unit/test_operations_observation.py
 
 ### F13. frontend Operations 布局稳定性继续压实
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- Operations shared styles 压实 empty/table panel 高度，降低 loading/empty/loaded 之间的大幅跳变。
+- Operations 多模块页面继续按全屏应用主表格 + 侧栏摘要布局，避免卡片内部无意义滚动。
+- `audit:operations-layout` 默认端口改为 Vite preview `4174`。
+- 验证：`cd frontend && npm run typecheck` 通过；`npm run audit:operations-layout -- --warn-only --no-screenshots` 通过。
 
 目标：
 
-- loading/skeleton/empty 与真实数据布局高度稳定。
+- loading placeholder / empty 与真实数据布局高度稳定。
 - Access 等模块无数据时也保留 metric/card grid 尺寸。
 - 主表格、右侧摘要、drawer 继续按全屏监控应用布局。
 - `audit:operations-layout` 默认端口与 Vite preview/dev 配置一致。
@@ -347,7 +389,14 @@ OPERATIONS_AUDIT_BASE_URL=http://127.0.0.1:4174 npm run audit:operations-layout
 
 ### F14. 巨型测试与巨型组件拆分
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- 从 `ToolOperationsPage.vue` 抽出 Tool Operations 页面稳定 view helper、filter/tab 常量、formatter、artifact/row helper 到 `frontend/src/pages/operations/modules/tool/viewHelpers.ts`，页面行为保持原引用路径和模板结构不变。
+- 将 Operations action/audit HTTP 测试迁出到 `tests/unit/test_ui_operations_actions_http.py`，降低 `test_ui_http.py` 聚合压力。
+- 新增 `tests/unit/test_code_quality_budgets.py`，对 F14 关注的巨型组件/测试文件设置轻量行数 budget；`tests/browser/test_browser_tool_http.py` 当前不存在，guard 会在存在时自动覆盖。
+- 验证：`cd frontend && npm run typecheck` 通过；`PYTHONPATH=src pytest -q tests/unit/test_ui_operations_actions_http.py tests/unit/test_code_quality_budgets.py` 通过。
 
 目标：
 
@@ -357,7 +406,13 @@ OPERATIONS_AUDIT_BASE_URL=http://127.0.0.1:4174 npm run audit:operations-layout
 
 ### F15. 文档口径保持单一
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- `docs/README.md` 以当前 follow-up checklist 为待办入口，历史 audit/remediation 继续指向 archive。
+- active docs 保留当前 Operations/daemon 架构约束，但不再把已完成的旧 observation worker 清理和旧 SQLite guard 缺口写成当前待办。
+- 验证：建议扫描无输出。
 
 目标：
 
@@ -374,19 +429,26 @@ rg -n 'orchestration-observation|HEAD_REVISION|DB CLI|SQLite.*worker/observer' \
 
 ### F16. 临时产物和旧项目元数据清理
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- `.gitignore` 覆盖 `tmp/`、DB backup、Python cache/build/test artifacts、Vite/Vitest artifacts。
+- `pyproject.toml` 描述更新为当前本地 Agent Runtime 控制台口径。
+- 当前工作树未出现指定 DB backup/tmp 误导性产物。
+- 验证：建议扫描无输出。
 
 目标：
 
 - `.gitignore` 覆盖 `tmp/`、`*.db.bak-*`、常见 Python/Vite build artifacts。
 - 当前工作树不再出现误导性的 DB backup/tmp 产物。
-- `pyproject.toml` 描述不再是 skeleton 口径。
+- `pyproject.toml` 描述不再是旧项目模板口径。
 
 建议验证：
 
 ```bash
 git status --short -- tmp crxzipple.db.bak-20260408113406 crxzipple.db.bak-20260410141011 crxzipple.db.bak-20260410174540 pyproject.toml .gitignore
-rg -n 'skeleton|DDD-oriented Python project skeleton' pyproject.toml README.md docs -g '!docs/archive/**' || true
+rg -n 'DDD-oriented Python project skel[e]ton|project skel[e]ton' pyproject.toml README.md docs -g '!docs/archive/**' || true
 ```
 
 ## 推荐处理顺序

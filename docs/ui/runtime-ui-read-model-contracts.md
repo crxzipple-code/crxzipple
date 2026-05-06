@@ -78,6 +78,11 @@
 - `audit_event`
 - `trace`
 
+`risk` 必须保持 `normal`、`controlled`、`dangerous` 三值语义；后端不能把
+`controlled` 压扁成 `normal`。所有 audited mutation action 必须提供稳定的
+`audit_event`，并且与 `/operations/actions/audits` 返回的 `action_type` /
+`audit_event` 一致。
+
 ### TableSection
 
 用于 Operations 和 Settings 中的大量表格，但列和行仍由服务端显式给出。

@@ -57,7 +57,7 @@ from crxzipple.shared.content_blocks import (
     content_blocks_from_payload,
     describe_content_for_text_fallback,
 )
-from crxzipple.shared.infrastructure.http import request_url
+from crxzipple.shared.http import request_url
 
 if TYPE_CHECKING:
     from crxzipple.modules.access import AccessApplicationService

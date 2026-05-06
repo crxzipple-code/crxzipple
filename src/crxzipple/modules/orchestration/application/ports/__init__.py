@@ -2,6 +2,9 @@ from crxzipple.modules.orchestration.application.ports.dispatch import (
     RunDispatchClaim,
     RunDispatchPort,
 )
+from crxzipple.modules.orchestration.application.ports.database import (
+    TransientDatabaseErrorClassifier,
+)
 from crxzipple.modules.orchestration.application.ports.authorization import (
     AuthorizationPort,
 )
@@ -48,4 +51,5 @@ __all__ = [
     "SkillCatalogPort",
     "ToolCatalogPort",
     "ToolExecutionPort",
+    "TransientDatabaseErrorClassifier",
 ]

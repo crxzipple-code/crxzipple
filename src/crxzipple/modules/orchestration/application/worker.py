@@ -28,10 +28,11 @@ from crxzipple.modules.orchestration.domain.value_objects import (
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationValidationError,
 )
-from crxzipple.shared.domain.events import named_event_topic
-from crxzipple.shared.infrastructure.database_errors import (
+from crxzipple.modules.orchestration.application.ports.database import (
+    TransientDatabaseErrorClassifier,
     is_transient_database_lock_error,
 )
+from crxzipple.shared.domain.events import named_event_topic
 from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
     get_runtime_metrics_registry,
@@ -72,6 +73,9 @@ class OrchestrationExecutorService:
     wait_assignment_on_tool_fn: Callable[[WaitAssignmentOnToolInput], OrchestrationRun]
     complete_assignment_fn: Callable[[CompleteAssignmentInput], OrchestrationRun]
     fail_assignment_fn: Callable[[FailAssignmentInput], OrchestrationRun]
+    transient_database_error_classifier: TransientDatabaseErrorClassifier = (
+        is_transient_database_lock_error
+    )
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
     )
@@ -361,7 +365,7 @@ class OrchestrationExecutorService:
                     ),
                 )
             except Exception as exc:
-                if not is_transient_database_lock_error(exc):
+                if not self.transient_database_error_classifier(exc):
                     raise
                 logger.warning(
                     "transient database lock while heartbeating orchestration executor; will retry",

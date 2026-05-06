@@ -716,6 +716,7 @@ onUnmounted(() => {
           :columns="mainTable.columns"
           :rows="filteredMainRows"
           section-id="events-main-table"
+          :allow-raw-keys="true"
           :page-size="12"
           :clickable-rows="canSelectRows"
           @row-click="selectEventFromRow"
@@ -742,7 +743,7 @@ onUnmounted(() => {
             <h3>{{ sectionTitle(ownersTable) }}</h3>
             <a href="/operations/events?tab=owners" @click.prevent="selectTab('owners')">{{ t("common.viewAll") }}</a>
           </div>
-          <DataTable v-if="ownersTable.rows.length" :columns="ownersTable.columns" :rows="ownersTable.rows" section-id="events-owners" :page-size="3" />
+          <DataTable v-if="ownersTable.rows.length" :columns="ownersTable.columns" :rows="ownersTable.rows" section-id="events-owners" :allow-raw-keys="true" :page-size="3" />
           <p v-if="!ownersTable.rows.length" class="panel-empty">{{ emptyState(ownersTable) }}</p>
         </article>
 
@@ -751,7 +752,7 @@ onUnmounted(() => {
             <h3>{{ sectionTitle(deadLettersTable) }}</h3>
             <a href="/operations/events?tab=dead_letters" @click.prevent="selectTab('dead_letters')">{{ t("common.viewAll") }}</a>
           </div>
-          <DataTable v-if="deadLettersTable.rows.length" :columns="deadLettersTable.columns" :rows="deadLettersTable.rows" section-id="events-dead-letters" :page-size="3" />
+          <DataTable v-if="deadLettersTable.rows.length" :columns="deadLettersTable.columns" :rows="deadLettersTable.rows" section-id="events-dead-letters" :allow-raw-keys="true" :page-size="3" />
           <p v-if="!deadLettersTable.rows.length" class="panel-empty">{{ emptyState(deadLettersTable) }}</p>
         </article>
       </aside>
@@ -790,13 +791,13 @@ onUnmounted(() => {
 
       <section class="drawer-section">
         <h4>{{ sectionTitle(selectedDetail.contracts) }}</h4>
-        <DataTable :columns="selectedDetail.contracts.columns" :rows="selectedDetail.contracts.rows" section-id="events-detail-contracts" :page-size="5" />
+        <DataTable :columns="selectedDetail.contracts.columns" :rows="selectedDetail.contracts.rows" section-id="events-detail-contracts" :allow-raw-keys="true" :page-size="5" />
         <p v-if="!selectedDetail.contracts.rows.length" class="panel-empty">{{ emptyState(selectedDetail.contracts) }}</p>
       </section>
 
       <section class="drawer-section">
         <h4>{{ sectionTitle(selectedDetail.subscriptions) }}</h4>
-        <DataTable :columns="selectedDetail.subscriptions.columns" :rows="selectedDetail.subscriptions.rows" section-id="events-detail-subscriptions" :page-size="5" />
+        <DataTable :columns="selectedDetail.subscriptions.columns" :rows="selectedDetail.subscriptions.rows" section-id="events-detail-subscriptions" :allow-raw-keys="true" :page-size="5" />
         <p v-if="!selectedDetail.subscriptions.rows.length" class="panel-empty">{{ emptyState(selectedDetail.subscriptions) }}</p>
       </section>
     </aside>

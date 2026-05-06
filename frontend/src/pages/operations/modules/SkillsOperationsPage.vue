@@ -14,7 +14,7 @@ import {
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
 
 import { useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsSkillDetail,
   OperationsSkillsReadModel,
@@ -404,7 +404,7 @@ function skillsText(value: string | null | undefined): string {
   if (value === "Skill packages are queryable") return t("operations.skills.delta.queryable");
   if (value === "Some skill requirements need setup") return t("operations.skills.delta.attention");
   if (value === "Skill manager is not connected") return t("operations.skills.delta.disconnected");
-  return value;
+  return formatRawKeyLabel(value);
 }
 
 function emptyTable(id: string, title: string): UiTableSection {

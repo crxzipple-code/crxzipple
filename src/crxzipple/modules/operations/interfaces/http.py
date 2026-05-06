@@ -515,6 +515,7 @@ def cancel_orchestration_run_from_operations(
         target_id=run_id,
         target={"run_id": run_id},
         default_reason="Operations orchestration run cancellation",
+        risk="controlled",
     )
     try:
         run = _operations_action_service(container).cancel_orchestration_run(
@@ -554,6 +555,7 @@ def resume_orchestration_run_from_operations(
         target_id=run_id,
         target={"run_id": run_id},
         default_reason="Operations orchestration run resume",
+        risk="controlled",
     )
     try:
         run = _operations_action_service(container).resume_orchestration_run(
@@ -593,6 +595,7 @@ def cancel_tool_run_from_operations(
         target_id=run_id,
         target={"run_id": run_id},
         default_reason="Operations tool run cancellation",
+        risk="controlled",
     )
     try:
         run = _operations_action_service(container).cancel_tool_run(
@@ -628,6 +631,7 @@ async def retry_tool_run_from_operations(
         target_id=run_id,
         target={"run_id": run_id},
         default_reason="Operations tool run retry",
+        risk="controlled",
     )
     try:
         original = container.tool_service.get_tool_run(run_id)
@@ -674,6 +678,7 @@ def prune_expired_tool_workers_from_operations(
         target_type="tool_workers",
         target={"retention_seconds": request.retention_seconds},
         default_reason="Operations prune expired tool workers",
+        risk="controlled",
     )
     try:
         result = _operations_action_service(container).prune_expired_tool_workers(
@@ -714,6 +719,7 @@ def replay_channel_dead_letter_from_operations(
             "event_id": request.event_id,
         },
         default_reason="Operations channel dead-letter replay",
+        risk="dangerous",
     )
     try:
         result = _operations_action_service(container).replay_channel_dead_letter(
@@ -769,6 +775,7 @@ def validate_skill_package_from_operations(
         target_id=request.path,
         target={"path": request.path},
         default_reason="Operations skill package validation",
+        risk="controlled",
     )
     try:
         package = _operations_action_service(container).validate_skill_package(
@@ -800,6 +807,7 @@ def install_global_skill_from_operations(
         target_id=request.source_dir,
         target={"source_dir": request.source_dir},
         default_reason="Operations global skill install",
+        risk="controlled",
     )
     try:
         result = _operations_action_service(container).install_global_skill(
@@ -909,7 +917,7 @@ def run_daemon_service_action_from_operations(
         target_id=service_key,
         target={"service_key": service_key, "action": normalized_action},
         default_reason=f"Operations daemon action {normalized_action} for {service_key}",
-        dangerous=normalized_action == "stop",
+        risk=_daemon_service_action_risk(normalized_action),
     )
     try:
         instances = _operations_action_service(container).run_daemon_service_action(
@@ -945,6 +953,7 @@ def write_long_term_memory_from_operations(
         target_id=request.agent_id,
         target={"agent_id": request.agent_id},
         default_reason="Operations long-term memory write",
+        risk="controlled",
     )
     try:
         result = _operations_action_service(container).write_long_term_memory(
@@ -1372,7 +1381,7 @@ def advance_event_subscriptions_to_head(
             "dry_run": request.dry_run,
         },
         default_reason="Operations event subscription cursor advance",
-        dangerous=not request.dry_run,
+        risk="dangerous" if not request.dry_run else "normal",
     )
     try:
         result = _operations_action_service(container).advance_event_subscriptions_to_head(
@@ -1413,7 +1422,7 @@ def advance_event_observers_to_head(
             "dry_run": request.dry_run,
         },
         default_reason="Operations observer cursor advance",
-        dangerous=not request.dry_run,
+        risk="dangerous" if not request.dry_run else "normal",
     )
     try:
         result = _operations_action_service(container).advance_event_subscriptions_to_head(
@@ -1453,7 +1462,7 @@ def prune_stale_channel_runtimes(
             "dry_run": request.dry_run,
         },
         default_reason="Operations stale channel runtime prune",
-        dangerous=not request.dry_run,
+        risk="dangerous" if not request.dry_run else "normal",
     )
     try:
         result = _operations_action_service(container).prune_stale_channel_runtimes(
@@ -1589,9 +1598,11 @@ def _validated_operations_action(
     request: OperationsActionRequest,
     *,
     default_reason: str,
-    dangerous: bool = False,
+    risk: str = "normal",
     reason_required: bool = False,
 ) -> str:
+    normalized_risk = _operation_action_risk(risk)
+    dangerous = normalized_risk == "dangerous"
     reason = _operation_reason(request.reason) or _operation_reason(default_reason)
     if (dangerous or reason_required) and _operation_reason(request.reason) is None:
         raise HTTPException(
@@ -1626,19 +1637,20 @@ def _begin_operations_action_audit(
     target_id: str | None = None,
     target: dict[str, Any] | None = None,
     default_reason: str,
-    dangerous: bool = False,
+    risk: str = "normal",
     reason_required: bool = False,
 ) -> tuple[str, str]:
+    normalized_risk = _operation_action_risk(risk)
     reason = _validated_operations_action(
         request,
         default_reason=default_reason,
-        dangerous=dangerous,
+        risk=normalized_risk,
         reason_required=reason_required,
     )
     payload = _operations_action_audit_payload(
         request,
         reason=reason,
-        dangerous=dangerous,
+        risk=normalized_risk,
     )
     audit = container.operations_action_audit_store.record_attempt(
         action_type=action_type,
@@ -1691,8 +1703,10 @@ def _operations_action_audit_payload(
     request: OperationsActionRequest,
     *,
     reason: str,
-    dangerous: bool,
+    risk: str,
 ) -> dict[str, Any]:
+    normalized_risk = _operation_action_risk(risk)
+    dangerous = normalized_risk == "dangerous"
     audit = request.audit
     metadata: dict[str, Any] = {}
     if audit is not None:
@@ -1712,9 +1726,27 @@ def _operations_action_audit_payload(
         "risk_acknowledged": request.acknowledged_risk(),
         "confirmation": _operation_confirmation(request.confirmation),
         "dangerous": dangerous,
-        "risk": "dangerous" if dangerous else "normal",
+        "risk": normalized_risk,
         "metadata": metadata,
     }
+
+
+def _operation_action_risk(value: str | None) -> str:
+    if not isinstance(value, str):
+        return "normal"
+    normalized = value.strip().lower()
+    if normalized in {"normal", "controlled", "dangerous"}:
+        return normalized
+    return "normal"
+
+
+def _daemon_service_action_risk(action: str) -> str:
+    normalized = action.strip().lower()
+    if normalized == "stop":
+        return "dangerous"
+    if normalized in {"ensure", "reconcile"}:
+        return "controlled"
+    return "normal"
 
 
 def _operation_result_summary(value: Any) -> dict[str, Any]:

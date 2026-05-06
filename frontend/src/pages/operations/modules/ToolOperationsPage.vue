@@ -3,15 +3,13 @@ import { Activity, Archive, CheckCircle2, CircleX, Clock3, ExternalLink, FileTex
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 
-import { buildApiUrl } from "@/shared/api/client";
 import { hasI18nMessage, useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsTab,
   OperationsToolRunDetail,
   OperationsToolWorkerDetail,
   OperationsToolReadModel,
-  UiChartSection,
   UiMetricCard,
   UiTableSection,
   UiTableRow,
@@ -22,155 +20,61 @@ import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
 import { cancelToolRun, loadToolOperations, loadToolRunDetail, pruneExpiredToolWorkers, retryToolRun } from "../api";
 import { dynamicValueKeyPart, titleCaseDynamicValue } from "../mapping";
-
-interface ChartSegmentView {
-  id: string;
-  label: string;
-  value: number;
-  tone: UiTone;
-  pct: number;
-}
-
-interface ToolLifecycleEventCardView {
-  id: string;
-  time: string;
-  level: string;
-  event: string;
-  tool: string;
-  toolFull: string;
-  runId: string;
-  source: string;
-  sourceRoute: string | null;
-  assignment: string;
-  worker: string;
-  status: string;
-  tone: UiTone;
-  details: string[];
-  detailsTitle: string;
-  trace: string;
-  traceRoute: string | null;
-}
-
-interface ToolArtifactPreviewItem {
-  id: string;
-  name: string;
-  kind: string;
-  mimeType: string;
-  size: string;
-  dimensions: string;
-  tool: string;
-  runId: string;
-  time: string;
-  route: string | null;
-  trace: string;
-  traceRoute: string | null;
-  imageSrc: string | null;
-  isImage: boolean;
-}
-
-interface ToolDashboardMetric {
-  id: string;
-  label: string;
-  value: string;
-  helper: string;
-  tone: UiTone;
-  icon: unknown;
-  fillPct: number;
-}
-
-interface ToolInfoItem {
-  id: string;
-  label: string;
-  value: string;
-  tone?: UiTone;
-}
-
-interface ToolProviderHealthItem {
-  id: string;
-  name: string;
-  state: string;
-  latency: string;
-  tone: UiTone;
-}
-
-interface ToolFailureSummaryItem {
-  id: string;
-  label: string;
-  count: number;
-  pct: number;
-  tone: UiTone;
-}
-
-type ToolStatusFilter = "all" | "active" | "running" | "waiting" | "failed" | "long_running" | "succeeded" | "cancelled";
-type ToolTimeFilter = "all" | "24h";
-type ToolModeFilter = "all" | "inline" | "background";
-type ToolStrategyFilter = "all" | "async" | "thread" | "process";
-type ToolEnvironmentFilter = "all" | "local" | "sandbox" | "remote";
-type ToolTernaryFilter = "all" | "yes" | "no";
-
-const toolRunPageSize = 7;
-const lifecycleEventPageSize = 5;
+import {
+  artifactAssetUrl,
+  artifactPreviewItem,
+  canCancelToolRun,
+  canRetryToolRun,
+  cellRouteValue,
+  cellText,
+  chartSegments,
+  compactEntityId,
+  compactToolLabel,
+  donutGradient,
+  durationPct,
+  durationSecondsFromLabel,
+  emptyTable,
+  fallbackMetric,
+  fallbackTabs,
+  formatDurationSeconds,
+  formatPayload,
+  hasPayload,
+  isEnumLikeValue,
+  isFailureStatus,
+  isUiTableRow,
+  knownToolEnvironmentFilters,
+  knownToolModeFilters,
+  knownToolRunFilters,
+  knownToolStrategyFilters,
+  knownToolTabIds,
+  knownToolTernaryFilters,
+  lifecycleEventPageSize,
+  linkCell,
+  numberCell,
+  ratioPct,
+  rowRunId,
+  rowStatus,
+  rowWorkerId,
+  splitEventDetails,
+  titleLabel,
+  toolEventTextKeys,
+  toolRunPageSize,
+  toolTextKeys,
+  workerLoadLimit,
+  type ToolArtifactPreviewItem,
+  type ToolDashboardMetric,
+  type ToolEnvironmentFilter,
+  type ToolFailureSummaryItem,
+  type ToolInfoItem,
+  type ToolLifecycleEventCardView,
+  type ToolModeFilter,
+  type ToolProviderHealthItem,
+  type ToolStatusFilter,
+  type ToolStrategyFilter,
+  type ToolTernaryFilter,
+  type ToolTimeFilter,
+} from "./tool/viewHelpers";
 const { t } = useI18n();
-const knownToolTabIds = new Set([
-  "runs",
-  "workers",
-  "queue",
-  "waiting_io",
-  "capabilities",
-  "provider_limits",
-  "provider_history",
-  "diagnostics",
-  "risk",
-  "artifacts",
-  "events",
-  "strategies",
-]);
-const knownToolRunFilters = new Set<ToolStatusFilter>([
-  "all",
-  "active",
-  "running",
-  "waiting",
-  "failed",
-  "long_running",
-  "succeeded",
-  "cancelled",
-]);
-const knownToolModeFilters = new Set<ToolModeFilter>([
-  "all",
-  "inline",
-  "background",
-]);
-const knownToolStrategyFilters = new Set<ToolStrategyFilter>([
-  "all",
-  "async",
-  "thread",
-  "process",
-]);
-const knownToolEnvironmentFilters = new Set<ToolEnvironmentFilter>([
-  "all",
-  "local",
-  "sandbox",
-  "remote",
-]);
-const knownToolTernaryFilters = new Set<ToolTernaryFilter>([
-  "all",
-  "yes",
-  "no",
-]);
-const fallbackTabs: OperationsTab[] = [
-  { id: "runs", label: "Tool Runs" },
-  { id: "workers", label: "Workers" },
-  { id: "queue", label: "Queue" },
-  { id: "waiting_io", label: "Waiting IO" },
-  { id: "capabilities", label: "Capabilities" },
-  { id: "provider_limits", label: "Provider Limits" },
-  { id: "provider_history", label: "Provider History" },
-  { id: "diagnostics", label: "Diagnostics" },
-  { id: "risk", label: "Risk" },
-  { id: "artifacts", label: "Artifacts" },
-  { id: "events", label: "Events" },
-  { id: "strategies", label: "Strategies" },
-];
 
 const page = ref<OperationsToolReadModel | null>(null);
 const loading = ref(false);
@@ -660,125 +564,14 @@ const toolRunRecordsFooter = computed(() => t("operations.tool.footer.visibleTot
   total: toolRunRecordsTable.value.total ?? toolRunRecordsTable.value.rows.length,
 }));
 
-function emptyTable(id: string, title: string): UiTableSection {
-  return {
-    id,
-    title,
-    columns: [],
-    rows: [],
-    total: 0,
-    empty_state: "No records.",
-  };
-}
-
-function chartTotal(section: UiChartSection | null | undefined): number {
-  const raw = typeof section?.total === "number" ? section.total : Number(section?.total ?? 0);
-  if (Number.isFinite(raw) && raw > 0) return raw;
-  return section?.segments?.reduce((sum, segment) => sum + segment.value, 0) ?? 0;
-}
-
-function chartSegments(section: UiChartSection | null | undefined): ChartSegmentView[] {
-  const total = chartTotal(section);
-  return (section?.segments ?? []).map((segment) => ({
-    ...segment,
-    pct: total ? Math.round((segment.value / total) * 100) : 0,
-  }));
-}
-
 function metricCard(id: string): UiMetricCard | undefined {
   return metricsById.value.get(id);
-}
-
-function fallbackMetric(id: string): UiMetricCard {
-  return {
-    id,
-    label: id,
-    value: "0",
-    delta: "",
-    tone: "neutral",
-  };
 }
 
 function metricNumber(id: string): number {
   const raw = metricCard(id)?.value ?? "0";
   const value = Number(String(raw).replace(/[^\d.-]/g, ""));
   return Number.isFinite(value) ? value : 0;
-}
-
-function numberCell(row: UiTableRow, key: string): number {
-  const value = Number(cellText(row, key).replace(/[^\d.-]/g, ""));
-  return Number.isFinite(value) ? value : 0;
-}
-
-function workerLoadLimit(value: string): number {
-  const match = value.match(/\/\s*(\d+)/);
-  return match ? Number(match[1]) : 0;
-}
-
-function ratioPct(value: number, total: number): number {
-  if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) return 0;
-  return Math.max(0, Math.min(100, Math.round((value / total) * 100)));
-}
-
-function durationPct(value: number | null | undefined, maxValue: number | null | undefined): number {
-  if (value == null || maxValue == null || maxValue <= 0) return 0;
-  return ratioPct(value, maxValue);
-}
-
-function durationSecondsFromLabel(value: string): number | null {
-  if (!value || value === "-") return null;
-  const normalized = value.trim().toLowerCase();
-  let seconds = 0;
-  let matched = false;
-  const hours = normalized.match(/(\d+(?:\.\d+)?)\s*h/);
-  const minutes = normalized.match(/(\d+(?:\.\d+)?)\s*m(?!s)/);
-  const secs = normalized.match(/(\d+(?:\.\d+)?)\s*s/);
-  if (hours) {
-    seconds += Number(hours[1]) * 3600;
-    matched = true;
-  }
-  if (minutes) {
-    seconds += Number(minutes[1]) * 60;
-    matched = true;
-  }
-  if (secs) {
-    seconds += Number(secs[1]);
-    matched = true;
-  }
-  const numeric = Number(normalized.replace(/[^\d.]/g, ""));
-  if (!matched && Number.isFinite(numeric)) return numeric;
-  return matched && Number.isFinite(seconds) ? Math.round(seconds) : null;
-}
-
-function formatDurationSeconds(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return "-";
-  if (value >= 3600) return `${Math.floor(value / 3600)}h ${Math.round((value % 3600) / 60)}m`;
-  if (value >= 60) return `${Math.floor(value / 60)}m ${value % 60}s`;
-  return `${value}s`;
-}
-
-function donutGradient(segments: ChartSegmentView[]): string {
-  const total = segments.reduce((sum, segment) => sum + segment.value, 0);
-  if (!segments.length || total <= 0) return "var(--surface-raised)";
-  let cursor = 0;
-  const stops = segments.map((segment, index) => {
-    const start = cursor;
-    const end = index === segments.length - 1 ? 100 : Math.min(100, cursor + (segment.value / total) * 100);
-    cursor = end;
-    return `${toneColor(segment.tone)} ${start}% ${end}%`;
-  });
-  return `conic-gradient(${stops.join(", ")})`;
-}
-
-function toneColor(tone: UiTone): string {
-  const colors: Record<UiTone, string> = {
-    success: "var(--color-success)",
-    info: "var(--color-blue)",
-    warning: "var(--color-warning)",
-    danger: "var(--color-danger)",
-    neutral: "var(--color-gray)",
-  };
-  return colors[tone] ?? colors.neutral;
 }
 
 function toolText(value: string | null | undefined): string {
@@ -795,7 +588,7 @@ function toolText(value: string | null | undefined): string {
   const retainedFailures = value.match(/^(\d+) retained failures$/);
   if (retainedFailures) return t("operations.tool.delta.retainedFailures", { count: retainedFailures[1] });
 
-  return value;
+  return formatRawKeyLabel(value);
 }
 
 function metricLabel(metric: UiMetricCard): string {
@@ -817,13 +610,6 @@ function primaryTableTabLabel(tab: OperationsTab): string {
     waiting_io: "operations.tool.dashboard.tab.waitingIo",
   }[tab.id];
   return key ? t(key) : tabLabel(tab);
-}
-
-function cellText(row: UiTableRow, key: string): string {
-  const value = row.cells[key];
-  if (value === null || value === undefined || value === "") return "-";
-  if (typeof value === "object") return value.text;
-  return String(value);
 }
 
 function dynamicToolLabel(prefix: string, value: string, fallback?: string | null): string {
@@ -870,53 +656,6 @@ function isKnownTernaryFilter(value: string | null): value is ToolTernaryFilter 
   return Boolean(value && knownToolTernaryFilters.has(value as ToolTernaryFilter));
 }
 
-function cellRouteValue(row: UiTableRow, key: string): string | null {
-  const value = row.cells[key];
-  const route = value && typeof value === "object" ? value.route : value;
-  if (typeof route !== "string" || route === "-") return null;
-  return route.replace(/^\/ui(?=\/)/, "");
-}
-
-function artifactPreviewItem(row: UiTableRow): ToolArtifactPreviewItem {
-  const kind = cellText(row, "kind");
-  const mimeType = cellText(row, "mime_type");
-  const route = cellRouteValue(row, "route");
-  const isImage = kind.toLowerCase() === "image" || mimeType.toLowerCase().startsWith("image/");
-  const rawTime = cellText(row, "time");
-  return {
-    id: row.id,
-    name: cellText(row, "name"),
-    kind,
-    mimeType,
-    size: cellText(row, "size"),
-    dimensions: cellText(row, "dimensions"),
-    tool: compactToolLabel(cellText(row, "tool")),
-    runId: cellText(row, "run_id"),
-    time: /^(\d{4})-(\d{2})-(\d{2})T/.test(rawTime) ? formatLocalTime(rawTime) : rawTime,
-    route,
-    trace: cellText(row, "trace"),
-    traceRoute: cellRouteValue(row, "trace_route"),
-    imageSrc: isImage ? artifactAssetUrl(route) : null,
-    isImage,
-  };
-}
-
-function artifactAssetUrl(route: string | null): string | null {
-  if (!route) return null;
-  if (/^https?:\/\//.test(route)) return route;
-  return buildApiUrl(route.startsWith("/") ? route : `/${route}`);
-}
-
-function rowRunId(row: UiTableRow): string {
-  const runId = cellText(row, "run_id");
-  return runId === "-" ? row.id : runId;
-}
-
-function rowWorkerId(row: UiTableRow): string {
-  const workerId = cellText(row, "worker");
-  return workerId === "-" ? row.id : workerId;
-}
-
 function lifecycleEventCard(row: UiTableRow, index: number): ToolLifecycleEventCardView {
   const details = splitEventDetails(cellText(row, "details"));
   const time = cellText(row, "time");
@@ -961,36 +700,6 @@ function lifecycleEventTableRow(event: ToolLifecycleEventCardView): UiTableRow {
   };
 }
 
-function linkCell(text: string, route: string | null) {
-  return route ? { text, route } : text;
-}
-
-function splitEventDetails(value: string): string[] {
-  if (!value || value === "-") return [];
-  return value
-    .split(/,\s*/)
-    .map((item) => item.trim())
-    .filter((item) => !duplicatedEventDetailKeys.has(item.split("=", 1)[0]?.toLowerCase()))
-    .map((item) => item.replace(/^([a-z_]+)=/i, (_, key: string) => `${titleLabel(key)}: `))
-    .filter(Boolean)
-    .slice(0, 4);
-}
-
-const duplicatedEventDetailKeys = new Set([
-  "assignment_id",
-  "run_id",
-  "tool_id",
-  "worker_id",
-]);
-
-function compactToolLabel(value: string): string {
-  return value.replace(/\s+\([^)]+\)$/, "");
-}
-
-function titleLabel(value: string): string {
-  return titleCaseDynamicValue(value, value);
-}
-
 function eventLevelLabel(value: string): string {
   const normalized = titleLabel(value);
   return {
@@ -1026,30 +735,6 @@ function eventNameLabel(value: string): string {
   const explicitKey = toolEventTextKeys[value] ?? toolEventTextKeys[normalized];
   if (explicitKey) return t(explicitKey);
   return dynamicToolLabel("operations.tool.event", normalized);
-}
-
-function compactEntityId(value: string): string {
-  if (!value || value === "-") return "-";
-  if (value.length <= 16) return value;
-  return `${value.slice(0, 7)}...${value.slice(-5)}`;
-}
-
-function rowStatus(row: UiTableRow): string {
-  return String(row.status ?? cellText(row, "status")).trim().toLowerCase().replace(/[\s-]+/g, "_");
-}
-
-function isFailureStatus(status: string): boolean {
-  return ["failed", "timed_out", "timeout", "cancelled", "error"].includes(status);
-}
-
-function canCancelToolRun(row: UiTableRow): boolean {
-  const actions = cellText(row, "actions").toLowerCase();
-  const status = rowStatus(row);
-  return actions.includes("cancel") && !["succeeded", "failed", "cancelled", "timed_out"].includes(status);
-}
-
-function canRetryToolRun(row: UiTableRow): boolean {
-  return cellText(row, "actions").toLowerCase().includes("retry");
 }
 
 function cancelFirstActiveRun() {
@@ -1145,10 +830,6 @@ function closeArtifactDetail() {
   selectedArtifactId.value = null;
 }
 
-function isUiTableRow(row: unknown): row is UiTableRow {
-  return Boolean(row && typeof row === "object" && "cells" in row);
-}
-
 function openRunDetail(row: UiTableRow | Record<string, unknown>) {
   if (!isUiTableRow(row)) return;
   const runId = rowRunId(row);
@@ -1211,24 +892,6 @@ function closeRunDetail() {
 
 function closeWorkerDetail() {
   selectedWorkerId.value = null;
-}
-
-function formatPayload(payload: unknown): string {
-  if (payload === null || payload === undefined || payload === "") return "-";
-  if (typeof payload === "string") return payload;
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return String(payload);
-  }
-}
-
-function hasPayload(payload: unknown): boolean {
-  if (payload === null || payload === undefined) return false;
-  if (typeof payload === "string") return payload.trim().length > 0;
-  if (Array.isArray(payload)) return payload.length > 0;
-  if (typeof payload === "object") return Object.keys(payload).length > 0;
-  return true;
 }
 
 function detailValue(detail: OperationsToolRunDetail, label: string): string {
@@ -1360,10 +1023,6 @@ function detailSummaryText(value: string): string {
   }[value];
   if (key) return key;
   return isEnumLikeValue(value) ? titleLabel(value) : value;
-}
-
-function isEnumLikeValue(value: string): boolean {
-  return /^[a-z][a-z0-9_-]+$/.test(value) || /^[A-Z][A-Za-z0-9]+(?: [A-Z][A-Za-z0-9]+)+$/.test(value);
 }
 
 async function cancelRun(row: UiTableRow) {
@@ -1549,136 +1208,6 @@ onUnmounted(() => {
   }
 });
 
-const toolTextKeys: Record<string, string> = {
-  "Tool Runtime": "operations.tool.title",
-  "Tool Runs": "operations.tool.tab.runs",
-  "Workers": "operations.tool.tab.workers",
-  "Queue": "operations.tool.tab.queue",
-  "Capabilities": "operations.tool.tab.capabilities",
-  "Diagnostics": "operations.tool.tab.diagnostics",
-  "Risk": "operations.tool.tab.risk",
-  "Artifacts": "operations.tool.tab.artifacts",
-  "Events": "operations.tool.tab.events",
-  "Strategies": "operations.tool.tab.strategies",
-  "Waiting IO": "operations.tool.dashboard.waitingIo",
-  "Active Tool Runs": "operations.tool.dashboard.tab.running",
-  "Queued Tool Runs": "operations.tool.dashboard.tab.queued",
-  "Failed Tool Runs (24h)": "operations.tool.dashboard.failedRuns",
-  "Average Latency": "operations.tool.dashboard.avgLatency",
-  "P95 Latency": "operations.tool.dashboard.p95Latency",
-  "Throughput": "operations.tool.dashboard.throughput",
-  "Tool Run Records": "operations.tool.section.runRecords",
-  "Recent Tool Runs": "operations.tool.section.recentRuns",
-  "Tool Types": "operations.tool.section.toolTypes",
-  "Tool Call Share": "operations.tool.section.toolCallShare",
-  "Tool Types by Runs": "operations.tool.section.toolTypesByRuns",
-  "Tool Types by Catalog": "operations.tool.section.toolTypesByCatalog",
-  "Other Tools": "operations.tool.section.otherTools",
-  "Runtime Risk / Access": "operations.tool.section.runtimeRiskAccess",
-  "Worker Pool Overview": "operations.tool.section.workerPool",
-  "Worker Pool by Registrations": "operations.tool.section.workerPoolRegistrations",
-  "Worker Pool by Current Registrations": "operations.tool.section.workerPoolCurrentRegistrations",
-  "Worker Pool by Active Runs": "operations.tool.section.workerPoolActiveRuns",
-  "No tool workers registered.": "operations.tool.empty.noWorkers",
-  "Tool Queue": "operations.tool.section.queue",
-  "Capability Concurrency": "operations.tool.section.capabilityConcurrency",
-  "Provider Limits": "operations.tool.section.providerLimits",
-  "Provider History": "operations.tool.section.providerHistory",
-  "Run Scheduling Diagnostics": "operations.tool.section.runDiagnostics",
-  "Inline Risk": "operations.tool.section.inlineRisk",
-  "Active Inline Runs": "operations.tool.inlineRisk.activeRuns",
-  "Inline Share": "operations.tool.inlineRisk.share",
-  "Inline Failures": "operations.tool.inlineRisk.failures",
-  "Longest Inline Duration": "operations.tool.inlineRisk.longestDuration",
-  "Recent Artifacts": "operations.tool.section.recentArtifacts",
-  "Tool Lifecycle Events": "operations.tool.section.lifecycleEvents",
-  "Execution Strategies": "operations.tool.section.executionStrategies",
-  "Admin": "common.admin",
-  "No records.": "table.noRecords",
-  "No tool runs recorded.": "operations.tool.empty.noRuns",
-  "No tool runs match the current filters.": "operations.tool.empty.noFilteredRuns",
-  "No tool type data.": "operations.tool.empty.noToolTypes",
-  "No access or confirmation risks detected.": "operations.tool.empty.noRisk",
-  "No active worker-held runs.": "operations.tool.empty.noWorkerRuns",
-  "No active tool runs.": "operations.tool.empty.noActiveRuns",
-  "No waiting tool runs.": "operations.tool.empty.noWaitingRuns",
-  "No provider I/O waits.": "operations.tool.dashboard.noWaitingIo",
-  "No tool capability groups observed.": "operations.tool.empty.noCapabilityGroups",
-  "No remote provider limiter metrics observed.": "operations.tool.empty.noProviderLimits",
-  "No provider runtime history observed.": "operations.tool.empty.noProviderHistory",
-  "No active tool runs need scheduling diagnostics.": "operations.tool.empty.noDiagnostics",
-  "No active tool run has exceeded 5 minutes.": "operations.tool.empty.noLongRunning",
-  "No inline risk data.": "operations.tool.empty.noInlineRisk",
-  "No tool artifacts observed.": "operations.tool.empty.noArtifacts",
-  "No tool lifecycle events observed yet.": "operations.tool.empty.noLifecycleEvents",
-  "No tool execution strategies observed.": "operations.tool.empty.noStrategies",
-  "Tool runtime state is queryable": "operations.tool.delta.queryable",
-  "Operator attention recommended": "operations.tool.delta.attentionRecommended",
-  "Operator action required": "operations.tool.delta.actionRequired",
-  "Insufficient data": "operations.tool.delta.insufficientData",
-  "retained tool run records": "operations.tool.delta.retainedRecords",
-  "terminal tool runs": "operations.tool.delta.terminalRuns",
-  "24h when available": "operations.tool.delta.window24hAvailable",
-  "last 24h": "operations.tool.delta.last24h",
-  "tools require operator consent": "operations.tool.delta.confirmationRequired",
-  "tools with access requirements": "operations.tool.delta.accessGated",
-  "监控工具执行、队列、worker、产物与策略": "operations.tool.subtitleShort",
-  "监控工具从触发到完成的全链路：排队、调度、执行、I/O 等待、产物产出与策略治理。": "operations.tool.subtitleFull",
-  "工具目录、运行队列、worker 占用、权限风险、失败和产物的运维视图。": "operations.tool.subtitle",
-  "Function": "operations.tool.kind.function",
-  "Http": "operations.tool.kind.http",
-  "Mcp": "operations.tool.kind.mcp",
-  "Workflow": "operations.tool.kind.workflow",
-  "Unknown": "status.unknown",
-  "Ready": "text.ready",
-  "Saturated": "text.saturated",
-  "Started": "text.started",
-  "No Worker": "text.noWorker",
-  "No worker": "text.noWorker",
-  "Default tool groups": "text.defaultToolGroups",
-  "Image generation": "text.imageGeneration",
-  "Browser shared state": "text.browserSharedState",
-  "Workspace shared state": "text.workspaceSharedState",
-  "Mobile shared state": "text.mobileSharedState",
-  "Session shared state": "text.sessionSharedState",
-  "Command shared state": "text.commandSharedState",
-  "System shared state": "text.systemSharedState",
-  "capacity available": "text.capacityAvailable",
-  "worker slots full": "text.workerSlotsFull",
-  "no online worker": "text.noOnlineWorker",
-  "Idle": "operations.tool.worker.idle",
-  "Busy": "operations.tool.worker.busy",
-  "Stale": "operations.tool.worker.stale",
-  "Lease Expired": "operations.tool.worker.leaseExpired",
-  "worker.capabilities_updated": "operations.tool.event.workerCapabilitiesUpdated",
-  "worker.recovered": "operations.tool.event.workerRecovered",
-  "worker.pruned": "operations.tool.event.workerPruned",
-  "Event Bus": "operations.tool.source.eventBus",
-};
-
-const toolEventTextKeys: Record<string, string> = {
-  "tool.run.created": "operations.tool.event.toolRunCreated",
-  "tool.run.queued": "operations.tool.event.toolRunQueued",
-  "tool.run.dispatching": "operations.tool.event.toolRunDispatching",
-  "tool.run.started": "operations.tool.event.toolRunStarted",
-  "tool.run.succeeded": "operations.tool.event.toolRunSucceeded",
-  "tool.run.failed": "operations.tool.event.toolRunFailed",
-  "tool.run.requeued": "operations.tool.event.toolRunRequeued",
-  "tool.run.cancel_requested": "operations.tool.event.toolRunCancelRequested",
-  "tool.run.cancelled": "operations.tool.event.toolRunCancelled",
-  "tool.run.timed_out": "operations.tool.event.toolRunTimedOut",
-  "tool.assignment.created": "operations.tool.event.toolAssignmentCreated",
-  "tool.assignment.started": "operations.tool.event.toolAssignmentStarted",
-  "tool.assignment.succeeded": "operations.tool.event.toolAssignmentSucceeded",
-  "tool.assignment.failed": "operations.tool.event.toolAssignmentFailed",
-  "tool.assignment.cancelled": "operations.tool.event.toolAssignmentCancelled",
-  "tool.assignment.expired": "operations.tool.event.toolAssignmentExpired",
-  "tool.worker.registered": "operations.tool.event.toolWorkerRegistered",
-  "tool.worker.recovered": "operations.tool.event.workerRecovered",
-  "tool.worker.capabilities_updated": "operations.tool.event.workerCapabilitiesUpdated",
-  "tool.worker.stale": "operations.tool.event.toolWorkerStale",
-  "tool.worker.pruned": "operations.tool.event.workerPruned",
-};
 </script>
 
 <template>

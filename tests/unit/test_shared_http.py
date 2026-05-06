@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from crxzipple.shared.infrastructure.http import (
+from crxzipple.shared.http import (
     AsyncHttpClientPool,
     install_json_exception_handler,
     is_loopback_http_url,

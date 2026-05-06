@@ -54,6 +54,16 @@
   text-align: center;
 }
 
+.operations-module-console :where([class$="-table-panel"], [class*="-table-panel "], .table-panel, .orchestra-panel--focus-table) :where(.panel-empty, .table-empty) {
+  flex: 1 1 auto;
+  min-height: clamp(180px, 34dvh, 360px);
+}
+
+.operations-module-console :where([class$="-side-panel"], [class*="-side-panel "], [class$="-side-stack"], [class*="-side-stack "]) > article > :where(.panel-empty, .table-empty) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .operations-module-console :where(.metric--placeholder) {
   min-height: 64px;
 }

@@ -94,6 +94,16 @@ class ToolHttpTestCase(HttpModuleTestCase):
         self.assertEqual(get_run_response.status_code, 200)
         self.assertEqual(get_run_response.json()["id"], run_payload["id"])
 
+    def test_missing_tool_run_returns_404_json(self) -> None:
+        response = self.client.get("/tools/runs/missing-tool-run")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("application/json", response.headers["content-type"])
+        self.assertEqual(
+            response.json(),
+            {"detail": "Tool run 'missing-tool-run' was not found."},
+        )
+
     def test_tool_provider_endpoints_list_and_discover_tools(self) -> None:
         providers_response = self.client.get("/tools/providers")
 

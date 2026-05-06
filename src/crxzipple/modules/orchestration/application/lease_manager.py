@@ -13,6 +13,10 @@ from crxzipple.modules.orchestration.application.assignment import (
 from crxzipple.modules.orchestration.application.ports import (
     RunDispatchPort,
 )
+from crxzipple.modules.orchestration.application.ports.database import (
+    TransientDatabaseErrorClassifier,
+    is_transient_database_lock_error,
+)
 from crxzipple.modules.orchestration.domain import (
     OrchestrationExecutorLease,
     OrchestrationExecutorLeaseStatus,
@@ -22,9 +26,6 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRunStatus,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
-from crxzipple.shared.infrastructure.database_errors import (
-    is_transient_database_lock_error,
-)
 
 
 logger = get_logger(__name__)
@@ -69,6 +70,9 @@ class OrchestrationLeaseManager:
     worker_heartbeat_seconds: float
     assignment_selector: OrchestrationAssignmentSelector = field(
         default_factory=OrchestrationAssignmentSelector,
+    )
+    transient_database_error_classifier: TransientDatabaseErrorClassifier = (
+        is_transient_database_lock_error
     )
 
     def assign_next_assignment(
@@ -322,7 +326,7 @@ class OrchestrationLeaseManager:
                         worker_id=worker_id,
                     )
                 except Exception as exc:
-                    if is_transient_database_lock_error(exc):
+                    if self.transient_database_error_classifier(exc):
                         logger.warning(
                             "transient database lock while heartbeating orchestration run; will retry",
                             extra={"run_id": run_id, "worker_id": worker_id},

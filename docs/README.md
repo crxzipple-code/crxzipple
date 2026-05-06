@@ -9,7 +9,6 @@
 
 ## 查验与报告
 
-- [reports/code-quality-audit-checklist.md](reports/code-quality-audit-checklist.md)：后续代码质量查验 checklist。
 - [reports/code-quality-followup-checklist-20260506.md](reports/code-quality-followup-checklist-20260506.md)：当前仍需处理的代码规范性问题清单。
 
 已关闭的历史审计和整改报告放在 `docs/archive/reports/`，只作背景，不作为当前待办入口。

@@ -47,6 +47,36 @@ export function formatBytes(value: number) {
   }).format(value / 1024 / 1024);
 }
 
+export function looksLikeRawKey(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const text = value.trim();
+  if (!text || text === "-" || text.length > 120) return false;
+  if (/^https?:\/\//i.test(text) || text.startsWith("/")) return false;
+  if (/\s/.test(text)) return false;
+  if (!/[._:/-]/.test(text)) return false;
+  if (/^[A-Z0-9_-]+$/.test(text)) return false;
+  if (/^[a-z]{2,10}_[0-9a-z]+$/i.test(text)) return false;
+  return /^[a-z][a-z0-9]*(?:[._:/-][a-z0-9]+)+$/i.test(text);
+}
+
+export function formatRawKeyLabel(value: string | null | undefined): string {
+  if (!value) return "";
+  const text = value.trim();
+  if (!looksLikeRawKey(text)) return value;
+  return text
+    .replace(/^events\.named\./, "")
+    .split(/[._:/-]+/)
+    .filter(Boolean)
+    .map((part) => {
+      const lower = part.toLowerCase();
+      if (["api", "cli", "db", "http", "id", "io", "json", "llm", "mcp", "pid", "ttl", "ui", "url"].includes(lower)) {
+        return lower.toUpperCase();
+      }
+      return `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`;
+    })
+    .join(" / ");
+}
+
 function runtimeLocale(): "zh-CN" | "en-US" {
   if (typeof document === "undefined") return "zh-CN";
   return document.documentElement.lang === "en-US" ? "en-US" : "zh-CN";

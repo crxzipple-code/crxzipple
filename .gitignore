@@ -1,8 +1,13 @@
 __pycache__/
+*.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
 .venv/
+.eggs/
 .vscode/
 .DS_Store
 node_modules/
@@ -11,6 +16,8 @@ node_modules/
 !.env.example
 dist/
 build/
+site/
+pip-wheel-metadata/
 *.egg-info/
 *.db
 *.db-wal
@@ -39,5 +46,9 @@ coverage/
 .nyc_output/
 .vite/
 .vitest/
+frontend/.vite/
+frontend/.vitest/
+frontend/dist/
+frontend/coverage/
 config/**/local/
 *.local.yaml

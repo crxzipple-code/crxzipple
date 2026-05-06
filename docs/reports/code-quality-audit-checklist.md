@@ -83,7 +83,7 @@ rg -n 'except:\\s*$|/Users/[^[:space:]]+/Documents/[^[:space:]]+' src tests docs
 建议命令：
 
 ```bash
-rg -n 'OrchestrationControlService|orchestration-observation|session_resolver|application/services.py|application/router.py' src tests docs || true
+rg -n 'OrchestrationControlService|worker:orchestration[-_]observation|session_resolver|application/services.py|application/router.py' src tests || true
 rg -n 'complete.*orchestration|orchestration.*complete|run.*complete' src/crxzipple/modules/tool src/crxzipple/modules/llm || true
 ```
 
@@ -106,7 +106,7 @@ rg -n 'read_recent_event_topic|read_event_topic|list_event_topics' src/crxzipple
 ## F. Operations 链路
 
 - [ ] `operations-observer` 是独立 daemon worker。
-- [ ] 不存在旧 `orchestration-observation` worker。
+- [ ] 不存在已退场的旧 orchestration observation worker。
 - [ ] `operations_projection_store` 是 `/operations/*` 主读取源。
 - [ ] `operations_projections` migration 存在且已接入 ORM import。
 - [ ] `OperationsProjectionMaterializer` 覆盖 9 个模块。
@@ -138,7 +138,7 @@ rg -n '\"projections\"|\"projection\"' .crxzipple/operations/observer_observatio
 - [ ] 存在 `worker:operations-observer`。
 - [ ] 存在 `worker:tool-scheduler`。
 - [ ] 存在 `worker:tool`。
-- [ ] 不存在 `worker:orchestration-observation`。
+- [ ] 不存在已退场的旧 orchestration observation daemon service。
 - [ ] tool worker `max_in_flight` 配置生效。
 - [ ] worker lease / heartbeat / recovery 可查询。
 - [ ] 长运行 worker 不需要人工散养启动。
@@ -220,7 +220,7 @@ rg -n 'Expected JSON|VITE_API_BASE|VITE_DATA_MODE|fixture|requestJson' src
 - [ ] 主表格区域占主要面积。
 - [ ] 右侧区域用于摘要、图表、风险、详情。
 - [ ] 卡片无数据时高度稳定。
-- [ ] skeleton 与真实数据布局差异小。
+- [ ] loading placeholder 与真实数据布局差异小。
 - [ ] 没有卡片内部小滚动条承载核心监控信息。
 - [ ] 表格有分页或明确截断。
 - [ ] 长错误和详情进入右侧 drawer。

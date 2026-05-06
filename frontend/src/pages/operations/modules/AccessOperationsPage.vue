@@ -15,7 +15,7 @@ import {
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
 
 import { useI18n } from "@/shared/i18n";
-import { formatLocalTime } from "@/shared/i18n/formatters";
+import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
 import type {
   OperationsAccessReadModel,
   OperationsAccessTargetDetail,
@@ -411,7 +411,7 @@ function accessText(value: string | null | undefined): string {
   if (value === "Access inventory is ready") return t("operations.access.delta.readyInventory");
   if (value === "Access setup is required") return t("operations.access.delta.setupRequired");
   if (value === "Access service is not connected") return t("operations.access.delta.disconnected");
-  return value;
+  return formatRawKeyLabel(value);
 }
 
 function emptyTable(id: string, title: string): UiTableSection {

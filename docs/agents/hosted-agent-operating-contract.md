@@ -93,7 +93,7 @@ owner module runtime fact
 - Operations 页面数据从 `/operations/{module}` 读，不从 owner module HTTP API 拼。
 - 业务模块不提供 operations-specific page provider。它们提供通用 service/query/port，Operations 自己解释成运维视图。
 - 如果某个卡片是假数据，要补事实来源：事件、query service、runtime metrics、projection 字段或 worker 上报。
-- 不要复活 `orchestration-observation` worker。运行时观察归 `operations-observer`。
+- 不要复活已退场的旧 orchestration observation worker。运行时观察归 `operations-observer`。
 - observer 可以读取通用 query service 来重建 projection，但页面请求不应该每次扫全库/扫全 topic。
 - `.crxzipple/operations/observer_observation.json` 只保存轻量观察状态；页面 projection 在 Postgres。
 

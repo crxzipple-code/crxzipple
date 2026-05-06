@@ -230,7 +230,10 @@ def get_tool_run(
     run_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ToolRunResponse:
-    return _to_run_response(container.tool_service.get_tool_run(run_id))
+    try:
+        return _to_run_response(container.tool_service.get_tool_run(run_id))
+    except ToolRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
 
 
 @router.post("/runs/{run_id}/cancel", response_model=ToolRunResponse)

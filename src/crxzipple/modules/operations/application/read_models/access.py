@@ -430,6 +430,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             label="Check Access",
             owner="access",
             risk="normal",
+            audit_event="access.readiness.check",
             method="POST",
             endpoint="/operations/access/check",
         ),

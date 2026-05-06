@@ -38,8 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit Operations page layout in a browser.")
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("OPERATIONS_AUDIT_BASE_URL", "http://127.0.0.1:4173"),
-        help="Frontend base URL. Defaults to OPERATIONS_AUDIT_BASE_URL or http://127.0.0.1:4173.",
+        default=os.environ.get("OPERATIONS_AUDIT_BASE_URL", "http://127.0.0.1:4174"),
+        help="Frontend base URL. Defaults to OPERATIONS_AUDIT_BASE_URL or http://127.0.0.1:4174.",
     )
     parser.add_argument(
         "--modules",

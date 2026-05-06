@@ -7,19 +7,15 @@ import {
   Search,
   Sun,
 } from "lucide-vue-next";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
 import { useI18n } from "@/shared/i18n";
-import { localizeStaticCopyTree } from "@/shared/i18n/staticCopy";
 
 const route = useRoute();
 const { locale, setLocale, t } = useI18n();
 type ThemePreference = "dark" | "light";
 const themeStorageKey = "crxzipple.theme";
-const contentRoot = ref<HTMLElement | null>(null);
-let staticCopyObserver: MutationObserver | null = null;
-let staticCopyScheduled = false;
 
 const navItems = [
   { label: "nav.workbench", to: "/workbench", key: "workbench", count: 0 },
@@ -59,37 +55,7 @@ function toggleLocale(): void {
   setLocale(locale.value === "zh-CN" ? "en-US" : "zh-CN");
 }
 
-function scheduleStaticCopyLocalization(): void {
-  if (staticCopyScheduled) return;
-  staticCopyScheduled = true;
-  void nextTick(() => {
-    staticCopyScheduled = false;
-    if (contentRoot.value) {
-      localizeStaticCopyTree(contentRoot.value, locale.value);
-    }
-  });
-}
-
 setTheme(theme.value);
-
-onMounted(() => {
-  scheduleStaticCopyLocalization();
-  if (typeof MutationObserver === "undefined" || !contentRoot.value) return;
-  staticCopyObserver = new MutationObserver(scheduleStaticCopyLocalization);
-  staticCopyObserver.observe(contentRoot.value, {
-    attributeFilter: ["aria-label", "placeholder", "title"],
-    attributes: true,
-    characterData: true,
-    childList: true,
-    subtree: true,
-  });
-});
-
-onBeforeUnmount(() => {
-  staticCopyObserver?.disconnect();
-});
-
-watch([locale, () => route.fullPath], scheduleStaticCopyLocalization, { flush: "post" });
 </script>
 
 <template>
@@ -156,7 +122,7 @@ watch([locale, () => route.fullPath], scheduleStaticCopyLocalization, { flush: "
       </div>
     </header>
 
-    <main ref="contentRoot" class="runtime-shell__content">
+    <main class="runtime-shell__content">
       <RouterView />
     </main>
   </div>
