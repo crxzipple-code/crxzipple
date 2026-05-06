@@ -16,7 +16,13 @@
 
 ### F1. Operations action surface 收口到 `/operations/*`
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- Runtime action 增加 `kind`，可执行动作 endpoint 收口到 `/operations/*`；纯跳转标记为 `navigation`。
+- `/ui/bootstrap` 不再为 Operations action 暴露 owner module 动作 route。
+- 验证：`rg -n 'endpoint="/(turns|orchestration|tools|llms|channels|skills|access|daemon|memory)' src/crxzipple/modules/operations/application/read_models src/crxzipple/interfaces/http/ui.py || true` 无输出；`PYTHONPATH=src pytest -q tests/unit/test_ui_http.py tests/unit/test_operations_observation.py` 通过。
 
 问题：
 
@@ -40,7 +46,13 @@ PYTHONPATH=src pytest -q tests/unit/test_ui_http.py tests/unit/test_operations_o
 
 ### F2. Operations 实时刷新改成 Operations SSE surface
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- 新增 `/operations/stream`，输出 `projection_updated` 等 Operations 语义 SSE。
+- OperationsShell 改为订阅 `/operations/stream`；raw `/events/stream` helper 移到 Workbench 本地 API，不再位于 shared/Operations surface。
+- 验证：`rg -n '/events/stream|openEventStream|source_payload|topicPrefix: "events.named.operations.projection' frontend/src/pages/operations frontend/src/shared || true` 无输出；`cd frontend && npm run typecheck && npm run build` 通过。
 
 问题：
 
@@ -64,7 +76,14 @@ cd frontend && npm run typecheck && npm run build
 
 ### F3. 危险动作不能由前端自动确认风险
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- 前端 `operationsActionPayload()` 不再自动补危险动作确认或风险确认。
+- Events / Channels / Daemon 危险动作显式确认后才传 `confirmation` 与 `risk_acknowledged`。
+- 后端保持强校验，新增 HTTP 测试覆盖危险动作缺确认/缺风险确认返回 400。
+- 验证：`PYTHONPATH=src pytest -q tests/unit/test_ui_http.py tests/unit/test_operations_observation.py` 通过。
 
 问题：
 
@@ -88,7 +107,13 @@ PYTHONPATH=src pytest -q tests/unit/test_ui_http.py tests/unit/test_operations_o
 
 ### F4. EventDefinition 覆盖 observer 订阅和投影刷新事件
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- 补齐 `tool.enabled`、`tool.disabled`、`llm.stream_delta_observed`、`operations.projection.invalidated` 与 orchestration operational events 的 EventDefinition。
+- 新增 observer 订阅事件集合必须被 registry 覆盖的防回归测试。
+- 验证：缺口脚本无输出；`PYTHONPATH=src pytest -q tests/unit/test_events.py tests/unit/test_operations_observation.py` 通过。
 
 问题：
 
@@ -120,7 +145,14 @@ PYTHONPATH=src pytest -q tests/unit/test_events.py tests/unit/test_operations_ob
 
 ### F5. Operations tool/llm 列表和详情做真正分页
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- Tool / LLM page projection 缩回首屏；主表格数据另存为 `kind=table`、`query_key=tool_runs/recent_invocations` 的 projection。
+- detail projection 随分页 table materialization 补齐，窗口外 detail 可按 id 读取；缺失仍返回 404。
+- `/operations/tool`、`/operations/llm` 查询优先读取 table projection 后再应用筛选与 `limit/offset`。
+- 验证：`PYTHONPATH=src pytest -q tests/unit/test_operations_observation.py tests/unit/test_ui_http.py` 通过。
 
 问题：
 
@@ -146,7 +178,13 @@ rg -n 'limit=1000|max(.*200|offset' \
 
 ### F6. 长运行入口 SQLite guard 收尾
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- `channel-runtime run` 加入统一 `guard_runtime_database`。
+- `serve` 移除 `APP_ALLOW_SQLITE_SERVE` 专用放行，SQLite runtime fallback 只接受 `APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1`。
+- 验证：`PYTHONPATH=src pytest -q tests/unit/test_channels_cli.py tests/unit/test_serve_cli.py tests/unit/test_config.py` 通过；接口层无 `APP_ALLOW_SQLITE_SERVE` 残留。
 
 问题：
 
@@ -169,7 +207,12 @@ rg -n 'APP_ALLOW_SQLITE_SERVE|guard_runtime_database' src/crxzipple/interfaces s
 
 ### F7. 当前 agent/dev/migration 关键文件必须进入版本控制边界
 
-状态：待处理。
+状态：已处理。
+
+处理记录：
+
+- 已在 `da41ccf` / `417712d` 将 agent contract、dev stack、migration head、当前唯一 `frontend/` 与基础验证纳入版本控制。
+- 验证：`PYTHONPATH=src python -m alembic heads` 为 `0041_create_operations_action_audits (head)`；当前无未跟踪关键文件。
 
 问题：
 

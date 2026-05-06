@@ -15,13 +15,14 @@ import {
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { RouterLink, useRoute } from "vue-router";
 
-import { openEventStream, type EventConsoleRecord } from "@/shared/api/events";
 import { useI18n } from "@/shared/i18n";
 import type { OperationsModuleOverview } from "@/shared/runtime/types";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import {
   loadOperationsRuntimeStatus,
   loadOperationsOverview,
+  openOperationsStream,
+  type OperationsRefreshEvent,
   type OperationsRuntimeStatus,
   type OperationsRuntimeStatusItem,
 } from "./api";
@@ -188,20 +189,13 @@ async function refreshRuntimeStatus() {
 
 function openOperationsEventStream() {
   eventStreamCleanup.value?.();
-  eventStreamCleanup.value = openEventStream(
-    {
-      topicPrefix: "events.named.operations.projection.",
-      snapshotLimit: 0,
-      timeoutSeconds: 300,
-    },
-    {
-      event: handleOperationsEvent,
-      error: () => scheduleRuntimeStatusRefresh(2500),
-    },
-  );
+  eventStreamCleanup.value = openOperationsStream({
+    event: handleOperationsEvent,
+    error: () => scheduleRuntimeStatusRefresh(2500),
+  });
 }
 
-function handleOperationsEvent(record: EventConsoleRecord) {
+function handleOperationsEvent(record: OperationsRefreshEvent) {
   window.dispatchEvent(new CustomEvent("crxzipple:operations-event", { detail: record }));
   for (const moduleId of modulesForEvent(record)) {
     scheduleModuleOverviewRefresh(moduleId);
@@ -209,26 +203,14 @@ function handleOperationsEvent(record: EventConsoleRecord) {
   scheduleRuntimeStatusRefresh();
 }
 
-function modulesForEvent(record: EventConsoleRecord): OperationsModuleId[] {
+function modulesForEvent(record: OperationsRefreshEvent): OperationsModuleId[] {
   const modules = new Set<OperationsModuleId>();
-  const payload = record.source_payload ?? {};
-  for (const candidate of operationsProjectionModules(payload)) {
+  for (const candidate of record.modules ?? []) {
     if (isOperationsModuleId(candidate)) {
       modules.add(candidate);
     }
   }
   return [...modules];
-}
-
-function operationsProjectionModules(payload: Record<string, unknown>): string[] {
-  return [
-    payload.module,
-    payload.module_id,
-    ...(Array.isArray(payload.modules) ? payload.modules : []),
-  ]
-    .filter((value): value is string => typeof value === "string")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
 }
 
 function isOperationsModuleId(value: string): value is OperationsModuleId {

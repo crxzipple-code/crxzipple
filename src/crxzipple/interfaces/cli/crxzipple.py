@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import typer
 import uvicorn
 
 from crxzipple.core.config import (
     RuntimeDatabaseGuardError,
-    is_sqlite_database_url,
     load_settings,
     require_runtime_database,
 )
@@ -33,28 +31,6 @@ from crxzipple.modules.session.domain import DirectSessionScope
 logger = get_logger(__name__)
 
 _ACTIVE_DAEMON_STATUSES = frozenset({"starting", "ready", "degraded"})
-
-
-def _guard_serve_database_url() -> None:
-    settings = load_settings()
-    if not is_sqlite_database_url(settings.database_url):
-        return
-    allow_serve_fallback = os.getenv("APP_ALLOW_SQLITE_SERVE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if settings.allow_sqlite_runtime_fallback or allow_serve_fallback:
-        return
-    typer.secho(
-        "Refusing to start the HTTP API with SQLite. "
-        "Source `scripts/dev/infra-env.sh` or set APP_DATABASE_URL to Postgres. "
-        "For a one-off SQLite run, set APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1 explicitly.",
-        err=True,
-        fg=typer.colors.RED,
-    )
-    raise typer.Exit(code=1)
 
 
 def guard_runtime_database(settings, *, runtime_name: str) -> None:  # noqa: ANN001
@@ -324,7 +300,7 @@ def serve(
     host: str = typer.Option("127.0.0.1", help="HTTP bind host."),
     port: int = typer.Option(8000, min=1, max=65535, help="HTTP bind port."),
 ) -> None:
-    _guard_serve_database_url()
+    guard_runtime_database(load_settings(), runtime_name="HTTP API")
     from crxzipple.interfaces.http.app import create_app
 
     container = ensure_container(ctx)

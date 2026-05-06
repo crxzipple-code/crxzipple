@@ -221,6 +221,36 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertIn("/operations/orchestration", payload["routes"])
         self.assertEqual(payload["sections"][0]["id"], "workbench")
 
+    def test_operations_stream_projects_refresh_events_without_raw_event_schema(
+        self,
+    ) -> None:
+        container = self.client.app.state.container
+        container.events_service.publish(
+            Event(
+                name="operations.projection.invalidated",
+                payload={
+                    "module": "tool",
+                    "kinds": ["page", "overview", "table"],
+                    "query_key": "default",
+                    "source": "operations-observer",
+                },
+            ),
+        )
+
+        with self.client.stream(
+            "GET",
+            "/operations/stream?snapshot_limit=1&timeout_seconds=0.01",
+        ) as response:
+            body = "".join(response.iter_text())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: connected", body)
+        self.assertIn("event: snapshot", body)
+        self.assertIn('"modules": ["tool"]', body)
+        self.assertIn('"kinds": ["page", "overview", "table"]', body)
+        self.assertNotIn("source_payload", body)
+        self.assertNotIn('"topic"', body)
+
     def test_ui_bootstrap_covers_operations_action_endpoints(self) -> None:
         bootstrap_response = self.client.get("/ui/bootstrap")
         self.assertEqual(bootstrap_response.status_code, 200)
@@ -1002,7 +1032,10 @@ class UiHttpTestCase(HttpModuleTestCase):
 
         action_by_id = {item["id"]: item for item in payload["actions"]}
         self.assertEqual(action_by_id["cancel_run"]["method"], "POST")
-        self.assertEqual(action_by_id["cancel_run"]["endpoint"], "/turns/{run_id}/cancel")
+        self.assertEqual(
+            action_by_id["cancel_run"]["endpoint"],
+            "/operations/orchestration/runs/{run_id}/cancel",
+        )
         self.assertEqual(action_by_id["force_release_lane"]["risk"], "dangerous")
         self.assertFalse(action_by_id["force_release_lane"]["allowed"])
         self.assertTrue(action_by_id["force_release_lane"]["requires_confirmation"])
@@ -1693,7 +1726,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         action_by_id = {item["id"]: item for item in payload["actions"]}
         self.assertEqual(
             action_by_id["healthcheck_service"]["endpoint"],
-            "/daemon/services/{service_key}/healthcheck",
+            "/operations/daemon/services/{service_key}/healthcheck",
         )
         process_segments = {
             item["id"]: item["value"]
@@ -2278,11 +2311,11 @@ class UiHttpTestCase(HttpModuleTestCase):
         action_by_id = {item["id"]: item for item in payload["actions"]}
         self.assertEqual(
             action_by_id["cancel_tool_run"]["endpoint"],
-            "/tools/runs/{run_id}/cancel",
+            "/operations/tool/runs/{run_id}/cancel",
         )
         self.assertEqual(
             action_by_id["retry_tool_run"]["endpoint"],
-            "/tools/runs/{run_id}/retry",
+            "/operations/tool/runs/{run_id}/retry",
         )
         self.assertNotIn("error", run_rows["tool-run-ui-page-failed"]["cells"])
         self.assertNotIn(
@@ -2788,7 +2821,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         action_by_id = {item["id"]: item for item in payload["actions"]}
         self.assertEqual(
             action_by_id["open_invocation"]["endpoint"],
-            "/llms/calls/{invocation_id}",
+            "/operations/llm/invocations/{invocation_id}/detail",
         )
         self.assertFalse(action_by_id["disable_profile"]["allowed"])
         self.assertIsNone(action_by_id["disable_profile"]["endpoint"])
@@ -2962,6 +2995,38 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(missing_reason_response.status_code, 400)
 
+        missing_confirmation_response = self.client.post(
+            "/operations/events/subscriptions/advance-to-head",
+            json={
+                "subscription_id": "operations.events.action.consumer",
+                "source_topic": topic,
+                "status": "lagging",
+                "reason": "unit test cursor maintenance",
+                "risk_acknowledged": True,
+            },
+        )
+        self.assertEqual(missing_confirmation_response.status_code, 400)
+        self.assertIn(
+            "confirmation",
+            missing_confirmation_response.json()["detail"],
+        )
+
+        missing_risk_ack_response = self.client.post(
+            "/operations/events/subscriptions/advance-to-head",
+            json={
+                "subscription_id": "operations.events.action.consumer",
+                "source_topic": topic,
+                "status": "lagging",
+                "reason": "unit test cursor maintenance",
+                "confirmation": "Advance cursor to head for unit test",
+            },
+        )
+        self.assertEqual(missing_risk_ack_response.status_code, 400)
+        self.assertIn(
+            "risk acknowledgement",
+            missing_risk_ack_response.json()["detail"],
+        )
+
         response = self.client.post(
             "/operations/events/subscriptions/advance-to-head",
             json={
@@ -2969,7 +3034,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "source_topic": topic,
                 "status": "lagging",
                 "reason": "unit test cursor maintenance",
-                "confirmation": True,
+                "confirmation": "Advance cursor to head for unit test",
                 "risk_acknowledged": True,
             },
         )

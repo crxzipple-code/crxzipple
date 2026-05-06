@@ -1,5 +1,5 @@
 import { operationsModules, operationsOrchestrationPage } from "@/mocks/fixtures/runtime";
-import { dataMode, requestJson } from "@/shared/api/client";
+import { buildApiUrl, dataMode, requestJson } from "@/shared/api/client";
 import type {
   OperationsModuleOverview,
   OperationsAccessReadModel,
@@ -63,6 +63,23 @@ export interface OperationsRuntimeStatus {
 export interface OperationsRuntimeStatusData {
   status: OperationsRuntimeStatus;
   source: "fixture" | "api";
+}
+
+export interface OperationsRefreshEvent {
+  event_type: "connected" | "snapshot" | "projection_updated" | "timeout" | string;
+  event_id?: string;
+  module?: string | null;
+  modules: string[];
+  kinds?: string[];
+  query_key?: string;
+  updated_at?: string;
+  records?: OperationsRefreshEvent[];
+}
+
+export interface OperationsStreamHandlers {
+  event?: (record: OperationsRefreshEvent) => void;
+  snapshot?: (snapshot: OperationsRefreshEvent) => void;
+  error?: (event: Event) => void;
 }
 
 export interface OrchestrationOperationsData {
@@ -351,15 +368,18 @@ function operationsActionPayload(
     dangerous?: boolean;
   },
 ): OperationsActionPayload {
-  const reason = payload.reason?.trim() || payload.defaultReason;
+  const explicitReason = payload.reason?.trim() || null;
+  const reason = explicitReason ?? (payload.dangerous ? null : payload.defaultReason);
+  const hasRiskAcknowledgement = (
+    typeof payload.risk_acknowledged === "boolean"
+    || typeof payload.risk_ack === "boolean"
+  );
   const metadata = {
     ...(payload.metadata ?? {}),
     action_source: payload.source ?? payload.audit?.source ?? "operations",
   };
-  return {
+  const actionPayload: OperationsActionPayload = {
     reason,
-    confirmation: payload.dangerous ? (payload.confirmation ?? true) : payload.confirmation,
-    risk_acknowledged: payload.dangerous ? true : Boolean(payload.risk_acknowledged ?? payload.risk_ack),
     operator: payload.operator ?? null,
     source: payload.source ?? "operations",
     metadata,
@@ -369,6 +389,43 @@ function operationsActionPayload(
       metadata,
     },
   };
+  if (payload.confirmation !== undefined) {
+    actionPayload.confirmation = payload.confirmation;
+  }
+  if (hasRiskAcknowledgement) {
+    actionPayload.risk_acknowledged = Boolean(payload.risk_acknowledged ?? payload.risk_ack);
+  }
+  return actionPayload;
+}
+
+export function openOperationsStream(handlers: OperationsStreamHandlers): () => void {
+  const query = new URLSearchParams({
+    snapshot_limit: "0",
+    timeout_seconds: "300",
+  });
+  const source = new EventSource(buildApiUrl(`/operations/stream?${query.toString()}`));
+
+  source.addEventListener("projection_updated", (event) => {
+    const record = parseEventData<OperationsRefreshEvent>(event);
+    if (record) handlers.event?.(record);
+  });
+  source.addEventListener("snapshot", (event) => {
+    const snapshot = parseEventData<OperationsRefreshEvent>(event);
+    if (snapshot) handlers.snapshot?.(snapshot);
+  });
+  source.addEventListener("error", (event) => {
+    handlers.error?.(event);
+  });
+
+  return () => source.close();
+}
+
+function parseEventData<T>(event: MessageEvent): T | null {
+  try {
+    return JSON.parse(event.data) as T;
+  } catch {
+    return null;
+  }
 }
 
 export interface DaemonOperationsData {

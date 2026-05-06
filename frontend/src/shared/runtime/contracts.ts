@@ -42,6 +42,7 @@ export type UiRuntimeStatus =
 
 export type RuntimeActionRisk = "normal" | "controlled" | "dangerous";
 export type RuntimeActionMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+export type RuntimeActionKind = "operation" | "navigation";
 
 export interface UiTraceContext {
   trace_id: string;
@@ -77,6 +78,7 @@ export interface UiRuntimeAction {
   id: string;
   label: string;
   owner: RuntimeModuleId | SettingsResourceId | string;
+  kind?: RuntimeActionKind;
   target?: UiLinkedEntity | null;
   method?: RuntimeActionMethod | null;
   endpoint?: string | null;

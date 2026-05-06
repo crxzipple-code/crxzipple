@@ -49,6 +49,9 @@ class _FakeSessionUnitOfWork:
     def commit(self) -> None:
         return None
 
+    def flush(self) -> None:
+        return None
+
     def rollback(self) -> None:
         return None
 

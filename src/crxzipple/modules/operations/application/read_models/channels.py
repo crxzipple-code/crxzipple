@@ -812,11 +812,13 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             id="open_channel_runtime",
             label="Open Runtime",
             owner="channels",
+            kind="navigation",
         ),
         RuntimeActionModel(
             id="inspect_dead_letter",
             label="Inspect Dead Letter",
             owner="channels",
+            kind="navigation",
             risk="controlled",
         ),
         RuntimeActionModel(
@@ -826,7 +828,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             risk="dangerous",
             requires_confirmation=True,
             method="POST",
-            endpoint="/channels/dead-letters/{channel_type}/replay",
+            endpoint="/operations/channels/dead-letters/{channel_type}/replay",
         ),
         RuntimeActionModel(
             id="prune_stale_runtimes",

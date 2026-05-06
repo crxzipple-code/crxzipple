@@ -35,7 +35,9 @@ class ChannelsCliTestCase(unittest.TestCase):
             "APP_TOOL_OPENAPI_PROVIDER_PATHS": os.pathsep,
             "APP_AUTHORIZATION_ENABLED": "false",
             "APP_CHANNELS_STATE_DIR": str(Path(self.harness._tempdir.name) / "channels"),
+            "APP_EVENTS_BACKEND": "file",
             "APP_EVENTS_STATE_DIR": str(Path(self.harness._tempdir.name) / "events"),
+            "APP_ALLOW_SQLITE_RUNTIME_FALLBACK": "1",
         }
 
     def tearDown(self) -> None:
@@ -43,6 +45,11 @@ class ChannelsCliTestCase(unittest.TestCase):
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
         self._skills_tempdir.cleanup()
+
+    def env_without_sqlite_runtime_fallback(self) -> dict[str, str]:
+        env = dict(self.env)
+        env.pop("APP_ALLOW_SQLITE_RUNTIME_FALLBACK", None)
+        return env
 
     def test_channel_runtime_cli_registers_runtime_from_profile(self) -> None:
         container = self.harness.build_container()
@@ -91,3 +98,25 @@ class ChannelsCliTestCase(unittest.TestCase):
             self.assertIsNone(binding)
         finally:
             reopened.close()
+
+    def test_channel_runtime_run_rejects_sqlite_without_explicit_runtime_fallback(
+        self,
+    ) -> None:
+        result = self.runner.invoke(
+            app,
+            [
+                "channel-runtime",
+                "run",
+                "--channel",
+                "web",
+                "--runtime-id",
+                "web-runtime-cli-guard",
+                "--max-cycles",
+                "1",
+            ],
+            env=self.env_without_sqlite_runtime_fallback(),
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Refusing to start channel runtime with SQLite", result.stderr)
+        self.assertIn("APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1", result.stderr)

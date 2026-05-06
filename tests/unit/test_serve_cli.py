@@ -35,13 +35,24 @@ class ServeCliTestCase(CliModuleTestCase):
             result = self.runner.invoke(
                 app,
                 ["serve", "--host", "127.0.0.1", "--port", "8010"],
-                env={**self.env, "APP_ALLOW_SQLITE_SERVE": "1"},
+                env=self.env,
             )
 
         self.assertEqual(result.exit_code, 0)
         create_app_mock.assert_called_once()
         self.assertEqual(len(server_instances), 1)
         self.assertTrue(server_instances[0].run_called)
+
+    def test_serve_rejects_sqlite_without_explicit_runtime_fallback(self) -> None:
+        result = self.runner.invoke(
+            app,
+            ["serve", "--host", "127.0.0.1", "--port", "8010"],
+            env=self.env_without_sqlite_runtime_fallback(),
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Refusing to start HTTP API with SQLite", result.stderr)
+        self.assertIn("APP_ALLOW_SQLITE_RUNTIME_FALLBACK=1", result.stderr)
 
 
 if __name__ == "__main__":

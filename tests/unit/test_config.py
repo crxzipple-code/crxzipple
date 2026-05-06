@@ -223,6 +223,27 @@ max_concurrency: 7
         with self.assertRaises(RuntimeDatabaseGuardError):
             require_runtime_database(settings, runtime_name="test runtime")
 
+    def test_runtime_database_guard_ignores_legacy_serve_fallback_env(self) -> None:
+        os.environ["APP_DATABASE_URL"] = "sqlite:///tmp/crxzipple-test.db"
+        os.environ["APP_ALLOW_SQLITE_SERVE"] = "1"
+        os.environ.pop("APP_ALLOW_SQLITE_RUNTIME_FALLBACK", None)
+
+        settings = load_settings()
+
+        self.assertFalse(settings.allow_sqlite_runtime_fallback)
+        with self.assertRaises(RuntimeDatabaseGuardError):
+            require_runtime_database(settings, runtime_name="test runtime")
+
+    def test_runtime_database_guard_requires_runtime_fallback_value_one(self) -> None:
+        os.environ["APP_DATABASE_URL"] = "sqlite:///tmp/crxzipple-test.db"
+        os.environ["APP_ALLOW_SQLITE_RUNTIME_FALLBACK"] = "true"
+
+        settings = load_settings()
+
+        self.assertFalse(settings.allow_sqlite_runtime_fallback)
+        with self.assertRaises(RuntimeDatabaseGuardError):
+            require_runtime_database(settings, runtime_name="test runtime")
+
     def test_runtime_database_guard_allows_sqlite_with_explicit_fallback(self) -> None:
         os.environ["APP_DATABASE_URL"] = "sqlite:///tmp/crxzipple-test.db"
         os.environ["APP_ALLOW_SQLITE_RUNTIME_FALLBACK"] = "1"

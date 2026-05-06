@@ -126,6 +126,10 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _runtime_sqlite_fallback_enabled() -> bool:
+    return os.getenv(ALLOW_SQLITE_RUNTIME_FALLBACK_ENV, "").strip() == "1"
+
+
 def _optional_positive_int(value: object, *, label: str) -> int | None:
     if value is None:
         return None
@@ -1835,10 +1839,7 @@ def load_settings() -> Settings:
         app_name=os.getenv("APP_NAME", "crxzipple"),
         environment=os.getenv("APP_ENV", "local"),
         database_url=os.getenv("APP_DATABASE_URL", "sqlite:///./crxzipple.db"),
-        allow_sqlite_runtime_fallback=_env_flag(
-            ALLOW_SQLITE_RUNTIME_FALLBACK_ENV,
-            default=False,
-        ),
+        allow_sqlite_runtime_fallback=_runtime_sqlite_fallback_enabled(),
         tool_local_paths=_load_tool_local_paths(),
         tool_openapi_providers=_load_openapi_provider_settings(),
         tool_mcp_providers=_load_mcp_provider_settings(),

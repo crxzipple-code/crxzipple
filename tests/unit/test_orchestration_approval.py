@@ -25,6 +25,10 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         "mobile_type",
         "mobile_wait",
     ]
+    _OPENAI_IMAGE_TOOL_IDS = [
+        "openai_image_edit",
+        "openai_image_generate",
+    ]
     _SESSION_TOOL_IDS = [
         "session_status",
         "sessions_history",
@@ -175,6 +179,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_write_daily",
                     *self._MOBILE_TOOL_IDS,
                     "open_meteo_weather.forecast_weather",
+                    *self._OPENAI_IMAGE_TOOL_IDS,
                     "process",
                     "read",
                     *self._SESSION_TOOL_IDS,
@@ -296,6 +301,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_write_daily",
                     *self._MOBILE_TOOL_IDS,
                     "open_meteo_weather.forecast_weather",
+                    *self._OPENAI_IMAGE_TOOL_IDS,
                     "process",
                     "read",
                     *self._SESSION_TOOL_IDS,
@@ -429,6 +435,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_search",
                     "memory_write_daily",
                     *self._MOBILE_TOOL_IDS,
+                    *self._OPENAI_IMAGE_TOOL_IDS,
                     "process",
                     "read",
                     *self._SESSION_TOOL_IDS,
@@ -535,6 +542,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     "memory_search",
                     "memory_write_daily",
                     *self._MOBILE_TOOL_IDS,
+                    *self._OPENAI_IMAGE_TOOL_IDS,
                     "process",
                     "read",
                     *self._SESSION_TOOL_IDS,

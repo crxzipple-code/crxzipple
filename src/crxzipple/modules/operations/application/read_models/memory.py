@@ -596,15 +596,17 @@ def _actions(agent_id: str) -> tuple[RuntimeActionModel, ...]:
             id="open_memory_overview",
             label="Open Memory Overview",
             owner="memory",
+            kind="navigation",
             method="GET",
-            endpoint=f"/memory/overview{suffix}",
+            endpoint=f"/operations/memory{suffix}",
         ),
         RuntimeActionModel(
             id="search_memory",
             label="Search Memory",
             owner="memory",
+            kind="navigation",
             method="GET",
-            endpoint=f"/memory/search{suffix}&query={{query}}" if suffix else "/memory/search?query={query}",
+            endpoint=f"/operations/memory{suffix}&search={{query}}" if suffix else "/operations/memory?search={query}",
         ),
         RuntimeActionModel(
             id="write_long_term_memory",
@@ -612,7 +614,7 @@ def _actions(agent_id: str) -> tuple[RuntimeActionModel, ...]:
             owner="memory",
             risk="controlled",
             method="POST",
-            endpoint="/memory/long-term",
+            endpoint="/operations/memory/long-term",
         ),
     )
 

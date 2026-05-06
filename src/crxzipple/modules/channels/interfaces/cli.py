@@ -11,6 +11,7 @@ import typer
 from crxzipple.bootstrap import build_container
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging
+from crxzipple.interfaces.cli.crxzipple import guard_runtime_database
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.channels.application.runtime import ChannelRuntimeBootstrapService
 from crxzipple.modules.channels.domain import ChannelValidationError
@@ -61,6 +62,7 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         settings = load_settings()
+        guard_runtime_database(settings, runtime_name="channel runtime")
         configure_logging(settings)
         container = build_container(settings=settings)
         stop_event = Event()

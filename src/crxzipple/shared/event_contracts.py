@@ -241,6 +241,11 @@ TOOL_WORKER_EVENT_NAMES: tuple[str, ...] = (
     "tool.worker.pruned",
 )
 
+TOOL_CATALOG_EVENT_NAMES: tuple[str, ...] = (
+    "tool.enabled",
+    "tool.disabled",
+)
+
 LLM_INVOCATION_EVENT_NAMES: tuple[str, ...] = (
     "llm.invocation_started",
     "llm.invocation_succeeded",
@@ -252,12 +257,18 @@ LLM_PROFILE_EVENT_NAMES: tuple[str, ...] = (
     "llm.profile_updated",
 )
 
+LLM_STREAM_EVENT_NAMES: tuple[str, ...] = (
+    "llm.stream_delta_observed",
+)
+
 TOOL_LLM_EVENT_NAMES: tuple[str, ...] = (
     *TOOL_RUN_EVENT_NAMES,
     *TOOL_ASSIGNMENT_EVENT_NAMES,
     *TOOL_WORKER_EVENT_NAMES,
+    *TOOL_CATALOG_EVENT_NAMES,
     *LLM_INVOCATION_EVENT_NAMES,
     *LLM_PROFILE_EVENT_NAMES,
+    *LLM_STREAM_EVENT_NAMES,
 )
 
 
@@ -306,6 +317,25 @@ _TOOL_WORKER_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("retention_seconds", "Expired worker retention window used for pruning.", "integer"),
 )
 
+_OPERATIONS_DISPLAY_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("level", "Operational severity level for display.", "string"),
+    EventDefinitionField("summary", "Display-safe event summary.", "string"),
+    EventDefinitionField("display_label", "Short display label for operations views.", "string"),
+    EventDefinitionField("display_summary", "Human-readable operations summary.", "string"),
+    EventDefinitionField("display_tone", "Display tone such as info, success, warning, or danger.", "string"),
+    EventDefinitionField("entity_type", "Linked entity type for navigation or filtering.", "string"),
+    EventDefinitionField("entity_id", "Linked entity identifier for navigation or filtering.", "string"),
+)
+
+_TOOL_CATALOG_FIELDS: tuple[EventDefinitionField, ...] = (
+    _EVENT_NAME_FIELD,
+    EventDefinitionField("tool_id", "Tool catalog identifier.", "string", True),
+    EventDefinitionField("tool_name", "Display-safe tool name.", "string"),
+    EventDefinitionField("enabled", "Tool enabled state after the change.", "boolean"),
+    EventDefinitionField("status", "Normalized catalog status after the change.", "string"),
+    *_OPERATIONS_DISPLAY_FIELDS,
+)
+
 _LLM_INVOCATION_FIELDS: tuple[EventDefinitionField, ...] = (
     _EVENT_NAME_FIELD,
     EventDefinitionField("invocation_id", "LLM invocation identifier.", "string", True),
@@ -339,6 +369,18 @@ _LLM_PROFILE_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("provider", "LLM provider.", "string", True),
     EventDefinitionField("api_family", "Adapter API family.", "string", True),
     EventDefinitionField("source_kind", "Profile source kind when synced.", "string"),
+)
+
+_LLM_STREAM_FIELDS: tuple[EventDefinitionField, ...] = (
+    _EVENT_NAME_FIELD,
+    EventDefinitionField("invocation_id", "LLM invocation identifier.", "string", True),
+    EventDefinitionField("llm_id", "LLM profile identifier.", "string"),
+    EventDefinitionField("status", "Streaming observation status.", "string"),
+    EventDefinitionField("streaming", "Whether the invocation is currently streaming.", "boolean"),
+    EventDefinitionField("text_delta", "Incremental text delta when retained for diagnostics.", "string"),
+    EventDefinitionField("text_delta_length", "Character count for the observed delta.", "integer"),
+    EventDefinitionField("token_count", "Token count associated with the delta when available.", "integer"),
+    *_OPERATIONS_DISPLAY_FIELDS,
 )
 
 
@@ -410,6 +452,20 @@ def tool_llm_event_definitions() -> tuple[EventDefinition, ...]:
         )
         for event_name in TOOL_WORKER_EVENT_NAMES
     )
+    catalog_definitions = tuple(
+        _lifecycle_definition(
+            event_name=event_name,
+            owner="tool",
+            description="Tool catalog availability fact emitted by the tool module.",
+            producers=("Tool.enable", "Tool.disable", "ToolApplicationService"),
+            consumers=("operations observer", "trace read model"),
+            fields=_TOOL_CATALOG_FIELDS,
+            notes=(
+                "tool catalog state is tool-owned; operations observes enablement changes",
+            ),
+        )
+        for event_name in TOOL_CATALOG_EVENT_NAMES
+    )
     invocation_definitions = tuple(
         _lifecycle_definition(
             event_name=event_name,
@@ -434,12 +490,28 @@ def tool_llm_event_definitions() -> tuple[EventDefinition, ...]:
         )
         for event_name in LLM_PROFILE_EVENT_NAMES
     )
+    stream_definitions = tuple(
+        _lifecycle_definition(
+            event_name=event_name,
+            owner="llm",
+            description="LLM streaming delta observation fact emitted for diagnostics.",
+            producers=("LlmApplicationService", "LLM stream observers"),
+            consumers=("operations observer", "trace read model"),
+            fields=_LLM_STREAM_FIELDS,
+            notes=(
+                "stream deltas are observation facts; consumers should not rebuild final invocation truth from raw deltas",
+            ),
+        )
+        for event_name in LLM_STREAM_EVENT_NAMES
+    )
     return (
         *tool_run_definitions,
         *assignment_definitions,
         *worker_definitions,
+        *catalog_definitions,
         *invocation_definitions,
         *profile_definitions,
+        *stream_definitions,
     )
 
 

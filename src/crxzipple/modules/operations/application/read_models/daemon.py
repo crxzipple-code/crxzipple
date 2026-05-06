@@ -751,7 +751,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="daemon",
             risk="controlled",
             method="POST",
-            endpoint="/daemon/services/{service_key}/ensure",
+            endpoint="/operations/daemon/services/{service_key}/ensure",
         ),
         RuntimeActionModel(
             id="healthcheck_service",
@@ -759,7 +759,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="daemon",
             risk="normal",
             method="POST",
-            endpoint="/daemon/services/{service_key}/healthcheck",
+            endpoint="/operations/daemon/services/{service_key}/healthcheck",
         ),
         RuntimeActionModel(
             id="reconcile_service",
@@ -767,7 +767,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="daemon",
             risk="controlled",
             method="POST",
-            endpoint="/daemon/services/{service_key}/reconcile",
+            endpoint="/operations/daemon/services/{service_key}/reconcile",
         ),
         RuntimeActionModel(
             id="stop_service",
@@ -775,7 +775,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="daemon",
             risk="dangerous",
             method="POST",
-            endpoint="/daemon/services/{service_key}/stop",
+            endpoint="/operations/daemon/services/{service_key}/stop",
             requires_confirmation=True,
             reason_required=True,
         ),

@@ -30,7 +30,6 @@ import { computed, nextTick, onUnmounted, ref, watch, type Component } from "vue
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { dataMode } from "@/shared/api/client";
-import { openEventStream, type EventConsoleRecord } from "@/shared/api/events";
 import { formatBytes, formatDuration, formatLocalTime, formatNumber } from "@/shared/i18n/formatters";
 import { useI18n } from "@/shared/i18n";
 import type {
@@ -54,10 +53,12 @@ import {
   listWorkbenchModels,
   listWorkbenchTools,
   loadWorkbenchData,
+  openEventStream,
   resolveWorkbenchApproval,
   uploadWorkbenchArtifact,
   type ApprovalDecision,
   type CreateTurnPayload,
+  type EventConsoleRecord,
   type WorkbenchAgentProfile,
   type WorkbenchArtifactUpload,
   type WorkbenchContentBlock,

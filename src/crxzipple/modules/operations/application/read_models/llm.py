@@ -39,7 +39,6 @@ _MAX_RECENT_LLM_EVENTS = 320
 _RECENT_LLM_TOPIC_LIMIT = 100
 _INVOCATION_OVERVIEW_LIMIT = 240
 _INVOCATION_PAGE_BASE_LIMIT = 240
-_INVOCATION_PAGE_MAX_LIMIT = 600
 _LLM_DIRECT_EVENT_TOPICS = (
     "events.named.llm.profile_registered",
     "events.named.llm.profile_updated",
@@ -584,13 +583,15 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             id="open_invocation",
             label="Open Invocation",
             owner="llm",
+            kind="navigation",
             method="GET",
-            endpoint="/llms/calls/{invocation_id}",
+            endpoint="/operations/llm/invocations/{invocation_id}/detail",
         ),
         RuntimeActionModel(
             id="open_trace",
             label="Open Trace",
             owner="events",
+            kind="navigation",
             method="GET",
             endpoint="/ui/trace/{trace_id}",
         ),
@@ -598,6 +599,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             id="open_access",
             label="Open Access",
             owner="access",
+            kind="navigation",
             method="GET",
             endpoint="/operations/access",
         ),
@@ -605,6 +607,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             id="view_limits",
             label="View Limits",
             owner="llm",
+            kind="navigation",
             method="GET",
             endpoint="/settings/llm-profiles",
         ),
@@ -612,6 +615,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             id="configure_pricing",
             label="Configure Pricing",
             owner="settings",
+            kind="navigation",
             risk="controlled",
             method="GET",
             endpoint="/settings/llm-profiles",
@@ -1776,10 +1780,7 @@ def _normalize_query(query: LlmOperationsQuery | None) -> LlmOperationsQuery:
 
 def _invocation_page_read_limit(query: LlmOperationsQuery) -> int:
     requested_window = query.offset + query.limit
-    return min(
-        max(requested_window, _INVOCATION_PAGE_BASE_LIMIT),
-        _INVOCATION_PAGE_MAX_LIMIT,
-    )
+    return max(requested_window, _INVOCATION_PAGE_BASE_LIMIT)
 
 
 def _paginate_invocations(

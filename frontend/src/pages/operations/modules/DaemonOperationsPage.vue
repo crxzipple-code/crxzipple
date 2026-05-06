@@ -564,15 +564,21 @@ async function runDaemonAction(action: UiRuntimeAction) {
   }
   const serviceKey = resolveActionServiceKey();
   if (!serviceKey) return;
-  if (action.requires_confirmation && !window.confirm(t("operations.daemon.action.confirm", {
-    action: actionLabel(action),
-    serviceKey,
-  }))) {
-    return;
+  const label = actionLabel(action);
+  let confirmation: string | null = null;
+  let riskAcknowledged = false;
+  if (action.requires_confirmation) {
+    confirmation = t("operations.daemon.action.confirm", {
+      action: label,
+      serviceKey,
+    });
+    const confirmed = window.confirm(confirmation);
+    if (!confirmed) return;
+    riskAcknowledged = confirmed;
   }
   const promptReason = action.reason_required
     ? window.prompt(t("operations.daemon.action.reasonPrompt", {
-      action: actionLabel(action),
+      action: label,
       serviceKey,
     }))?.trim()
     : null;
@@ -584,10 +590,23 @@ async function runDaemonAction(action: UiRuntimeAction) {
   actionNotice.value = null;
   loadError.value = null;
   try {
-    const result = await runDaemonServiceAction(serviceKey, actionKind, reason);
+    const result = await runDaemonServiceAction(
+      serviceKey,
+      actionKind,
+      reason,
+      confirmation
+        ? {
+          confirmation,
+          risk_acknowledged: riskAcknowledged,
+          metadata: {
+            confirmation_prompt: confirmation,
+          },
+        }
+        : {},
+    );
     selectedServiceKey.value = serviceKey;
     actionNotice.value = t("operations.daemon.action.notice", {
-      action: actionLabel(action),
+      action: label,
       serviceKey,
       count: result.length,
     });

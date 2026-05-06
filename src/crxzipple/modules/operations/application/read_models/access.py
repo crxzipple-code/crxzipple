@@ -423,7 +423,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="access",
             risk="normal",
             method="GET",
-            endpoint="/access/inventory",
+            endpoint="/operations/access/inventory",
         ),
         RuntimeActionModel(
             id="check_access",
@@ -431,7 +431,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="access",
             risk="normal",
             method="POST",
-            endpoint="/access/check",
+            endpoint="/operations/access/check",
         ),
         RuntimeActionModel(
             id="setup_access",
@@ -439,7 +439,7 @@ def _actions() -> tuple[RuntimeActionModel, ...]:
             owner="access",
             risk="controlled",
             method="GET",
-            endpoint="/access/setup?target={target}",
+            endpoint="/operations/access/setup?target={target}",
         ),
     )
 

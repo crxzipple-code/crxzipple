@@ -470,14 +470,35 @@ async function refreshPage() {
 async function advanceStuckSubscriptions(observerOnly = false) {
   if (typeof window === "undefined") return;
   const reason = window.prompt(t("operations.events.action.reasonPrompt"));
-  if (!reason?.trim()) return;
+  const normalizedReason = reason?.trim();
+  if (!normalizedReason) return;
+  const actionLabel = t(
+    observerOnly
+      ? "operations.events.action.advanceObservers"
+      : "operations.events.action.advanceSubscriptions",
+  );
+  const confirmation = t("operations.events.action.advanceConfirm", {
+    action: actionLabel,
+    reason: normalizedReason,
+  });
+  const confirmed = window.confirm(confirmation);
+  if (!confirmed) return;
   actionBusy.value = observerOnly ? "observers" : "subscriptions";
   actionNotice.value = null;
   loadError.value = null;
   try {
+    const actionPayload = {
+      status: "stuck",
+      reason: normalizedReason,
+      confirmation,
+      risk_acknowledged: confirmed,
+      metadata: {
+        confirmation_prompt: confirmation,
+      },
+    };
     const result = observerOnly
-      ? await advanceEventObserversToHead({ status: "stuck", reason })
-      : await advanceEventSubscriptionsToHead({ status: "stuck", reason });
+      ? await advanceEventObserversToHead(actionPayload)
+      : await advanceEventSubscriptionsToHead(actionPayload);
     actionNotice.value = t(
       observerOnly
         ? "operations.events.action.advanceObserversNotice"

@@ -500,8 +500,9 @@ def _actions(surface: str) -> tuple[RuntimeActionModel, ...]:
             id="list_skills",
             label="List Skills",
             owner="skills",
+            kind="navigation",
             method="GET",
-            endpoint=f"/skills?surface={surface}",
+            endpoint=f"/operations/skills?surface={surface}",
         ),
         RuntimeActionModel(
             id="validate_skill",
@@ -509,7 +510,7 @@ def _actions(surface: str) -> tuple[RuntimeActionModel, ...]:
             owner="skills",
             risk="controlled",
             method="POST",
-            endpoint="/skills/validate",
+            endpoint="/operations/skills/validate",
         ),
     )
 
@@ -522,7 +523,7 @@ def _import_actions() -> tuple[RuntimeActionModel, ...]:
             owner="skills",
             risk="controlled",
             method="POST",
-            endpoint="/skills/validate",
+            endpoint="/operations/skills/validate",
         ),
         RuntimeActionModel(
             id="install_global_skill",
@@ -531,7 +532,7 @@ def _import_actions() -> tuple[RuntimeActionModel, ...]:
             risk="controlled",
             requires_confirmation=True,
             method="POST",
-            endpoint="/skills/install",
+            endpoint="/operations/skills/install",
         ),
     )
 

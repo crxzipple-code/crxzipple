@@ -23,6 +23,153 @@ from crxzipple.shared import (
 from crxzipple.shared.domain.events import named_event_topic
 
 
+_OPERATION_DISPLAY_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("level", "Operational severity level for display.", "string"),
+    EventDefinitionField("summary", "Display-safe event summary.", "string"),
+    EventDefinitionField("display_label", "Short display label for operations views.", "string"),
+    EventDefinitionField("display_summary", "Human-readable operations summary.", "string"),
+    EventDefinitionField("display_tone", "Display tone such as info, success, warning, or danger.", "string"),
+    EventDefinitionField("entity_type", "Linked entity type for navigation or filtering.", "string"),
+    EventDefinitionField("entity_id", "Linked entity identifier for navigation or filtering.", "string"),
+)
+
+_RUN_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
+    "orchestration.run.accepted",
+    "orchestration.run.routed",
+    "orchestration.run.bulk_ready",
+    "orchestration.run.heartbeated",
+)
+
+_INGRESS_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
+    "orchestration.ingress.requested",
+    "orchestration.ingress.claimed",
+    "orchestration.ingress.completed",
+    "orchestration.ingress.failed",
+)
+
+_SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
+    "orchestration.scheduler.signal.requested",
+    "orchestration.scheduler.signal.claimed",
+    "orchestration.scheduler.signal.completed",
+    "orchestration.scheduler.signal.failed",
+)
+
+_EXECUTOR_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
+    "orchestration.executor.assignment.requested",
+    "orchestration.executor.lease.registered",
+    "orchestration.executor.lease.heartbeated",
+    "orchestration.executor.lease.assignment_claimed",
+    "orchestration.executor.lease.assignment_released",
+    "orchestration.executor.lease.offline",
+)
+
+_RUN_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("event_name", "Stable orchestration run event name.", "string", True),
+    EventDefinitionField("run_id", "Owning orchestration run identifier.", "string", True),
+    EventDefinitionField("status", "Current run status.", "string", True),
+    EventDefinitionField("stage", "Current orchestration stage.", "string", True),
+    EventDefinitionField("current_step", "Current step counter for the run.", "integer", True),
+    EventDefinitionField("source", "Ingress source that accepted the run.", "string"),
+    EventDefinitionField("agent_id", "Agent profile selected for the run.", "string"),
+    EventDefinitionField("session_key", "Resolved session key for the run.", "string"),
+    EventDefinitionField("active_session_id", "Active session instance identifier.", "string"),
+    EventDefinitionField("worker_id", "Worker currently claiming the run.", "string"),
+    EventDefinitionField("lane_key", "Scheduler lane key.", "string"),
+    EventDefinitionField("lane_lock_key", "Lane lock held by the worker.", "string"),
+    EventDefinitionField("priority", "Scheduler priority.", "integer"),
+    *_OPERATION_DISPLAY_FIELDS,
+)
+
+_INGRESS_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("event_name", "Stable orchestration ingress event name.", "string", True),
+    EventDefinitionField("request_id", "Ingress request identifier.", "string", True),
+    EventDefinitionField("run_id", "Owning orchestration run identifier.", "string"),
+    EventDefinitionField("kind", "Ingress request kind.", "string", True),
+    EventDefinitionField("status", "Ingress request status.", "string", True),
+    EventDefinitionField("worker_id", "Scheduler worker processing the request.", "string"),
+    EventDefinitionField("source", "External source or bound-turn source.", "string"),
+    EventDefinitionField("target_lane", "Requested scheduler lane or target session.", "string"),
+    EventDefinitionField("priority", "Scheduler priority.", "integer"),
+    EventDefinitionField("queue_policy", "Queue policy selected for the run.", "string"),
+    EventDefinitionField("requested_llm_id", "Requested LLM profile id or auto route.", "string"),
+    EventDefinitionField("code", "Failure code for failed ingress requests.", "string"),
+    EventDefinitionField("message", "Failure message for failed ingress requests.", "string"),
+    EventDefinitionField("details", "Failure details for failed ingress requests.", "object"),
+    *_OPERATION_DISPLAY_FIELDS,
+)
+
+_SCHEDULER_SIGNAL_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("event_name", "Stable orchestration scheduler signal event name.", "string", True),
+    EventDefinitionField("signal_id", "Scheduler signal identifier.", "string", True),
+    EventDefinitionField("signal_kind", "Scheduler signal kind.", "string", True),
+    EventDefinitionField("signal_payload", "Signal payload used by the scheduler.", "object"),
+    EventDefinitionField("status", "Scheduler signal status.", "string", True),
+    EventDefinitionField("worker_id", "Scheduler worker processing the signal.", "string"),
+    EventDefinitionField("code", "Failure code for failed scheduler signals.", "string"),
+    EventDefinitionField("message", "Failure message for failed scheduler signals.", "string"),
+    EventDefinitionField("details", "Failure details for failed scheduler signals.", "object"),
+    *_OPERATION_DISPLAY_FIELDS,
+)
+
+_EXECUTOR_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("event_name", "Stable orchestration executor event name.", "string", True),
+    EventDefinitionField("run_id", "Assigned orchestration run identifier.", "string"),
+    EventDefinitionField("worker_id", "Executor worker identifier.", "string", True),
+    EventDefinitionField("status", "Executor lease status.", "string"),
+    EventDefinitionField("lane_key", "Scheduler lane key for the requested assignment.", "string"),
+    EventDefinitionField("max_inflight_assignments", "Configured executor assignment capacity.", "integer"),
+    EventDefinitionField("inflight_assignment_count", "Current claimed assignment count.", "integer"),
+    EventDefinitionField("available_assignment_slots", "Available assignment slots after the event.", "integer"),
+    EventDefinitionField("active_run_ids", "Run ids currently reported as active by the executor.", "array"),
+    EventDefinitionField("last_heartbeat_at", "Most recent executor heartbeat timestamp.", "string"),
+    EventDefinitionField("lease_expires_at", "Executor lease expiration timestamp.", "string"),
+    *_OPERATION_DISPLAY_FIELDS,
+)
+
+_ORCHESTRATION_OPERATIONAL_EVENT_DESCRIPTIONS: dict[str, str] = {
+    "orchestration.run.accepted": "Run intake accepted an orchestration run.",
+    "orchestration.run.routed": "Run routing selected agent, lane, and priority metadata.",
+    "orchestration.run.bulk_ready": "Run was bound to durable session state and is ready to queue.",
+    "orchestration.run.heartbeated": "Executor heartbeat refreshed a running orchestration run.",
+    "orchestration.ingress.requested": "Scheduler ingress request was queued for run preparation.",
+    "orchestration.ingress.claimed": "Scheduler worker claimed an ingress request.",
+    "orchestration.ingress.completed": "Scheduler ingress request completed successfully.",
+    "orchestration.ingress.failed": "Scheduler ingress request failed.",
+    "orchestration.scheduler.signal.requested": "Scheduler signal was queued.",
+    "orchestration.scheduler.signal.claimed": "Scheduler worker claimed a signal.",
+    "orchestration.scheduler.signal.completed": "Scheduler signal completed successfully.",
+    "orchestration.scheduler.signal.failed": "Scheduler signal failed.",
+    "orchestration.executor.assignment.requested": "Scheduler requested executor processing for a run.",
+    "orchestration.executor.lease.registered": "Executor registered or refreshed its capacity lease.",
+    "orchestration.executor.lease.heartbeated": "Executor lease heartbeat refreshed capacity and activity.",
+    "orchestration.executor.lease.assignment_claimed": "Executor lease claimed assignment capacity.",
+    "orchestration.executor.lease.assignment_released": "Executor lease released assignment capacity.",
+    "orchestration.executor.lease.offline": "Executor lease was marked offline.",
+}
+
+
+def _direct_operational_definition(
+    *,
+    event_name: str,
+    producers: tuple[str, ...],
+    fields: tuple[EventDefinitionField, ...],
+    notes: tuple[str, ...] = (),
+) -> EventDefinition:
+    return EventDefinition(
+        definition_id=event_name,
+        owner="orchestration",
+        event_name=event_name,
+        description=_ORCHESTRATION_OPERATIONAL_EVENT_DESCRIPTIONS[event_name],
+        topics=(named_event_topic(event_name),),
+        producers=producers,
+        consumers=("operations observer", "trace read model", "diagnostics"),
+        fields=fields,
+        durability="persistent",
+        publication_mode="direct",
+        notes=notes,
+    )
+
+
 def orchestration_event_topic_contracts() -> tuple[EventTopicContract, ...]:
     return (
         EventTopicContract(
@@ -122,6 +269,51 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
         )
         for event_name in RUN_OBSERVATION_EVENT_NAMES
     ]
+    definitions.extend(
+        _direct_operational_definition(
+            event_name=event_name,
+            producers=("OrchestrationRun", "OrchestrationExecutorService"),
+            fields=_RUN_OPERATIONAL_FIELDS,
+            notes=(
+                "These are orchestration-owned source facts consumed directly by Operations.",
+                "Session-scoped run observation remains the reduced consumer surface for channel runtimes.",
+            ),
+        )
+        for event_name in _RUN_OPERATIONAL_EVENT_NAMES
+    )
+    definitions.extend(
+        _direct_operational_definition(
+            event_name=event_name,
+            producers=("OrchestrationIngressRequest", "RunIngressCoordinator"),
+            fields=_INGRESS_OPERATIONAL_FIELDS,
+            notes=(
+                "Ingress facts describe scheduler intake and preparation state.",
+            ),
+        )
+        for event_name in _INGRESS_OPERATIONAL_EVENT_NAMES
+    )
+    definitions.extend(
+        _direct_operational_definition(
+            event_name=event_name,
+            producers=("OrchestrationSchedulerSignal", "RunSchedulerSignalCoordinator"),
+            fields=_SCHEDULER_SIGNAL_OPERATIONAL_FIELDS,
+            notes=(
+                "Scheduler signal facts wake and coordinate orchestration-owned run work.",
+            ),
+        )
+        for event_name in _SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES
+    )
+    definitions.extend(
+        _direct_operational_definition(
+            event_name=event_name,
+            producers=("OrchestrationSchedulerService", "OrchestrationExecutorLease"),
+            fields=_EXECUTOR_OPERATIONAL_FIELDS,
+            notes=(
+                "Executor assignment and lease facts describe capacity, not tool or LLM ownership.",
+            ),
+        )
+        for event_name in _EXECUTOR_OPERATIONAL_EVENT_NAMES
+    )
     definitions.append(
         EventDefinition(
             definition_id=ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
@@ -336,6 +528,33 @@ def orchestration_event_surfaces() -> tuple[EventSurface, ...]:
             notes=(
                 "This surface intentionally stays separate from run lifecycle observation.",
                 "It is derived from current orchestration shared state when runtime source events arrive.",
+            ),
+        ),
+        EventSurface(
+            surface_id="orchestration.operational",
+            owner="orchestration",
+            description=(
+                "Direct orchestration-owned operational facts for scheduler "
+                "intake, signals, executor assignment, and executor lease state."
+            ),
+            definition_ids=(
+                *_RUN_OPERATIONAL_EVENT_NAMES,
+                *_INGRESS_OPERATIONAL_EVENT_NAMES,
+                *_SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES,
+                *_EXECUTOR_OPERATIONAL_EVENT_NAMES,
+            ),
+            topics=tuple(
+                named_event_topic(event_name)
+                for event_name in (
+                    *_RUN_OPERATIONAL_EVENT_NAMES,
+                    *_INGRESS_OPERATIONAL_EVENT_NAMES,
+                    *_SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES,
+                    *_EXECUTOR_OPERATIONAL_EVENT_NAMES,
+                )
+            ),
+            consumers=("operations observer", "trace read model", "diagnostics"),
+            notes=(
+                "This surface describes source operational facts, not the reduced session observation contract.",
             ),
         ),
     )

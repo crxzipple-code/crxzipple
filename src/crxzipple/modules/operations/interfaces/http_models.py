@@ -64,6 +64,7 @@ class RuntimeActionResponse(BaseModel):
     id: str
     label: str
     owner: str = "runtime"
+    kind: str = "operation"
     risk: str = "normal"
     allowed: bool = True
     disabled_reason: str | None = None
@@ -78,6 +79,7 @@ class RuntimeActionResponse(BaseModel):
             id=value.id,
             label=value.label,
             owner=getattr(value, "owner", "runtime"),
+            kind=getattr(value, "kind", "operation"),
             risk=value.risk,
             allowed=getattr(value, "allowed", True),
             disabled_reason=getattr(value, "disabled_reason", None),

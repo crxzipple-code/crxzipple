@@ -131,6 +131,10 @@ from crxzipple.modules.operations.application.observation import (
     OperationsEventObserver,
     observed_event_from_record,
 )
+from crxzipple.modules.operations.application.event_contracts import (
+    operations_event_definitions,
+    operations_event_surfaces,
+)
 from crxzipple.modules.operations.application.runtime import (
     OperationsObserverRuntimeService,
     operations_observer_event_names,
@@ -1738,6 +1742,8 @@ def _build_event_definition_registry() -> EventDefinitionRegistry:
     registry.register_observers(dispatch_event_observers())
     registry.register_many(channel_event_definitions())
     registry.register_surfaces(channel_event_surfaces())
+    registry.register_many(operations_event_definitions())
+    registry.register_surfaces(operations_event_surfaces())
     registry.register_many(orchestration_event_definitions())
     registry.register_surfaces(orchestration_event_surfaces())
     registry.register_observers(orchestration_event_observers())

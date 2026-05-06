@@ -381,6 +381,62 @@ class OperationsObservationTestCase(unittest.TestCase):
             ),
         )
 
+    def test_materializer_stores_paginated_tables_outside_page_projection(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_PaginatedOperationsSourceProvider(total=75),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_modules(("tool", "llm"))
+
+        self.assertEqual(materialized, 2)
+        tool_page = store.get_projection(module="tool", kind="page")
+        tool_table = store.get_projection(
+            module="tool",
+            kind="table",
+            query_key="tool_runs",
+        )
+        tool_detail = store.get_projection(
+            module="tool",
+            kind="tool_run_detail",
+            query_key="tool-run-74",
+        )
+        self.assertIsNotNone(tool_page)
+        self.assertIsNotNone(tool_table)
+        self.assertIsNotNone(tool_detail)
+        assert tool_page is not None
+        assert tool_table is not None
+        assert tool_detail is not None
+        self.assertEqual(len(tool_page.payload["tool_runs"]["rows"]), 50)
+        self.assertEqual(len(tool_table.payload["rows"]), 75)
+        self.assertEqual(tool_table.payload["total"], 75)
+        self.assertEqual(tool_detail.payload["input_payload"], {"index": 74})
+
+        llm_page = store.get_projection(module="llm", kind="page")
+        llm_table = store.get_projection(
+            module="llm",
+            kind="table",
+            query_key="recent_invocations",
+        )
+        llm_detail = store.get_projection(
+            module="llm",
+            kind="llm_invocation_detail",
+            query_key="llm-invocation-74",
+        )
+        self.assertIsNotNone(llm_page)
+        self.assertIsNotNone(llm_table)
+        self.assertIsNotNone(llm_detail)
+        assert llm_page is not None
+        assert llm_table is not None
+        assert llm_detail is not None
+        self.assertEqual(len(llm_page.payload["recent_invocations"]["rows"]), 50)
+        self.assertEqual(len(llm_table.payload["rows"]), 75)
+        self.assertEqual(llm_table.payload["total"], 75)
+        self.assertEqual(llm_detail.payload["request_payload"], {"index": 74})
+
     def test_materializer_clears_stale_details_when_current_page_has_none(self) -> None:
         store = self._projection_store()
         store.record_projection(
@@ -669,6 +725,71 @@ class _EmptyDetailOperationsSourceProvider(_FakeOperationsSourceProvider):
             "title": "LLM Runtime",
             "invocation_details": [],
         }
+
+
+class _PaginatedOperationsSourceProvider(_FakeOperationsSourceProvider):
+    def __init__(self, *, total: int) -> None:
+        self.total = total
+
+    def tool_page(self, query: object | None = None) -> dict[str, object]:
+        offset = _query_int(query, "offset", 0)
+        limit = _query_int(query, "limit", 50)
+        indexes = range(offset, min(offset + limit, self.total))
+        return {
+            "module": "tool",
+            "title": "Tool Runtime",
+            "tool_runs": {
+                "id": "tool_runs",
+                "title": "Tool Runs",
+                "columns": [],
+                "rows": [
+                    {"id": f"tool-run-{index}", "cells": {"index": str(index)}}
+                    for index in indexes
+                ],
+                "total": self.total,
+            },
+            "tool_run_details": [
+                {
+                    "run_id": f"tool-run-{index}",
+                    "input_payload": {"index": index},
+                }
+                for index in indexes
+            ],
+        }
+
+    def llm_page(self, query: object | None = None) -> dict[str, object]:
+        offset = _query_int(query, "offset", 0)
+        limit = _query_int(query, "limit", 50)
+        indexes = range(offset, min(offset + limit, self.total))
+        return {
+            "module": "llm",
+            "title": "LLM Runtime",
+            "recent_invocations": {
+                "id": "recent_invocations",
+                "title": "Recent Invocations",
+                "columns": [],
+                "rows": [
+                    {
+                        "id": f"llm-invocation-{index}",
+                        "cells": {"index": str(index)},
+                    }
+                    for index in indexes
+                ],
+                "total": self.total,
+            },
+            "invocation_details": [
+                {
+                    "invocation_id": f"llm-invocation-{index}",
+                    "request_payload": {"index": index},
+                }
+                for index in indexes
+            ],
+        }
+
+
+def _query_int(query: object | None, name: str, default: int) -> int:
+    value = getattr(query, name, default)
+    return value if isinstance(value, int) else default
 
 
 if __name__ == "__main__":

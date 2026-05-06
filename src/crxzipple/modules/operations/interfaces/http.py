@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
+import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -13,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from crxzipple.bootstrap import AppContainer
 from crxzipple.interfaces.authorization import authorize_tool_run
 from crxzipple.interfaces.http.dependencies import get_container
+from crxzipple.modules.events import EventTopicRecord, EventTopicWatch
 from crxzipple.modules.operations.interfaces.http_models import (
     AccessOperationsResponse,
     OperationsChannelRuntimePruneRequest,
@@ -93,6 +97,8 @@ _TOOL_ACTIVE_STATUSES = frozenset(
 )
 _TOOL_WAITING_STATUSES = _TOOL_ACTIVE_STATUSES - {"running"}
 _TOOL_LONG_RUNNING_SECONDS = 300
+_OPERATIONS_STREAM_TOPIC = "events.named.operations.projection.invalidated"
+_OPERATIONS_STREAM_DISCOVERY_INTERVAL_SECONDS = 0.25
 
 
 def _operations_action_service(container: AppContainer) -> OperationsActionService:
@@ -120,6 +126,93 @@ def get_operations_runtime_status(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> OperationsRuntimeStatusResponse:
     return _runtime_status(container)
+
+
+@router.get("/stream")
+def stream_operations_refresh_feed(
+    container: Annotated[AppContainer, Depends(get_container)],
+    snapshot_limit: Annotated[int, Query(ge=0, le=50)] = 0,
+    timeout_seconds: Annotated[float, Query(gt=0.0, le=300.0)] = 120.0,
+) -> StreamingResponse:
+    events_service = container.events_service
+    if events_service is None:
+        raise HTTPException(status_code=503, detail="Event service is not available.")
+
+    def event_stream():
+        cursor = events_service.snapshot_event_topic(_OPERATIONS_STREAM_TOPIC)
+        yield _format_operations_sse_event(
+            "connected",
+            {
+                "event_type": "connected",
+                "modules": [],
+                "stream_role": "operations",
+                "stream_scope": "projection_refresh",
+            },
+        )
+        if snapshot_limit > 0:
+            records = events_service.read_recent_event_topic(
+                _OPERATIONS_STREAM_TOPIC,
+                limit=snapshot_limit,
+            )
+            yield _format_operations_sse_event(
+                "snapshot",
+                {
+                    "event_type": "snapshot",
+                    "modules": [],
+                    "records": [
+                        _operations_stream_record_payload(record)
+                        for record in records
+                    ],
+                },
+            )
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            records = events_service.read_event_topic(
+                _OPERATIONS_STREAM_TOPIC,
+                after_cursor=cursor,
+                limit=100,
+            )
+            if records:
+                cursor = records[-1].cursor
+                for record in records:
+                    yield _format_operations_sse_event(
+                        "projection_updated",
+                        _operations_stream_record_payload(record),
+                    )
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            events_service.wait_for_event_topics(
+                (
+                    EventTopicWatch(
+                        topic=_OPERATIONS_STREAM_TOPIC,
+                        after_cursor=cursor,
+                    ),
+                ),
+                timeout_seconds=min(
+                    remaining,
+                    _OPERATIONS_STREAM_DISCOVERY_INTERVAL_SECONDS,
+                ),
+            )
+        yield _format_operations_sse_event(
+            "timeout",
+            {
+                "event_type": "timeout",
+                "modules": [],
+            },
+        )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Crx-Stream-Role": "operations",
+            "X-Crx-Stream-Scope": "projection_refresh",
+        },
+    )
 
 
 @router.get("/orchestration", response_model=OrchestrationOperationsResponse)
@@ -938,6 +1031,12 @@ def _projection_response(
 ) -> Any:
     payload = _projection_payload(container, module=module, kind=kind)
     if table is not None and filters is not None:
+        _replace_table_from_projection(
+            container,
+            payload,
+            module=module,
+            table=table,
+        )
         _apply_table_projection_filters(payload, table=table, filters=filters)
         _apply_related_projection_filters(
             payload,
@@ -947,6 +1046,25 @@ def _projection_response(
         )
     _strip_deferred_detail_payloads(payload, module=module, kind=kind)
     return response_cls(**payload)
+
+
+def _replace_table_from_projection(
+    container: AppContainer,
+    payload: dict[str, Any],
+    *,
+    module: str,
+    table: str,
+) -> None:
+    projection = container.operations_projection_store.get_projection(
+        module=module.strip().lower(),
+        kind="table",
+        query_key=table,
+    )
+    if projection is None:
+        return
+    table_payload = deepcopy(projection.payload)
+    if isinstance(table_payload, dict):
+        payload[table] = table_payload
 
 
 def _projection_payload(
@@ -1182,6 +1300,54 @@ def _runtime_status(container: AppContainer) -> OperationsRuntimeStatusResponse:
         updated_at=datetime.now(timezone.utc).isoformat(),
         checks=[database, events, migration],
     )
+
+
+def _operations_stream_record_payload(record: EventTopicRecord) -> dict[str, Any]:
+    payload = dict(record.envelope.payload)
+    modules = _operations_stream_modules(payload)
+    return {
+        "event_type": "projection_updated",
+        "event_id": record.envelope.id,
+        "module": modules[0] if len(modules) == 1 else None,
+        "modules": modules,
+        "kinds": _operations_stream_kinds(payload),
+        "query_key": str(payload.get("query_key") or "default"),
+        "updated_at": str(
+            payload.get("updated_at")
+            or format_datetime_utc(record.envelope.occurred_at),
+        ),
+    }
+
+
+def _operations_stream_modules(payload: dict[str, Any]) -> list[str]:
+    candidates = [
+        payload.get("module"),
+        payload.get("module_id"),
+        *(payload.get("modules") if isinstance(payload.get("modules"), list) else []),
+    ]
+    modules = []
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        module = candidate.strip().lower()
+        if module in _PROJECTED_MODULES and module not in modules:
+            modules.append(module)
+    return modules
+
+
+def _operations_stream_kinds(payload: dict[str, Any]) -> list[str]:
+    raw_kinds = payload.get("kinds")
+    if not isinstance(raw_kinds, list):
+        raw_kinds = [payload.get("kind")]
+    return [
+        kind
+        for item in raw_kinds
+        if isinstance(item, str) and (kind := item.strip().lower())
+    ]
+
+
+def _format_operations_sse_event(event_name: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.post(

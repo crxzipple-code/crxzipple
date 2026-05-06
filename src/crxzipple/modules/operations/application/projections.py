@@ -8,6 +8,9 @@ import logging
 from typing import Any, Protocol
 
 from crxzipple.modules.events import EventsApplicationService
+from crxzipple.modules.operations.application.event_contracts import (
+    OPERATIONS_PROJECTION_INVALIDATED_EVENT,
+)
 from crxzipple.modules.operations.application.read_models import (
     AccessOperationsQuery,
     ChannelsOperationsQuery,
@@ -23,6 +26,7 @@ from crxzipple.shared.domain.events import Event
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 logger = logging.getLogger(__name__)
+_TABLE_PROJECTION_LIMIT = 200
 
 OPERATIONS_PROJECTION_MODULES: tuple[str, ...] = (
     "orchestration",
@@ -52,9 +56,6 @@ _EVENT_MODULE_TO_PROJECTION_MODULES: dict[str, tuple[str, ...]] = {
     "daemon": ("daemon", "events"),
     "process": ("daemon", "events"),
 }
-
-OPERATIONS_PROJECTION_INVALIDATED_EVENT = "operations.projection.invalidated"
-
 
 class OperationsProjectionWritePort(Protocol):
     def record_projection(
@@ -122,6 +123,11 @@ class OperationsProjectionMaterializer:
         overview_payload = _json_ready(overview) if overview is not None else {}
         detail_kind = _module_detail_kind(module)
         detail_projections = _extract_detail_projections(module, page_payload)
+        table_projections, table_detail_projections = _module_table_projections(
+            self._source_provider,
+            module,
+        )
+        detail_projections = (*detail_projections, *table_detail_projections)
         page_payload["projection"] = {
             "source": "operations-observer",
             "materialized_at": format_datetime_utc(now),
@@ -133,12 +139,22 @@ class OperationsProjectionMaterializer:
             }
         if detail_kind is not None:
             self._projection_store.clear(module=module, kind=detail_kind)
+        if table_projections:
+            self._projection_store.clear(module=module, kind="table")
         for projection_kind, query_key, detail_payload in detail_projections:
             self._projection_store.record_projection(
                 module=module,
                 kind=projection_kind,
                 query_key=query_key,
                 payload=detail_payload,
+                updated_at=now,
+            )
+        for query_key, table_payload in table_projections:
+            self._projection_store.record_projection(
+                module=module,
+                kind="table",
+                query_key=query_key,
+                payload=table_payload,
                 updated_at=now,
             )
         self._projection_store.record_projection(
@@ -154,9 +170,24 @@ class OperationsProjectionMaterializer:
                 payload=overview_payload,
                 updated_at=now,
             )
-        self._publish_invalidation(module=module, updated_at=now)
+        self._publish_invalidation(
+            module=module,
+            updated_at=now,
+            kinds=(
+                "page",
+                "overview",
+                *(("table",) if table_projections else ()),
+                *((detail_kind,) if detail_kind is not None else ()),
+            ),
+        )
 
-    def _publish_invalidation(self, *, module: str, updated_at: datetime) -> None:
+    def _publish_invalidation(
+        self,
+        *,
+        module: str,
+        updated_at: datetime,
+        kinds: tuple[str, ...],
+    ) -> None:
         if self._events_service is None:
             return
         try:
@@ -165,7 +196,7 @@ class OperationsProjectionMaterializer:
                     name=OPERATIONS_PROJECTION_INVALIDATED_EVENT,
                     payload={
                         "module": module,
-                        "kinds": ["page", "overview"],
+                        "kinds": list(dict.fromkeys(kinds)),
                         "query_key": "default",
                         "source": "operations-observer",
                         "updated_at": format_datetime_utc(updated_at),
@@ -184,9 +215,9 @@ def _module_page(provider: OperationsReadModelProvider, module: str) -> Any:
     if module == "orchestration":
         return provider.orchestration_page()
     if module == "tool":
-        return provider.tool_page(ToolOperationsQuery(limit=1000))
+        return provider.tool_page(ToolOperationsQuery(limit=50))
     if module == "llm":
-        return provider.llm_page(LlmOperationsQuery(limit=1000))
+        return provider.llm_page(LlmOperationsQuery(limit=50))
     if module == "access":
         return provider.access_page(AccessOperationsQuery(limit=1000))
     if module == "channels":
@@ -200,6 +231,90 @@ def _module_page(provider: OperationsReadModelProvider, module: str) -> Any:
     if module == "daemon":
         return provider.daemon_page(DaemonOperationsQuery(limit=1000))
     raise KeyError(module)
+
+
+def _module_table_projections(
+    provider: OperationsReadModelProvider,
+    module: str,
+) -> tuple[
+    tuple[tuple[str, dict[str, Any]], ...],
+    tuple[tuple[str, str, dict[str, Any]], ...],
+]:
+    if module == "tool":
+        return _collect_paginated_table_projection(
+            page_loader=lambda offset, limit: _json_ready(
+                provider.tool_page(ToolOperationsQuery(limit=limit, offset=offset)),
+            ),
+            table_key="tool_runs",
+            detail_payload_key="tool_run_details",
+            detail_id_key="run_id",
+            detail_kind="tool_run_detail",
+        )
+    if module == "llm":
+        return _collect_paginated_table_projection(
+            page_loader=lambda offset, limit: _json_ready(
+                provider.llm_page(LlmOperationsQuery(limit=limit, offset=offset)),
+            ),
+            table_key="recent_invocations",
+            detail_payload_key="invocation_details",
+            detail_id_key="invocation_id",
+            detail_kind="llm_invocation_detail",
+        )
+    return (), ()
+
+
+def _collect_paginated_table_projection(
+    *,
+    page_loader,
+    table_key: str,
+    detail_payload_key: str,
+    detail_id_key: str,
+    detail_kind: str,
+) -> tuple[
+    tuple[tuple[str, dict[str, Any]], ...],
+    tuple[tuple[str, str, dict[str, Any]], ...],
+]:
+    rows: list[dict[str, Any]] = []
+    total = 0
+    section_payload: dict[str, Any] | None = None
+    detail_by_key: dict[str, dict[str, Any]] = {}
+    offset = 0
+    while True:
+        page_payload = page_loader(offset, _TABLE_PROJECTION_LIMIT)
+        if not isinstance(page_payload, dict):
+            break
+        section = page_payload.get(table_key)
+        if not isinstance(section, dict):
+            break
+        if section_payload is None:
+            section_payload = dict(section)
+        page_rows = [
+            row
+            for row in section.get("rows", ())
+            if isinstance(row, dict)
+        ]
+        total = max(_int_value(section.get("total")), len(rows) + len(page_rows))
+        rows.extend(dict(row) for row in page_rows)
+        for projection_kind, query_key, detail_payload in _extract_list_detail_projections(
+            page_payload=page_payload,
+            payload_key=detail_payload_key,
+            id_key=detail_id_key,
+            detail_kind=detail_kind,
+        ):
+            if projection_kind == detail_kind:
+                detail_by_key[query_key] = detail_payload
+        offset += _TABLE_PROJECTION_LIMIT
+        if len(rows) >= total or len(page_rows) < _TABLE_PROJECTION_LIMIT:
+            break
+    details = tuple(
+        (detail_kind, key, payload)
+        for key, payload in detail_by_key.items()
+    )
+    if section_payload is None:
+        return (), details
+    section_payload["rows"] = rows
+    section_payload["total"] = total
+    return ((table_key, section_payload),), details
 
 
 def _extract_detail_projections(
@@ -251,6 +366,17 @@ def _extract_list_detail_projections(
             continue
         projections.append((detail_kind, query_key, dict(item)))
     return tuple(projections)
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
 
 
 def _normalize_modules(modules: Iterable[str]) -> tuple[str, ...]:

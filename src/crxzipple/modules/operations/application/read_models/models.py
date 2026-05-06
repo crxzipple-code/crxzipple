@@ -17,6 +17,7 @@ class RuntimeActionModel:
     id: str
     label: str
     owner: str = "operations"
+    kind: str = "operation"
     risk: str = "normal"
     allowed: bool = True
     disabled_reason: str | None = None

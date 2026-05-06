@@ -67,6 +67,7 @@ class CliModuleTestCase(unittest.TestCase):
             "APP_AUTHORIZATION_ENABLED": "false",
             "APP_BROWSER_STATE_DIR": str(Path(self.harness._tempdir.name) / "browser"),
             "APP_DAEMON_STATE_DIR": str(Path(self.harness._tempdir.name) / "daemon"),
+            "APP_EVENTS_BACKEND": "file",
             "APP_EVENTS_STATE_DIR": str(Path(self.harness._tempdir.name) / "events"),
             "APP_OPERATIONS_STATE_DIR": str(
                 Path(self.harness._tempdir.name) / "operations",

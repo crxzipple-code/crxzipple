@@ -483,12 +483,25 @@ async function refreshPage() {
 async function pruneStaleRuntimes() {
   if (typeof window === "undefined") return;
   const reason = window.prompt(t("operations.channels.action.reasonPrompt"));
-  if (!reason?.trim()) return;
+  const normalizedReason = reason?.trim();
+  if (!normalizedReason) return;
+  const confirmation = t("operations.channels.action.pruneStaleRuntimesConfirm", {
+    reason: normalizedReason,
+  });
+  const confirmed = window.confirm(confirmation);
+  if (!confirmed) return;
   actionBusy.value = "prune";
   actionNotice.value = null;
   loadError.value = null;
   try {
-    const result = await pruneStaleChannelRuntimes({ reason });
+    const result = await pruneStaleChannelRuntimes({
+      reason: normalizedReason,
+      confirmation,
+      risk_acknowledged: confirmed,
+      metadata: {
+        confirmation_prompt: confirmation,
+      },
+    });
     actionNotice.value = t("operations.channels.action.pruneStaleRuntimesNotice", {
       count: result.pruned_count,
       matched: result.matched_count,
@@ -507,7 +520,9 @@ async function replaySelectedDeadLetter() {
   const target = selectedDeadLetterReplayTarget.value;
   if (!target) return;
   const replayId = target.eventId ?? target.cursor ?? "-";
-  if (!window.confirm(t("operations.channels.action.replayDeadLetterConfirm", { id: replayId }))) {
+  const confirmation = t("operations.channels.action.replayDeadLetterConfirm", { id: replayId });
+  const confirmed = window.confirm(confirmation);
+  if (!confirmed) {
     return;
   }
   actionBusy.value = "replay";
@@ -518,6 +533,11 @@ async function replaySelectedDeadLetter() {
       runtime_id: target.runtimeId,
       cursor: target.cursor,
       event_id: target.eventId,
+      confirmation,
+      risk_acknowledged: confirmed,
+      metadata: {
+        confirmation_prompt: confirmation,
+      },
     });
     actionNotice.value = t("operations.channels.action.replayDeadLetterNotice", {
       outboundId: result.outbound_id,

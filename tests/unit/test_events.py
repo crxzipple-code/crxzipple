@@ -346,11 +346,14 @@ class EventsModuleTestCase(unittest.TestCase):
             "tool.worker.capabilities_updated",
             "tool.worker.stale",
             "tool.worker.pruned",
+            "tool.enabled",
+            "tool.disabled",
             "llm.invocation_started",
             "llm.invocation_succeeded",
             "llm.invocation_failed",
             "llm.profile_registered",
             "llm.profile_updated",
+            "llm.stream_delta_observed",
         )
 
         self.assertEqual(TOOL_LLM_EVENT_NAMES, expected_event_names)
@@ -378,6 +381,10 @@ class EventsModuleTestCase(unittest.TestCase):
                 elif event_name.startswith("tool.worker."):
                     self.assertEqual(definition.owner, "tool")
                     self.assertIn("worker_id", field_paths)
+                elif event_name in {"tool.enabled", "tool.disabled"}:
+                    self.assertEqual(definition.owner, "tool")
+                    self.assertIn("tool_id", field_paths)
+                    self.assertIn("tool_name", field_paths)
                 elif event_name.startswith("llm.invocation_"):
                     self.assertEqual(definition.owner, "llm")
                     self.assertIn("invocation_id", field_paths)
@@ -385,6 +392,59 @@ class EventsModuleTestCase(unittest.TestCase):
                 elif event_name.startswith("llm.profile_"):
                     self.assertEqual(definition.owner, "llm")
                     self.assertIn("llm_id", field_paths)
+                elif event_name == "llm.stream_delta_observed":
+                    self.assertEqual(definition.owner, "llm")
+                    self.assertIn("invocation_id", field_paths)
+                    self.assertIn("text_delta_length", field_paths)
+
+    def test_event_definition_registry_covers_operations_observer_subscriptions(self) -> None:
+        from crxzipple.bootstrap.container import _build_event_definition_registry
+        from crxzipple.modules.operations.application.event_contracts import (
+            OPERATIONS_PROJECTION_INVALIDATED_EVENT,
+        )
+        from crxzipple.modules.operations.application.runtime import (
+            operations_observer_event_names,
+        )
+
+        registry = _build_event_definition_registry()
+        defined = {definition.event_name for definition in registry.list_definitions()}
+        subscribed = set(operations_observer_event_names(registry))
+
+        self.assertEqual(sorted(subscribed - defined), [])
+        projection_definition = registry.get_by_event_name(
+            OPERATIONS_PROJECTION_INVALIDATED_EVENT,
+        )
+        self.assertIsNotNone(projection_definition)
+        assert projection_definition is not None
+        self.assertEqual(projection_definition.owner, "operations")
+        self.assertEqual(projection_definition.stability, "stable")
+        self.assertEqual(projection_definition.publication_mode, "direct")
+
+        display_fields = {
+            "level",
+            "summary",
+            "display_label",
+            "display_summary",
+            "entity_type",
+            "entity_id",
+        }
+        operational_event_names = (
+            OPERATIONS_PROJECTION_INVALIDATED_EVENT,
+            "tool.enabled",
+            "tool.disabled",
+            "llm.stream_delta_observed",
+            "orchestration.ingress.requested",
+            "orchestration.scheduler.signal.requested",
+            "orchestration.executor.assignment.requested",
+            "orchestration.executor.lease.heartbeated",
+        )
+        for event_name in operational_event_names:
+            with self.subTest(event_name=event_name):
+                definition = registry.get_by_event_name(event_name)
+                self.assertIsNotNone(definition)
+                assert definition is not None
+                field_paths = {field.field_path for field in definition.fields}
+                self.assertTrue(display_fields.issubset(field_paths))
 
     def test_event_contract_registry_describes_topics_and_routes(self) -> None:
         registry = EventContractRegistry(
