@@ -15,13 +15,9 @@ from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     OperationsObservationSnapshot,
 )
-from crxzipple.modules.operations.application.orchestration_observation import (
-    OperationsOrchestrationObservation,
-    record_orchestration_observed_event,
-)
 from crxzipple.shared.time import coerce_utc_datetime
 
-_OBSERVATION_VERSION = 3
+_OBSERVATION_VERSION = 4
 _RECENT_EVENTS_PER_MODULE = 80
 
 
@@ -77,7 +73,6 @@ class FileBackedOperationsObservationStore:
                     version=_OBSERVATION_VERSION,
                     updated_at=None,
                     modules=(),
-                    orchestration=None,
                     observer_heartbeats=(),
                 ),
             )
@@ -92,14 +87,6 @@ class FileBackedOperationsObservationStore:
         for item in self.snapshot().modules:
             if item.module == normalized:
                 return item
-        return None
-
-    def get_orchestration_observation(
-        self,
-    ) -> OperationsOrchestrationObservation | None:
-        observation = self.snapshot().orchestration
-        if isinstance(observation, OperationsOrchestrationObservation):
-            return observation
         return None
 
     def snapshot(self) -> OperationsObservationSnapshot:
@@ -121,7 +108,6 @@ class FileBackedOperationsObservationStore:
                 version=_OBSERVATION_VERSION,
                 updated_at=None,
                 modules=(),
-                orchestration=None,
                 observer_heartbeats=(),
             )
         try:
@@ -131,7 +117,6 @@ class FileBackedOperationsObservationStore:
                 version=_OBSERVATION_VERSION,
                 updated_at=None,
                 modules=(),
-                orchestration=None,
                 observer_heartbeats=(),
             )
         if not isinstance(payload, dict):
@@ -139,7 +124,6 @@ class FileBackedOperationsObservationStore:
                 version=_OBSERVATION_VERSION,
                 updated_at=None,
                 modules=(),
-                orchestration=None,
                 observer_heartbeats=(),
             )
         modules = tuple(
@@ -148,12 +132,6 @@ class FileBackedOperationsObservationStore:
             if isinstance(item, dict)
             for module in (OperationsModuleObservation.from_payload(item),)
             if module is not None
-        )
-        raw_orchestration = payload.get("orchestration")
-        orchestration = (
-            OperationsOrchestrationObservation.from_payload(raw_orchestration)
-            if isinstance(raw_orchestration, dict)
-            else None
         )
         observer_heartbeats = tuple(
             heartbeat
@@ -166,7 +144,6 @@ class FileBackedOperationsObservationStore:
             version=max(_int(payload.get("version")), _OBSERVATION_VERSION),
             updated_at=_parse_datetime(payload.get("updated_at")),
             modules=modules,
-            orchestration=orchestration,
             observer_heartbeats=observer_heartbeats,
         )
 
@@ -228,26 +205,10 @@ def _record_observed_event(
         event,
         recent_limit=recent_limit,
     )
-    orchestration = snapshot.orchestration
-    if event.module == "orchestration" or event.event_name.startswith(
-        "orchestration.",
-    ):
-        orchestration = record_orchestration_observed_event(
-            (
-                orchestration
-                if isinstance(
-                    orchestration,
-                    OperationsOrchestrationObservation,
-                )
-                else None
-            ),
-            event,
-        )
     return OperationsObservationSnapshot(
         version=_OBSERVATION_VERSION,
         updated_at=event.occurred_at,
         modules=tuple(modules_by_key[key] for key in sorted(modules_by_key)),
-        orchestration=orchestration,
         observer_heartbeats=snapshot.observer_heartbeats,
     )
 
@@ -269,7 +230,6 @@ def _record_observer_heartbeat(
         version=_OBSERVATION_VERSION,
         updated_at=latest_update,
         modules=snapshot.modules,
-        orchestration=snapshot.orchestration,
         observer_heartbeats=tuple(
             heartbeats_by_key[key] for key in sorted(heartbeats_by_key)
         ),

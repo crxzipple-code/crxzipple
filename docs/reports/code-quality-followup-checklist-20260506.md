@@ -244,7 +244,8 @@ PYTHONPATH=src pytest -q tests/unit/test_db_cli.py
 
 - Operations orchestration page 不再读取 rich file-backed orchestration observation；运行事实来自 orchestration query service、executor control 与 Operations event projection。
 - 保留 file-backed observer 轻量状态读取，仅用于 observer health/freshness。
-- 新增回归测试确保 orchestration page 不调用 `get_orchestration_observation()`。
+- 移除 rich orchestration snapshot 模型、file-backed 写入和 snapshot `orchestration` 字段；旧文件中的 `orchestration` key 读取时会被忽略，新写文件不再带该 key。
+- 新增回归测试确保 orchestration page 只依赖 module observation。
 - 验证：`PYTHONPATH=src pytest -q tests/unit/test_operations_observation.py tests/unit/test_ui_http.py -q` 通过。
 
 目标：
@@ -256,8 +257,10 @@ PYTHONPATH=src pytest -q tests/unit/test_db_cli.py
 建议验证：
 
 ```bash
-rg -n 'observer_observation|OrchestrationObservation|record_orchestration' \
-  src/crxzipple/modules/operations src/crxzipple/bootstrap/container.py
+rg -n 'OperationsOrchestrationObservation|record_orchestration|get_orchestration_observation|"orchestration"\s*:' \
+  src/crxzipple/modules/operations/application/observation.py \
+  src/crxzipple/modules/operations/application/orchestration_observation.py \
+  src/crxzipple/modules/operations/infrastructure/observation_store.py
 ```
 
 ### F9. application 层 shared infrastructure 依赖收口为 port

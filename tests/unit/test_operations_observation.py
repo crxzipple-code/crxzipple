@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 import tempfile
 import unittest
 
@@ -176,6 +178,7 @@ class OperationsObservationTestCase(unittest.TestCase):
             observation = store.get_module_observation("orchestration")
             self.assertIsNotNone(observation)
             assert observation is not None
+            self.assertFalse(hasattr(store.snapshot(), "orchestration"))
             self.assertEqual(observation.last_cursor, "9")
             self.assertEqual(observation.event_count, 9)
             self.assertEqual(
@@ -187,6 +190,12 @@ class OperationsObservationTestCase(unittest.TestCase):
                 observation.recent_events[-1].event_name,
                 "orchestration.run.accepted",
             )
+            persisted_payload = json.loads(
+                (Path(tempdir) / "observer_observation.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertNotIn("orchestration", persisted_payload)
 
             restored = FileBackedOperationsObservationStore(tempdir)
             restored_observation = restored.get_module_observation("orchestration")
@@ -386,7 +395,7 @@ class OperationsObservationTestCase(unittest.TestCase):
             ),
         )
 
-    def test_orchestration_page_ignores_rich_file_backed_observation(self) -> None:
+    def test_orchestration_page_uses_module_observation_without_rich_snapshot(self) -> None:
         timestamp = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
         observed_event = observed_event_from_record(
             EventTopicRecord(
@@ -435,7 +444,7 @@ class OperationsObservationTestCase(unittest.TestCase):
                     ),
                 ],
             ),
-            operations_observation=_RichOrchestrationObservationMustNotBeRead(
+            operations_observation=_ModuleOnlyOperationsObservation(
                 OperationsModuleObservation(
                     module="orchestration",
                     owner="orchestration",
@@ -798,7 +807,7 @@ class _FakeOrchestrationExecutorControl:
         return list(self._leases)
 
 
-class _RichOrchestrationObservationMustNotBeRead:
+class _ModuleOnlyOperationsObservation:
     def __init__(self, module_observation: OperationsModuleObservation) -> None:
         self._module_observation = module_observation
 
@@ -807,9 +816,6 @@ class _RichOrchestrationObservationMustNotBeRead:
         module: str,
     ) -> OperationsModuleObservation | None:
         return self._module_observation if module == "orchestration" else None
-
-    def get_orchestration_observation(self) -> object:
-        raise AssertionError("rich orchestration observation must not drive page truth")
 
 
 class _FakeOperationsSourceProvider:

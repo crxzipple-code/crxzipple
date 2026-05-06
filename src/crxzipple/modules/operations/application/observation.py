@@ -256,20 +256,9 @@ class OperationsObservationSnapshot:
     version: int
     updated_at: datetime | None
     modules: tuple[OperationsModuleObservation, ...]
-    orchestration: Any | None = None
     observer_heartbeats: tuple[OperationsObserverHeartbeat, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
-        orchestration_payload = None
-        if self.orchestration is not None:
-            to_payload = getattr(self.orchestration, "to_payload", None)
-            orchestration_payload = (
-                to_payload()
-                if callable(to_payload)
-                else self.orchestration
-                if isinstance(self.orchestration, dict)
-                else None
-            )
         return {
             "version": self.version,
             "updated_at": (
@@ -278,7 +267,6 @@ class OperationsObservationSnapshot:
                 else None
             ),
             "modules": [module.to_payload() for module in self.modules],
-            "orchestration": orchestration_payload,
             "observer_heartbeats": [
                 heartbeat.to_payload() for heartbeat in self.observer_heartbeats
             ],
@@ -311,9 +299,6 @@ class OperationsObservationStore(Protocol):
         ...
 
     def snapshot(self) -> OperationsObservationSnapshot:
-        ...
-
-    def get_orchestration_observation(self) -> Any | None:
         ...
 
 
