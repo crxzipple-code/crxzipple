@@ -20,6 +20,7 @@ class LlmAdapterRequest:
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = field(default_factory=dict)
+    resolved_credential: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +34,7 @@ class LlmAdapter(Protocol):
         self,
         profile: LlmProfile,
         request: LlmAdapterRequest,
-        ) -> LlmAdapterResponse:
+    ) -> LlmAdapterResponse:
         ...
 
 

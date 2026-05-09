@@ -18,23 +18,27 @@ ecosystem.
 
 ## Core Position
 
-`profile`, `skill`, `memory`, `authorization`, and `access` are separate
-concepts.
+`profile`, `skill`, `memory`, and `access` are separate governance concepts.
+Authorization remains a decision protocol/evaluator inside the access boundary,
+not a parallel source of governance truth.
 
 - `profile` is the persistent agent identity and base contract.
 - `skill` is a task-scoped method and instruction package.
 - `memory` is durable knowledge plus recall.
-- `authorization` is the final tool/effect decision system.
-- `access` prepares external connections, credentials, login state, and
-  readiness.
+- `access` owns access governance truth: access assets, credential bindings,
+  connection profiles, authorization policies, temporary grants, setup
+  sessions, readiness, and access audit.
+- authorization evaluation answers whether an effective access decision allows,
+  denies, or requires approval for a requested effect in the current execution
+  context.
 - `orchestration` resolves and assembles these inputs into a run.
 
 The short rule is:
 
 ```text
 modules declare access requirements in their own assets
-access prepares connections, credentials, login state, and setup flows
-ABAC decides whether the current execution context may perform an effect
+access materializes effective bindings, readiness, setup flows, and decisions
+authorization evaluation applies Access-owned policies and grants
 orchestration decides what is applicable and visible for this run
 ```
 
@@ -163,7 +167,8 @@ Suggested fields:
 - `extensions`
 
 `allowed_tools` should be avoided as a core skill term because it sounds like an
-authorization decision. In this system, authorization belongs to ABAC.
+authorization decision. In this system, access owns the governance truth and
+authorization is only the evaluator/decision protocol for effective access.
 
 Legacy or imported skill packages may contain auth-like fields such as
 `required_auth`, `required_secrets`, or `required_credential_files`. Treat them
@@ -216,13 +221,25 @@ The previous `tool_preferences` profile field has been removed from the runtime
 profile model. Task-specific tool preference belongs in skills as
 `required_tools`, `suggested_tools`, and `required_effects`.
 
-Profile can still be an ABAC subject dimension. For example, a policy may allow
-one profile to use a capability while another profile cannot. But profile is
-not the place to express a workflow's preferred tool set.
+Profile can still be an authorization subject dimension. For example, an
+Access-owned policy may allow one profile to use a capability while another
+profile cannot. But profile is not the place to express a workflow's preferred
+tool set.
 
 ## Authorization Boundary
 
-Authorization is evaluated against the current execution context.
+Authorization is evaluated against the current execution context, but the
+long-term governance truth belongs to Access.
+
+Authorization should be treated as one of these implementation shapes:
+
+- an Access-internal evaluator/engine
+- a shared decision protocol exposed through injected providers
+- a temporary legacy module whose policy and grant repositories are owned by
+  Access and can later be folded into `modules/access`
+
+It should not be treated as a separate governance owner for policies, grants,
+credentials, setup flows, or audit.
 
 That context can include:
 
@@ -236,13 +253,17 @@ That context can include:
 
 `skill` is not an authorization subject.
 
-`skill` can declare:
+`skill` can declare access requirements:
 
 - this method needs `github.pr_write`
 - this method needs `browser_control`
 - this method needs `memory_search`
 
-Authorization decides:
+Modules declare requirements, but consume injected Access effective
+decisions/bindings rather than interpreting policy, credential sources, or
+secret values themselves.
+
+The Access decision provider decides:
 
 - whether this execution context may use the matching tool/effect now
 - whether approval is needed
@@ -253,13 +274,19 @@ Authorization decides:
 ### Definition
 
 `access` is the system-level service for connection, credential, login, and
-readiness state.
+readiness state. It owns the access governance truth.
+Access owns access governance truth.
 
-It is not ABAC.
+Authorization policy and temporary grant truth are part of Access governance.
+An authorization evaluator can live under `modules/authorization` during
+migration, but it must consume Access-owned policy/grant repositories and remain
+a pure decision engine.
 
 It should own:
 
 - access requirement and credential binding models
+- access assets and connection profiles
+- authorization policies and temporary grants
 - OAuth connection flows
 - connector setup status
 - API key and secret capture
@@ -267,14 +294,15 @@ It should own:
 - setup links
 - readiness checks
 - surface-specific setup instructions
+- access action audit
 
 It should not own:
 
-- final tool allow/deny decisions
+- protocol-specific tool execution
 - skill selection policy
 - protocol-specific request shaping
-- tool execution
 - run scheduling
+- business-module requirement declarations
 
 Protocol-specific modules keep their protocol logic. For example, `access`
 can resolve a bearer token, while an OpenAPI runtime still decides whether that
@@ -292,7 +320,8 @@ Suggested states:
 - `unsupported`
 
 These states are inputs to resolver decisions and UI display. They are not
-authorization outcomes by themselves.
+authorization outcomes by themselves; effective Access decisions combine
+readiness, policy, grants, and the requested effect.
 
 ### Surface Behavior
 
@@ -312,8 +341,8 @@ Current control surface:
   and returns readiness plus optional `setup_flow`.
 - HTTP `POST /access/setup` and `GET /access/setup` return a displayable setup
   action for one requirement or binding.
-- HTTP `GET /access/inventory` discovers authorization targets used by model,
-  tool, and channel assets, returning only blocked targets by default.
+- HTTP `GET /access/inventory` discovers access assets and bindings used by
+  model, tool, and channel assets, returning only blocked targets by default.
 - CLI `crxzipple access check` and `crxzipple access setup` expose the same
   readiness and setup payloads.
 - CLI `crxzipple access inventory` exposes the same aggregate readiness view for
@@ -323,17 +352,17 @@ These surfaces must not return credential values. They only expose readiness,
 missing setup reason, and safe setup instructions such as environment variable
 names, file paths, login commands, or future OAuth/device-code actions.
 
-Inventory granularity should follow access ownership, not catalog item count.
-Targets should be authorization assets, credentials, or login states such as
+Inventory granularity should follow Access ownership, not catalog item count.
+Targets should be access assets, credential bindings, or login states such as
 `env:OPENAI_API_KEY`, `codex_auth_json`, `env:BRAVE_SEARCH_API_KEY`, or a
 multi-field channel credential set. LLM profiles, tools, and channels should be
-listed as usage metadata under the authorization target. The inventory should
+listed as usage metadata under the access target. The inventory should
 not emit one target per model profile or one target per tool when those
-usages share the same authorization asset.
+usages share the same Access asset or binding.
 
 Inventory metadata should use usage language:
 
-- `asset_kind` describes the authorization asset, for example `env`, `file`,
+- `asset_kind` describes the access asset, for example `env`, `file`,
   `codex_auth_json`, or `credential_set`.
 - `usage_count`, `usage_types`, and `usages` describe which model, tool, or
   channel declarations depend on the asset.
@@ -365,8 +394,10 @@ access:
     - github:oauth_connector(repo_read,pr_write)
 ```
 
-The first two examples are module-owned declarations. The last example is a generic
-access requirement shape that can be used by future connector/provider assets.
+The first two examples are module-owned declarations that reference Access
+assets/bindings. The last example is a generic access requirement shape that can
+be used by future connector/provider assets. Settings pages should store and
+display these Access asset or binding references, never secret values.
 
 ## Memory Design
 
@@ -437,9 +468,11 @@ Typical flow:
    and capability facts.
 4. Applicable skills are injected into prompt as task guidance.
 5. The model may use `skill_read` to load instructions or supporting files.
-6. Model, channel, tool, or connector resolvers ask `access` about their own
-   credentials before exposing or executing unavailable capabilities.
-7. If a tool call is attempted, ABAC still makes the final decision.
+6. Model, channel, tool, or connector resolvers ask `access` for effective
+   credential bindings, readiness, and decisions before exposing or executing
+   unavailable capabilities.
+7. If a tool call is attempted, the Access decision provider applies the
+   Access-owned policy/grant truth through the authorization evaluator.
 8. Memory recall remains explicit through memory tools unless a run policy adds
    bounded bootstrap context.
 
@@ -472,7 +505,8 @@ Suggested order:
 6. Move task-level tool preferences out of agent profile and into skill
    requirements or suggestions.
 7. Add `access` as the system service for credential readiness and setup flows.
-8. Keep ABAC as the only final permission decision point.
+8. Move long-term authorization policy and temporary grant truth under Access,
+   with authorization retained only as evaluator/decision protocol.
 
 Current implementation status:
 
@@ -500,11 +534,16 @@ Do not add these to skill:
 - standalone skill runs
 
 Those belong to orchestration, tool, session, memory, or authorization.
+The authorization entry here means effect evaluation only; long-term policy,
+grant, credential, readiness, setup, and audit governance belongs to Access.
 
 ## Final Rule
 
-Keep instruction assets, knowledge assets, connection readiness, and permission
-decisions separate.
+Keep instruction assets, knowledge assets, access governance truth, and
+protocol execution separate. Modules declare access requirements, Access owns
+effective bindings and decisions, Settings references Access assets instead of
+secret values, and authorization remains an evaluator rather than a governance
+owner.
 
 This gives `crxzipple` room to ingest external ecosystems without turning
 skills into a second orchestration runtime.

@@ -27,8 +27,8 @@ from crxzipple.modules.llm.domain import (
     ToolCallIntent,
     ToolSchema,
 )
-from crxzipple.modules.llm.domain.entities import LlmInvocation
-from crxzipple.modules.llm.interfaces.dto import LlmInvocationDTO
+from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
+from crxzipple.modules.llm.interfaces.dto import LlmInvocationDTO, LlmProfileDTO
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
 from tests.unit.support import SqliteTestHarness
 
@@ -142,6 +142,16 @@ class _FakeAsyncStreamingLlmAdapter:
         )
 
 
+class _FakeCredentialProvider:
+    def __init__(self, credential: str = "injected-secret") -> None:
+        self.credential = credential
+        self.calls = []
+
+    def resolve_credential(self, binding, *, consumer, trace_context=None):  # noqa: ANN001, ANN201
+        self.calls.append((binding, consumer, trace_context))
+        return self.credential
+
+
 class LlmServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = SqliteTestHarness()
@@ -175,6 +185,19 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(dto.created_at, "2026-04-18T07:00:00+00:00")
         self.assertEqual(dto.started_at, "2026-04-18T07:00:01+00:00")
         self.assertEqual(dto.completed_at, "2026-04-18T07:00:02+00:00")
+
+    def test_llm_profile_dto_does_not_echo_inline_credential_values(self) -> None:
+        profile = LlmProfile(
+            id="inline-credential-profile",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding="sk-inline-secret",
+        )
+
+        dto = LlmProfileDTO.from_entity(profile)
+
+        self.assertEqual(dto.credential_binding, "credential binding")
 
     def test_register_profile_and_invoke_persists_new_llm_shapes(self) -> None:
         profile = self.service.register_profile(
@@ -250,6 +273,79 @@ class LlmServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
         self.assertEqual([item.id for item in invocation_list], [invocation.id])
+
+    def test_profile_update_enable_disable_and_delete_use_llm_repository(self) -> None:
+        self.service.register_profile(
+            RegisterLlmProfileInput(
+                id="runtime-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        updated = self.service.update_profile(
+            RegisterLlmProfileInput(
+                id="runtime-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.1",
+                enabled=True,
+            ),
+        )
+        disabled = self.service.set_profile_enabled("runtime-writer", enabled=False)
+        enabled = self.service.set_profile_enabled("runtime-writer", enabled=True)
+        self.service.delete_profile("runtime-writer")
+
+        self.assertEqual(updated.model_name, "gpt-5.1")
+        self.assertFalse(disabled.enabled)
+        self.assertTrue(enabled.enabled)
+        self.assertNotIn(
+            "runtime-writer",
+            [profile.id for profile in self.service.list_profiles()],
+        )
+
+    def test_invoke_resolves_credential_through_injected_access_provider(self) -> None:
+        credential_provider = _FakeCredentialProvider("llm-access-token")
+        service = LlmApplicationService(
+            self.container.uow_factory,
+            self.registry,
+            credential_provider=credential_provider,
+        )
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="access-backed-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+                credential_binding="env:LLM_ACCESS_TOKEN",
+            ),
+        )
+
+        invocation = service.invoke(
+            InvokeLlmInput(
+                llm_id=profile.id,
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="Use injected access.",
+                    ),
+                ),
+            ),
+        )
+
+        binding, consumer, trace_context = credential_provider.calls[0]
+        self.assertEqual(binding.source_ref, "env:LLM_ACCESS_TOKEN")
+        self.assertEqual(binding.source_type, "env")
+        self.assertEqual(consumer.module, "llm")
+        self.assertEqual(consumer.consumer_id, "llm.profile:access-backed-writer")
+        self.assertIsNone(trace_context)
+        self.assertEqual(self.adapter.last_request.resolved_credential, "llm-access-token")
+        self.assertEqual(invocation.status.value, "succeeded")
+
+        fetched_profile = service.get_profile(profile.id)
+        self.assertEqual(fetched_profile.credential_binding, "env:LLM_ACCESS_TOKEN")
+        self.assertNotEqual(fetched_profile.credential_binding, "llm-access-token")
 
     def test_sync_profiles_updates_imported_profiles_and_preserves_manual_profiles(self) -> None:
         manual_profile = self.service.register_profile(

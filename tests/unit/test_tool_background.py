@@ -248,6 +248,14 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         assert initial_lease_expires_at is not None
         self.assertGreater(refreshed_task.lease_expires_at, initial_lease_expires_at)
 
+        event_names = [
+            event.event_name
+            for event in self.container.event_bus.published_events
+            if isinstance(event, Event) and bool(event.name)
+        ]
+        self.assertIn("tool.run.heartbeated", event_names)
+        self.assertIn("tool.assignment.heartbeated", event_names)
+
     def test_worker_run_loop_processes_multiple_assigned_runs_concurrently(self) -> None:
         active_runs = 0
         max_active_runs = 0

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 from uuid import uuid4
@@ -39,6 +39,11 @@ from crxzipple.modules.llm.domain.value_objects import (
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.domain.events import Event
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    CredentialBindingRef,
+    CredentialProvider,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,20 @@ class RegisterLlmProfileInput:
     concurrency_key: str | None = None
     source_kind: LlmSourceKind = LlmSourceKind.MANUAL
     enabled: bool = True
+
+    @classmethod
+    def from_config(
+        cls,
+        config: LlmProfileImportLike | Mapping[str, Any],
+    ) -> "RegisterLlmProfileInput":
+        return register_llm_profile_input_from_config(config)
+
+
+class LlmProfileImportLike(Protocol):
+    profile_id: str
+    provider: str | LlmProviderKind
+    api_family: str | LlmApiFamily
+    model_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,29 +99,99 @@ class StreamLlmInput:
     invocation_id: str | None = None
 
 
+def register_llm_profile_input_from_config(
+    config: LlmProfileImportLike | Mapping[str, Any],
+) -> RegisterLlmProfileInput:
+    """Convert a legacy import payload into LLM owner-module input."""
+
+    return RegisterLlmProfileInput(
+        id=str(_config_value(config, "id", _config_value(config, "profile_id"))),
+        provider=_coerce_provider_kind(_config_value(config, "provider")),
+        api_family=_coerce_api_family(_config_value(config, "api_family")),
+        model_name=str(_config_value(config, "model_name")),
+        context_window_tokens=_optional_int_config_value(
+            _config_value(config, "context_window_tokens", None),
+        ),
+        model_family=_coerce_model_family(
+            _config_value(config, "model_family", LlmModelFamily.GENERAL),
+        ),
+        capabilities=_capabilities_from_config_value(
+            _config_value(config, "capabilities", ()),
+        ),
+        default_params=_defaults_from_config_value(
+            _config_value(config, "default_params", None),
+        ),
+        base_url=_optional_string_config_value(_config_value(config, "base_url", None)),
+        credential_binding=_credential_binding_from_config_value(
+            _config_value(
+                config,
+                "credential_binding",
+                _config_value(config, "credential_binding_ref", None),
+            ),
+        ),
+        timeout_seconds=_int_config_value(
+            _config_value(config, "timeout_seconds", 60),
+            default=60,
+        ),
+        max_concurrency=_optional_int_config_value(
+            _config_value(config, "max_concurrency", None),
+        ),
+        concurrency_key=_optional_string_config_value(
+            _config_value(config, "concurrency_key", None),
+        ),
+        source_kind=_coerce_source_kind(
+            _config_value(config, "source_kind", LlmSourceKind.IMPORTED),
+        ),
+        enabled=_bool_config_value(_config_value(config, "enabled", True)),
+    )
+
+
+def llm_profile_from_config(
+    config: LlmProfileImportLike | Mapping[str, Any],
+) -> LlmProfile:
+    return llm_profile_from_register_input(
+        register_llm_profile_input_from_config(config),
+    )
+
+
+def llm_profile_from_register_input(data: RegisterLlmProfileInput) -> LlmProfile:
+    return LlmProfile(
+        id=data.id,
+        provider=data.provider,
+        api_family=data.api_family,
+        model_name=data.model_name,
+        context_window_tokens=data.context_window_tokens,
+        model_family=data.model_family,
+        capabilities=data.capabilities,
+        default_params=data.default_params,
+        base_url=data.base_url,
+        credential_binding=data.credential_binding,
+        timeout_seconds=data.timeout_seconds,
+        max_concurrency=data.max_concurrency,
+        concurrency_key=data.concurrency_key,
+        source_kind=data.source_kind,
+        enabled=data.enabled,
+    )
+
+
 class LlmUnitOfWork(Protocol):
     llm_profiles: LlmProfileRepository
     llm_invocations: LlmInvocationRepository
 
-    def __enter__(self) -> "LlmUnitOfWork":
-        ...
+    def __enter__(self) -> "LlmUnitOfWork": ...
 
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: Any,
-    ) -> None:
-        ...
+    ) -> None: ...
 
-    def collect(self, aggregate: AggregateRoot[Any]) -> None:
-        ...
+    def collect(self, aggregate: AggregateRoot[Any]) -> None: ...
 
-    def commit(self) -> None:
-        ...
+    def commit(self) -> None: ...
 
-    def rollback(self) -> None:
-        ...
+    def rollback(self) -> None: ...
 
 
 class LlmApplicationService:
@@ -112,10 +201,12 @@ class LlmApplicationService:
         adapter_gateway: LlmAdapterGateway,
         *,
         concurrency_limiter: LlmConcurrencyLimiter | None = None,
+        credential_provider: CredentialProvider | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.adapter_gateway = adapter_gateway
         self.concurrency_limiter = concurrency_limiter or LlmConcurrencyLimiter()
+        self.credential_provider = credential_provider
 
     def register_profile(self, data: RegisterLlmProfileInput) -> LlmProfile:
         with self.uow_factory() as uow:
@@ -154,6 +245,108 @@ class LlmApplicationService:
             uow.commit()
             return profile
 
+    def upsert_profile(self, data: RegisterLlmProfileInput) -> LlmProfile:
+        with self.uow_factory() as uow:
+            existing = uow.llm_profiles.get(data.id)
+            profile = self._build_profile(data)
+            profile.record_event(
+                Event(
+                    name=(
+                        "llm.profile_registered"
+                        if existing is None
+                        else "llm.profile_updated"
+                    ),
+                    payload={
+                        "llm_id": profile.id,
+                        "provider": profile.provider.value,
+                        "api_family": profile.api_family.value,
+                        "source_kind": profile.source_kind.value,
+                    },
+                ),
+            )
+            uow.llm_profiles.add(profile)
+            uow.collect(profile)
+            uow.commit()
+            return profile
+
+    def update_profile(self, data: RegisterLlmProfileInput) -> LlmProfile:
+        with self.uow_factory() as uow:
+            if uow.llm_profiles.get(data.id) is None:
+                raise LlmNotFoundError(f"LLM profile '{data.id}' was not found.")
+            profile = self._build_profile(data)
+            profile.record_event(
+                Event(
+                    name="llm.profile_updated",
+                    payload={
+                        "llm_id": profile.id,
+                        "provider": profile.provider.value,
+                        "api_family": profile.api_family.value,
+                        "source_kind": profile.source_kind.value,
+                    },
+                ),
+            )
+            uow.llm_profiles.add(profile)
+            uow.collect(profile)
+            uow.commit()
+            return profile
+
+    def set_profile_enabled(self, llm_id: str, *, enabled: bool) -> LlmProfile:
+        with self.uow_factory() as uow:
+            existing = uow.llm_profiles.get(llm_id)
+            if existing is None:
+                raise LlmNotFoundError(f"LLM profile '{llm_id}' was not found.")
+            profile = LlmProfile(
+                id=existing.id,
+                provider=existing.provider,
+                api_family=existing.api_family,
+                model_name=existing.model_name,
+                context_window_tokens=existing.context_window_tokens,
+                model_family=existing.model_family,
+                capabilities=existing.capabilities,
+                default_params=existing.default_params,
+                base_url=existing.base_url,
+                credential_binding=existing.credential_binding,
+                timeout_seconds=existing.timeout_seconds,
+                max_concurrency=existing.max_concurrency,
+                concurrency_key=existing.concurrency_key,
+                source_kind=existing.source_kind,
+                enabled=enabled,
+            )
+            profile.record_event(
+                Event(
+                    name=("llm.profile_enabled" if enabled else "llm.profile_disabled"),
+                    payload={
+                        "llm_id": profile.id,
+                        "provider": profile.provider.value,
+                        "api_family": profile.api_family.value,
+                        "enabled": profile.enabled,
+                    },
+                ),
+            )
+            uow.llm_profiles.add(profile)
+            uow.collect(profile)
+            uow.commit()
+            return profile
+
+    def delete_profile(self, llm_id: str) -> None:
+        with self.uow_factory() as uow:
+            existing = uow.llm_profiles.get(llm_id)
+            if existing is None:
+                raise LlmNotFoundError(f"LLM profile '{llm_id}' was not found.")
+            existing.record_event(
+                Event(
+                    name="llm.profile_deleted",
+                    payload={
+                        "llm_id": existing.id,
+                        "provider": existing.provider.value,
+                        "api_family": existing.api_family.value,
+                    },
+                ),
+            )
+            uow.llm_profiles.delete(llm_id)
+            uow.collect(existing)
+            uow.commit()
+
     def get_profile(self, llm_id: str) -> LlmProfile:
         with self.uow_factory() as uow:
             profile = uow.llm_profiles.get(llm_id)
@@ -179,6 +372,8 @@ class LlmApplicationService:
     def sync_profiles(
         self,
         profiles: tuple[RegisterLlmProfileInput, ...],
+        *,
+        emit_events: bool = True,
     ) -> list[LlmProfile]:
         if not profiles:
             return []
@@ -201,17 +396,18 @@ class LlmApplicationService:
                     if existing is None
                     else "llm.profile_updated"
                 )
-                profile.record_event(
-                    Event(
-                        name=event_name,
-                        payload={
-                            "llm_id": profile.id,
-                            "provider": profile.provider.value,
-                            "api_family": profile.api_family.value,
-                            "source_kind": profile.source_kind.value,
-                        },
-                    ),
-                )
+                if emit_events:
+                    profile.record_event(
+                        Event(
+                            name=event_name,
+                            payload={
+                                "llm_id": profile.id,
+                                "provider": profile.provider.value,
+                                "api_family": profile.api_family.value,
+                                "source_kind": profile.source_kind.value,
+                            },
+                        ),
+                    )
                 uow.llm_profiles.add(profile)
                 uow.collect(profile)
                 synced_profiles.append(profile)
@@ -260,14 +456,8 @@ class LlmApplicationService:
             uow.collect(invocation)
             uow.commit()
 
-        request = LlmAdapterRequest(
-            messages=invocation.messages,
-            tool_schemas=invocation.tool_schemas,
-            response_format=invocation.response_format,
-            overrides=invocation.request_overrides,
-        )
-
         try:
+            request = self._build_adapter_request(profile, invocation)
             with self.concurrency_limiter.limit(profile):
                 response = adapter.invoke(profile, request)
         except Exception as exc:
@@ -335,14 +525,8 @@ class LlmApplicationService:
 
         await asyncio.to_thread(self._store_started_invocation, invocation)
 
-        request = LlmAdapterRequest(
-            messages=invocation.messages,
-            tool_schemas=invocation.tool_schemas,
-            response_format=invocation.response_format,
-            overrides=invocation.request_overrides,
-        )
-
         try:
+            request = self._build_adapter_request(profile, invocation)
             async with self.concurrency_limiter.limit_async(profile):
                 response = await self._invoke_adapter_async(adapter, profile, request)
         except Exception as exc:
@@ -409,13 +593,6 @@ class LlmApplicationService:
             uow.collect(invocation)
             uow.commit()
 
-        request = LlmAdapterRequest(
-            messages=invocation.messages,
-            tool_schemas=invocation.tool_schemas,
-            response_format=invocation.response_format,
-            overrides=invocation.request_overrides,
-        )
-
         def _generator() -> Iterator[LlmStreamEvent]:
             with self.concurrency_limiter.limit(profile):
                 sequence = 1
@@ -432,6 +609,7 @@ class LlmApplicationService:
                 sequence += 1
 
                 try:
+                    request = self._build_adapter_request(profile, invocation)
                     for event in stream_invoke(profile, request):
                         normalized_event = LlmStreamEvent(
                             type=event.type,
@@ -481,9 +659,9 @@ class LlmApplicationService:
                             sequence=sequence,
                             invocation_id=invocation.id,
                             data={
-                                "error": failed.error.to_payload()
-                                if failed.error
-                                else {},
+                                "error": (
+                                    failed.error.to_payload() if failed.error else {}
+                                ),
                             },
                         )
                 except Exception as exc:
@@ -546,13 +724,6 @@ class LlmApplicationService:
 
         await asyncio.to_thread(self._store_started_invocation, invocation)
 
-        request = LlmAdapterRequest(
-            messages=invocation.messages,
-            tool_schemas=invocation.tool_schemas,
-            response_format=invocation.response_format,
-            overrides=invocation.request_overrides,
-        )
-
         async with self.concurrency_limiter.limit_async(profile):
             sequence = 1
             completed = False
@@ -568,6 +739,7 @@ class LlmApplicationService:
             sequence += 1
 
             try:
+                request = self._build_adapter_request(profile, invocation)
                 async for event in stream(request):
                     normalized_event = LlmStreamEvent(
                         type=event.type,
@@ -810,25 +982,204 @@ class LlmApplicationService:
             uow.commit()
             return stored
 
+    def _build_adapter_request(
+        self,
+        profile: LlmProfile,
+        invocation: LlmInvocation,
+    ) -> LlmAdapterRequest:
+        return LlmAdapterRequest(
+            messages=invocation.messages,
+            tool_schemas=invocation.tool_schemas,
+            response_format=invocation.response_format,
+            overrides=invocation.request_overrides,
+            resolved_credential=self._resolve_profile_credential(profile),
+        )
+
+    def _resolve_profile_credential(self, profile: LlmProfile) -> str | None:
+        if self.credential_provider is None:
+            return None
+        binding_ref = credential_binding_ref_for_profile(profile)
+        if binding_ref is None:
+            return None
+        return self.credential_provider.resolve_credential(
+            binding_ref,
+            consumer=AccessConsumerRef(
+                consumer_id=f"llm.profile:{profile.id}",
+                module="llm",
+                component="adapter",
+                runtime_ref=profile.api_family.value,
+                metadata={
+                    "provider": profile.provider.value,
+                    "model_name": profile.model_name,
+                },
+            ),
+        )
+
     @staticmethod
     def _build_profile(data: RegisterLlmProfileInput) -> LlmProfile:
-        return LlmProfile(
-            id=data.id,
-            provider=data.provider,
-            api_family=data.api_family,
-            model_name=data.model_name,
-            context_window_tokens=data.context_window_tokens,
-            model_family=data.model_family,
-            capabilities=data.capabilities,
-            default_params=data.default_params,
-            base_url=data.base_url,
-            credential_binding=data.credential_binding,
-            timeout_seconds=data.timeout_seconds,
-            max_concurrency=data.max_concurrency,
-            concurrency_key=data.concurrency_key,
-            source_kind=data.source_kind,
-            enabled=data.enabled,
-        )
+        return llm_profile_from_register_input(data)
+
+
+def _config_value(config: object, key: str, default: object = None) -> object:
+    if isinstance(config, Mapping):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _coerce_provider_kind(value: object) -> LlmProviderKind:
+    return value if isinstance(value, LlmProviderKind) else LlmProviderKind(str(value))
+
+
+def _coerce_api_family(value: object) -> LlmApiFamily:
+    return value if isinstance(value, LlmApiFamily) else LlmApiFamily(str(value))
+
+
+def _coerce_model_family(value: object) -> LlmModelFamily:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return LlmModelFamily.GENERAL
+    return value if isinstance(value, LlmModelFamily) else LlmModelFamily(str(value))
+
+
+def _coerce_source_kind(value: object) -> LlmSourceKind:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return LlmSourceKind.IMPORTED
+    return value if isinstance(value, LlmSourceKind) else LlmSourceKind(str(value))
+
+
+def _capabilities_from_config_value(value: object) -> tuple[LlmCapability, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, LlmCapability)):
+        value = (value,)
+    return tuple(
+        item if isinstance(item, LlmCapability) else LlmCapability(str(item))
+        for item in value
+    )
+
+
+def _defaults_from_config_value(value: object) -> LlmDefaults:
+    if value is None:
+        return LlmDefaults()
+    if isinstance(value, LlmDefaults):
+        return value
+    if isinstance(value, Mapping):
+        return LlmDefaults.from_payload(dict(value))
+    to_payload = getattr(value, "to_payload", None)
+    if callable(to_payload):
+        payload = to_payload()
+        if isinstance(payload, Mapping):
+            return LlmDefaults.from_payload(dict(payload))
+
+    payload: dict[str, Any] = {}
+    for field_name in (
+        "temperature",
+        "top_p",
+        "max_output_tokens",
+        "reasoning_effort",
+    ):
+        field_value = getattr(value, field_name, None)
+        if field_value is not None:
+            payload[field_name] = field_value
+    extra_body = getattr(value, "extra_body", None)
+    if isinstance(extra_body, Mapping):
+        payload["extra_body"] = dict(extra_body)
+    return LlmDefaults.from_payload(payload)
+
+
+def _credential_binding_from_config_value(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _optional_string_config_value(value)
+    if isinstance(value, Mapping):
+        for key in ("source_ref", "binding_id", "storage_key"):
+            resolved = _optional_string_config_value(value.get(key))
+            if resolved is not None:
+                return resolved
+        return None
+    for attr_name in ("source_ref", "binding_id", "storage_key"):
+        resolved = _optional_string_config_value(getattr(value, attr_name, None))
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _optional_string_config_value(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _int_config_value(value: object, *, default: int) -> int:
+    if value is None:
+        return default
+    return int(value)
+
+
+def _optional_int_config_value(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return int(value)
+
+
+def _bool_config_value(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def credential_binding_ref_for_profile(
+    profile: LlmProfile,
+) -> CredentialBindingRef | None:
+    binding = _effective_credential_binding(profile)
+    if binding is None:
+        return None
+    return CredentialBindingRef(
+        binding_id=binding,
+        source_type=_credential_source_type(binding),
+        source_ref=binding,
+    )
+
+
+def public_credential_binding_label(binding: str | None) -> str | None:
+    if binding is None or not binding.strip():
+        return None
+    normalized = binding.strip()
+    if normalized.startswith("env:"):
+        env_name = normalized.removeprefix("env:").strip()
+        return f"env:{env_name}" if env_name else "env"
+    if normalized.startswith("file:"):
+        return "file credential"
+    if normalized.startswith("codex_auth_json") or normalized in {
+        "codex-cli",
+        "codex_auth_json",
+    }:
+        return "codex_auth_json"
+    return "credential binding"
+
+
+def _effective_credential_binding(profile: LlmProfile) -> str | None:
+    if profile.credential_binding is not None and profile.credential_binding.strip():
+        return profile.credential_binding.strip()
+    if profile.api_family is LlmApiFamily.OPENAI_CODEX_RESPONSES:
+        return "codex_auth_json"
+    return None
+
+
+def _credential_source_type(binding: str) -> str:
+    if binding.startswith("env:"):
+        return "env"
+    if binding.startswith("file:"):
+        return "file"
+    if binding.startswith("codex_auth_json") or binding in {
+        "codex-cli",
+        "codex_auth_json",
+    }:
+        return "codex_auth_json"
+    return "binding"
 
 
 def _invocation_started_event_payload(

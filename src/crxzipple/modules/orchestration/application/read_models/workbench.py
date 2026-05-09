@@ -565,7 +565,7 @@ class WorkbenchReadModelProvider:
                         if run.status is OrchestrationRunStatus.WAITING
                         else "failed"
                     ),
-                    title="Access Required",
+                    title="External Access Required",
                     summary=_missing_access_summary(access_payload),
                     started_at=run.completed_at or run.updated_at,
                     completed_at=run.completed_at,
@@ -2009,8 +2009,11 @@ def _missing_access_summary(payload: dict[str, object]) -> str:
     requirements = _access_requirement_labels(access_payload)
     subject = display_name or f"{resource_type}:{resource_id}"
     if requirements:
-        return f"Access is not ready for {subject}: {', '.join(requirements)}."
-    return f"Access is not ready for {subject}."
+        return (
+            f"External access is not ready for {subject}: "
+            f"{', '.join(requirements)}."
+        )
+    return f"External access is not ready for {subject}."
 
 
 def _missing_access_entities(

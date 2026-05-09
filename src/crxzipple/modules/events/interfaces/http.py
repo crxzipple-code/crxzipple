@@ -34,6 +34,8 @@ class EventConsoleStreamFilters:
     session_key: str | None = None
     interaction_id: str | None = None
     channel_type: str | None = None
+    payload_key: str | None = None
+    payload_value: str | None = None
 
     @classmethod
     def from_query(
@@ -47,6 +49,8 @@ class EventConsoleStreamFilters:
         session_key: str | None = None,
         interaction_id: str | None = None,
         channel_type: str | None = None,
+        payload_key: str | None = None,
+        payload_value: str | None = None,
     ) -> EventConsoleStreamFilters:
         return cls(
             owner=_normalize_optional_text(owner),
@@ -57,6 +61,8 @@ class EventConsoleStreamFilters:
             session_key=_normalize_optional_text(session_key),
             interaction_id=_normalize_optional_text(interaction_id),
             channel_type=_normalize_optional_text(channel_type),
+            payload_key=_normalize_optional_text(payload_key),
+            payload_value=_normalize_optional_text(payload_value),
         )
 
     def active(self) -> bool:
@@ -73,6 +79,8 @@ class EventConsoleStreamFilters:
             ("session_key", self.session_key),
             ("interaction_id", self.interaction_id),
             ("channel_type", self.channel_type),
+            ("payload_key", self.payload_key),
+            ("payload_value", self.payload_value),
         ):
             if value is not None:
                 payload[key] = value
@@ -101,6 +109,8 @@ def stream_event_console(
     session_key: str | None = Query(default=None),
     interaction_id: str | None = Query(default=None),
     channel_type: str | None = Query(default=None),
+    payload_key: str | None = Query(default=None),
+    payload_value: str | None = Query(default=None),
 ) -> StreamingResponse:
     events_service = container.events_service
     if events_service is None:
@@ -115,6 +125,8 @@ def stream_event_console(
         session_key=session_key,
         interaction_id=interaction_id,
         channel_type=channel_type,
+        payload_key=payload_key,
+        payload_value=payload_value,
     )
     definition_registry = container.event_definition_registry
 
@@ -220,6 +232,55 @@ def stream_event_console(
             "X-Crx-Stream-Scope": "bus",
         },
     )
+
+
+@router.get("/records")
+def list_event_records(
+    container: Annotated[AppContainer, Depends(get_container)],
+    limit: Annotated[int, Query(ge=0, le=500)] = 50,
+    owner: str | None = Query(default=None),
+    surface_id: str | None = Query(default=None),
+    event_name: str | None = Query(default=None),
+    topic_prefix: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    session_key: str | None = Query(default=None),
+    interaction_id: str | None = Query(default=None),
+    channel_type: str | None = Query(default=None),
+    payload_key: str | None = Query(default=None),
+    payload_value: str | None = Query(default=None),
+) -> dict[str, Any]:
+    events_service = container.events_service
+    if events_service is None:
+        raise HTTPException(status_code=503, detail="Event service is not available.")
+
+    filters = EventConsoleStreamFilters.from_query(
+        owner=owner,
+        surface_id=surface_id,
+        event_name=event_name,
+        topic_prefix=topic_prefix,
+        run_id=run_id,
+        session_key=session_key,
+        interaction_id=interaction_id,
+        channel_type=channel_type,
+        payload_key=payload_key,
+        payload_value=payload_value,
+    )
+    topic_cursors = _snapshot_console_topics(
+        events_service=events_service,
+        filters=filters,
+    )
+    records = _read_recent_console_records(
+        events_service=events_service,
+        topic_cursors=topic_cursors,
+        limit=limit,
+        definition_registry=container.event_definition_registry,
+        filters=filters,
+    )
+    return {
+        "filters": filters.to_payload(),
+        "topic_count": len(topic_cursors),
+        "records": list(records),
+    }
 
 
 @router.get("/topics/{topic}/diagnostics")
@@ -682,6 +743,13 @@ def _matches_console_stream_filters(
         )
     ):
         return False
+    if filters.payload_key is not None:
+        payload_value = _payload_lookup(source_payload, filters.payload_key)
+        if filters.payload_value is None:
+            if payload_value is None:
+                return False
+        elif not _payload_value_matches(payload_value, filters.payload_value):
+            return False
     return True
 
 
@@ -705,6 +773,26 @@ def _collect_nested_scalar_values(
         elif isinstance(current, (list, tuple)):
             stack.extend(current)
     return values
+
+
+def _payload_lookup(payload: dict[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in path.split("."):
+        key = part.strip()
+        if not key:
+            return None
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
+def _payload_value_matches(value: Any, expected: str) -> bool:
+    if isinstance(value, (list, tuple, set)):
+        return expected in {str(item).strip() for item in value if item is not None}
+    if isinstance(value, dict):
+        return False
+    return str(value).strip() == expected
 
 
 def _normalize_optional_text(value: str | None) -> str | None:

@@ -242,6 +242,51 @@ class EventsHttpTestCase(HttpModuleTestCase):
         self.assertIn("orchestration.run.queued", body)
         self.assertNotIn("channel.connection.observed", body)
 
+    def test_event_records_endpoint_filters_by_payload_value(self) -> None:
+        container = self.client.app.state.container
+        container.events_service.publish(
+            Event(
+                name="agent.profile.updated",
+                payload={
+                    "agent_profile_id": "assistant",
+                    "reason": "settings_agent_profiles_owner_view",
+                },
+            ),
+        )
+        container.events_service.publish(
+            Event(
+                name="agent.profile.updated",
+                payload={
+                    "agent_profile_id": "writer",
+                    "reason": "other profile",
+                },
+            ),
+        )
+
+        response = self.client.get(
+            "/events/records",
+            params={
+                "topic_prefix": "events.named.agent.profile",
+                "payload_key": "agent_profile_id",
+                "payload_value": "assistant",
+                "limit": 10,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filters"]["payload_key"], "agent_profile_id")
+        self.assertEqual(payload["filters"]["payload_value"], "assistant")
+        self.assertEqual(payload["topic_count"], 1)
+        self.assertEqual(len(payload["records"]), 1)
+        record = payload["records"][0]
+        self.assertEqual(record["source_event_name"], "agent.profile.updated")
+        self.assertEqual(record["source_payload"]["agent_profile_id"], "assistant")
+        self.assertEqual(
+            record["source_payload"]["reason"],
+            "settings_agent_profiles_owner_view",
+        )
+
     def test_event_topic_diagnostics_reports_contracts_cursors_and_records(self) -> None:
         container = self.client.app.state.container
         topic = "turn.session.agent:assistant:deck-diagnostics"

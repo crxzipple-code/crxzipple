@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import httpx
 
-from crxzipple.modules.access.interfaces.inventory import collect_access_inventory
 from crxzipple.modules.orchestration.domain import (
     InboundInstruction,
     OrchestrationRun,
@@ -147,7 +146,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
 
         tool = self.container.tool_service.get_tool("openai_image_generate")
         self.assertEqual(tool.access_requirement_sets, (("env:OPENAI_API_KEY",),))
-        self.assertEqual(tool.required_effect_ids, ("remote_tool_access",))
+        self.assertEqual(tool.required_effect_ids, ("remote_tool_execution",))
         self.assertEqual(tool.execution_support.supported_modes, (ToolMode.BACKGROUND,))
         self.assertIn("surface:interactive", tool.tags)
 
@@ -265,7 +264,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
         self.assertEqual(tool.access_requirement_sets, (("env:OPENAI_API_KEY",),))
         self.assertEqual(
             tool.required_effect_ids,
-            ("remote_tool_access", "sensitive_access"),
+            ("remote_tool_execution", "sensitive_operation_confirmation"),
         )
         self.assertEqual(tool.execution_support.supported_modes, (ToolMode.BACKGROUND,))
         self.assertIn("surface:interactive", tool.tags)
@@ -301,26 +300,20 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
         self.assertEqual(artifact.name, "openai-gpt-image-2-edit-1.webp")
         self.assertNotIn("data:image/png", json.dumps(tool_run.result.details))
 
-    def test_openai_api_key_is_one_authorization_asset_for_both_tools(self) -> None:
+    def test_image_tools_declare_the_same_openai_access_requirement(self) -> None:
         register_scanned_tool_packages(self.container, include_openapi=False)
         self.container.tool_service.discover_local_tools()
 
-        inventory = collect_access_inventory(
-            self.container,
-            include_ready=True,
-        )
-        openai_targets = [
-            target
-            for target in inventory["targets"]
-            if target["display_name"] == "OPENAI_API_KEY"
-        ]
+        generate = self.container.tool_service.get_tool("openai_image_generate")
+        edit = self.container.tool_service.get_tool("openai_image_edit")
 
-        self.assertEqual(len(openai_targets), 1)
-        metadata = openai_targets[0]["metadata"]
-        self.assertEqual(metadata["requirements"], ["env:OPENAI_API_KEY"])
         self.assertEqual(
-            metadata["tool_ids"],
-            ["openai_image_edit", "openai_image_generate"],
+            generate.access_requirement_sets,
+            (("env:OPENAI_API_KEY",),),
+        )
+        self.assertEqual(
+            edit.access_requirement_sets,
+            generate.access_requirement_sets,
         )
 
     def test_image_tools_are_visible_to_interactive_orchestration_runs(self) -> None:

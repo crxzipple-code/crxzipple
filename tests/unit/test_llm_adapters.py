@@ -29,6 +29,11 @@ from crxzipple.modules.llm.infrastructure import (
 )
 
 
+def _adapter_request(**kwargs) -> LlmAdapterRequest:  # noqa: ANN003
+    kwargs.setdefault("resolved_credential", "adapter-test-token")
+    return LlmAdapterRequest(**kwargs)
+
+
 class _FakeResponse:
     def __init__(
         self,
@@ -157,7 +162,6 @@ class LlmAdapterTestCase(unittest.TestCase):
         _FakeAsyncClient.response = _FakeAsyncResponse()
 
     def test_openai_responses_adapter_shapes_request_and_result(self) -> None:
-        os.environ["OPENAI_API_KEY"] = "openai-secret"
         profile = LlmProfile(
             id="writer",
             provider=LlmProviderKind.OPENAI,
@@ -171,7 +175,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             ),
             credential_binding="env:OPENAI_API_KEY",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.SYSTEM,
@@ -236,7 +240,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.usage.total_tokens, 33)
 
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer openai-secret")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
         self.assertEqual(kwargs["json"]["model"], "gpt-5")
         self.assertEqual(kwargs["json"]["tools"][0]["name"], "search_docs")
         self.assertEqual(kwargs["json"]["text"]["format"]["name"], "answer")
@@ -252,7 +256,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
             ),
@@ -303,6 +307,69 @@ class LlmAdapterTestCase(unittest.TestCase):
             "sample_api_search_docs",
         )
 
+    def test_openai_responses_adapter_uses_resolved_request_credential(self) -> None:
+        profile = LlmProfile(
+            id="writer-access-provider",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding="env:MISSING_OPENAI_API_KEY",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Use injected access."),
+            ),
+            resolved_credential="access-provider-token",
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_responses.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "response.completed",
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_access_provider_1",
+                                "model": "gpt-5",
+                                "status": "completed",
+                                "output_text": "ok",
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ) as post:
+            OpenAIResponsesAdapter().invoke(profile, request)
+
+        _, kwargs = post.call_args
+        self.assertEqual(
+            kwargs["headers"]["Authorization"],
+            "Bearer access-provider-token",
+        )
+
+    def test_openai_responses_adapter_does_not_resolve_binding_fallback(self) -> None:
+        os.environ["OPENAI_API_KEY"] = "env-token-that-must-not-be-read"
+        profile = LlmProfile(
+            id="writer-no-private-fallback",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding="env:OPENAI_API_KEY",
+        )
+        request = LlmAdapterRequest(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="No private fallback."),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "no resolved credential was injected",
+        ):
+            OpenAIResponsesAdapter().invoke(profile, request)
+
     def test_openai_responses_adapter_stream_invoke_emits_text_delta_and_completed(self) -> None:
         profile = LlmProfile(
             id="writer-stream",
@@ -311,7 +378,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Reply with stream-openai."),
             ),
@@ -367,7 +434,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Reply async."),
             ),
@@ -430,7 +497,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding="inline-openai-token",
             capabilities=(LlmCapability.VISION_INPUT,),
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -487,7 +554,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -546,7 +613,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -573,7 +640,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding="inline-openai-token",
             capabilities=(LlmCapability.VISION_INPUT,),
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.TOOL,
@@ -660,7 +727,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.TOOL,
@@ -742,7 +809,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Retry please."),
             ),
@@ -822,7 +889,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
                 LlmMessage(
@@ -905,7 +972,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-5",
             credential_binding="inline-openai-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
                 LlmMessage(
@@ -972,7 +1039,6 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
     def test_openai_chat_compatible_adapter_shapes_request_and_result(self) -> None:
-        os.environ["OLLAMA_TOKEN"] = "compat-secret"
         profile = LlmProfile(
             id="local-chat",
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
@@ -982,7 +1048,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding="env:OLLAMA_TOKEN",
             default_params=LlmDefaults(top_p=0.9, max_output_tokens=256),
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
             ),
@@ -1035,7 +1101,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.finish_reason, "tool_calls")
 
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer compat-secret")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
         self.assertEqual(kwargs["json"]["messages"][0]["role"], "user")
         self.assertEqual(kwargs["json"]["response_format"]["type"], "json_object")
         self.assertEqual(kwargs["json"]["max_tokens"], 256)
@@ -1060,7 +1126,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             base_url="http://localhost:8010/v1",
             credential_binding="inline-vllm-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
             ),
@@ -1146,7 +1212,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             base_url="http://localhost:8010/v1",
             credential_binding="inline-vllm-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
             ),
@@ -1216,7 +1282,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             base_url="http://localhost:8010/v1",
             credential_binding="inline-vllm-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Say A"),
             ),
@@ -1249,7 +1315,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 },
             ),
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Say hello"),
             ),
@@ -1302,7 +1368,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="llama3.2",
             credential_binding="compat-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
                 LlmMessage(
@@ -1386,7 +1452,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="qwen3.5-35b",
             credential_binding="compat-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Call a tool."),
             ),
@@ -1445,7 +1511,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="qwen3.5-35b",
             credential_binding="compat-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="hello"),
                 LlmMessage(role=LlmMessageRole.SYSTEM, content="system-late"),
@@ -1486,7 +1552,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="qwen3.5-35b",
             credential_binding="compat-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.SYSTEM, content="sys1"),
                 LlmMessage(role=LlmMessageRole.SYSTEM, content="sys2"),
@@ -1526,7 +1592,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gpt-4.1",
             credential_binding="inline-chat-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -1582,7 +1648,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="llama3.2",
             credential_binding="compat-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
             ),
@@ -1633,7 +1699,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             "sample_api_search_docs",
         )
 
-    def test_openai_codex_responses_adapter_reads_auth_json_and_sse(self) -> None:
+    def test_openai_codex_responses_adapter_uses_resolved_credential_and_sse(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             auth_path = Path(tempdir) / "auth.json"
             auth_path.write_text(
@@ -1659,7 +1725,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 credential_binding=f"codex_auth_json:{auth_path}",
                 default_params=LlmDefaults(reasoning_effort="medium"),
             )
-            request = LlmAdapterRequest(
+            request = _adapter_request(
                 messages=(
                     LlmMessage(
                         role=LlmMessageRole.SYSTEM,
@@ -1736,7 +1802,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.metadata["transport"], "sse")
 
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer codex-access-token")
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
         self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
         self.assertEqual(kwargs["json"]["instructions"], "You are a concise coding assistant.")
         self.assertEqual(
@@ -1759,7 +1825,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_family=LlmModelFamily.CODEX,
             credential_binding="codex-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -1819,7 +1885,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_family=LlmModelFamily.CODEX,
             credential_binding="codex-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -1888,7 +1954,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_family=LlmModelFamily.CODEX,
             credential_binding="codex-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -1964,7 +2030,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_family=LlmModelFamily.CODEX,
             credential_binding="codex-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2046,7 +2112,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_family=LlmModelFamily.CODEX,
             credential_binding="codex-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Retry codex."),
             ),
@@ -2119,7 +2185,6 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(post.call_count, 2)
 
     def test_anthropic_messages_adapter_shapes_request_and_result(self) -> None:
-        os.environ["ANTHROPIC_API_KEY"] = "anthropic-secret"
         profile = LlmProfile(
             id="claude",
             provider=LlmProviderKind.ANTHROPIC,
@@ -2128,7 +2193,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding="env:ANTHROPIC_API_KEY",
             default_params=LlmDefaults(temperature=0.3, top_p=0.8),
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.SYSTEM,
@@ -2180,14 +2245,13 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.finish_reason, "tool_use")
 
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["headers"]["x-api-key"], "anthropic-secret")
+        self.assertEqual(kwargs["headers"]["x-api-key"], "adapter-test-token")
         self.assertEqual(kwargs["headers"]["anthropic-version"], "2023-06-01")
         self.assertEqual(kwargs["json"]["system"], "Return concise answers.")
         self.assertEqual(kwargs["json"]["tools"][0]["name"], "search_docs")
         self.assertEqual(kwargs["json"]["max_tokens"], 1024)
 
     def test_anthropic_messages_adapter_invoke_async_uses_async_http(self) -> None:
-        os.environ["ANTHROPIC_API_KEY"] = "anthropic-secret"
         profile = LlmProfile(
             id="claude-async",
             provider=LlmProviderKind.ANTHROPIC,
@@ -2195,7 +2259,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="claude-sonnet-4-5",
             credential_binding="env:ANTHROPIC_API_KEY",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2226,7 +2290,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
         self.assertEqual(method, "POST")
         self.assertEqual(url, "https://api.anthropic.com/v1/messages")
-        self.assertEqual(kwargs["headers"]["x-api-key"], "anthropic-secret")
+        self.assertEqual(kwargs["headers"]["x-api-key"], "adapter-test-token")
 
     def test_anthropic_messages_adapter_encodes_tool_history_messages(self) -> None:
         profile = LlmProfile(
@@ -2236,7 +2300,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="claude-sonnet-4-5",
             credential_binding="anthropic-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
                 LlmMessage(
@@ -2344,7 +2408,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="claude-sonnet-4-5",
             credential_binding="anthropic-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2404,7 +2468,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="claude-sonnet-4-5",
             credential_binding="anthropic-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2434,7 +2498,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="claude-sonnet-4-5",
             credential_binding="anthropic-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2480,7 +2544,6 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
     def test_gemini_generate_content_adapter_shapes_request_and_result(self) -> None:
-        os.environ["GEMINI_API_KEY"] = "gemini-secret"
         profile = LlmProfile(
             id="gemini",
             provider=LlmProviderKind.GOOGLE,
@@ -2492,7 +2555,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 max_output_tokens=300,
             ),
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.SYSTEM,
@@ -2552,7 +2615,7 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.usage.total_tokens, 20)
 
         _, kwargs = post.call_args
-        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "gemini-secret")
+        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "adapter-test-token")
         self.assertEqual(
             kwargs["json"]["system_instruction"]["parts"][0]["text"],
             "Use tools when needed.",
@@ -2564,7 +2627,6 @@ class LlmAdapterTestCase(unittest.TestCase):
         )
 
     def test_gemini_generate_content_adapter_invoke_async_uses_async_http(self) -> None:
-        os.environ["GEMINI_API_KEY"] = "gemini-secret"
         profile = LlmProfile(
             id="gemini-async",
             provider=LlmProviderKind.GOOGLE,
@@ -2572,7 +2634,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gemini-2.5-pro",
             credential_binding="env:GEMINI_API_KEY",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,
@@ -2612,7 +2674,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
         )
-        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "gemini-secret")
+        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "adapter-test-token")
 
     def test_gemini_generate_content_adapter_encodes_tool_history_messages(self) -> None:
         profile = LlmProfile(
@@ -2622,7 +2684,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gemini-2.5-pro",
             credential_binding="gemini-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="Need docs"),
                 LlmMessage(
@@ -2723,7 +2785,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             model_name="gemini-2.5-pro",
             credential_binding="gemini-inline-token",
         )
-        request = LlmAdapterRequest(
+        request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.USER,

@@ -19,7 +19,7 @@ class AuthorizationServiceAdapter(AuthorizationPort):
     def check_tool_execution(self, request):
         return self.service.check_tool_execution(request)
 
-    def grant_run_access(
+    def grant_run_authorization(
         self,
         *,
         run_id: str,
@@ -28,7 +28,7 @@ class AuthorizationServiceAdapter(AuthorizationPort):
         effect_ids: tuple[str, ...],
         tool_ids: tuple[str, ...],
     ):
-        return self.service.grant_run_access(
+        return self.service.grant_run_authorization(
             run_id=run_id,
             agent_id=agent_id,
             approval_request_id=approval_request_id,
@@ -36,7 +36,7 @@ class AuthorizationServiceAdapter(AuthorizationPort):
             tool_ids=tool_ids,
         )
 
-    def grant_session_access(
+    def grant_session_authorization(
         self,
         *,
         session_key: str,
@@ -45,7 +45,7 @@ class AuthorizationServiceAdapter(AuthorizationPort):
         effect_ids: tuple[str, ...],
         tool_ids: tuple[str, ...],
     ):
-        return self.service.grant_session_access(
+        return self.service.grant_session_authorization(
             session_key=session_key,
             agent_id=agent_id,
             approval_request_id=approval_request_id,
@@ -53,13 +53,24 @@ class AuthorizationServiceAdapter(AuthorizationPort):
             tool_ids=tool_ids,
         )
 
-    def grant_agent_effect_access(
+    def grant_agent_effect_authorization(
         self,
         *,
         agent_id: str,
         effect_id: str,
     ):
-        return self.service.grant_agent_effect_access(
+        return self.service.grant_agent_effect_authorization(
             agent_id=agent_id,
             effect_id=effect_id,
+        )
+
+    def grant_agent_tool_authorization(
+        self,
+        *,
+        agent_id: str,
+        tool_id: str,
+    ):
+        return self.service.grant_agent_tool_authorization(
+            agent_id=agent_id,
+            tool_id=tool_id,
         )

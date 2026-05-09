@@ -48,7 +48,7 @@ class ApprovalResolutionService:
     session_service: SessionApplicationService | None
     get_run: Callable[[str], OrchestrationRun]
 
-    def grant_run_tool_access(
+    def grant_run_tool_authorization(
         self,
         *,
         run_id: str,
@@ -59,7 +59,7 @@ class ApprovalResolutionService:
         if self.authorization_port is None:
             raise RuntimeError("Authorization service is not configured.")
         run = self.get_run(run_id)
-        self.authorization_port.grant_run_access(
+        self.authorization_port.grant_run_authorization(
             run_id=run.id,
             agent_id=run.agent_id,
             approval_request_id=approval_request_id,
@@ -67,7 +67,7 @@ class ApprovalResolutionService:
             tool_ids=tool_ids,
         )
 
-    def grant_session_tool_access(
+    def grant_session_tool_authorization(
         self,
         *,
         run_id: str,
@@ -83,7 +83,7 @@ class ApprovalResolutionService:
             raise OrchestrationValidationError(
                 "Orchestration run metadata.session_key is required for session grants.",
             )
-        self.authorization_port.grant_session_access(
+        self.authorization_port.grant_session_authorization(
             session_key=session_key,
             agent_id=run.agent_id,
             approval_request_id=approval_request_id,
@@ -91,7 +91,7 @@ class ApprovalResolutionService:
             tool_ids=tool_ids,
         )
 
-    def grant_agent_effect_access(
+    def grant_agent_effect_authorization(
         self,
         *,
         run_id: str,
@@ -105,7 +105,7 @@ class ApprovalResolutionService:
                 "Orchestration run agent_id is required for agent grants.",
             )
         for effect_id in effect_ids:
-            self.authorization_port.grant_agent_effect_access(
+            self.authorization_port.grant_agent_effect_authorization(
                 agent_id=run.agent_id,
                 effect_id=effect_id,
             )

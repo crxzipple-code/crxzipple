@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from crxzipple.bootstrap import AppContainer
-from crxzipple.core.config import LlmProfileSettings
 from crxzipple.interfaces.authorization import authorize_llm_action
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.llm.application import (
     InvokeLlmInput,
     RegisterLlmProfileInput,
     StreamLlmInput,
+)
+from crxzipple.modules.llm.application.services import (
+    public_credential_binding_label,
+    register_llm_profile_input_from_config,
 )
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
@@ -59,6 +63,7 @@ class RegisterLlmProfileRequest(BaseModel):
     max_concurrency: int | None = Field(default=None, ge=1)
     concurrency_key: str | None = None
     enabled: bool = True
+    reason: str | None = None
 
 
 class LlmProfileResponse(BaseModel):
@@ -145,56 +150,57 @@ class LlmInvocationResponse(BaseModel):
     completed_at: str | None = None
 
 
-def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfileInput:
-    return RegisterLlmProfileInput(
-        id=profile.id,
-        provider=LlmProviderKind(profile.provider),
-        api_family=LlmApiFamily(profile.api_family),
-        model_name=profile.model_name,
-        context_window_tokens=profile.context_window_tokens,
-        model_family=LlmModelFamily(profile.model_family),
-        capabilities=tuple(LlmCapability(item) for item in profile.capabilities),
-        default_params=LlmDefaults.from_payload(profile.default_params),
-        base_url=profile.base_url,
-        credential_binding=profile.credential_binding,
-        timeout_seconds=profile.timeout_seconds,
-        max_concurrency=profile.max_concurrency,
-        concurrency_key=profile.concurrency_key,
-        source_kind=LlmSourceKind(profile.source_kind),
-        enabled=profile.enabled,
-    )
-
-
 @router.post("", response_model=LlmProfileResponse, status_code=status.HTTP_201_CREATED)
 def register_profile(
     payload: RegisterLlmProfileRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmProfileResponse:
-    profile = container.llm_service.register_profile(
-        RegisterLlmProfileInput(
-            id=payload.id,
-            provider=payload.provider,
-            api_family=payload.api_family,
-            model_name=payload.model_name,
-            context_window_tokens=payload.context_window_tokens,
-            model_family=payload.model_family,
-            capabilities=tuple(payload.capabilities),
-            default_params=LlmDefaults(
-                temperature=payload.default_params.temperature,
-                top_p=payload.default_params.top_p,
-                max_output_tokens=payload.default_params.max_output_tokens,
-                reasoning_effort=payload.default_params.reasoning_effort,
-                extra_body=dict(payload.default_params.extra_body),
-            ),
-            base_url=payload.base_url,
-            credential_binding=payload.credential_binding,
-            timeout_seconds=payload.timeout_seconds,
-            max_concurrency=payload.max_concurrency,
-            concurrency_key=payload.concurrency_key,
-            enabled=payload.enabled,
-        ),
-    )
+    profile = container.llm_service.register_profile(_register_request_to_input(payload))
     return _to_profile_response(profile)
+
+
+def _register_request_to_input(
+    payload: RegisterLlmProfileRequest,
+) -> RegisterLlmProfileInput:
+    return RegisterLlmProfileInput(
+        id=payload.id,
+        provider=payload.provider,
+        api_family=payload.api_family,
+        model_name=payload.model_name,
+        context_window_tokens=payload.context_window_tokens,
+        model_family=payload.model_family,
+        capabilities=tuple(payload.capabilities),
+        default_params=LlmDefaults(
+            temperature=payload.default_params.temperature,
+            top_p=payload.default_params.top_p,
+            max_output_tokens=payload.default_params.max_output_tokens,
+            reasoning_effort=payload.default_params.reasoning_effort,
+            extra_body=dict(payload.default_params.extra_body),
+        ),
+        base_url=payload.base_url,
+        credential_binding=payload.credential_binding,
+        timeout_seconds=payload.timeout_seconds,
+        max_concurrency=payload.max_concurrency,
+        concurrency_key=payload.concurrency_key,
+        source_kind=LlmSourceKind.MANUAL,
+        enabled=payload.enabled,
+    )
+
+
+def _profile_config_id(config: object) -> str:
+    if isinstance(config, Mapping):
+        profile_id = config.get("profile_id")
+        if profile_id is not None:
+            return str(profile_id)
+        return str(config.get("id"))
+    profile_id = getattr(config, "profile_id", None)
+    if profile_id is not None:
+        return str(profile_id)
+    return str(getattr(config, "id"))
+
+
+def _configured_profiles_from_settings(container: AppContainer) -> tuple[object, ...]:
+    return tuple(getattr(container.settings, "llm_profiles", ()))
 
 
 @router.get("", response_model=list[LlmProfileResponse])
@@ -215,13 +221,33 @@ def sync_profiles(
     selected_ids = set(profile or [])
     configured_profiles = tuple(
         item
-        for item in container.settings.llm_profiles
-        if not selected_ids or item.id in selected_ids
+        for item in _configured_profiles_from_settings(container)
+        if not selected_ids or _profile_config_id(item) in selected_ids
     )
     synced = container.llm_service.sync_profiles(
-        tuple(_profile_settings_to_input(item) for item in configured_profiles),
+        tuple(
+            register_llm_profile_input_from_config(item) for item in configured_profiles
+        ),
     )
     return [_to_profile_response(item) for item in synced]
+
+
+@router.put("/{llm_id}", response_model=LlmProfileResponse)
+def update_profile(
+    llm_id: str,
+    payload: RegisterLlmProfileRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmProfileResponse:
+    if payload.id != llm_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "llm_profile_id_mismatch",
+                "message": "Request body id must match the llm_id path parameter.",
+            },
+        )
+    profile = container.llm_service.update_profile(_register_request_to_input(payload))
+    return _to_profile_response(profile)
 
 
 @router.get("/{llm_id}", response_model=LlmProfileResponse)
@@ -230,6 +256,35 @@ def get_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmProfileResponse:
     return _to_profile_response(container.llm_service.get_profile(llm_id))
+
+
+@router.post("/{llm_id}/enable", response_model=LlmProfileResponse)
+def enable_profile(
+    llm_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmProfileResponse:
+    return _to_profile_response(
+        container.llm_service.set_profile_enabled(llm_id, enabled=True),
+    )
+
+
+@router.post("/{llm_id}/disable", response_model=LlmProfileResponse)
+def disable_profile(
+    llm_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmProfileResponse:
+    return _to_profile_response(
+        container.llm_service.set_profile_enabled(llm_id, enabled=False),
+    )
+
+
+@router.delete("/{llm_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_profile(
+    llm_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> Response:
+    container.llm_service.delete_profile(llm_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -289,6 +344,7 @@ def stream_llm(
         action="llm.stream",
         interface_name="http",
     )
+
     def event_stream():
         for event in container.llm_service.stream_invoke(
             StreamLlmInput(
@@ -365,7 +421,7 @@ def _to_profile_response(profile: Any) -> LlmProfileResponse:
             extra_body=dict(profile.default_params.extra_body),
         ),
         base_url=profile.base_url,
-        credential_binding=profile.credential_binding,
+        credential_binding=public_credential_binding_label(profile.credential_binding),
         timeout_seconds=profile.timeout_seconds,
         max_concurrency=profile.max_concurrency,
         concurrency_key=profile.concurrency_key,

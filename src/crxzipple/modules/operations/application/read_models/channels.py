@@ -7,7 +7,10 @@ import json
 from typing import Any
 
 from crxzipple.modules.channels.domain import channel_dead_letter_topic
-from crxzipple.modules.operations.application.observation import observed_event_from_record
+from crxzipple.modules.operations.application.observation import (
+    OperationsObservedEvent,
+    observed_event_from_record,
+)
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
     OperationsChartSectionModel,
@@ -29,6 +32,7 @@ from crxzipple.modules.orchestration.application import (
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 _STALE_RUNTIME_AFTER_SECONDS = 300.0
+_RECENT_CHANNEL_HEALTH_SECONDS = 86400.0
 _RECENT_TOPIC_LIMIT = 40
 _MAX_EVENT_TOPICS = 180
 _MAX_RECENT_EVENTS = 240
@@ -224,6 +228,7 @@ class ChannelsOperationsReadModelProvider:
             profiles=profiles,
             dead_letters=dead_letter_events,
             interactions=interactions,
+            now=now,
         )
 
         channel_status = _channel_status_table(
@@ -275,6 +280,7 @@ class ChannelsOperationsReadModelProvider:
                 events=channel_events,
                 dead_letters=dead_letter_events,
                 interactions=interactions,
+                now=now,
             ),
             tabs=_tabs(
                 runtimes=len(filtered_runtime_records),
@@ -584,6 +590,10 @@ def _runtime_records(
     rows: list[dict[str, Any]] = []
     for runtime in runtimes:
         runtime_id = _text(getattr(runtime, "runtime_id", None), "")
+        seconds_since_heartbeat = _seconds_since(
+            getattr(runtime, "last_heartbeat_at", None),
+            now=now,
+        )
         status = _runtime_status(runtime, now=now)
         rows.append(
             {
@@ -594,21 +604,19 @@ def _runtime_records(
                 "status": status,
                 "registered_at": _format_datetime(getattr(runtime, "registered_at", None)),
                 "last_heartbeat": _format_datetime(getattr(runtime, "last_heartbeat_at", None)),
-                "heartbeat_age": _age_label(
-                    _seconds_since(getattr(runtime, "last_heartbeat_at", None), now=now)
-                ),
+                "heartbeat_age": _age_label(seconds_since_heartbeat),
                 "account_count": len(accounts_by_runtime.get(runtime_id, ())),
                 "connection_count": len(connections_by_runtime.get(runtime_id, ())),
                 "event_count": event_counts[runtime_id],
                 "action": "Open",
                 "route": f"/operations/channels?runtime_id={runtime_id}",
                 "tone": _tone_for_status(status),
+                "_seconds_since_heartbeat": round(seconds_since_heartbeat, 3),
             }
         )
     rows.sort(
         key=lambda item: (
-            item["status"] != "Stale",
-            item["status"] not in {"Offline", "Error", "Failed"},
+            _runtime_status_sort(item["status"]),
             item["channel_type"],
             item["runtime_id"],
         )
@@ -686,16 +694,21 @@ def _health(
     profiles: tuple[Any, ...],
     dead_letters: tuple[_ChannelEventRecord, ...],
     interactions: tuple[Any, ...],
+    now: datetime,
 ) -> str:
     if not service_available:
         return "error"
-    if dead_letters:
+    if any(_is_recent_channel_event(event, now=now) for event in dead_letters):
         return "error"
     if any(row["status"] in {"Error", "Failed", "Offline"} for row in runtimes):
         return "error"
-    if any(_interaction_tone(item) == "danger" for item in interactions):
+    if any(
+        _interaction_tone(item) == "danger"
+        and _is_recent_interaction(item, now=now)
+        for item in interactions
+    ):
         return "error"
-    if any(row["status"] == "Stale" for row in runtimes):
+    if any(_runtime_is_recent_stale(row) for row in runtimes):
         return "warning"
     if not runtimes and not profiles:
         return "warning"
@@ -712,15 +725,23 @@ def _metrics(
     events: tuple[_ChannelEventRecord, ...],
     dead_letters: tuple[_ChannelEventRecord, ...],
     interactions: tuple[Any, ...],
+    now: datetime,
 ) -> tuple[MetricCardModel, ...]:
     online = sum(1 for row in runtimes if row["status"] == "Online")
-    stale = sum(1 for row in runtimes if row["status"] == "Stale")
+    recent_stale = sum(1 for row in runtimes if _runtime_is_recent_stale(row))
+    retained_stale = sum(1 for row in runtimes if row["status"] == "Stale")
     enabled_profiles = sum(1 for profile in profiles if bool(getattr(profile, "enabled", True)))
     bound_interactions = sum(
         1 for interaction in interactions if _text(getattr(interaction, "run_id", None), "")
     )
     failed_interactions = sum(
-        1 for interaction in interactions if _interaction_tone(interaction) == "danger"
+        1
+        for interaction in interactions
+        if _interaction_tone(interaction) == "danger"
+        and _is_recent_interaction(interaction, now=now)
+    )
+    recent_dead_letters = tuple(
+        event for event in dead_letters if _is_recent_channel_event(event, now=now)
     )
     return (
         MetricCardModel(
@@ -734,8 +755,8 @@ def _metrics(
             id="runtimes",
             label="Runtimes",
             value=str(len(runtimes)),
-            delta=f"{online} online / {stale} stale",
-            tone="warning" if stale else "success",
+            delta=f"{online} online / {recent_stale} recent stale / {retained_stale} retained stale",
+            tone="warning" if recent_stale else "success",
         ),
         MetricCardModel(
             id="profiles",
@@ -768,9 +789,9 @@ def _metrics(
         MetricCardModel(
             id="dead_letters",
             label="Dead Letters",
-            value=str(len(dead_letters)),
-            delta="retained channel failures",
-            tone="danger" if dead_letters else "success",
+            value=str(len(recent_dead_letters)),
+            delta=f"{len(dead_letters)} retained channel failures",
+            tone="danger" if recent_dead_letters else "success",
         ),
         MetricCardModel(
             id="events",
@@ -1588,7 +1609,6 @@ def _table(
     total: int | None = None,
     empty_state: str,
 ) -> OperationsTableSectionModel:
-    column_keys = tuple(key for key, _ in columns)
     return OperationsTableSectionModel(
         id=section_id,
         title=title,
@@ -1817,6 +1837,19 @@ def _interaction_tone(interaction: Any) -> str:
     return "neutral"
 
 
+def _is_recent_interaction(interaction: Any, *, now: datetime) -> bool:
+    updated_at = getattr(interaction, "updated_at", None)
+    created_at = getattr(interaction, "created_at", None)
+    for value in (updated_at, created_at):
+        if isinstance(value, datetime):
+            return _seconds_since(value, now=now) <= _RECENT_CHANNEL_HEALTH_SECONDS
+    return False
+
+
+def _is_recent_channel_event(event: _ChannelEventRecord, *, now: datetime) -> bool:
+    return _seconds_since(event.occurred_at, now=now) <= _RECENT_CHANNEL_HEALTH_SECONDS
+
+
 def _runtime_status(runtime: Any, *, now: datetime) -> str:
     raw = _text(getattr(runtime, "status", None), "online")
     heartbeat = getattr(runtime, "last_heartbeat_at", None)
@@ -1830,6 +1863,26 @@ def _runtime_status(runtime: Any, *, now: datetime) -> str:
     if normalized in {"error", "failed"}:
         return "Error"
     return _title(raw)
+
+
+def _runtime_status_sort(status: str) -> int:
+    normalized = status.strip().lower()
+    if normalized == "online":
+        return 0
+    if normalized in {"error", "failed", "offline"}:
+        return 1
+    if normalized == "stale":
+        return 2
+    return 3
+
+
+def _runtime_is_recent_stale(row: dict[str, Any]) -> bool:
+    if row.get("status") != "Stale":
+        return False
+    seconds = row.get("_seconds_since_heartbeat")
+    if not isinstance(seconds, (int, float)):
+        return False
+    return float(seconds) <= _RECENT_CHANNEL_HEALTH_SECONDS
 
 
 def _seconds_since(value: Any, *, now: datetime) -> float:

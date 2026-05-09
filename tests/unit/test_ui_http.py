@@ -16,6 +16,7 @@ from PIL import Image
 from crxzipple.modules.channels.domain import (
     ChannelAccountProfile,
     ChannelInteraction,
+    ChannelInteractionRegistry,
     ChannelProfile,
     channel_dead_letter_topic,
 )
@@ -50,6 +51,7 @@ from crxzipple.modules.tool.domain import (
     ToolWorkerRegistration,
     ToolRunResult,
 )
+from crxzipple.modules.settings.application import CreateSettingsResourceInput
 
 from tests.unit.http_test_support import (
     HttpModuleTestCase,
@@ -1257,7 +1259,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 description="Tool used by UI skills operations tests.",
             ),
         )
-        system_root = container.skill_manager.repository._system_root
+        system_root = container.skill_manager.manager.repository._system_root
         _write_skill_package(
             system_root / "ui-skill-ready",
             name="ui-skill-ready",
@@ -1497,12 +1499,41 @@ class UiHttpTestCase(HttpModuleTestCase):
     def test_ui_operations_access_page_uses_access_inventory_state(self) -> None:
         container = self.client.app.state.container
         previous = os.environ.pop("UI_ACCESS_MISSING_TOKEN", None)
-        container.tool_service.register(
-            RegisterToolInput(
-                id="ui_access_missing_tool",
-                name="UI Access Missing Tool",
-                description="Tool used by UI access operations tests.",
-                access_requirements=("env:UI_ACCESS_MISSING_TOKEN",),
+        container.settings_action_service.create_resource(
+            CreateSettingsResourceInput(
+                resource_id="ui-access-missing-token",
+                resource_kind="access-assets",
+                owner_module="access",
+                payload={
+                    "config_id": "ui-access-missing-token",
+                    "assets": (
+                        {
+                            "asset_id": "ui_access_missing_token",
+                            "asset_kind": "env",
+                            "display_name": "UI Access Missing Token",
+                            "governance_scope": "tool",
+                            "status": "active",
+                        },
+                    ),
+                    "consumer_bindings": (
+                        {
+                            "binding_id": "ui_access_missing_tool_access",
+                            "consumer_module": "tool",
+                            "consumer_kind": "tool",
+                            "consumer_id": "ui_access_missing_tool",
+                            "display_name": "UI Access Missing Tool",
+                            "asset_id": "ui_access_missing_token",
+                            "requirement_sets": (
+                                ("env:UI_ACCESS_MISSING_TOKEN",),
+                            ),
+                            "status": "active",
+                        },
+                    ),
+                },
+                display_name="UI Access Missing Token",
+                reason="seed settings-owned access inventory test data",
+                publish=True,
+                source="test",
             ),
         )
         container.events_service.publish(
@@ -1779,6 +1810,34 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(process_row["cells"]["status"], "Missing")
         self.assertEqual(process_row["cells"]["binding"], "Missing Session")
+
+    def test_ui_operations_daemon_health_ignores_historical_process_failures(self) -> None:
+        container = self.client.app.state.container
+        ended_at = datetime.now(timezone.utc) - timedelta(days=2)
+        process_session = ProcessSession(
+            id=f"historical-daemon-failed-{uuid4().hex}",
+            command="python -m crxzipple.main old-worker",
+            shell="/bin/sh",
+            working_directory=str(Path.cwd()),
+            session_key="daemon:worker:tool",
+            metadata={"daemon_service_key": "worker:tool"},
+            pid=12345,
+            status=ProcessStatus.FAILED,
+            exit_code=1,
+            started_at=ended_at - timedelta(minutes=5),
+            updated_at=ended_at,
+            ended_at=ended_at,
+        )
+        container.process_service.repository.save(process_session)
+
+        self._materialize_operations("daemon")
+        response = self.client.get("/operations/daemon")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertNotEqual(payload["health"], "error")
+        metric_by_id = {item["id"]: item for item in payload["metrics"]}
+        self.assertNotEqual(metric_by_id["processes"]["tone"], "danger")
 
     def test_ui_operations_tool_overview_uses_tool_runtime_state(self) -> None:
         container = self.client.app.state.container
@@ -2663,7 +2722,10 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["module"], "llm")
         self.assertEqual(payload["title"], "LLM")
         metric_by_id = {item["id"]: item for item in payload["metrics"]}
-        self.assertEqual(metric_by_id["profiles"]["value"], "1")
+        self.assertEqual(
+            metric_by_id["profiles"]["value"],
+            str(len(container.llm_service.list_profiles())),
+        )
         self.assertEqual(metric_by_id["tokens"]["value"], "18")
         self.assertIn(
             {
@@ -3139,6 +3201,41 @@ class UiHttpTestCase(HttpModuleTestCase):
         filtered_payload = filtered_response.json()
         self.assertEqual(filtered_payload["channel_status"]["total"], 0)
         self.assertEqual(filtered_payload["dead_letter_queue"]["total"], 1)
+
+    def test_ui_operations_channels_health_ignores_historical_failed_interactions(
+        self,
+    ) -> None:
+        container = self.client.app.state.container
+        old_timestamp = datetime.now(timezone.utc) - timedelta(days=3)
+        container.channel_profile_service.upsert_profile(
+            ChannelProfile(channel_type="webhook"),
+        )
+        container.channel_interaction_registry_store.save(
+            ChannelInteractionRegistry(
+                interactions=(
+                    ChannelInteraction(
+                        interaction_id="webhook:ops:event:historical-failed",
+                        channel_type="webhook",
+                        channel_account_id="ops",
+                        run_id="run-channel-historical-failed",
+                        status="failed",
+                        last_error="historical delivery failure",
+                        created_at=old_timestamp,
+                        updated_at=old_timestamp,
+                    ),
+                ),
+            ),
+        )
+
+        self._materialize_operations("channels")
+        response = self.client.get("/operations/channels")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertNotEqual(payload["health"], "error")
+        metric_by_id = {item["id"]: item for item in payload["metrics"]}
+        self.assertEqual(metric_by_id["interactions"]["value"], "1")
+        self.assertIn("0 failed", metric_by_id["interactions"]["delta"])
 
     def test_ui_trace_summary_and_events_use_event_read_model(self) -> None:
         container = self.client.app.state.container

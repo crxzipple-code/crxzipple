@@ -46,6 +46,108 @@ class AuthHttpTestCase(HttpModuleTestCase):
         finally:
             client.close()
 
+    def test_authorization_governance_endpoints_manage_policies(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        client = TestClient(create_app(settings=settings))
+        try:
+            policy_payload = {
+                "id": "local_allow_echo_http",
+                "effect": "allow",
+                "actions": ["tool.run"],
+                "resource_kind": "tool",
+                "resource_id": "echo",
+                "priority": 20,
+                "actor": {"type": "test", "id": "operator"},
+                "reason": "http governance test",
+            }
+            create_response = client.post(
+                "/authorization/policies",
+                json=policy_payload,
+            )
+            self.assertEqual(create_response.status_code, 201)
+            self.assertEqual(create_response.json()["id"], "local_allow_echo_http")
+
+            dry_run_payload = {
+                "request": {
+                    "action": "tool.run",
+                    "resource": {"kind": "tool", "id": "echo"},
+                    "context": {"attrs": {"interface": "http"}},
+                },
+                "actor": {"type": "test", "id": "operator"},
+            }
+            dry_run_response = client.post(
+                "/authorization/policies/dry-run",
+                json=dry_run_payload,
+            )
+            self.assertEqual(dry_run_response.status_code, 200)
+            self.assertTrue(dry_run_response.json()["allowed"])
+
+            disable_response = client.post(
+                "/authorization/policies/local_allow_echo_http/disable",
+                json={"actor": {"type": "test", "id": "operator"}},
+            )
+            self.assertEqual(disable_response.status_code, 200)
+            self.assertFalse(disable_response.json()["enabled"])
+
+            impact_response = client.post(
+                "/authorization/policies/impact",
+                json={
+                    **dry_run_payload,
+                    "proposed_policies": [
+                        {
+                            **policy_payload,
+                            "enabled": True,
+                            "actor": {"type": "test", "id": "operator"},
+                        },
+                    ],
+                },
+            )
+            self.assertEqual(impact_response.status_code, 200)
+            self.assertTrue(impact_response.json()["changed"])
+            self.assertTrue(impact_response.json()["after"]["allowed"])
+
+            import_response = client.post(
+                "/authorization/policies/import",
+                json={
+                    "source": "test.yaml",
+                    "content": """
+- id: local_allow_llm_http
+  effect: allow
+  actions:
+    - llm.invoke
+  resource:
+    kind: llm_profile
+""",
+                    "actor": {"type": "test", "id": "operator"},
+                },
+            )
+            self.assertEqual(import_response.status_code, 200)
+            self.assertEqual(import_response.json()["imported"], 1)
+
+            export_response = client.get("/authorization/policies/export")
+            self.assertEqual(export_response.status_code, 200)
+            self.assertIn(
+                "local_allow_llm_http",
+                [item["id"] for item in export_response.json()["policies"]],
+            )
+
+            audit_response = client.get(
+                "/authorization/audits",
+                params={"action": "policy.import"},
+            )
+            self.assertEqual(audit_response.status_code, 200)
+            self.assertEqual(audit_response.json()[0]["action"], "policy.import")
+        finally:
+            client.close()
+
     def test_http_guard_returns_403_when_abac_blocks_tool_run(self) -> None:
         settings = replace(
             load_settings(),

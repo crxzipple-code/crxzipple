@@ -10,6 +10,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
 )
+from crxzipple.shared.time import format_datetime_utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +116,8 @@ class AgentProfileDTO:
     name: str
     description: str
     enabled: bool
+    created_at: str
+    updated_at: str
     identity: AgentIdentityDTO
     instruction_policy: AgentInstructionPolicyDTO
     llm_routing_policy: AgentLlmRoutingPolicyDTO
@@ -128,6 +131,8 @@ class AgentProfileDTO:
             name=profile.name,
             description=profile.description,
             enabled=profile.enabled,
+            created_at=format_datetime_utc(profile.created_at),
+            updated_at=format_datetime_utc(profile.updated_at),
             identity=AgentIdentityDTO.from_value(profile.identity),
             instruction_policy=AgentInstructionPolicyDTO.from_value(
                 profile.instruction_policy,

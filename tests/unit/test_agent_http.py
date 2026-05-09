@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from crxzipple.modules.settings.domain import SettingsNotFoundError
 from tests.unit.http_test_support import *
 
 
@@ -33,9 +34,16 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 )
 
                 self.assertEqual(create_response.status_code, 201)
-                self.assertEqual(create_response.json()["id"], "writer")
+                created_payload = create_response.json()
+                self.assertEqual(created_payload["id"], "writer")
+                self.assertTrue(created_payload["created_at"].endswith("+00:00"))
+                self.assertTrue(created_payload["updated_at"].endswith("+00:00"))
+                self.assertLessEqual(
+                    datetime.fromisoformat(created_payload["created_at"]),
+                    datetime.fromisoformat(created_payload["updated_at"]),
+                )
                 self.assertEqual(
-                    create_response.json()["llm_routing_policy"]["default_llm_id"],
+                    created_payload["llm_routing_policy"]["default_llm_id"],
                     "openai.gpt-5.4-mini",
                 )
 
@@ -48,29 +56,224 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertTrue((home_dir / "memory").is_dir())
                 self.assertTrue((home_dir / "skills").is_dir())
                 self.assertTrue((home_dir / ".state").is_dir())
+                with self.assertRaises(SettingsNotFoundError):
+                    self.client.app.state.container.settings_query_service.get_resource(
+                        "writer",
+                    )
 
                 get_response = self.client.get("/agents/writer")
                 list_response = self.client.get("/agents")
 
                 self.assertEqual(get_response.status_code, 200)
-                self.assertEqual(get_response.json()["identity"]["display_name"], "Writer Agent")
+                fetched_payload = get_response.json()
+                listed_payload = list_response.json()
+                self.assertTrue(fetched_payload["created_at"].endswith("+00:00"))
+                self.assertTrue(fetched_payload["updated_at"].endswith("+00:00"))
+                self.assertEqual(fetched_payload["identity"]["display_name"], "Writer Agent")
                 self.assertEqual(
-                    get_response.json()["runtime_preferences"]["home_dir"],
+                    fetched_payload["runtime_preferences"]["home_dir"],
                     str(home_dir),
                 )
                 self.assertEqual(
-                    get_response.json()["runtime_preferences"]["workdir"],
+                    fetched_payload["runtime_preferences"]["workdir"],
                     str(workdir),
                 )
                 self.assertEqual(
-                    get_response.json()["runtime_preferences"]["workspace"],
+                    fetched_payload["runtime_preferences"]["workspace"],
                     str(workdir),
                 )
                 self.assertEqual(list_response.status_code, 200)
-                self.assertEqual(len(list_response.json()), 1)
-                self.assertTrue(
-                    list_response.json()[0]["instruction_policy"]["stream_by_default"]
+                self.assertEqual(len(listed_payload), 1)
+                self.assertTrue(listed_payload[0]["created_at"].endswith("+00:00"))
+                self.assertTrue(listed_payload[0]["updated_at"].endswith("+00:00"))
+                self.assertTrue(listed_payload[0]["instruction_policy"]["stream_by_default"])
+
+    def test_agent_enable_disable_updates_agent_truth_without_settings_resource(self) -> None:
+            with tempfile.TemporaryDirectory() as tempdir:
+                home_dir = Path(tempdir) / "agent-writer-home"
+                create_response = self.client.post(
+                    "/agents",
+                    json={
+                        "id": "writer",
+                        "name": "Writer",
+                        "enabled": False,
+                        "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                        "runtime_preferences": {"home_dir": str(home_dir)},
+                    },
                 )
+                self.assertEqual(create_response.status_code, 201)
+                self.assertFalse(create_response.json()["enabled"])
+
+                enable_response = self.client.post("/agents/writer/enable")
+                self.assertEqual(enable_response.status_code, 200)
+                self.assertTrue(enable_response.json()["enabled"])
+                self.assertTrue(self.client.get("/agents/writer").json()["enabled"])
+
+                disable_response = self.client.post(
+                    "/agents/writer/disable",
+                    json={"reason": "pause profile", "actor": "unit-test"},
+                )
+                self.assertEqual(disable_response.status_code, 200)
+                self.assertFalse(disable_response.json()["enabled"])
+                self.assertFalse(self.client.get("/agents/writer").json()["enabled"])
+
+                enable_with_reason_response = self.client.post(
+                    "/agents/writer/enable",
+                    json={"reason": "resume profile", "actor": "unit-test"},
+                )
+                self.assertEqual(enable_with_reason_response.status_code, 200)
+                self.assertTrue(enable_with_reason_response.json()["enabled"])
+
+                disable_without_body_response = self.client.post("/agents/writer/disable")
+                self.assertEqual(disable_without_body_response.status_code, 200)
+                self.assertFalse(disable_without_body_response.json()["enabled"])
+                with self.assertRaises(SettingsNotFoundError):
+                    self.client.app.state.container.settings_query_service.get_resource(
+                        "writer",
+                    )
+
+    def test_agent_resolution_endpoint_reads_owner_modules_without_settings_truth(self) -> None:
+            with tempfile.TemporaryDirectory() as tempdir:
+                home_dir = Path(tempdir) / "agent-writer-home"
+                llm_response = self.client.post(
+                    "/llms",
+                    json={
+                        "id": "writer-llm",
+                        "provider": "openai",
+                        "api_family": "openai_responses",
+                        "model_name": "gpt-5",
+                        "capabilities": ["tool_calling"],
+                        "credential_binding": "env:AGENT_TEST_OPENAI_TOKEN",
+                    },
+                )
+                self.assertEqual(llm_response.status_code, 201)
+                self.client.app.state.container.tool_service.register(
+                    RegisterToolInput(
+                        id="agent-search",
+                        name="Agent Search",
+                        description="Search for agent test data.",
+                        access_requirements=("env:AGENT_TEST_TOOL_TOKEN",),
+                    ),
+                )
+                create_response = self.client.post(
+                    "/agents",
+                    json={
+                        "id": "writer",
+                        "name": "Writer",
+                        "llm_routing_policy": {"default_llm_id": "writer-llm"},
+                        "runtime_preferences": {
+                            "home_dir": str(home_dir),
+                            "attrs": {
+                                "tool_ids": ["agent-search"],
+                                "skill_ids": ["memory-recall"],
+                            },
+                        },
+                    },
+                )
+                self.assertEqual(create_response.status_code, 201)
+                self.client.app.state.container.authorization_service.grant_agent_effect_authorization(
+                    agent_id="writer",
+                    effect_id="weather_data",
+                )
+
+                response = self.client.get("/agents/writer/resolution")
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["profile_id"], "writer")
+                self.assertEqual(payload["summary"]["llm_routes"], 1)
+                self.assertEqual(payload["summary"]["tools"], 1)
+                self.assertEqual(payload["summary"]["skills"], 1)
+                self.assertEqual(payload["summary"]["authorization_grants"], 1)
+                self.assertEqual(payload["llm_routes"][0]["llm_id"], "writer-llm")
+                self.assertTrue(payload["llm_routes"][0]["resolved"])
+                self.assertEqual(payload["llm_routes"][0]["model_name"], "gpt-5")
+                self.assertEqual(payload["tools"][0]["tool_id"], "agent-search")
+                self.assertTrue(payload["tools"][0]["resolved"])
+                self.assertEqual(payload["skills"][0]["skill_id"], "memory-recall")
+                self.assertTrue(payload["skills"][0]["resolved"])
+                self.assertIn(
+                    "env:AGENT_TEST_TOOL_TOKEN",
+                    [item["requirement"] for item in payload["access_grants"]],
+                )
+                self.assertIn(
+                    "env:AGENT_TEST_OPENAI_TOKEN",
+                    [item["requirement"] for item in payload["access_grants"]],
+                )
+                self.assertEqual(
+                    payload["authorization_grants"][0]["effect_ids"],
+                    ["weather_data"],
+                )
+                self.assertEqual(
+                    payload["authorization_grants"][0]["action"],
+                    "tool.effect.authorize",
+                )
+                self.assertTrue(
+                    any(item["source"] == "agent" for item in payload["trace"]),
+                )
+                with self.assertRaises(SettingsNotFoundError):
+                    self.client.app.state.container.settings_query_service.get_resource(
+                        "writer",
+                    )
+
+    def test_agent_resolution_endpoint_returns_404_for_missing_profile(self) -> None:
+            response = self.client.get("/agents/missing/resolution")
+
+            self.assertEqual(response.status_code, 404)
+
+    def test_agent_update_and_delete_are_owned_by_agent_module(self) -> None:
+            with tempfile.TemporaryDirectory() as tempdir:
+                home_dir = Path(tempdir) / "agent-writer-home"
+                create_response = self.client.post(
+                    "/agents",
+                    json={
+                        "id": "writer",
+                        "name": "Writer",
+                        "description": "Initial profile.",
+                        "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
+                        "runtime_preferences": {"home_dir": str(home_dir)},
+                    },
+                )
+                self.assertEqual(create_response.status_code, 201)
+
+                update_response = self.client.put(
+                    "/agents/writer",
+                    json={
+                        "name": "Writer Updated",
+                        "description": "Updated profile.",
+                        "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4"},
+                        "reason": "refresh profile",
+                        "actor": "unit-test",
+                    },
+                )
+
+                self.assertEqual(update_response.status_code, 200)
+                self.assertEqual(update_response.json()["name"], "Writer Updated")
+                self.assertEqual(
+                    update_response.json()["llm_routing_policy"]["default_llm_id"],
+                    "openai.gpt-5.4",
+                )
+                home_payload = json.loads((home_dir / "agent.json").read_text(encoding="utf-8"))
+                self.assertEqual(home_payload["name"], "Writer Updated")
+                self.assertEqual(
+                    home_payload["llm_routing_policy"]["default_llm_id"],
+                    "openai.gpt-5.4",
+                )
+
+                delete_response = self.client.delete(
+                    "/agents/writer",
+                    params={"reason": "remove profile", "actor": "unit-test"},
+                )
+
+                self.assertEqual(delete_response.status_code, 204)
+                self.assertEqual(self.client.get("/agents/writer").status_code, 404)
+                self.assertEqual(self.client.get("/agents").json(), [])
+                self.assertFalse((home_dir / "agent.json").exists())
+                self.assertTrue((home_dir / "AGENT.md").exists())
+                with self.assertRaises(SettingsNotFoundError):
+                    self.client.app.state.container.settings_query_service.get_resource(
+                        "writer",
+                    )
 
     def test_agent_sync_profiles_endpoint_uses_configured_profiles(self) -> None:
             home_root = Path(tempfile.mkdtemp())
@@ -442,9 +645,12 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 [item["id"] for item in list_response.json()],
             )
             self.assertEqual(get_response.status_code, 200)
-            self.assertEqual(get_response.json()["name"], "File Only Writer")
+            get_payload = get_response.json()
+            self.assertEqual(get_payload["name"], "File Only Writer")
+            self.assertTrue(get_payload["created_at"].endswith("+00:00"))
+            self.assertTrue(get_payload["updated_at"].endswith("+00:00"))
             self.assertEqual(
-                get_response.json()["runtime_preferences"]["home_dir"],
+                get_payload["runtime_preferences"]["home_dir"],
                 str(home_dir),
             )
 

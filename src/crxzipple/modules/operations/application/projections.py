@@ -39,6 +39,9 @@ OPERATIONS_PROJECTION_MODULES: tuple[str, ...] = (
     "events",
     "daemon",
 )
+_PROJECTION_MODULE_PRIORITY = {
+    module: index for index, module in enumerate(OPERATIONS_PROJECTION_MODULES)
+}
 
 _EVENT_MODULE_TO_PROJECTION_MODULES: dict[str, tuple[str, ...]] = {
     "orchestration": ("orchestration", "events"),
@@ -98,7 +101,7 @@ class OperationsProjectionMaterializer:
         for module in modules:
             normalized = module.strip().lower()
             targets.update(_EVENT_MODULE_TO_PROJECTION_MODULES.get(normalized, ()))
-        return self.materialize_modules(sorted(targets))
+        return self.materialize_modules(_order_projection_modules(targets))
 
     def materialize_modules(self, modules: Iterable[str]) -> int:
         materialized = 0
@@ -385,6 +388,18 @@ def _normalize_modules(modules: Iterable[str]) -> tuple[str, ...]:
             module.strip().lower()
             for module in modules
             if isinstance(module, str) and module.strip()
+        ),
+    )
+
+
+def _order_projection_modules(modules: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            _normalize_modules(modules),
+            key=lambda module: _PROJECTION_MODULE_PRIORITY.get(
+                module,
+                len(_PROJECTION_MODULE_PRIORITY),
+            ),
         ),
     )
 

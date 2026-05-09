@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 import typer
 
-from crxzipple.core.config import LlmProfileSettings
 from crxzipple.interfaces.authorization import authorize_llm_action
 from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.llm.application import InvokeLlmInput, RegisterLlmProfileInput
+from crxzipple.modules.llm.application.services import (
+    register_llm_profile_input_from_config,
+)
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
@@ -82,24 +85,64 @@ def _parse_tool_schemas(raw: str | None) -> tuple[ToolSchema, ...]:
     return tuple(schemas)
 
 
-def _profile_settings_to_input(profile: LlmProfileSettings) -> RegisterLlmProfileInput:
+def _profile_input_from_cli_args(
+    *,
+    llm_id: str,
+    provider: LlmProviderKind,
+    api_family: LlmApiFamily,
+    model_name: str,
+    context_window_tokens: int | None,
+    model_family: LlmModelFamily,
+    capability: list[LlmCapability] | None,
+    temperature: float | None,
+    top_p: float | None,
+    max_output_tokens: int | None,
+    reasoning_effort: str | None,
+    base_url: str | None,
+    credential_binding: str | None,
+    timeout_seconds: int,
+    max_concurrency: int | None,
+    concurrency_key: str | None,
+    enabled: bool,
+) -> RegisterLlmProfileInput:
     return RegisterLlmProfileInput(
-        id=profile.id,
-        provider=LlmProviderKind(profile.provider),
-        api_family=LlmApiFamily(profile.api_family),
-        model_name=profile.model_name,
-        context_window_tokens=profile.context_window_tokens,
-        model_family=LlmModelFamily(profile.model_family),
-        capabilities=tuple(LlmCapability(item) for item in profile.capabilities),
-        default_params=LlmDefaults.from_payload(profile.default_params),
-        base_url=profile.base_url,
-        credential_binding=profile.credential_binding,
-        timeout_seconds=profile.timeout_seconds,
-        max_concurrency=profile.max_concurrency,
-        concurrency_key=profile.concurrency_key,
-        source_kind=LlmSourceKind(profile.source_kind),
-        enabled=profile.enabled,
+        id=llm_id,
+        provider=provider,
+        api_family=api_family,
+        model_name=model_name,
+        context_window_tokens=context_window_tokens,
+        model_family=model_family,
+        capabilities=tuple(capability or ()),
+        default_params=LlmDefaults(
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=reasoning_effort,
+        ),
+        base_url=base_url,
+        credential_binding=credential_binding,
+        timeout_seconds=timeout_seconds,
+        max_concurrency=max_concurrency,
+        concurrency_key=concurrency_key,
+        source_kind=LlmSourceKind.MANUAL,
+        enabled=enabled,
     )
+
+
+def _profile_config_id(config: object) -> str:
+    if isinstance(config, Mapping):
+        profile_id = config.get("profile_id")
+        if profile_id is not None:
+            return str(profile_id)
+        return str(config.get("id"))
+    profile_id = getattr(config, "profile_id", None)
+    if profile_id is not None:
+        return str(profile_id)
+    return str(getattr(config, "id"))
+
+
+def _configured_profiles_from_settings(container: object) -> tuple[object, ...]:
+    return tuple(getattr(container.settings, "llm_profiles", ()))
 
 
 def build_cli() -> typer.Typer:
@@ -153,23 +196,23 @@ def build_cli() -> typer.Typer:
             help="Optional key shared by profiles that should use one LLM limit.",
         ),
         enabled: bool = typer.Option(True, "--enabled/--disabled"),
+        reason: str | None = typer.Option(None, "--reason", help="Change reason."),
     ) -> None:
         container = ensure_container(ctx)
+        del reason
         profile = container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id=llm_id,
+            _profile_input_from_cli_args(
+                llm_id=llm_id,
                 provider=provider,
                 api_family=api_family,
                 model_name=model_name,
                 context_window_tokens=context_window_tokens,
                 model_family=model_family,
-                capabilities=tuple(capability or ()),
-                default_params=LlmDefaults(
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_output_tokens=max_output_tokens,
-                    reasoning_effort=reasoning_effort,
-                ),
+                capability=capability,
+                temperature=temperature,
+                top_p=top_p,
+                max_output_tokens=max_output_tokens,
+                reasoning_effort=reasoning_effort,
                 base_url=base_url,
                 credential_binding=credential_binding,
                 timeout_seconds=timeout_seconds,
@@ -179,6 +222,108 @@ def build_cli() -> typer.Typer:
             ),
         )
         echo_data(LlmProfileDTO.from_entity(profile))
+
+    @app.command("update-profile")
+    def update_profile(
+        ctx: typer.Context,
+        llm_id: str = typer.Argument(..., help="LLM identifier."),
+        provider: LlmProviderKind = typer.Argument(..., help="Provider kind."),
+        api_family: LlmApiFamily = typer.Argument(..., help="Adapter API family."),
+        model_name: str = typer.Argument(..., help="Model name."),
+        context_window_tokens: int | None = typer.Option(
+            None,
+            help="Optional model context window in tokens.",
+        ),
+        model_family: LlmModelFamily = typer.Option(
+            LlmModelFamily.GENERAL,
+            help="Model family.",
+        ),
+        capability: list[LlmCapability] = typer.Option(
+            None,
+            "--capability",
+            help="Capability flags.",
+        ),
+        temperature: float | None = typer.Option(None, help="Sampling temperature."),
+        top_p: float | None = typer.Option(None, help="Top-p sampling value."),
+        max_output_tokens: int | None = typer.Option(
+            None,
+            help="Maximum output token budget.",
+        ),
+        reasoning_effort: str | None = typer.Option(
+            None,
+            help="Reasoning effort hint.",
+        ),
+        base_url: str | None = typer.Option(None, help="Optional adapter base URL."),
+        credential_binding: str | None = typer.Option(
+            None,
+            help="Credential binding reference.",
+        ),
+        timeout_seconds: int = typer.Option(60, help="Invocation timeout in seconds."),
+        max_concurrency: int | None = typer.Option(
+            None,
+            "--max-concurrency",
+            min=1,
+            help="Optional per-concurrency-key LLM invocation limit.",
+        ),
+        concurrency_key: str | None = typer.Option(
+            None,
+            "--concurrency-key",
+            help="Optional key shared by profiles that should use one LLM limit.",
+        ),
+        enabled: bool = typer.Option(True, "--enabled/--disabled"),
+        reason: str | None = typer.Option(None, "--reason", help="Change reason."),
+    ) -> None:
+        container = ensure_container(ctx)
+        del reason
+        profile = container.llm_service.update_profile(
+            _profile_input_from_cli_args(
+                llm_id=llm_id,
+                provider=provider,
+                api_family=api_family,
+                model_name=model_name,
+                context_window_tokens=context_window_tokens,
+                model_family=model_family,
+                capability=capability,
+                temperature=temperature,
+                top_p=top_p,
+                max_output_tokens=max_output_tokens,
+                reasoning_effort=reasoning_effort,
+                base_url=base_url,
+                credential_binding=credential_binding,
+                timeout_seconds=timeout_seconds,
+                max_concurrency=max_concurrency,
+                concurrency_key=concurrency_key,
+                enabled=enabled,
+            ),
+        )
+        echo_data(LlmProfileDTO.from_entity(profile))
+
+    @app.command("enable")
+    def enable_profile(
+        ctx: typer.Context,
+        llm_id: str = typer.Argument(..., help="LLM identifier."),
+    ) -> None:
+        container = ensure_container(ctx)
+        profile = container.llm_service.set_profile_enabled(llm_id, enabled=True)
+        echo_data(LlmProfileDTO.from_entity(profile))
+
+    @app.command("disable")
+    def disable_profile(
+        ctx: typer.Context,
+        llm_id: str = typer.Argument(..., help="LLM identifier."),
+    ) -> None:
+        container = ensure_container(ctx)
+        profile = container.llm_service.set_profile_enabled(llm_id, enabled=False)
+        echo_data(LlmProfileDTO.from_entity(profile))
+
+    @app.command("delete")
+    def delete_profile(
+        ctx: typer.Context,
+        llm_id: str = typer.Argument(..., help="LLM identifier."),
+    ) -> None:
+        container = ensure_container(ctx)
+        container.llm_service.delete_profile(llm_id)
+        echo_data({"id": llm_id, "deleted": True})
 
     @app.command("list")
     def list_profiles(ctx: typer.Context) -> None:
@@ -202,11 +347,14 @@ def build_cli() -> typer.Typer:
         selected_ids = set(profile or [])
         configured_profiles = tuple(
             item
-            for item in container.settings.llm_profiles
-            if not selected_ids or item.id in selected_ids
+            for item in _configured_profiles_from_settings(container)
+            if not selected_ids or _profile_config_id(item) in selected_ids
         )
         synced = container.llm_service.sync_profiles(
-            tuple(_profile_settings_to_input(item) for item in configured_profiles),
+            tuple(
+                register_llm_profile_input_from_config(item)
+                for item in configured_profiles
+            ),
         )
         echo_data([LlmProfileDTO.from_entity(item) for item in synced])
 

@@ -51,6 +51,53 @@ class ChannelsCliTestCase(unittest.TestCase):
         env.pop("APP_ALLOW_SQLITE_RUNTIME_FALLBACK", None)
         return env
 
+    def test_channel_profile_cli_upsert_disable_enable_uses_channels_store(self) -> None:
+        upsert = self.runner.invoke(
+            app,
+            [
+                "channel-runtime",
+                "upsert-profile",
+                "web",
+                "--capabilities-json",
+                '{"supports_streaming": true}',
+                "--account-json",
+                '{"account_id": "browser", "transport_mode": "sse"}',
+                "--metadata-json",
+                '{"owner": "channels"}',
+            ],
+            env=self.env,
+        )
+
+        self.assertEqual(upsert.exit_code, 0)
+        self.assertIn('"channel_type": "web"', upsert.stdout)
+
+        disabled = self.runner.invoke(
+            app,
+            ["channel-runtime", "disable-profile", "WEB"],
+            env=self.env,
+        )
+
+        self.assertEqual(disabled.exit_code, 0)
+        self.assertIn('"enabled": false', disabled.stdout)
+
+        enabled = self.runner.invoke(
+            app,
+            ["channel-runtime", "enable-profile", "web"],
+            env=self.env,
+        )
+
+        self.assertEqual(enabled.exit_code, 0)
+        self.assertIn('"enabled": true', enabled.stdout)
+        reopened = self.harness.build_container()
+        try:
+            profile = reopened.channel_profile_service.get_profile("web")
+            self.assertIsNotNone(profile)
+            assert profile is not None
+            self.assertTrue(profile.enabled)
+            self.assertEqual(profile.accounts[0].account_id, "browser")
+        finally:
+            reopened.close()
+
     def test_channel_runtime_cli_registers_runtime_from_profile(self) -> None:
         container = self.harness.build_container()
         try:

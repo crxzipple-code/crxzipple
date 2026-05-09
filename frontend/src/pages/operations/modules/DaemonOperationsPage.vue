@@ -42,6 +42,7 @@ import {
   runDaemonServiceAction,
   type DaemonServiceActionKind,
 } from "../api";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
   id: string;
@@ -646,6 +647,8 @@ async function refreshPage() {
     loading.value = false;
   }
 }
+
+useOperationsProjectionRefresh("daemon", refreshPage);
 
 onMounted(() => {
   void refreshPage();

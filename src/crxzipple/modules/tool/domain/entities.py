@@ -324,6 +324,20 @@ class ToolRun(AggregateRoot[str]):
         now = datetime.now(timezone.utc)
         self.heartbeat_at = now
         self.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        self.record_event(
+            Event(
+                name="tool.run.heartbeated",
+                payload={
+                    "run_id": self.id,
+                    "tool_id": self.tool_id,
+                    "worker_id": self.worker_id,
+                    "status": self.status.value,
+                    "attempt_count": self.attempt_count,
+                    "heartbeat_at": self.heartbeat_at.isoformat(),
+                    "lease_expires_at": self.lease_expires_at.isoformat(),
+                },
+            ),
+        )
 
     def succeed(self, output_payload: ToolRunResult) -> None:
         self.status = ToolRunStatus.SUCCEEDED
@@ -513,6 +527,21 @@ class ToolRunAssignment(AggregateRoot[str]):
         now = datetime.now(timezone.utc)
         self.heartbeat_at = now
         self.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        self.record_event(
+            Event(
+                name="tool.assignment.heartbeated",
+                payload={
+                    "assignment_id": self.id,
+                    "run_id": self.run_id,
+                    "tool_id": self.tool_id,
+                    "worker_id": self.worker_id,
+                    "status": self.status.value,
+                    "attempt_count": self.attempt_count,
+                    "heartbeat_at": self.heartbeat_at.isoformat(),
+                    "lease_expires_at": self.lease_expires_at.isoformat(),
+                },
+            ),
+        )
 
     def succeed(self) -> None:
         self._complete(ToolRunAssignmentStatus.SUCCEEDED)

@@ -71,9 +71,9 @@ class RunWaitCoordinator:
     agent_service: AgentApplicationService | None
     get_run: Callable[[str], OrchestrationRun]
     resume_input_factory: Callable[..., "ResumeOrchestrationRunInput"]
-    grant_run_tool_access: Callable[..., None]
-    grant_session_tool_access: Callable[..., None]
-    grant_agent_effect_access: Callable[..., None]
+    grant_run_tool_authorization: Callable[..., None]
+    grant_session_tool_authorization: Callable[..., None]
+    grant_agent_effect_authorization: Callable[..., None]
     append_approval_resolution_message: Callable[..., None]
     reconcile_tool_waits: Callable[[tuple[str, ...]], None]
     continue_recovery_contract_fn: Callable[[str], OrchestrationRun] | None = None
@@ -187,21 +187,21 @@ class RunWaitCoordinator:
             uow.commit()
 
         if data.decision is ApprovalDecision.ALLOW_ONCE:
-            self.grant_run_tool_access(
+            self.grant_run_tool_authorization(
                 run_id=data.run_id,
                 approval_request_id=pending_request.request_id,
                 effect_ids=(pending_request.effect_id,),
                 tool_ids=pending_request.tool_ids,
             )
         elif data.decision is ApprovalDecision.ALLOW_FOR_SESSION:
-            self.grant_session_tool_access(
+            self.grant_session_tool_authorization(
                 run_id=data.run_id,
                 approval_request_id=pending_request.request_id,
                 effect_ids=(pending_request.effect_id,),
                 tool_ids=pending_request.tool_ids,
             )
         elif data.decision is ApprovalDecision.ALWAYS_FOR_AGENT:
-            self.grant_agent_effect_access(
+            self.grant_agent_effect_authorization(
                 run_id=data.run_id,
                 effect_ids=(pending_request.effect_id,),
             )

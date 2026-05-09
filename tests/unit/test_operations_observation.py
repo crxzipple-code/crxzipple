@@ -24,7 +24,11 @@ from crxzipple.modules.operations.application.projections import (
 from crxzipple.modules.operations.application.read_models.orchestration import (
     OrchestrationOperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.events import (
+    _health as events_operations_health,
+)
 from crxzipple.modules.operations.application.runtime import (
+    OperationsObserverRuntimeService,
     operations_observer_event_names,
 )
 from crxzipple.modules.operations.infrastructure import (
@@ -213,6 +217,50 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertIn("orchestration.executor.assignment.requested", names)
         self.assertIn("tool.run.created", names)
         self.assertIn("tool.assignment.created", names)
+
+    def test_operations_observer_runs_maintenance_after_processing_events(self) -> None:
+        events = EventsApplicationService(InMemoryEventsBackend())
+        topic = named_event_topic("operations.maintenance.test")
+        events.publish(
+            Event(
+                name="operations.maintenance.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.maintenance.test"},
+            ),
+        )
+        handled: list[str] = []
+        maintenance_calls: list[str] = []
+        runtime = OperationsObserverRuntimeService(
+            events_service=events,
+            maintenance_handler=lambda: maintenance_calls.append("maintenance"),
+        )
+        runtime.subscribe_topic(
+            topic,
+            subscription_id="operations.maintenance.test",
+            handler=lambda record: handled.append(record.cursor),
+        )
+
+        processed = runtime.run_until_stopped(
+            worker_id="maintenance-test",
+            poll_interval_seconds=0.01,
+            max_events=1,
+        )
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(len(handled), 1)
+        self.assertGreaterEqual(len(maintenance_calls), 1)
+
+    def test_events_operations_health_treats_stuck_consumers_as_warning(self) -> None:
+        health = events_operations_health(
+            events_service_available=True,
+            stuck_count=2,
+            lagging_count=2,
+            dead_letter_count=0,
+            uncovered_topic_count=0,
+        )
+
+        self.assertEqual(health, "warning")
 
     def test_sqlalchemy_store_records_operations_projection(self) -> None:
         timestamp = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
@@ -612,6 +660,42 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(payload["module"], "orchestration")
         self.assertEqual(payload["kinds"], ["page", "overview"])
         self.assertEqual(payload["source"], "operations-observer")
+
+    def test_observer_runtime_runs_maintenance_before_idle_wait(self) -> None:
+        events_service = EventsApplicationService(InMemoryEventsBackend())
+        maintenance_calls: list[str] = []
+        runtime = OperationsObserverRuntimeService(
+            events_service=events_service,
+            maintenance_handler=lambda: maintenance_calls.append("flush"),
+        )
+
+        processed = runtime.run_until_stopped(
+            worker_id="operations-observer-test",
+            poll_interval_seconds=0.05,
+            max_idle_cycles=1,
+        )
+
+        self.assertEqual(processed, 0)
+        self.assertEqual(maintenance_calls, ["flush"])
+
+    def test_observer_runtime_direct_processing_keeps_full_scan_semantics(self) -> None:
+        events_service = EventsApplicationService(InMemoryEventsBackend())
+        observed: list[str] = []
+        runtime = OperationsObserverRuntimeService(events_service=events_service)
+        runtime.subscribe_event_name(
+            "tool.worker.stale",
+            subscription_id="operations.observer.tool.worker.stale.test",
+            handler=lambda record: observed.append(record.envelope.id),
+        )
+
+        events_service.publish(Event(name="tool.worker.stale", payload={"worker_id": "w1"}))
+        first_processed = runtime.process_available_events()
+        events_service.publish(Event(name="tool.worker.stale", payload={"worker_id": "w2"}))
+        second_processed = runtime.process_available_events()
+
+        self.assertEqual(first_processed, 1)
+        self.assertEqual(second_processed, 1)
+        self.assertEqual(len(observed), 2)
 
     def test_operations_action_request_accepts_audit_payload(self) -> None:
         request = OperationsActionReasonRequest(

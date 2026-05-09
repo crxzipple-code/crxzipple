@@ -1,10 +1,102 @@
 from __future__ import annotations
 
-from tests.unit.http_test_support import *
+from dataclasses import replace
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from fastapi.testclient import TestClient
+
+from crxzipple.core.config import LlmProfileSettings, load_settings
+from crxzipple.interfaces.http.app import create_app
+from crxzipple.modules.settings import CreateSettingsResourceInput
+from tests.unit.http_test_support import (
+    _FakeStreamResponse,
+    HttpModuleTestCase,
+    SampleLlmApiServer,
+    SqliteTestHarness,
+)
 
 
 class LlmHttpTestCase(HttpModuleTestCase):
     def test_llm_profile_endpoints_register_fetch_and_list(self) -> None:
+            settings_actions = self.client.app.state.container.settings_action_service
+            settings_actions.create_resource = Mock(
+                side_effect=AssertionError("HTTP LLM register must not write Settings"),
+            )
+            settings_actions.update_resource = Mock(
+                side_effect=AssertionError("HTTP LLM register must not write Settings"),
+            )
+
+            with patch(
+                "crxzipple.modules.llm.interfaces.http.register_llm_profile_input_from_config",
+                side_effect=AssertionError("HTTP LLM register must not use Settings sync helper"),
+            ):
+                create_response = self.client.post(
+                    "/llms",
+                    json={
+                        "id": "writer",
+                        "provider": "openai",
+                        "api_family": "openai_responses",
+                        "model_name": "gpt-5",
+                        "model_family": "reasoning",
+                        "capabilities": ["tool_calling"],
+                        "default_params": {
+                            "temperature": 0.2,
+                            "max_output_tokens": 512,
+                            "extra_body": {
+                                "chat_template_kwargs": {"enable_thinking": False},
+                            },
+                        },
+                        "credential_binding": "env:OPENAI_API_KEY",
+                        "max_concurrency": 2,
+                        "concurrency_key": "provider:openai",
+                    },
+                )
+                update_response = self.client.put(
+                    "/llms/writer",
+                    json={
+                        "id": "writer",
+                        "provider": "openai",
+                        "api_family": "openai_responses",
+                        "model_name": "gpt-5.1",
+                        "credential_binding": "env:OPENAI_API_KEY",
+                    },
+                )
+
+            self.assertEqual(create_response.status_code, 201)
+            self.assertEqual(update_response.status_code, 200)
+            self.assertEqual(create_response.json()["id"], "writer")
+            self.assertEqual(create_response.json()["api_family"], "openai_responses")
+            self.assertEqual(update_response.json()["model_name"], "gpt-5.1")
+            self.assertEqual(
+                create_response.json()["default_params"]["extra_body"],
+                {"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            self.assertEqual(create_response.json()["max_concurrency"], 2)
+            self.assertEqual(create_response.json()["concurrency_key"], "provider:openai")
+
+            get_response = self.client.get("/llms/writer")
+            list_response = self.client.get("/llms")
+
+            self.assertEqual(get_response.status_code, 200)
+            self.assertEqual(get_response.json()["model_name"], "gpt-5.1")
+            self.assertEqual(list_response.status_code, 200)
+            profiles_by_id = {
+                item["id"]: item
+                for item in list_response.json()
+            }
+            self.assertIn("writer", profiles_by_id)
+            self.assertEqual(
+                profiles_by_id["writer"]["credential_binding"],
+                "env:OPENAI_API_KEY",
+            )
+            self.assertEqual(profiles_by_id["writer"]["source_kind"], "manual")
+
+    def test_llm_profile_enable_disable_updates_llm_runtime_truth(self) -> None:
             create_response = self.client.post(
                 "/llms",
                 json={
@@ -28,23 +120,29 @@ class LlmHttpTestCase(HttpModuleTestCase):
             )
 
             self.assertEqual(create_response.status_code, 201)
-            self.assertEqual(create_response.json()["id"], "writer")
-            self.assertEqual(create_response.json()["api_family"], "openai_responses")
-            self.assertEqual(
-                create_response.json()["default_params"]["extra_body"],
-                {"chat_template_kwargs": {"enable_thinking": False}},
-            )
-            self.assertEqual(create_response.json()["max_concurrency"], 2)
-            self.assertEqual(create_response.json()["concurrency_key"], "provider:openai")
 
-            get_response = self.client.get("/llms/writer")
+            settings_actions = self.client.app.state.container.settings_action_service
+            settings_actions.set_resource_enabled = Mock(
+                side_effect=AssertionError("HTTP LLM enablement must not write Settings"),
+            )
+
+            disable_response = self.client.post("/llms/writer/disable")
+            get_disabled_response = self.client.get("/llms/writer")
+            enable_response = self.client.post("/llms/writer/enable")
+            get_enabled_response = self.client.get("/llms/writer")
+
+            self.assertEqual(disable_response.status_code, 200)
+            self.assertFalse(disable_response.json()["enabled"])
+            self.assertFalse(get_disabled_response.json()["enabled"])
+            self.assertEqual(enable_response.status_code, 200)
+            self.assertTrue(enable_response.json()["enabled"])
+            self.assertTrue(get_enabled_response.json()["enabled"])
+
+            delete_response = self.client.delete("/llms/writer")
             list_response = self.client.get("/llms")
 
-            self.assertEqual(get_response.status_code, 200)
-            self.assertEqual(get_response.json()["model_name"], "gpt-5")
-            self.assertEqual(list_response.status_code, 200)
-            self.assertEqual(len(list_response.json()), 1)
-            self.assertEqual(list_response.json()[0]["credential_binding"], "env:OPENAI_API_KEY")
+            self.assertEqual(delete_response.status_code, 204)
+            self.assertNotIn("writer", {item["id"] for item in list_response.json()})
 
     def test_llm_invoke_endpoint_uses_openai_compatible_adapter(self) -> None:
             server = SampleLlmApiServer(tool_calls_on_tools=True)
@@ -103,6 +201,12 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 server.close()
 
     def test_llm_stream_endpoint_returns_sse_events_for_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            auth_path = Path(tempdir) / "auth.json"
+            auth_path.write_text(
+                json.dumps({"tokens": {"access_token": "codex-http-token"}}),
+                encoding="utf-8",
+            )
             create_response = self.client.post(
                 "/llms",
                 json={
@@ -111,7 +215,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                     "api_family": "openai_codex_responses",
                     "model_name": "gpt-5-codex",
                     "model_family": "codex",
-                    "credential_binding": "codex-inline-token",
+                    "credential_binding": f"codex_auth_json:{auth_path}",
                 },
             )
 
@@ -235,6 +339,56 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(
                     [item["id"] for item in list_response.json()],
                     ["openai.gpt-5.4"],
+                )
+            finally:
+                client.close()
+                client.app.state.container.engine.dispose()
+                harness.close()
+
+    def test_llm_sync_profiles_endpoint_ignores_legacy_settings_resources(self) -> None:
+            harness = SqliteTestHarness()
+            settings = replace(
+                load_settings(),
+                database_url=harness.database_url,
+                llm_profiles=(),
+            )
+
+            harness.initialize_schema(settings=settings)
+            client = TestClient(
+                create_app(
+                    settings=settings,
+                    database_url=harness.database_url,
+                ),
+            )
+
+            try:
+                client.app.state.container.settings_action_service.create_resource(
+                    CreateSettingsResourceInput(
+                        resource_id="legacy-openai",
+                        resource_kind="llm-profiles",
+                        owner_module="llm",
+                        payload={
+                            "provider": "openai",
+                            "api_family": "openai_responses",
+                            "model_name": "legacy-gpt",
+                        },
+                        reason="seed legacy settings profile",
+                        publish=True,
+                    ),
+                )
+
+                sync_response = client.post(
+                    "/llms/sync-profiles",
+                    params={"profile": "legacy-openai"},
+                )
+                list_response = client.get("/llms")
+
+                self.assertEqual(sync_response.status_code, 200)
+                self.assertEqual(sync_response.json(), [])
+                self.assertEqual(list_response.status_code, 200)
+                self.assertNotIn(
+                    "legacy-openai",
+                    {item["id"] for item in list_response.json()},
                 )
             finally:
                 client.close()

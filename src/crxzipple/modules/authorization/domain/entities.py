@@ -42,3 +42,19 @@ class TemporaryAuthorizationGrant:
     session_key: str | None = None
     agent_id: str | None = None
     approval_request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationAuditRecord:
+    id: str
+    action: str
+    status: str
+    created_at: datetime
+    actor_type: str | None = None
+    actor_id: str | None = None
+    target_policy_id: str | None = None
+    reason: str = ""
+    before_payload: dict[str, Any] = field(default_factory=dict)
+    after_payload: dict[str, Any] = field(default_factory=dict)
+    decision_payload: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)

@@ -1,16 +1,428 @@
 <script setup lang="ts">
-import { ArrowRight, Copy, GitBranch, Mail, MessageCircle, Save, Slack, Webhook, Zap } from "lucide-vue-next";
+import { ArrowRight, Copy, GitBranch, MessageCircle, Plus, Power, RefreshCcw, Save, Trash2 } from "lucide-vue-next";
+import { computed, onMounted, ref } from "vue";
 
+import DataTable from "@/shared/ui/DataTable.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
+import {
+  listSettingsResources,
+} from "../api";
+import {
+  deleteChannelProfile,
+  getChannelProfile,
+  listChannelProfiles,
+  setChannelProfileEnabled,
+  upsertChannelProfile,
+  type ChannelProfileApiPayload,
+  type ChannelProfileWritePayload,
+} from "../ownerApis/channelProfiles";
 
-const channels = [
-  ["Web Chat", "Web", "Enabled", MessageCircle],
-  ["Lark Assistant", "Lark", "Enabled", MessageCircle],
-  ["Slack Bot", "Slack", "Enabled", Slack],
-  ["WhatsApp Business", "WhatsApp", "Enabled", MessageCircle],
-  ["Public Webhook", "Webhook", "Enabled", Webhook],
-  ["Email Inbound", "Email", "Enabled", Mail],
-] as const;
+type JsonRecord = Record<string, unknown>;
+type TableRow = Record<string, string | number | null>;
+
+interface SettingsResourceSummaryPayload {
+  id?: string;
+  resource_id?: string;
+  title?: string;
+  display_name?: string;
+  status?: string;
+  enabled?: boolean;
+  source?: string | null;
+  version?: string | number | null;
+  updated_at?: string | null;
+  metadata?: JsonRecord;
+  payload?: JsonRecord;
+  effective_config?: JsonRecord;
+  resolution?: {
+    value?: unknown;
+    source?: { kind?: string; name?: string };
+    sources?: Array<{ kind?: string; name?: string; version_id?: string | null }>;
+    override_trace?: unknown[];
+  };
+}
+
+interface SettingsResourceDetailPayload extends SettingsResourceSummaryPayload {
+  title?: string;
+  payload?: JsonRecord;
+  versions?: JsonRecord[];
+  validation?: { status?: string; checks?: { rows?: JsonRecord[] } };
+  audit?: { recent_changes?: { rows?: JsonRecord[]; total?: number } };
+}
+
+interface SettingsResourcePagePayload {
+  title?: string;
+  description?: string;
+  status?: string;
+  resources?: SettingsResourceSummaryPayload[];
+  list?: { total?: number };
+  detail?: SettingsResourceDetailPayload | null;
+}
+
+const settingsPage = ref<SettingsResourcePagePayload | null>(null);
+const selectedDetail = ref<SettingsResourceDetailPayload | null>(null);
+const selectedResourceId = ref<string | null>(null);
+const isLoading = ref(false);
+const detailLoading = ref(false);
+const loadError = ref<string | null>(null);
+const detailError = ref<string | null>(null);
+const ownerActionError = ref<string | null>(null);
+const ownerActionMessage = ref<string | null>(null);
+const ownerActionLoading = ref(false);
+const editMode = ref<"create" | "update">("update");
+const editorText = ref("");
+
+const resources = computed(() => settingsPage.value?.resources ?? []);
+const selectedResource = computed(() =>
+  resources.value.find((resource) => settingsResourceId(resource) === selectedResourceId.value)
+  ?? resources.value[0]
+  ?? null,
+);
+const activeDetail = computed(() => selectedDetail.value ?? selectedResource.value);
+const selectedConfig = computed(() => activeDetail.value ? resourceConfig(activeDetail.value) : {});
+const channelRows = computed<TableRow[]>(() =>
+  resources.value.map((resource) => {
+    const config = resourceConfig(resource);
+    return {
+      Name: textValue(resource.display_name, settingsResourceId(resource)),
+      "Channel ID": settingsResourceId(resource),
+      Type: textValue(config.channel_kind, textValue(config.channel_type, "-")),
+      Status: resource.enabled === false ? "disabled" : textValue(resource.status, "ready"),
+      Source: textValue(resource.source, resource.resolution?.source?.name ?? "settings_application"),
+      Version: textValue(resource.version, "-"),
+      "Updated At": formatTime(resource.updated_at),
+    };
+  }),
+);
+const effectiveRows = computed<TableRow[]>(() =>
+  Object.entries(selectedConfig.value).slice(0, 14).map(([key, value]) => ({
+    Key: key,
+    Value: formatValue(value),
+  })),
+);
+const resolutionRows = computed<TableRow[]>(() =>
+  (activeDetail.value?.resolution?.sources ?? []).map((source, index) => ({
+    Layer: index === 0 ? "primary" : "source",
+    Source: textValue(source.name, textValue(source.kind, "settings")),
+    Version: textValue(source.version_id, "-"),
+  })),
+);
+const totalResources = computed(() => settingsPage.value?.list?.total ?? resources.value.length);
+const selectedChannelType = computed(() => selectedResourceId.value ?? textValue(activeDetail.value?.resource_id));
+const canWriteOwnerProfile = computed(() => !ownerActionLoading.value && editorText.value.trim().length > 0);
+const ownerFormTitle = computed(() => editMode.value === "create" ? "Create Channel Profile" : "Update Channel Profile");
+
+onMounted(() => {
+  void loadChannelProfiles();
+});
+
+async function loadChannelProfiles(): Promise<void> {
+  isLoading.value = true;
+  loadError.value = null;
+  try {
+    const [profiles, overlay] = await Promise.all([
+      listChannelProfiles(),
+      loadSettingsOverlay(),
+    ]);
+    const payload = buildChannelProfilePage(profiles, overlay);
+    settingsPage.value = payload;
+    const first = profiles[0] ?? null;
+    selectedResourceId.value = first ? first.channel_type : null;
+    selectedDetail.value = first ? channelProfileToDetail(first) : null;
+    if (selectedDetail.value) {
+      resetEditorFromDetail(selectedDetail.value);
+    } else {
+      beginCreateProfile();
+    }
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : String(error);
+    settingsPage.value = null;
+    selectedDetail.value = null;
+  } finally {
+    isLoading.value = false;
+  }
+}
+
+async function selectResource(resource: SettingsResourceSummaryPayload): Promise<void> {
+  const resourceId = settingsResourceId(resource);
+  selectedResourceId.value = resourceId;
+  detailLoading.value = true;
+  detailError.value = null;
+  try {
+    selectedDetail.value = channelProfileToDetail(await getChannelProfile(resourceId));
+    editMode.value = "update";
+    resetEditorFromDetail(selectedDetail.value);
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+function selectChannelRow(row: unknown): void {
+  const channelId = textValue(tableCellValue(row, "Channel ID"), "");
+  const resource = resources.value.find((item) => settingsResourceId(item) === channelId);
+  if (resource) void selectResource(resource);
+}
+
+async function handleOwnerActionCompleted(resourceId = selectedResourceId.value): Promise<void> {
+  if (!resourceId) {
+    await loadChannelProfiles();
+    return;
+  }
+  await loadChannelProfiles();
+  selectedResourceId.value = resourceId;
+  try {
+    selectedDetail.value = channelProfileToDetail(await getChannelProfile(resourceId));
+    resetEditorFromDetail(selectedDetail.value);
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function beginCreateProfile(): void {
+  editMode.value = "create";
+  selectedResourceId.value = null;
+  selectedDetail.value = null;
+  ownerActionError.value = null;
+  ownerActionMessage.value = null;
+  editorText.value = JSON.stringify(
+    {
+      channel_type: "webhook",
+      enabled: true,
+      capabilities: {},
+      accounts: [],
+      metadata: {},
+    },
+    null,
+    2,
+  );
+}
+
+function resetEditorFromDetail(detail: SettingsResourceSummaryPayload): void {
+  editMode.value = "update";
+  editorText.value = JSON.stringify(channelWritePayloadFromConfig(resourceConfig(detail)), null, 2);
+}
+
+async function submitOwnerProfile(): Promise<void> {
+  ownerActionError.value = null;
+  ownerActionMessage.value = null;
+  if (!canWriteOwnerProfile.value) return;
+  ownerActionLoading.value = true;
+  try {
+    const payload = parseEditorPayload();
+    const channelType = textValue(payload.channel_type, selectedChannelType.value).trim().toLowerCase();
+    if (!channelType) {
+      throw new Error("channel_type is required by the Channels API.");
+    }
+    const saved = await upsertChannelProfile(channelType, payload);
+    ownerActionMessage.value = `${saved.channel_type} saved through /channels/profiles.`;
+    editMode.value = "update";
+    await handleOwnerActionCompleted(saved.channel_type);
+  } catch (error) {
+    ownerActionError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    ownerActionLoading.value = false;
+  }
+}
+
+async function toggleOwnerEnabled(enabled: boolean): Promise<void> {
+  ownerActionError.value = null;
+  ownerActionMessage.value = null;
+  const channelType = selectedChannelType.value;
+  if (!channelType) return;
+  ownerActionLoading.value = true;
+  try {
+    const profile = await setChannelProfileEnabled(channelType, enabled);
+    ownerActionMessage.value = `${profile.channel_type} ${enabled ? "enabled" : "disabled"} through Channels API.`;
+    await handleOwnerActionCompleted(profile.channel_type);
+  } catch (error) {
+    ownerActionError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    ownerActionLoading.value = false;
+  }
+}
+
+async function removeOwnerProfile(): Promise<void> {
+  ownerActionError.value = null;
+  ownerActionMessage.value = null;
+  const channelType = selectedChannelType.value;
+  if (!channelType) return;
+  if (!window.confirm(`Delete channel profile '${channelType}' through /channels/profiles?`)) return;
+  ownerActionLoading.value = true;
+  try {
+    await deleteChannelProfile(channelType);
+    ownerActionMessage.value = `${channelType} deleted through Channels API.`;
+    await loadChannelProfiles();
+  } catch (error) {
+    ownerActionError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    ownerActionLoading.value = false;
+  }
+}
+
+function parseEditorPayload(): ChannelProfileWritePayload {
+  let value: unknown;
+  try {
+    value = JSON.parse(editorText.value);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSON: ${detail}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Channel profile payload must be a JSON object.");
+  }
+  return channelWritePayloadFromConfig(value as JsonRecord);
+}
+
+function channelWritePayloadFromConfig(config: JsonRecord): ChannelProfileWritePayload {
+  return {
+    channel_type: optionalText(config.channel_type ?? config.channel_kind),
+    enabled: typeof config.enabled === "boolean" ? config.enabled : true,
+    capabilities: objectValue(config.capabilities) ?? {},
+    accounts: arrayOfRecords(config.accounts),
+    metadata: objectValue(config.metadata) ?? {},
+  };
+}
+
+async function loadSettingsOverlay(): Promise<SettingsResourcePagePayload | null> {
+  try {
+    return await listSettingsResources("channel-profiles", { limit: 1, offset: 0 }) as SettingsResourcePagePayload;
+  } catch {
+    return null;
+  }
+}
+
+function buildChannelProfilePage(
+  profiles: ChannelProfileApiPayload[],
+  overlay: SettingsResourcePagePayload | null,
+): SettingsResourcePagePayload {
+  return {
+    title: overlay?.title ?? "Channel Profiles",
+    description: overlay?.description ?? "Channel profiles from Channels module with Settings governance overlay.",
+    status: overlay?.status ?? (profiles.length ? "ready" : "empty"),
+    resources: profiles.map(channelProfileToResource),
+    list: { total: profiles.length },
+    detail: profiles[0] ? channelProfileToDetail(profiles[0]) : null,
+  };
+}
+
+function channelProfileToResource(profile: ChannelProfileApiPayload): SettingsResourceSummaryPayload {
+  const effectiveConfig = channelProfileConfig(profile);
+  return {
+    id: profile.channel_type,
+    resource_id: profile.channel_type,
+    display_name: profile.channel_type,
+    status: profile.enabled ? "ready" : "disabled",
+    enabled: profile.enabled,
+    source: "channels_module_api",
+    version: null,
+    updated_at: null,
+    metadata: {
+      owner: "channels",
+      account_count: profile.accounts.length,
+    },
+    payload: effectiveConfig,
+    effective_config: effectiveConfig,
+    resolution: ownerResolution("Channels module API", effectiveConfig),
+  };
+}
+
+function channelProfileToDetail(profile: ChannelProfileApiPayload): SettingsResourceDetailPayload {
+  return {
+    ...channelProfileToResource(profile),
+    title: profile.channel_type,
+    validation: {
+      status: "owner-api",
+      checks: {
+        rows: [
+          { Check: "truth source", Result: "Channels module API" },
+          { Check: "settings role", Result: "governance overlay only" },
+        ],
+      },
+    },
+    audit: { recent_changes: { rows: [], total: 0 } },
+    versions: [],
+  };
+}
+
+function channelProfileConfig(profile: ChannelProfileApiPayload): JsonRecord {
+  return {
+    channel_type: profile.channel_type,
+    channel_kind: profile.channel_type,
+    enabled: profile.enabled,
+    capabilities: profile.capabilities,
+    accounts: profile.accounts,
+    account_count: profile.accounts.length,
+    metadata: profile.metadata,
+  };
+}
+
+function ownerResolution(name: string, value: JsonRecord): SettingsResourceSummaryPayload["resolution"] {
+  return {
+    value,
+    source: { kind: "owner_module", name },
+    sources: [{ kind: "owner_module", name, version_id: null }],
+    override_trace: [],
+  };
+}
+
+function resourceConfig(resource: SettingsResourceSummaryPayload): JsonRecord {
+  return objectValue(resource.effective_config)
+    ?? objectValue(resource.payload)
+    ?? objectValue(resource.resolution?.value)
+    ?? {};
+}
+
+function settingsResourceId(resource: SettingsResourceSummaryPayload): string {
+  return textValue(resource.resource_id, textValue(resource.id, "unknown"));
+}
+
+function objectValue(value: unknown): JsonRecord | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as JsonRecord;
+  return null;
+}
+
+function arrayOfRecords(value: unknown): JsonRecord[] {
+  return Array.isArray(value)
+    ? value.map(objectValue).filter((item): item is JsonRecord => item !== null)
+    : [];
+}
+
+function optionalText(value: unknown): string | null {
+  const text = textValue(value, "");
+  return text || null;
+}
+
+function tableCellValue(row: unknown, key: string): unknown {
+  if (!row || typeof row !== "object") return null;
+  if ("cells" in row && row.cells && typeof row.cells === "object") {
+    return (row.cells as Record<string, unknown>)[key];
+  }
+  return (row as Record<string, unknown>)[key];
+}
+
+function textValue(value: unknown, fallback = ""): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
+function formatValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatTime(value: unknown): string {
+  const raw = textValue(value, "");
+  if (!raw) return "-";
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? raw : date.toLocaleString();
+}
 </script>
 
 <template>
@@ -18,130 +430,118 @@ const channels = [
     <header class="channel-page-header">
       <div>
         <p>Settings / <strong>Channel Profiles</strong></p>
-        <h1>Web Chat <span><i class="channel-status-dot" />Enabled</span></h1>
-        <div class="channel-id">ID: <code>ch_01HZ8S4Y6N9Q2D8K7E3A1B2C</code><Copy :size="13" /></div>
+        <h1>{{ textValue(activeDetail?.display_name, textValue(activeDetail?.title, "Channel Profiles")) }} <span><i class="channel-status-dot" />{{ textValue(activeDetail?.status, settingsPage?.status ?? "unknown") }}</span></h1>
+        <div class="channel-id">ID: <code>{{ selectedResourceId ?? "-" }}</code><Copy :size="13" /></div>
       </div>
       <div class="settings-header-actions">
-        <UiButton size="sm" variant="secondary"><Zap :size="14" /> Test Connection</UiButton>
-        <UiButton size="sm" variant="secondary">More</UiButton>
-        <UiButton size="sm" variant="primary"><Save :size="14" /> Save Changes</UiButton>
+        <UiButton size="sm" variant="secondary" :disabled="isLoading" @click="beginCreateProfile">
+          <Plus :size="14" /> New
+        </UiButton>
+        <UiButton size="sm" variant="secondary" :disabled="isLoading" @click="loadChannelProfiles">
+          <RefreshCcw :size="14" /> Refresh
+        </UiButton>
       </div>
     </header>
 
+    <section v-if="loadError" class="settings-panel">
+      <p class="settings-tone-danger">{{ loadError }}</p>
+    </section>
+
     <section class="channel-layout">
       <aside class="settings-panel channel-picker">
-        <label><MessageCircle :size="14" /><input placeholder="Search channels..." /></label>
-        <select><option>All Status</option></select>
+        <label><MessageCircle :size="14" /><input disabled placeholder="Search loaded profiles..." /></label>
+        <select disabled><option>Channels owner profiles</option></select>
         <div class="channel-list">
-          <button v-for="[name, type, status, icon] in channels" :key="name" :class="{ active: name === 'Web Chat' }" type="button">
-            <span><component :is="icon" :size="18" /></span>
-            <strong>{{ name }}<small>{{ type }}</small></strong>
-            <em>{{ status }}</em>
+          <button
+            v-for="resource in resources"
+            :key="settingsResourceId(resource)"
+            :class="{ active: settingsResourceId(resource) === selectedResourceId }"
+            type="button"
+            @click="selectResource(resource)"
+          >
+            <span><MessageCircle :size="18" /></span>
+            <strong>{{ textValue(resource.display_name, settingsResourceId(resource)) }}<small>{{ settingsResourceId(resource) }}</small></strong>
+            <em>{{ resource.enabled === false ? "disabled" : textValue(resource.status, "ready") }}</em>
           </button>
         </div>
-        <button class="new-channel" type="button">+ New Channel</button>
+        <p class="channel-owner-note">Create and update channel profiles through the Channels module API. Settings only shows governance policy.</p>
       </aside>
 
       <div class="channel-workspace">
-        <nav class="settings-tabs">
-          <button class="active" type="button">General</button>
-          <button type="button">Authentication</button>
-          <button type="button">Configuration</button>
-          <button type="button">Runtime Binding</button>
-          <button type="button">Message Mapping</button>
-          <button type="button">Delivery & Retry</button>
-          <button type="button">Permissions</button>
-          <button type="button">Monitoring</button>
-        </nav>
-
-        <section class="channel-top-grid">
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Basic Information</h2></div>
-            <div class="settings-form-grid">
-              <label><span>Name</span><input value="Web Chat" /></label>
-              <label><span>Type</span><select><option>Web Chat</option></select></label>
-              <label class="settings-field-wide"><span>Description</span><textarea>Web application chat interface for end users.</textarea></label>
-            </div>
-          </article>
-
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Surfaces</h2></div>
-            <div class="settings-form-grid">
-              <label class="settings-field-wide"><span>Intake Surface</span><select><option>HTTPS</option></select><small>https://app.acme.com/chat</small></label>
-              <label class="settings-field-wide"><span>Delivery Surface</span><select><option>WebSocket</option></select><small>wss://app.acme.com/ws/chat</small></label>
-            </div>
-          </article>
-
-          <aside class="settings-panel">
-            <div class="settings-panel-heading"><h2>Required Access Assets</h2><span>2 assets</span></div>
-            <div class="asset-list"><span>asset_web_chat_public <em>Website</em></span><span>asset_chat_message_service <em>Service</em></span></div>
-            <a>Manage in Access Assets <ArrowRight :size="12" /></a>
-          </aside>
-        </section>
-
-        <section class="channel-mid-grid">
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Routing Rules</h2></div>
-            <dl class="settings-kv">
-              <div><dt>Session Strategy</dt><dd>Reuse active session, otherwise create new</dd></div>
-              <div><dt>Agent Profile</dt><dd>Support Agent (v2)</dd></div>
-              <div><dt>Tenant Scope</dt><dd>From request: tenant_id</dd></div>
-              <div><dt>User Scope</dt><dd>From request: user.id</dd></div>
-              <div><dt>Custom Conditions</dt><dd>None</dd></div>
-            </dl>
-          </article>
-
-          <article class="settings-panel binding-preview">
-            <div class="settings-panel-heading"><h2>Run / Turn Binding Preview</h2></div>
-            <div class="binding-flow">
-              <pre>{ "text": "Hello" }</pre>
-              <ArrowRight :size="14" />
-              <span><strong>Session</strong>sess_01HZXQ3V2...</span>
-              <ArrowRight :size="14" />
-              <span><strong>Agent Profile</strong>Support Agent</span>
-            </div>
-            <button type="button">Test with Sample Payload</button>
-          </article>
-
-          <aside class="settings-panel policy-stack">
-            <article>
-              <h3>Allowed Actions Policy (ABAC)</h3>
-              <dl class="settings-kv"><div><dt>Policy Source</dt><dd>channel_web_chat_access</dd></div><div><dt>Scope</dt><dd>Global</dd></div></dl>
-              <button type="button">Test Policy</button>
-            </article>
-            <article>
-              <h3>Delivery Policy</h3>
-              <dl class="settings-kv"><div><dt>Retry</dt><dd>3 attempts</dd></div><div><dt>Backoff</dt><dd>Exponential</dd></div><div><dt>Dead Letter</dt><dd class="settings-tone-success">Enabled</dd></div></dl>
-            </article>
-            <article>
-              <h3>Callback / Webhook Health</h3>
-              <dl class="settings-kv"><div><dt>Status</dt><dd class="settings-tone-success">Healthy</dd></div><div><dt>Last Callback</dt><dd>2 minutes ago</dd></div><div><dt>Failure Rate</dt><dd>0.3%</dd></div></dl>
-            </article>
-          </aside>
-        </section>
-
-        <section class="settings-panel mapping-preview">
-          <div class="settings-panel-heading"><h2>Message Mapping Preview</h2><UiButton size="sm" variant="secondary">Edit Mapping</UiButton></div>
-          <div class="mapping-grid">
-            <article><h3>Incoming: Channel Payload</h3><pre>{ "text": "Hello, I need help.", "user": { "id": "u_123" } }</pre></article>
-            <ArrowRight :size="16" />
-            <article><h3>Normalized Intake Message</h3><pre>{ "message_id": "msg_01HZX...", "content": "Hello, I need help." }</pre></article>
-            <article><h3>Outgoing: Agent Response</h3><pre>{ "text": "Sure, how can I help you?" }</pre></article>
-            <ArrowRight :size="16" />
-            <article><h3>Channel Payload</h3><pre>{ "type": "message", "text": "Sure, how can I help you?" }</pre></article>
+        <section class="settings-panel">
+          <div class="settings-panel-heading">
+            <h2>Channel Profiles</h2>
+            <span>{{ isLoading ? "Loading" : `${channelRows.length} / ${totalResources}` }}</span>
           </div>
+          <DataTable
+            :columns="['Name', 'Channel ID', 'Type', 'Status', 'Source', 'Version', 'Updated At']"
+            :rows="channelRows"
+            section-id="channel-profiles"
+            clickable-rows
+            @row-click="selectChannelRow"
+          />
         </section>
 
-        <section class="channel-bottom-grid">
-          <article class="settings-panel"><div class="settings-panel-heading"><h2>Mapping Contract Test</h2><div class="settings-header-actions"><UiButton size="sm" variant="secondary">Run Intake Test</UiButton><UiButton size="sm" variant="secondary">Run Delivery Test</UiButton></div></div><p>Validate mapping with real payloads before saving.</p></article>
-          <article class="settings-panel"><div class="settings-panel-heading"><h2>Sample Payloads</h2></div><div class="settings-chip-row"><span>web_chat_text_message</span><span>web_chat_file_upload</span><span>web_chat_system_event</span><span>+ Add Sample</span></div></article>
+        <section v-if="!isLoading && !resources.length && editMode !== 'create'" class="settings-panel settings-empty-state">
+          <MessageCircle :size="24" />
+          <h2>No channel profiles</h2>
+          <p><code>/channels/profiles</code> returned no profiles. Profile truth and write workflows remain in Channels; Settings only shows governance policy.</p>
+        </section>
+
+        <section v-else class="channel-top-grid">
+          <article class="settings-panel">
+            <div class="settings-panel-heading"><h2>Effective Configuration</h2></div>
+            <DataTable :columns="['Key', 'Value']" :rows="effectiveRows" section-id="channel-effective-config" />
+            <p v-if="detailLoading">Loading selected channel detail...</p>
+            <p v-if="detailError" class="settings-tone-danger">{{ detailError }}</p>
+          </article>
+
+          <article class="settings-panel">
+            <div class="settings-panel-heading"><h2>Resolution Trace</h2></div>
+            <DataTable :columns="['Layer', 'Source', 'Version']" :rows="resolutionRows" section-id="channel-resolution-trace" />
+          </article>
+
+          <aside class="channel-side-stack">
+            <article class="settings-panel">
+              <div class="settings-panel-heading"><h2>Summary</h2></div>
+              <dl class="settings-kv">
+                <div><dt>Status</dt><dd>{{ textValue(activeDetail?.status, "unknown") }}</dd></div>
+                <div><dt>Enabled</dt><dd>{{ activeDetail?.enabled === false ? "false" : "true" }}</dd></div>
+                <div><dt>Source</dt><dd>{{ textValue(activeDetail?.source, activeDetail?.resolution?.source?.name ?? "-") }}</dd></div>
+                <div><dt>Version</dt><dd>{{ textValue(activeDetail?.version, "-") }}</dd></div>
+                <div><dt>Overrides</dt><dd>{{ activeDetail?.resolution?.override_trace?.length ?? 0 }}</dd></div>
+                <div><dt>Versions</dt><dd>{{ selectedDetail?.versions?.length ?? 0 }}</dd></div>
+              </dl>
+            </article>
+            <article class="settings-panel channel-owner-editor">
+              <div class="settings-panel-heading">
+                <h2>{{ ownerFormTitle }}</h2>
+                <span>Channels owner API</span>
+              </div>
+              <textarea v-model="editorText" spellcheck="false" />
+              <div class="settings-header-actions compact-actions">
+                <UiButton size="sm" variant="primary" :disabled="!canWriteOwnerProfile" @click="submitOwnerProfile">
+                  <Save :size="14" /> Save
+                </UiButton>
+                <UiButton size="sm" variant="secondary" :disabled="ownerActionLoading || !selectedChannelType" @click="toggleOwnerEnabled(activeDetail?.enabled === false)">
+                  <Power :size="14" /> {{ activeDetail?.enabled === false ? "Enable" : "Disable" }}
+                </UiButton>
+                <UiButton size="sm" variant="danger" :disabled="ownerActionLoading || !selectedChannelType" @click="removeOwnerProfile">
+                  <Trash2 :size="14" /> Delete
+                </UiButton>
+              </div>
+              <p v-if="ownerActionMessage" class="settings-tone-success">{{ ownerActionMessage }}</p>
+              <p v-if="ownerActionError" class="settings-tone-danger">{{ ownerActionError }}</p>
+              <p class="channel-owner-note">Writes go directly to <code>/channels/profiles</code>. Runtime readiness remains in Operations.</p>
+            </article>
+          </aside>
         </section>
       </div>
     </section>
 
     <footer class="settings-footer">
-      <span><GitBranch :size="14" />Config Source: Channel Profile</span>
-      <span><Save :size="14" />Last Saved: 2 minutes ago</span>
+      <span><GitBranch :size="14" />Governance overlay: /ui/settings/channel-profiles</span>
+      <span><MessageCircle :size="14" />Truth source: Channels module API</span>
       <a>Audit History <ArrowRight :size="13" /></a>
     </footer>
   </main>
@@ -290,12 +690,13 @@ const channels = [
   font-style: normal;
 }
 
-.new-channel {
-  min-height: 34px;
-  border: 0;
-  background: transparent;
-  color: var(--color-accent);
-  cursor: pointer;
+.channel-owner-note {
+  margin: 0;
+  padding: 8px 2px 0;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .channel-workspace {
@@ -311,6 +712,36 @@ const channels = [
 
 .channel-top-grid {
   grid-template-columns: 0.9fr 1.05fr 1.05fr;
+}
+
+.channel-side-stack {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.channel-owner-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.channel-owner-editor textarea {
+  min-height: 190px;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.compact-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
 }
 
 .channel-mid-grid {

@@ -84,6 +84,7 @@ class AnthropicMessagesAdapter:
             profile.credential_binding,
             required=True,
             description=f"LLM profile '{profile.id}'",
+            resolved_credential=request.resolved_credential,
         )
         headers = {
             "Content-Type": "application/json",

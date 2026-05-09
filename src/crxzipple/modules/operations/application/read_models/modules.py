@@ -33,6 +33,7 @@ _STUCK_SUBSCRIPTION_AFTER_SECONDS = 15.0
 @dataclass(frozen=True, slots=True)
 class OperationsModuleQuerySet:
     access_service: Any
+    access_governance_repository: Any | None
     agent_service: Any
     channel_profile_service: Any
     channel_runtime_manager: Any

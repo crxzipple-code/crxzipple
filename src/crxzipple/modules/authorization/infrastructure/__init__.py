@@ -8,12 +8,16 @@ from crxzipple.modules.authorization.infrastructure.repositories import (
     InMemoryAuthorizationPolicyRepository,
 )
 from crxzipple.modules.authorization.infrastructure.persistence.repositories import (
+    SqlAlchemyAuthorizationAuditRepository,
+    SqlAlchemyAuthorizationPolicyRepository,
     SqlAlchemyTemporaryAuthorizationGrantRepository,
 )
 
 __all__ = [
     "AbacAuthorizationEvaluator",
     "InMemoryAuthorizationPolicyRepository",
+    "SqlAlchemyAuthorizationAuditRepository",
+    "SqlAlchemyAuthorizationPolicyRepository",
     "SqlAlchemyTemporaryAuthorizationGrantRepository",
     "YamlAuthorizationPolicyLoader",
 ]

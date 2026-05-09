@@ -42,6 +42,8 @@ class RegisterAgentProfileInput:
         default_factory=AgentRuntimePreferences,
     )
     home_sidecar_files: dict[str, str] = field(default_factory=dict)
+    reason: str | None = None
+    actor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,15 @@ class UpdateAgentProfileInput:
     llm_routing_policy: object = _UNSET
     execution_policy: object = _UNSET
     runtime_preferences: object = _UNSET
+    reason: str | None = None
+    actor: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentProfileActionInput:
+    id: str
+    reason: str | None = None
+    actor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +175,7 @@ class AgentApplicationService:
         home_registry_lister: Callable[[str], tuple[tuple[str, str], ...]] | None = None,
         home_registry_resolver: Callable[[str, str], str | None] | None = None,
         home_registry_writer: Callable[[str, str, str], Any] | None = None,
+        home_registry_remover: Callable[[str, str], Any] | None = None,
         home_sidecar_factory: (
             Callable[[dict[str, object], str], dict[str, str]] | None
         ) = None,
@@ -181,6 +193,7 @@ class AgentApplicationService:
         self.home_registry_lister = home_registry_lister
         self.home_registry_resolver = home_registry_resolver
         self.home_registry_writer = home_registry_writer
+        self.home_registry_remover = home_registry_remover
         self.home_sidecar_factory = home_sidecar_factory
         self.home_file_reader = home_file_reader
         self.home_file_writer = home_file_writer
@@ -209,10 +222,11 @@ class AgentApplicationService:
             profile.record_event(
                 Event(
                     name="agent.profile.registered",
-                    payload={
-                        "agent_profile_id": profile.id,
-                        "agent_profile_name": profile.name,
-                    },
+                    payload=_agent_profile_event_payload(
+                        profile,
+                        reason=data.reason,
+                        actor=data.actor,
+                    ),
                 ),
             )
             self._persist_profile_state_and_home(
@@ -226,6 +240,8 @@ class AgentApplicationService:
     def sync_profiles(
         self,
         profiles: tuple[RegisterAgentProfileInput, ...],
+        *,
+        write_home: bool | str = True,
     ) -> list[AgentProfile]:
         if not profiles:
             return []
@@ -234,20 +250,23 @@ class AgentApplicationService:
         with self.uow_factory() as uow:
             for data in profiles:
                 existing = self._load_home_profile(data.id)
-                profile = AgentProfile(
-                    id=data.id,
-                    name=data.name,
-                    description=data.description,
-                    enabled=data.enabled,
-                    identity=data.identity,
-                    instruction_policy=data.instruction_policy,
-                    llm_routing_policy=data.llm_routing_policy,
-                    execution_policy=data.execution_policy,
-                    runtime_preferences=self._normalize_runtime_preferences(
+                profile_kwargs: dict[str, object] = {
+                    "id": data.id,
+                    "name": data.name,
+                    "description": data.description,
+                    "enabled": data.enabled,
+                    "identity": data.identity,
+                    "instruction_policy": data.instruction_policy,
+                    "llm_routing_policy": data.llm_routing_policy,
+                    "execution_policy": data.execution_policy,
+                    "runtime_preferences": self._normalize_runtime_preferences(
                         data.id,
                         data.runtime_preferences,
                     ),
-                )
+                }
+                if existing is not None:
+                    profile_kwargs["created_at"] = existing.created_at
+                profile = AgentProfile(**profile_kwargs)
                 profile.record_event(
                     Event(
                         name=(
@@ -255,16 +274,18 @@ class AgentApplicationService:
                             if existing is None
                             else "agent.profile.updated"
                         ),
-                        payload={
-                            "agent_profile_id": profile.id,
-                            "agent_profile_name": profile.name,
-                        },
+                        payload=_agent_profile_event_payload(
+                            profile,
+                            reason=data.reason,
+                            actor=data.actor,
+                        ),
                     ),
                 )
                 self._persist_profile_state_and_home(
                     uow,
                     profile,
                     home_sidecar_files=data.home_sidecar_files,
+                    write_home=write_home,
                     source_home_dir=(
                         existing.runtime_preferences.resolved_home_dir
                         if existing is not None
@@ -311,6 +332,8 @@ class AgentApplicationService:
                     if data.runtime_preferences is not _UNSET
                     else None
                 ),
+                reason=data.reason,
+                actor=data.actor,
             )
             self._normalize_profile_runtime_preferences(profile)
             self._persist_profile_state_and_home(
@@ -340,29 +363,74 @@ class AgentApplicationService:
     def resolve_registered_home(self, profile_id: str) -> str | None:
         return self._resolve_registered_home(profile_id)
 
-    def enable_profile(self, profile_id: str) -> AgentProfile:
+    def enable_profile(
+        self,
+        profile: str | AgentProfileActionInput,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> AgentProfile:
+        data = _coerce_action_input(profile, reason=reason, actor=actor)
         with self.uow_factory() as uow:
-            profile = self._load_profile_for_mutation(profile_id)
-            if profile is None:
+            loaded_profile = self._load_profile_for_mutation(data.id)
+            if loaded_profile is None:
                 raise AgentNotFoundError(
-                    f"Agent profile '{profile_id}' was not found.",
+                    f"Agent profile '{data.id}' was not found.",
                 )
-            profile.enable()
-            self._persist_profile_state_and_home(uow, profile)
+            loaded_profile.enable(reason=data.reason, actor=data.actor)
+            self._persist_profile_state_and_home(uow, loaded_profile)
             uow.commit()
-            return profile
+            return loaded_profile
 
-    def disable_profile(self, profile_id: str) -> AgentProfile:
+    def disable_profile(
+        self,
+        profile: str | AgentProfileActionInput,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> AgentProfile:
+        data = _coerce_action_input(profile, reason=reason, actor=actor)
         with self.uow_factory() as uow:
-            profile = self._load_profile_for_mutation(profile_id)
-            if profile is None:
+            loaded_profile = self._load_profile_for_mutation(data.id)
+            if loaded_profile is None:
                 raise AgentNotFoundError(
-                    f"Agent profile '{profile_id}' was not found.",
+                    f"Agent profile '{data.id}' was not found.",
                 )
-            profile.disable()
-            self._persist_profile_state_and_home(uow, profile)
+            loaded_profile.disable(reason=data.reason, actor=data.actor)
+            self._persist_profile_state_and_home(uow, loaded_profile)
             uow.commit()
-            return profile
+            return loaded_profile
+
+    def delete_profile(
+        self,
+        profile: str | AgentProfileActionInput,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> None:
+        data = _coerce_action_input(profile, reason=reason, actor=actor)
+        with self.uow_factory() as uow:
+            loaded_profile = self._load_profile_for_mutation(data.id)
+            if loaded_profile is None:
+                raise AgentNotFoundError(
+                    f"Agent profile '{data.id}' was not found.",
+                )
+            home_dir = loaded_profile.runtime_preferences.resolved_home_dir
+            loaded_profile.record_event(
+                Event(
+                    name="agent.profile.deleted",
+                    payload=_agent_profile_event_payload(
+                        loaded_profile,
+                        reason=data.reason,
+                        actor=data.actor,
+                    ),
+                ),
+            )
+            uow.collect(loaded_profile)
+            self._unregister_home(loaded_profile.id)
+            if home_dir is not None:
+                self._remove_home_config(home_dir)
+            uow.commit()
 
     def migrate_profile_home(
         self,
@@ -598,6 +666,20 @@ class AgentApplicationService:
             raise AgentValidationError("Agent home registry writing is unavailable.")
         self.home_registry_writer(self._require_agent_home_root(), agent_id, home_dir)
 
+    def _unregister_home(self, agent_id: str) -> None:
+        if self.home_registry_remover is None:
+            raise AgentValidationError("Agent home registry removal is unavailable.")
+        self.home_registry_remover(self._require_agent_home_root(), agent_id)
+
+    def _remove_home_config(self, home_dir: str) -> None:
+        config_path = Path(home_dir).expanduser() / "agent.json"
+        try:
+            config_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise AgentValidationError(
+                f"Unable to remove Agent home config '{config_path}'.",
+            ) from exc
+
     def _load_home_profile(self, profile_id: str) -> AgentProfile | None:
         home_dir = self._resolve_registered_home(profile_id)
         if home_dir is None:
@@ -620,6 +702,7 @@ class AgentApplicationService:
         *,
         home_sidecar_files: dict[str, str] | None = None,
         source_home_dir: str | None = None,
+        write_home: bool | str = True,
     ) -> None:
         self._normalize_profile_runtime_preferences(profile)
         home_dir = self._resolve_agent_home_dir(profile=profile, home_dir=None)
@@ -627,16 +710,20 @@ class AgentApplicationService:
             raise AgentValidationError(
                 f"Agent profile '{profile.id}' must define a home directory.",
         )
-        self._ensure_home_scaffold(profile)
-        self._write_home_config(profile, home_dir=home_dir)
-        resolved_sidecar_files = dict(home_sidecar_files or {})
-        if (
-            not resolved_sidecar_files
-            and source_home_dir is not None
-            and not _same_home_dir(source_home_dir, home_dir)
-        ):
-            resolved_sidecar_files = self._read_home_sidecar_files(source_home_dir)
-        self._write_home_sidecars(home_dir=home_dir, files=resolved_sidecar_files)
+        should_write_home = bool(write_home)
+        if write_home == "if_missing":
+            should_write_home = not Path(home_dir, "agent.json").exists()
+        if should_write_home:
+            self._ensure_home_scaffold(profile)
+            self._write_home_config(profile, home_dir=home_dir)
+            resolved_sidecar_files = dict(home_sidecar_files or {})
+            if (
+                not resolved_sidecar_files
+                and source_home_dir is not None
+                and not _same_home_dir(source_home_dir, home_dir)
+            ):
+                resolved_sidecar_files = self._read_home_sidecar_files(source_home_dir)
+            self._write_home_sidecars(home_dir=home_dir, files=resolved_sidecar_files)
         self._register_home(profile.id, home_dir)
         uow.collect(profile)
 
@@ -776,3 +863,44 @@ def _same_home_dir(first: str, second: str) -> bool:
             Path(first).expanduser().absolute()
             == Path(second).expanduser().absolute()
         )
+
+
+def _coerce_action_input(
+    profile: str | AgentProfileActionInput,
+    *,
+    reason: str | None,
+    actor: str | None,
+) -> AgentProfileActionInput:
+    if isinstance(profile, AgentProfileActionInput):
+        return AgentProfileActionInput(
+            id=profile.id,
+            reason=profile.reason if profile.reason is not None else reason,
+            actor=profile.actor if profile.actor is not None else actor,
+        )
+    return AgentProfileActionInput(id=profile, reason=reason, actor=actor)
+
+
+def _agent_profile_event_payload(
+    profile: AgentProfile,
+    *,
+    reason: str | None = None,
+    actor: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "agent_profile_id": profile.id,
+        "agent_profile_name": profile.name,
+    }
+    normalized_reason = _normalize_optional_text(reason)
+    normalized_actor = _normalize_optional_text(actor)
+    if normalized_reason is not None:
+        payload["reason"] = normalized_reason
+    if normalized_actor is not None:
+        payload["actor"] = normalized_actor
+    return payload
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None

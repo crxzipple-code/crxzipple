@@ -23,6 +23,7 @@ from crxzipple.modules.channels.application.services import (
 )
 from crxzipple.modules.channels.application.bindings import (
     collect_channel_access_requirements,
+    mask_channel_metadata,
     resolve_channel_metadata_binding,
 )
 from crxzipple.modules.channels.domain import (
@@ -58,6 +59,7 @@ from crxzipple.shared.content_blocks import (
     describe_content_for_text_fallback,
 )
 from crxzipple.shared.http import request_url
+from crxzipple.shared.access import AccessConsumerRef, CredentialProvider
 
 if TYPE_CHECKING:
     from crxzipple.modules.access import AccessApplicationService
@@ -139,10 +141,12 @@ class ChannelRuntimeBootstrapService:
         profile_service: ChannelProfileApplicationService,
         runtime_manager: ChannelRuntimeManager,
         access_service: "AccessApplicationService | None" = None,
+        credential_provider: CredentialProvider | None = None,
     ) -> None:
         self.profile_service = profile_service
         self.runtime_manager = runtime_manager
         self.access_service = access_service
+        self.credential_provider = credential_provider or access_service
 
     def ensure_registered(
         self,
@@ -157,6 +161,12 @@ class ChannelRuntimeBootstrapService:
         resolved_runtime_id = runtime_id or f"{normalized_channel}-runtime-1"
         resolved_service_key = service_key or f"channel:{normalized_channel}"
         profile = self.profile_service.get_profile(normalized_channel)
+        if profile is not None and not profile.enabled:
+            raise ChannelValidationError(
+                f"Channel '{normalized_channel}' profile is disabled.",
+                code="channel_profile_disabled",
+                details={"channel_type": normalized_channel},
+            )
         self._ensure_profile_access_ready(normalized_channel, profile)
         existing = self.runtime_manager.get_runtime(resolved_runtime_id)
         capabilities = (
@@ -234,7 +244,7 @@ class ChannelRuntimeBootstrapService:
                     runtime_id=runtime_id,
                     metadata={
                         "transport_mode": account.transport_mode,
-                        **dict(account.metadata),
+                        **mask_channel_metadata(account.metadata),
                     },
                 ),
             )
@@ -292,6 +302,65 @@ class ChannelRuntimeBootstrapService:
                     resolved.append(requirement)
         return tuple(resolved)
 
+    def _access_consumer(
+        self,
+        *,
+        channel_type: str,
+        component: str,
+        channel_account_id: str | None = None,
+        field: str | None = None,
+        runtime_ref: str | None = None,
+    ) -> AccessConsumerRef:
+        normalized_channel = channel_type.strip().lower()
+        account = (
+            channel_account_id.strip()
+            if isinstance(channel_account_id, str) and channel_account_id.strip()
+            else None
+        )
+        consumer_id = f"channels.{normalized_channel}"
+        if account is not None:
+            consumer_id = f"{consumer_id}.account:{account}"
+        if field is not None and field.strip():
+            consumer_id = f"{consumer_id}.{field.strip()}"
+        return AccessConsumerRef(
+            consumer_id=consumer_id,
+            module="channels",
+            component=component,
+            runtime_ref=runtime_ref or normalized_channel,
+            metadata={
+                "channel_type": normalized_channel,
+                "channel_account_id": account,
+                "field": field,
+            },
+        )
+
+    def _resolve_metadata_credential(
+        self,
+        metadata: dict[str, Any],
+        *,
+        key: str,
+        description: str,
+        required: bool,
+        channel_type: str,
+        component: str,
+        channel_account_id: str | None = None,
+        runtime_ref: str | None = None,
+    ) -> str | None:
+        return resolve_channel_metadata_binding(
+            metadata,
+            key=key,
+            description=description,
+            required=required,
+            credential_provider=self.credential_provider,
+            consumer=self._access_consumer(
+                channel_type=channel_type,
+                component=component,
+                channel_account_id=channel_account_id,
+                field=key,
+                runtime_ref=runtime_ref,
+            ),
+        )
+
 
 class WebChannelRuntimeService(ChannelRuntimeBootstrapService):
     def __init__(
@@ -301,11 +370,13 @@ class WebChannelRuntimeService(ChannelRuntimeBootstrapService):
         runtime_manager: ChannelRuntimeManager,
         events_service: EventsApplicationService,
         access_service: "AccessApplicationService | None" = None,
+        credential_provider: CredentialProvider | None = None,
     ) -> None:
         super().__init__(
             profile_service=profile_service,
             runtime_manager=runtime_manager,
             access_service=access_service,
+            credential_provider=credential_provider,
         )
         self.events_service = events_service
 
@@ -760,11 +831,13 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
         runtime_manager: ChannelRuntimeManager,
         events_service: EventsApplicationService,
         access_service: "AccessApplicationService | None" = None,
+        credential_provider: CredentialProvider | None = None,
     ) -> None:
         super().__init__(
             profile_service=profile_service,
             runtime_manager=runtime_manager,
             access_service=access_service,
+            credential_provider=credential_provider,
         )
         self.agent_service = agent_service
         self.orchestration_scheduler_service = orchestration_scheduler_service
@@ -1681,11 +1754,14 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
         if (
             normalized_chat_type == "group"
             and is_truthy(account_metadata.get("lark_group_require_bot_mention"))
-            and not resolve_channel_metadata_binding(
+            and not self._resolve_metadata_credential(
                 account_metadata,
                 key="lark_bot_open_id",
                 description="Lark bot open id",
                 required=False,
+                channel_type="lark",
+                component="message_ingress",
+                channel_account_id=normalized_account,
             )
         ):
             resolved_bot_open_id = self.resolve_bot_open_id_for_account(
@@ -1697,6 +1773,13 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
             account_metadata=effective_account_metadata,
             chat_type=normalized_chat_type,
             mentions=mentions,
+            credential_provider=self.credential_provider,
+            consumer=self._access_consumer(
+                channel_type="lark",
+                component="message_ingress",
+                channel_account_id=normalized_account,
+                field="lark_bot_open_id",
+            ),
         ):
             return {
                 "code": 0,
@@ -1914,29 +1997,45 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
         try:
             account_profile = self._require_account_profile(channel_account_id)
             metadata = dict(account_profile.metadata)
-            app_id = resolve_channel_metadata_binding(
+            app_id = self._resolve_metadata_credential(
                 metadata,
                 key="lark_app_id",
                 description="Lark app id",
                 required=True,
+                channel_type="lark",
+                component="long_connection",
+                channel_account_id=channel_account_id,
+                runtime_ref=runtime_id,
             )
-            app_secret = resolve_channel_metadata_binding(
+            app_secret = self._resolve_metadata_credential(
                 metadata,
                 key="lark_app_secret",
                 description="Lark app secret",
                 required=True,
+                channel_type="lark",
+                component="long_connection",
+                channel_account_id=channel_account_id,
+                runtime_ref=runtime_id,
             )
-            verification_token = resolve_channel_metadata_binding(
+            verification_token = self._resolve_metadata_credential(
                 metadata,
                 key="lark_verification_token",
                 description="Lark verification token",
                 required=False,
+                channel_type="lark",
+                component="long_connection",
+                channel_account_id=channel_account_id,
+                runtime_ref=runtime_id,
             ) or ""
-            encrypt_key = resolve_channel_metadata_binding(
+            encrypt_key = self._resolve_metadata_credential(
                 metadata,
                 key="lark_encrypt_key",
                 description="Lark encrypt key",
                 required=False,
+                channel_type="lark",
+                component="long_connection",
+                channel_account_id=channel_account_id,
+                runtime_ref=runtime_id,
             ) or ""
             base_url = str(metadata.get("lark_base_url") or "https://open.feishu.cn").strip()
             if not base_url:
@@ -2052,11 +2151,14 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
     ) -> str | None:
         account_profile = self._require_account_profile(channel_account_id)
         metadata = dict(account_profile.metadata)
-        configured_open_id = resolve_channel_metadata_binding(
+        configured_open_id = self._resolve_metadata_credential(
             metadata,
             key="lark_bot_open_id",
             description="Lark bot open id",
             required=False,
+            channel_type="lark",
+            component="bot_identity",
+            channel_account_id=channel_account_id,
         )
         if configured_open_id:
             return configured_open_id
@@ -2110,17 +2212,23 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
                 return cached.token
         account_profile = self._require_account_profile(channel_account_id)
         metadata = dict(account_profile.metadata)
-        app_id = resolve_channel_metadata_binding(
+        app_id = self._resolve_metadata_credential(
             metadata,
             key="lark_app_id",
             description="Lark app id",
             required=True,
+            channel_type="lark",
+            component="tenant_access_token",
+            channel_account_id=channel_account_id,
         )
-        app_secret = resolve_channel_metadata_binding(
+        app_secret = self._resolve_metadata_credential(
             metadata,
             key="lark_app_secret",
             description="Lark app secret",
             required=True,
+            channel_type="lark",
+            component="tenant_access_token",
+            channel_account_id=channel_account_id,
         )
         response = request_url(
             "POST",
@@ -2165,12 +2273,16 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
 
     def _require_account_profile(self, channel_account_id: str):
         profile = self.profile_service.get_profile("lark")
+        if profile is not None and not profile.enabled:
+            raise ValueError("lark_channel_profile_disabled")
         account = _resolve_channel_account_profile(
             profile,
             channel_account_id=channel_account_id,
         )
         if account is None:
             raise ValueError("missing_lark_account_profile")
+        if not account.enabled:
+            raise ValueError("lark_channel_account_disabled")
         return account
 
 
@@ -2188,11 +2300,13 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
         runtime_manager: ChannelRuntimeManager,
         events_service: EventsApplicationService,
         access_service: "AccessApplicationService | None" = None,
+        credential_provider: CredentialProvider | None = None,
     ) -> None:
         super().__init__(
             profile_service=profile_service,
             runtime_manager=runtime_manager,
             access_service=access_service,
+            credential_provider=credential_provider,
         )
         self.agent_service = agent_service
         self.orchestration_scheduler_service = orchestration_scheduler_service
@@ -2249,6 +2363,7 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
         normalized_callback_url = callback_url.strip()
         if not normalized_callback_url:
             raise ValueError("callback_url is required.")
+        self._ensure_account_enabled(normalized_account)
         profile, error = resolve_profile(
             self.agent_service,
             agent_id=agent_id,
@@ -2352,6 +2467,19 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
             "callback_url": normalized_callback_url,
             "interaction_status": bound.status if bound is not None else interaction.status,
         }
+
+    def _ensure_account_enabled(self, channel_account_id: str) -> None:
+        profile = self.profile_service.get_profile("webhook")
+        if profile is None:
+            return
+        if not profile.enabled:
+            raise ValueError("webhook_channel_profile_disabled")
+        account = _resolve_channel_account_profile(
+            profile,
+            channel_account_id=channel_account_id,
+        )
+        if account is not None and not account.enabled:
+            raise ValueError("webhook_channel_account_disabled")
 
     def run_runtime_loop(
         self,

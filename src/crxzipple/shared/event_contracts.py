@@ -216,6 +216,7 @@ TOOL_RUN_EVENT_NAMES: tuple[str, ...] = (
     "tool.run.queued",
     "tool.run.dispatching",
     "tool.run.started",
+    "tool.run.heartbeated",
     "tool.run.succeeded",
     "tool.run.failed",
     "tool.run.requeued",
@@ -227,6 +228,7 @@ TOOL_RUN_EVENT_NAMES: tuple[str, ...] = (
 TOOL_ASSIGNMENT_EVENT_NAMES: tuple[str, ...] = (
     "tool.assignment.created",
     "tool.assignment.started",
+    "tool.assignment.heartbeated",
     "tool.assignment.succeeded",
     "tool.assignment.failed",
     "tool.assignment.cancelled",
@@ -289,6 +291,8 @@ _TOOL_RUN_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("strategy", "Tool execution strategy.", "string"),
     EventDefinitionField("environment", "Tool execution environment.", "string"),
     EventDefinitionField("status", "Normalized run status implied by the event suffix.", "string"),
+    EventDefinitionField("heartbeat_at", "Most recent run heartbeat timestamp.", "string"),
+    EventDefinitionField("lease_expires_at", "Run lease expiration timestamp.", "string"),
     EventDefinitionField("error_message", "Terminal tool error message.", "string"),
     EventDefinitionField("reason", "Requeue or cancellation reason.", "string"),
 )
@@ -301,6 +305,8 @@ _TOOL_ASSIGNMENT_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("worker_id", "Assigned worker identifier.", "string", True),
     EventDefinitionField("attempt_count", "Execution attempt assigned to the worker.", "integer"),
     EventDefinitionField("status", "Normalized assignment status implied by the event suffix.", "string"),
+    EventDefinitionField("heartbeat_at", "Most recent assignment heartbeat timestamp.", "string"),
+    EventDefinitionField("lease_expires_at", "Assignment lease expiration timestamp.", "string"),
     EventDefinitionField("reason", "Terminal assignment reason when available.", "string"),
 )
 

@@ -26,17 +26,7 @@ import {
   type OperationsRuntimeStatus,
   type OperationsRuntimeStatusItem,
 } from "./api";
-
-type OperationsModuleId =
-  | "orchestration"
-  | "tool"
-  | "llm"
-  | "access"
-  | "channels"
-  | "memory"
-  | "skills"
-  | "events"
-  | "daemon";
+import type { OperationsModuleId } from "./useOperationsProjectionRefresh";
 
 interface ModuleNavItem {
   id: OperationsModuleId;

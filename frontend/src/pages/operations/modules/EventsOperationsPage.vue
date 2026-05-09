@@ -35,6 +35,7 @@ import {
   advanceEventSubscriptionsToHead,
   loadEventsOperations,
 } from "../api";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
   id: string;
@@ -515,6 +516,8 @@ async function advanceStuckSubscriptions(observerOnly = false) {
     actionBusy.value = null;
   }
 }
+
+useOperationsProjectionRefresh("events", refreshPage);
 
 onMounted(() => {
   void refreshPage();

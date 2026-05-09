@@ -25,6 +25,7 @@ import {
   loadOrchestrationOperations,
   resumeOrchestrationRun,
 } from "../api";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 type SegmentTone = "neutral" | "info" | "success" | "warning" | "danger";
 type DetailSectionId = "run_queue" | "ingress_queue" | "lane_locks" | "executor_overview" | "recent_failures" | "ops_event_log";
@@ -1220,6 +1221,10 @@ function closeDetail() {
 
 watch(activeTab, () => {
   selectedDetail.value = null;
+});
+
+useOperationsProjectionRefresh("orchestration", refreshPage, {
+  isEnabled: () => page.value?.auto_refresh !== false,
 });
 
 onMounted(() => {

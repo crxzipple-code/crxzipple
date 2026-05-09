@@ -219,15 +219,19 @@ class RedisEventsBackend(
     ) -> bool:
         stream_key = self._topic_stream_key(topic)
         cursor = after_cursor or "0-0"
-        if self._compare_cursors(self._snapshot_stream(stream_key), cursor) > 0:
-            return True
         remaining_seconds = max(float(timeout_seconds), 0.0)
         deadline = time.monotonic() + remaining_seconds
         while True:
             if stop_event is not None and stop_event.is_set():
                 return False
             if remaining_seconds <= 0:
-                return self._compare_cursors(self._snapshot_stream(stream_key), cursor) > 0
+                response = self._call_client(
+                    "wait for runtime event topic activity",
+                    self._client.xread,
+                    {stream_key: cursor},
+                    count=1,
+                )
+                return bool(response)
             block_ms = min(int(remaining_seconds * 1000), self._block_ms)
             response = self._call_client(
                 "wait for runtime event topic activity",
@@ -258,20 +262,22 @@ class RedisEventsBackend(
             stream_key: watch.after_cursor or "0-0"
             for stream_key, watch in stream_to_watch.items()
         }
-        for stream_key, cursor in streams.items():
-            if self._compare_cursors(self._snapshot_stream(stream_key), cursor) > 0:
-                return stream_to_watch[stream_key]
-
         remaining_seconds = max(float(timeout_seconds), 0.0)
         deadline = time.monotonic() + remaining_seconds
         while True:
             if stop_event is not None and stop_event.is_set():
                 return None
             if remaining_seconds <= 0:
-                for stream_key, cursor in streams.items():
-                    if self._compare_cursors(self._snapshot_stream(stream_key), cursor) > 0:
-                        return stream_to_watch[stream_key]
-                return None
+                response = self._call_client(
+                    "wait for runtime event topic activity",
+                    self._client.xread,
+                    streams,
+                    count=1,
+                )
+                if not response:
+                    return None
+                stream_key = str(response[0][0])
+                return stream_to_watch.get(stream_key)
             block_ms = min(int(remaining_seconds * 1000), self._block_ms)
             response = self._call_client(
                 "wait for runtime event topic activity",

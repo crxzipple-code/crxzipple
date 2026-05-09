@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 import os
-from pathlib import Path
 import time
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, inspect
 
 from crxzipple.core.config import (
     DEFAULT_BROWSER_DEFAULT_PROFILE_NAME,
@@ -40,7 +39,7 @@ from crxzipple.modules.channels.application.event_contracts import (
     channel_event_surfaces,
     channel_event_topic_contracts,
 )
-from crxzipple.core.db import SessionFactory, build_engine, build_session_factory
+from crxzipple.core.db import Base, SessionFactory, build_engine, build_session_factory
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.browser.application import (
     BrowserExecutionCoordinatorService,
@@ -78,8 +77,18 @@ from crxzipple.modules.artifacts import (
     ArtifactApplicationService,
     FilesystemArtifactStore,
 )
-from crxzipple.modules.agent.application import AgentApplicationService
-from crxzipple.modules.agent.domain import AgentNotFoundError
+from crxzipple.modules.agent.application import (
+    AgentApplicationService,
+    RegisterAgentProfileInput,
+)
+from crxzipple.modules.agent.domain import (
+    AgentExecutionPolicy,
+    AgentIdentity,
+    AgentInstructionPolicy,
+    AgentLlmRoutingPolicy,
+    AgentNotFoundError,
+    AgentRuntimePreferences,
+)
 from crxzipple.modules.agent.infrastructure.home_config import (
     apply_agent_home_config_payload,
     load_agent_home_config,
@@ -95,6 +104,7 @@ from crxzipple.modules.agent.infrastructure.home_registry import (
     list_registered_agent_homes,
     register_agent_home,
     resolve_registered_agent_home,
+    unregister_agent_home,
 )
 from crxzipple.modules.agent.infrastructure.home_migration import (
     migrate_agent_home_contents,
@@ -103,7 +113,29 @@ from crxzipple.modules.agent.infrastructure.home_scaffold import (
     ensure_agent_home_scaffold,
 )
 from crxzipple.modules.access import AccessApplicationService
+from crxzipple.modules.access.infrastructure import (
+    SqlAlchemyAccessActionAuditRepository,
+    SqlAlchemyAccessGovernanceRepository,
+)
+from crxzipple.modules.settings.application import (
+    SettingsEffectiveConfigMaterializer,
+    seed_core_settings_resources,
+)
+from crxzipple.modules.settings.infrastructure.persistence import (
+    SettingsActionAuditModel,
+    SettingsEffectiveSnapshotModel,
+    SettingsOverrideModel,
+    SettingsResourceModel,
+    SettingsResourceVersionModel,
+    SettingsValidationResultModel,
+    create_sqlalchemy_settings_services,
+)
 from crxzipple.modules.authorization.application import AuthorizationApplicationService
+from crxzipple.modules.authorization.infrastructure.persistence import (
+    SqlAlchemyAuthorizationAuditRepository,
+    SqlAlchemyAuthorizationPolicyRepository,
+    SqlAlchemyTemporaryAuthorizationGrantRepository,
+)
 from crxzipple.modules.dispatch.application import (
     DispatchApplicationService,
     DispatchWakeupObserver,
@@ -159,11 +191,12 @@ from crxzipple.modules.daemon import (
 )
 from crxzipple.modules.authorization.infrastructure import (
     AbacAuthorizationEvaluator,
-    InMemoryAuthorizationPolicyRepository,
-    SqlAlchemyTemporaryAuthorizationGrantRepository,
     YamlAuthorizationPolicyLoader,
 )
 from crxzipple.modules.llm.application import LlmApplicationService
+from crxzipple.modules.llm.application.services import (
+    register_llm_profile_input_from_config,
+)
 from crxzipple.modules.llm.domain import LlmApiFamily
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
 from crxzipple.modules.llm.infrastructure import (
@@ -173,7 +206,11 @@ from crxzipple.modules.llm.infrastructure import (
     OpenAICodexResponsesAdapter,
     OpenAIResponsesAdapter,
 )
-from crxzipple.modules.memory.application import FileBackedMemoryService
+from crxzipple.modules.memory.application import (
+    FileBackedMemoryService,
+    MemorySettingsBootstrapConfig,
+    memory_bootstrap_config_from_settings,
+)
 from crxzipple.modules.memory.application.event_contracts import (
     memory_event_definitions,
     memory_event_surfaces,
@@ -236,6 +273,8 @@ from crxzipple.modules.orchestration.application import (
     orchestration_event_observers,
     orchestration_event_surfaces,
     turn_session_topic,
+    RuntimeSettingsBootstrapConfig,
+    runtime_bootstrap_config_from_settings,
 )
 from crxzipple.modules.orchestration.application.cancellation import (
     RunCancellationService,
@@ -268,6 +307,10 @@ from crxzipple.modules.session.application import (
     SessionResolutionService,
 )
 from crxzipple.modules.skills.application import SkillManager
+from crxzipple.modules.skills.application.settings_integration import (
+    SkillEnablementManagerAdapter,
+    SkillEnablementService,
+)
 from crxzipple.modules.skills.application.event_contracts import (
     skill_event_definitions,
     skill_event_surfaces,
@@ -278,8 +321,15 @@ from crxzipple.modules.tool.application import (
     ToolApplicationService,
     ToolDispatchEventSubscriber,
     ToolSchedulerRuntimePort,
+    ToolSettingsBootstrapConfig,
     ToolRuntimeEventService,
     ToolWorkerRuntimePort,
+    tool_settings_bootstrap_config_from_settings,
+)
+from crxzipple.modules.tool.application.settings_integration import (
+    ToolEnablementDiscoveryGateway,
+    ToolEnablementRuntimeGateway,
+    ToolEnablementService,
 )
 from crxzipple.modules.tool.application.service_support import ToolServiceDependencies
 from crxzipple.modules.tool.application.service_graph import build_tool_service_graph
@@ -302,6 +352,7 @@ from crxzipple.modules.tool.infrastructure import (
     register_mcp_remote_handlers,
     register_openapi_remote_handlers,
 )
+from crxzipple.shared.access import CredentialProvider
 from crxzipple.shared.infrastructure import (
     EventsBackedEventBus,
     SqlAlchemyUnitOfWork,
@@ -324,6 +375,11 @@ class AppContainer:
     session_factory: SessionFactory
     event_bus: EventBus
     events_service: EventsApplicationService | None
+    settings_query_service: Any | None
+    settings_action_service: Any | None
+    tool_bootstrap_config: ToolSettingsBootstrapConfig
+    memory_bootstrap_config: MemorySettingsBootstrapConfig
+    runtime_bootstrap_config: RuntimeSettingsBootstrapConfig
     event_contract_registry: EventContractRegistry
     event_definition_registry: EventDefinitionRegistry
     channel_system_config: ChannelSystemConfig
@@ -345,6 +401,8 @@ class AppContainer:
     remote_tool_registry: ToolRuntimeRegistry
     llm_adapter_registry: LlmAdapterRegistry
     access_service: AccessApplicationService
+    access_governance_repository: SqlAlchemyAccessGovernanceRepository
+    access_action_audit_repository: SqlAlchemyAccessActionAuditRepository
     authorization_service: AuthorizationApplicationService
     uow_factory: Callable[[], SqlAlchemyUnitOfWork]
     browser_system_config: BrowserSystemConfig
@@ -384,7 +442,9 @@ class AppContainer:
     orchestration_cancellation_service: RunCancellationService
     orchestration_intake_service: OrchestrationIntakeService
     orchestration_scheduler_service: OrchestrationSchedulerService
-    orchestration_scheduler_runtime_event_service: OrchestrationRuntimeEventService | None
+    orchestration_scheduler_runtime_event_service: (
+        OrchestrationRuntimeEventService | None
+    )
     orchestration_executor_service: OrchestrationExecutorService
     tool_service: ToolApplicationService
     tool_scheduler_service: ToolSchedulerRuntimePort
@@ -397,7 +457,7 @@ class AppContainer:
     memory_context_resolver: FileMemoryContextResolver
     memory_watch_registry: MemoryWatchRegistry | None
     agent_service: AgentApplicationService
-    skill_manager: SkillManager
+    skill_manager: Any
     artifact_service: ArtifactApplicationService
     cleanup_callbacks: tuple[Callable[[], None], ...] = field(default_factory=tuple)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -413,13 +473,15 @@ class AppContainer:
                 logger.exception("container cleanup callback failed")
         self.engine.dispose()
 
+
 @dataclass(slots=True)
 class _ToolInfrastructure:
     local_tool_catalog: LocalToolCatalog
     tool_discovery_registry: ToolDiscoveryRegistry
+    tool_discovery_gateway: Any
     sandbox_tool_registry: ToolRuntimeRegistry
     remote_tool_registry: ToolRuntimeRegistry
-    tool_runtime_gateway: ToolRuntimeRouter
+    tool_runtime_gateway: Any
     cleanup_callbacks: tuple[Callable[[], None], ...] = field(default_factory=tuple)
 
 
@@ -437,7 +499,7 @@ class _RuntimeServices:
     orchestration_intake_service: OrchestrationIntakeService
     orchestration_scheduler_service: OrchestrationSchedulerService
     orchestration_executor_service: OrchestrationExecutorService
-    skill_manager: SkillManager
+    skill_manager: Any
 
 
 @dataclass(slots=True)
@@ -508,8 +570,12 @@ class _DaemonInfrastructure:
     service: DaemonApplicationService
 
 
-def _build_channels_infrastructure(settings: Settings) -> _ChannelsInfrastructure:
-    bootstrap_config = ChannelSystemConfig(profiles=settings.channel_profiles)
+def _build_channels_infrastructure(
+    settings: Settings,
+    *,
+    channel_profiles: tuple[Any, ...],
+) -> _ChannelsInfrastructure:
+    bootstrap_config = ChannelSystemConfig(profiles=channel_profiles)
     bootstrap_interactions = ChannelInteractionRegistry()
     bootstrap_registry = ChannelRuntimeRegistry()
     state_root = bootstrap_channel_state_root(
@@ -536,7 +602,7 @@ def _build_channels_infrastructure(settings: Settings) -> _ChannelsInfrastructur
     profile_service = ChannelProfileApplicationService(
         system_config_store=system_config_store,
     )
-    for profile in settings.channel_profiles:
+    for profile in channel_profiles:
         profile_service.upsert_profile(profile)
     runtime_planner = ChannelRuntimePlanner()
     runtime_manager = ChannelRuntimeManager(
@@ -556,32 +622,92 @@ def _build_channels_infrastructure(settings: Settings) -> _ChannelsInfrastructur
 
 
 def _build_authorization_service(
-    settings: Settings,
     session_factory: SessionFactory,
+    *,
+    enabled: bool,
+    policy_paths: tuple[str, ...],
 ) -> tuple[AuthorizationApplicationService, int]:
-    authorization_policy_paths = tuple(
-        dict.fromkeys(
-            (
-                *settings.authorization_policy_paths,
-                settings.authorization_runtime_policy_path,
-            ),
-        ),
+    bootstrap_policy_paths = tuple(
+        dict.fromkeys(path for path in policy_paths if path.strip()),
     )
-    authorization_policies = YamlAuthorizationPolicyLoader().load_paths(
-        authorization_policy_paths,
+    bootstrap_policies = YamlAuthorizationPolicyLoader().load_paths(
+        bootstrap_policy_paths,
     )
     service = AuthorizationApplicationService(
-        policy_repository=InMemoryAuthorizationPolicyRepository(
-            policies=list(authorization_policies),
-            managed_path=Path(settings.authorization_runtime_policy_path).expanduser(),
+        policy_repository=SqlAlchemyAuthorizationPolicyRepository(
+            session_factory=session_factory,
+            bootstrap_policies=bootstrap_policies,
         ),
         evaluator=AbacAuthorizationEvaluator(),
         temporary_grant_repository_factory=(
             lambda: SqlAlchemyTemporaryAuthorizationGrantRepository(session_factory)
         ),
-        enabled=settings.authorization_enabled,
+        audit_repository=SqlAlchemyAuthorizationAuditRepository(session_factory),
+        enabled=enabled,
     )
-    return service, len(authorization_policies)
+    return service, len(bootstrap_policies)
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthorizationBootstrapConfig:
+    enabled: bool = True
+    policy_paths: tuple[str, ...] = ()
+
+
+def _authorization_bootstrap_config_from_settings(
+    settings_query_service: Any,
+    *,
+    environment: str,
+) -> _AuthorizationBootstrapConfig:
+    try:
+        resolution = settings_query_service.get_effective(environment)
+    except Exception:
+        return _AuthorizationBootstrapConfig()
+    payload = resolution.effective_value
+    if not isinstance(payload, Mapping):
+        return _AuthorizationBootstrapConfig()
+    policy_paths = _string_tuple_from_value(payload.get("authorization_policy_paths"))
+    runtime_policy_path = _optional_string(payload.get("authorization_runtime_policy_path"))
+    if runtime_policy_path is not None:
+        policy_paths = (*policy_paths, runtime_policy_path)
+    return _AuthorizationBootstrapConfig(
+        enabled=_bool_from_value(payload.get("authorization_enabled"), default=True),
+        policy_paths=tuple(dict.fromkeys(policy_paths)),
+    )
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _string_tuple_from_value(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            text
+            for item in value
+            if (text := str(item).strip())
+        )
+    return ()
+
+
+def _bool_from_value(value: object, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
 
 
 def _build_llm_adapter_registry() -> LlmAdapterRegistry:
@@ -614,15 +740,9 @@ def _build_browser_system_config(settings: Settings) -> BrowserSystemConfig:
         BrowserProfileConfig(
             name=profile.name,
             driver=profile.driver,
-            cdp_url=(
-                None
-                if profile.driver == "existing-session"
-                else profile.cdp_url
-            ),
+            cdp_url=(None if profile.driver == "existing-session" else profile.cdp_url),
             cdp_port=(
-                None
-                if profile.driver == "existing-session"
-                else profile.cdp_port
+                None if profile.driver == "existing-session" else profile.cdp_port
             ),
             user_data_dir=profile.user_data_dir,
             attach_only=profile.attach_only,
@@ -649,7 +769,8 @@ def _build_browser_system_config(settings: Settings) -> BrowserSystemConfig:
         managed_tab_limit=None,
         cdp_host=settings.browser_cdp_host,
         cdp_port_range_start=settings.browser_cdp_port,
-        cdp_port_range_end=settings.browser_cdp_port + max(len(resolved_profiles) + 16, 32),
+        cdp_port_range_end=settings.browser_cdp_port
+        + max(len(resolved_profiles) + 16, 32),
     )
 
 
@@ -824,18 +945,19 @@ def _bootstrap_daemon_specs(
     *,
     settings: Settings,
     browser_system_config: BrowserSystemConfig,
+    runtime_bootstrap_config: RuntimeSettingsBootstrapConfig,
 ) -> tuple[DaemonServiceSpec, ...]:
     orchestration_executor_cli_args = [
         "orchestration-executor",
         "run-executor",
         "--max-concurrent-assignments",
-        str(settings.orchestration_executor_max_concurrent_assignments),
+        str(runtime_bootstrap_config.orchestration_executor_max_concurrent_assignments),
     ]
     tool_worker_cli_args = [
         "tool-worker",
         "run",
         "--max-in-flight",
-        str(settings.tool_worker_max_in_flight),
+        str(runtime_bootstrap_config.tool_worker_max_in_flight),
     ]
     specs: list[DaemonServiceSpec] = [
         DaemonServiceSpec(
@@ -968,7 +1090,13 @@ def _bootstrap_daemon_specs(
                     metadata={
                         "profile_name": profile.name,
                         "driver": profile.driver,
-                        "cli_args": ["browser", "mcp", "run", "--profile", profile.name],
+                        "cli_args": [
+                            "browser",
+                            "mcp",
+                            "run",
+                            "--profile",
+                            profile.name,
+                        ],
                     },
                 ),
             )
@@ -1031,6 +1159,7 @@ def _build_daemon_infrastructure(
     settings: Settings,
     *,
     browser_system_config: BrowserSystemConfig,
+    runtime_bootstrap_config: RuntimeSettingsBootstrapConfig,
 ) -> _DaemonInfrastructure:
     state_root = bootstrap_daemon_state_root(settings.daemon_state_dir)
     service_spec_store = FileBackedDaemonServiceSpecStore(
@@ -1038,6 +1167,7 @@ def _build_daemon_infrastructure(
         bootstrap_specs=_bootstrap_daemon_specs(
             settings=settings,
             browser_system_config=browser_system_config,
+            runtime_bootstrap_config=runtime_bootstrap_config,
         ),
     )
     instance_store = FileBackedDaemonInstanceStore(state_root.instances_dir)
@@ -1065,6 +1195,10 @@ def _build_daemon_infrastructure(
 def _build_tool_infrastructure(
     settings: Settings,
     *,
+    credential_provider: CredentialProvider,
+    tool_bootstrap_config: ToolSettingsBootstrapConfig,
+    tool_enablements: tuple[Any, ...],
+    runtime_bootstrap_config: RuntimeSettingsBootstrapConfig,
     browser_infrastructure: _BrowserInfrastructure,
     mobile_infrastructure: _MobileInfrastructure,
 ) -> _ToolInfrastructure:
@@ -1079,6 +1213,7 @@ def _build_tool_infrastructure(
             sandbox_tool_registry=sandbox_tool_registry,
             remote_tool_registry=remote_tool_registry,
             tool_discovery_registry=tool_discovery_registry,
+            credential_provider=credential_provider,
             settings=settings,
             browser_system_config=browser_infrastructure.system_config,
             browser_system_config_store=browser_infrastructure.system_config_store,
@@ -1098,13 +1233,13 @@ def _build_tool_infrastructure(
     )
     filesystem_provider = FilesystemLocalToolDiscoveryProvider(
         local_tool_catalog,
-        settings.tool_local_paths,
+        tool_bootstrap_config.local_paths,
     )
     tool_discovery_registry.register(filesystem_provider)
     filesystem_provider.discover_specs()
 
     cleanup_callbacks: list[Callable[[], None]] = []
-    for provider_settings in settings.tool_mcp_providers:
+    for provider_settings in tool_bootstrap_config.mcp_providers:
         mcp_client = McpStdioClient(provider_settings)
         mcp_provider = McpDiscoveryProvider(provider_settings, client=mcp_client)
         tool_discovery_registry.register(mcp_provider)
@@ -1114,20 +1249,21 @@ def _build_tool_infrastructure(
             client=mcp_client,
             max_concurrency=(
                 provider_settings.max_concurrency
-                or settings.tool_remote_default_max_concurrency
+                or runtime_bootstrap_config.tool_remote_default_max_concurrency
             ),
         )
         cleanup_callbacks.append(mcp_client.close)
 
-    for provider_settings in settings.tool_openapi_providers:
+    for provider_settings in tool_bootstrap_config.openapi_providers:
         openapi_provider = OpenApiDiscoveryProvider(provider_settings)
         tool_discovery_registry.register(openapi_provider)
         register_openapi_remote_handlers(
             remote_tool_registry,
             openapi_provider.operations(),
+            credential_provider=credential_provider,
             max_concurrency=(
                 provider_settings.max_concurrency
-                or settings.tool_remote_default_max_concurrency
+                or runtime_bootstrap_config.tool_remote_default_max_concurrency
             ),
         )
 
@@ -1137,12 +1273,20 @@ def _build_tool_infrastructure(
         SandboxAsyncToolExecutor(sandbox_tool_registry, sandbox_backend),
         RemoteAsyncToolExecutor(remote_tool_registry),
     )
+    tool_enablement_service = ToolEnablementService(tool_enablements)
     return _ToolInfrastructure(
         local_tool_catalog=local_tool_catalog,
         tool_discovery_registry=tool_discovery_registry,
+        tool_discovery_gateway=ToolEnablementDiscoveryGateway(
+            tool_discovery_registry,
+            tool_enablement_service,
+        ),
         sandbox_tool_registry=sandbox_tool_registry,
         remote_tool_registry=remote_tool_registry,
-        tool_runtime_gateway=tool_runtime_gateway,
+        tool_runtime_gateway=ToolEnablementRuntimeGateway(
+            tool_runtime_gateway,
+            tool_enablement_service,
+        ),
         cleanup_callbacks=tuple(cleanup_callbacks),
     )
 
@@ -1153,10 +1297,16 @@ def _build_core_services(
     llm_adapter_registry: LlmAdapterRegistry,
     local_tool_catalog: LocalToolCatalog,
     *,
+    access_service: AccessApplicationService,
+    memory_bootstrap_config: MemorySettingsBootstrapConfig,
     events_service: EventsApplicationService | None,
     enable_memory_watchers: bool,
 ) -> _CoreServices:
-    llm_service = LlmApplicationService(uow_factory, llm_adapter_registry)
+    llm_service = LlmApplicationService(
+        uow_factory,
+        llm_adapter_registry,
+        credential_provider=access_service,
+    )
     agent_home_root = str(derive_agent_home_root(settings.database_url))
     memory_binding_service = MemoryBindingService()
     agent_service = AgentApplicationService(
@@ -1189,6 +1339,10 @@ def _build_core_services(
             agent_id=agent_id,
             home_dir=home_dir,
         ),
+        home_registry_remover=lambda root_dir, agent_id: unregister_agent_home(
+            root_dir,
+            agent_id=agent_id,
+        ),
         home_sidecar_factory=lambda payload, _home_dir: (
             memory_binding_service.sidecar_files_from_agent_home_payload(payload)
         ),
@@ -1211,7 +1365,9 @@ def _build_core_services(
     file_memory_service = FileBackedMemoryService(
         store=FileMemoryStore(),
         index_manager=FileMemoryIndexManager(
-            embedding_provider=_build_memory_embedding_provider(settings),
+            embedding_provider=_build_memory_embedding_provider(
+                memory_bootstrap_config
+            ),
         ),
         event_emitter=_build_memory_event_emitter(events_service),
     )
@@ -1219,14 +1375,14 @@ def _build_core_services(
         MemoryWatchRegistry(
             memory_service=file_memory_service,
             enabled=True,
-            interval_seconds=settings.memory_watch_interval_seconds,
+            interval_seconds=memory_bootstrap_config.watch_interval_seconds,
         )
         if enable_memory_watchers
         else None
     )
     file_memory_context_resolver = FileMemoryContextResolver(
         agent_service=agent_service,
-        default_retrieval_backend=settings.memory_retrieval_backend,
+        default_retrieval_backend=memory_bootstrap_config.retrieval_backend,
         binding_loader=lambda home_dir: memory_binding_service.load(home_dir),
         context_observer=(
             memory_watch_registry.ensure_watching
@@ -1252,18 +1408,18 @@ def _build_core_services(
     )
 
 
-def _build_memory_embedding_provider(settings: Settings):
-    if settings.memory_vector_provider == "openai_compatible":
+def _build_memory_embedding_provider(config: MemorySettingsBootstrapConfig):
+    if config.vector_provider == "openai_compatible":
         return OpenAICompatibleMemoryEmbeddingProvider(
-            base_url=settings.memory_vector_base_url or "https://api.openai.com/v1",
-            model_name=settings.memory_vector_model or "text-embedding-3-small",
+            base_url=config.vector_base_url or "https://api.openai.com/v1",
+            model_name=config.vector_model or "text-embedding-3-small",
             credential_binding=(
-                settings.memory_vector_credential_binding or "env:OPENAI_API_KEY"
+                config.vector_credential_binding or "env:OPENAI_API_KEY"
             ),
-            timeout_seconds=settings.memory_vector_timeout_seconds,
+            timeout_seconds=config.vector_timeout_seconds,
         )
     return LocalHashedMemoryEmbeddingProvider(
-        model_name=settings.memory_vector_model or "local-hashed-v1",
+        model_name=config.vector_model or "local-hashed-v1",
     )
 
 
@@ -1297,20 +1453,26 @@ def _build_runtime_services(
     authorization_service: AuthorizationApplicationService,
     tool_infrastructure: _ToolInfrastructure,
     core_services: _CoreServices,
+    runtime_bootstrap_config: RuntimeSettingsBootstrapConfig,
+    skill_enablements: tuple[Any, ...],
     daemon_service: DaemonApplicationService,
     process_service: ProcessApplicationService,
     daemon_manager: DaemonManager,
     artifact_service: ArtifactApplicationService,
+    access_service: AccessApplicationService,
     events_service: EventsApplicationService | None = None,
 ) -> _RuntimeServices:
     memory_port = core_services.memory_port
     authorization_port = AuthorizationServiceAdapter(authorization_service)
     llm_port = LlmServiceAdapter(core_services.llm_service)
-    skill_manager = SkillManager(
+    base_skill_manager = SkillManager(
         repository=FilesystemSkillRepository(),
         event_emitter=_build_skill_event_emitter(events_service),
     )
-    access_service = AccessApplicationService()
+    skill_manager = SkillEnablementManagerAdapter(
+        manager=base_skill_manager,
+        enablement=SkillEnablementService(skill_enablements),
+    )
     orchestration_scheduler_service_ref: dict[
         str,
         OrchestrationSchedulerService | None,
@@ -1384,19 +1546,23 @@ def _build_runtime_services(
             uow_factory=uow_factory,
             runtime_gateway=tool_infrastructure.tool_runtime_gateway,
             runtime_registry=tool_infrastructure.remote_tool_registry,
-            discovery_gateway=tool_infrastructure.tool_discovery_registry,
+            discovery_gateway=tool_infrastructure.tool_discovery_gateway,
             dispatch_port=ToolRunDispatchAdapter(
                 dispatch_service=core_services.dispatch_service,
             ),
             artifact_service=artifact_service,
-            default_max_attempts=settings.tool_run_max_attempts,
-            worker_lease_seconds=settings.tool_run_lease_seconds,
-            worker_heartbeat_seconds=settings.tool_run_heartbeat_seconds,
+            default_max_attempts=runtime_bootstrap_config.tool_run_max_attempts,
+            worker_lease_seconds=runtime_bootstrap_config.tool_run_lease_seconds,
+            worker_heartbeat_seconds=runtime_bootstrap_config.tool_run_heartbeat_seconds,
             details_max_chars=settings.tool_details_max_chars,
-            worker_default_run_concurrency=settings.tool_worker_default_run_concurrency,
-            worker_image_run_concurrency=settings.tool_worker_image_run_concurrency,
+            worker_default_run_concurrency=(
+                runtime_bootstrap_config.tool_worker_default_run_concurrency
+            ),
+            worker_image_run_concurrency=(
+                runtime_bootstrap_config.tool_worker_image_run_concurrency
+            ),
             worker_shared_state_run_concurrency=(
-                settings.tool_worker_shared_state_run_concurrency
+                runtime_bootstrap_config.tool_worker_shared_state_run_concurrency
             ),
             metrics=get_runtime_metrics_registry(),
         ),
@@ -1463,14 +1629,18 @@ def _build_runtime_services(
         session_service=core_services.session_service,
         session_resolution_service=core_services.session_resolution_service,
         engine=orchestration_engine,
-        worker_lease_seconds=settings.orchestration_run_lease_seconds,
-        worker_heartbeat_seconds=settings.orchestration_run_heartbeat_seconds,
-        auto_compaction_enabled=settings.orchestration_auto_compaction_enabled,
+        worker_lease_seconds=runtime_bootstrap_config.orchestration_run_lease_seconds,
+        worker_heartbeat_seconds=(
+            runtime_bootstrap_config.orchestration_run_heartbeat_seconds
+        ),
+        auto_compaction_enabled=(
+            runtime_bootstrap_config.orchestration_auto_compaction_enabled
+        ),
         auto_compaction_reserve_tokens=(
-            settings.orchestration_auto_compaction_reserve_tokens
+            runtime_bootstrap_config.orchestration_auto_compaction_reserve_tokens
         ),
         auto_compaction_soft_threshold_tokens=(
-            settings.orchestration_auto_compaction_soft_threshold_tokens
+            runtime_bootstrap_config.orchestration_auto_compaction_soft_threshold_tokens
         ),
         events_service=events_service,
         run_query_service=orchestration_run_query_service,
@@ -1479,7 +1649,9 @@ def _build_runtime_services(
     orchestration_approval_control_service = (
         orchestration_service_graph.approval_control_service
     )
-    orchestration_cancellation_service = orchestration_service_graph.cancellation_service
+    orchestration_cancellation_service = (
+        orchestration_service_graph.cancellation_service
+    )
     orchestration_cancellation_service_ref["value"] = orchestration_cancellation_service
     orchestration_intake_service = orchestration_service_graph.intake_service
     orchestration_scheduler_service = orchestration_service_graph.scheduler_service
@@ -1521,6 +1693,99 @@ def _build_process_runtime_services(
         shell_resolver=lambda: "/bin/sh",
     )
     return process_service, daemon_manager
+
+
+def _bootstrap_llm_profiles_if_schema_ready(
+    engine: Engine,
+    llm_service: LlmApplicationService,
+    profile_configs: tuple[Any, ...],
+) -> None:
+    if not profile_configs:
+        return
+    if not inspect(engine).has_table("llm_profiles"):
+        return
+    llm_service.sync_profiles(
+        tuple(register_llm_profile_input_from_config(config) for config in profile_configs),
+        emit_events=False,
+    )
+
+
+def _bootstrap_agent_profiles_from_config(
+    agent_service: AgentApplicationService,
+    profile_configs: tuple[Any, ...],
+) -> None:
+    if not profile_configs:
+        return
+    memory_binding_service = MemoryBindingService()
+    agent_service.sync_profiles(
+        tuple(
+            _register_agent_profile_input_from_config(
+                config,
+                memory_binding_service=memory_binding_service,
+            )
+            for config in profile_configs
+        ),
+        write_home="if_missing",
+    )
+
+
+def _register_agent_profile_input_from_config(
+    profile_config: Any,
+    *,
+    memory_binding_service: MemoryBindingService,
+) -> RegisterAgentProfileInput:
+    runtime_preferences = _mapping_attr(profile_config, "runtime_preferences")
+    return RegisterAgentProfileInput(
+        id=str(getattr(profile_config, "id")),
+        name=str(getattr(profile_config, "name")),
+        description=str(getattr(profile_config, "description", "") or ""),
+        enabled=bool(getattr(profile_config, "enabled", True)),
+        identity=AgentIdentity.from_payload(_mapping_attr(profile_config, "identity")),
+        instruction_policy=AgentInstructionPolicy.from_payload(
+            _mapping_attr(profile_config, "instruction_policy"),
+        ),
+        llm_routing_policy=AgentLlmRoutingPolicy.from_payload(
+            _mapping_attr(profile_config, "llm_routing_policy"),
+        ),
+        execution_policy=AgentExecutionPolicy.from_payload(
+            _mapping_attr(profile_config, "execution_policy"),
+        ),
+        runtime_preferences=AgentRuntimePreferences.from_payload(runtime_preferences),
+        home_sidecar_files=(
+            memory_binding_service.sidecar_files_from_runtime_preferences_payload(
+                runtime_preferences,
+            )
+        ),
+    )
+
+
+def _mapping_attr(value: Any, name: str) -> dict[str, Any]:
+    raw = getattr(value, name, None)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return {}
+
+
+def _ensure_settings_schema(engine: Engine) -> None:
+    _ = (
+        SettingsActionAuditModel,
+        SettingsEffectiveSnapshotModel,
+        SettingsOverrideModel,
+        SettingsResourceModel,
+        SettingsResourceVersionModel,
+        SettingsValidationResultModel,
+    )
+    Base.metadata.create_all(
+        engine,
+        tables=(
+            SettingsResourceModel.__table__,
+            SettingsResourceVersionModel.__table__,
+            SettingsEffectiveSnapshotModel.__table__,
+            SettingsOverrideModel.__table__,
+            SettingsValidationResultModel.__table__,
+            SettingsActionAuditModel.__table__,
+        ),
+    )
 
 
 def _build_orchestration_scheduler_runtime_event_service(
@@ -1653,22 +1918,41 @@ def _build_operations_observer_runtime_event_service(
 ) -> OperationsObserverRuntimeService | None:
     if not isinstance(events_service, EventsApplicationService):
         return None
-    runtime = OperationsObserverRuntimeService(
-        events_service=events_service,
-        runtime_name="operations.observer",
-        heartbeat_handler=observation_store.record_observer_heartbeat,
-    )
     observer = OperationsEventObserver(
         observation_store=observation_store,
         definition_registry=event_definition_registry,
     )
     pending_projection_modules: set[str] = set()
-    last_projection_at = time.monotonic()
-    projection_interval_seconds = 30.0
+    next_projection_at: float | None = None
+    projection_debounce_seconds = 0.2
+    next_state_projection_at = 0.0
+    state_projection_interval_seconds = 2.0
+    state_projection_modules = (
+        "orchestration",
+        "tool",
+        "llm",
+        "channels",
+        "events",
+        "daemon",
+    )
 
-    def _observe_event_records(records) -> None:  # noqa: ANN001
-        nonlocal last_projection_at
-        observer.observe_event_records(records)
+    def _flush_due_projection() -> None:
+        nonlocal next_projection_at, next_state_projection_at
+        if projection_materializer is None:
+            return
+        now = time.monotonic()
+        if next_projection_at is not None and now >= next_projection_at:
+            modules = tuple(sorted(pending_projection_modules))
+            pending_projection_modules.clear()
+            next_projection_at = None
+            if modules:
+                projection_materializer.materialize_observed_modules(modules)
+        if now >= next_state_projection_at:
+            projection_materializer.materialize_modules(state_projection_modules)
+            next_state_projection_at = now + state_projection_interval_seconds
+
+    def _schedule_projection(records) -> None:  # noqa: ANN001
+        nonlocal next_projection_at
         if projection_materializer is None:
             return
         pending_projection_modules.update(
@@ -1678,14 +1962,22 @@ def _build_operations_observer_runtime_event_service(
             ).module
             for record in records
         )
-        now = time.monotonic()
-        if now - last_projection_at < projection_interval_seconds:
+        if not pending_projection_modules:
             return
-        modules = tuple(sorted(pending_projection_modules))
-        pending_projection_modules.clear()
-        last_projection_at = now
-        projection_materializer.materialize_observed_modules(modules)
+        if next_projection_at is None:
+            next_projection_at = time.monotonic() + projection_debounce_seconds
+        _flush_due_projection()
 
+    def _observe_event_records(records) -> None:  # noqa: ANN001
+        observer.observe_event_records(records)
+        _schedule_projection(records)
+
+    runtime = OperationsObserverRuntimeService(
+        events_service=events_service,
+        runtime_name="operations.observer",
+        heartbeat_handler=observation_store.record_observer_heartbeat,
+        maintenance_handler=_flush_due_projection,
+    )
     for event_name in operations_observer_event_names(event_definition_registry):
         runtime.subscribe_event_name(
             event_name,
@@ -1767,8 +2059,42 @@ def build_container(
 
     engine = build_engine(resolved_settings)
     session_factory = build_session_factory(engine)
+    _ensure_settings_schema(engine)
     event_contract_registry = _build_event_contract_registry()
     event_definition_registry = _build_event_definition_registry()
+    access_governance_repository = SqlAlchemyAccessGovernanceRepository(session_factory)
+    access_action_audit_repository = SqlAlchemyAccessActionAuditRepository(
+        session_factory,
+    )
+    settings_services = create_sqlalchemy_settings_services(session_factory)
+    seed_core_settings_resources(
+        resolved_settings,
+        services=settings_services,
+    )
+    settings_query_service = settings_services.queries
+    settings_action_service = settings_services.actions
+    settings_materializer = SettingsEffectiveConfigMaterializer(
+        settings_query_service,
+        environment=resolved_settings.environment,
+    )
+    tool_bootstrap_config = tool_settings_bootstrap_config_from_settings(
+        providers=settings_materializer.tool_providers(),
+        roots=settings_materializer.tool_roots(),
+    )
+    tool_enablements = settings_materializer.tool_enablements()
+    skill_enablements = settings_materializer.skill_enablements()
+    memory_resource_config = settings_materializer.memory_config()
+    memory_bootstrap_config = (
+        memory_bootstrap_config_from_settings(memory_resource_config)
+        if memory_resource_config is not None
+        else MemorySettingsBootstrapConfig()
+    )
+    runtime_resource_config = settings_materializer.runtime_defaults()
+    runtime_bootstrap_config = (
+        runtime_bootstrap_config_from_settings(runtime_resource_config)
+        if runtime_resource_config is not None
+        else RuntimeSettingsBootstrapConfig()
+    )
     resolved_event_bus = event_bus or EventsBackedEventBus(
         EventsApplicationService(
             _build_events_backend(resolved_settings),
@@ -1780,9 +2106,14 @@ def build_container(
         if isinstance(resolved_events_service, EventsApplicationService)
         else None
     )
+    authorization_bootstrap_config = _authorization_bootstrap_config_from_settings(
+        settings_query_service,
+        environment=resolved_settings.environment,
+    )
     authorization_service, authorization_policy_count = _build_authorization_service(
-        resolved_settings,
         session_factory,
+        enabled=authorization_bootstrap_config.enabled,
+        policy_paths=authorization_bootstrap_config.policy_paths,
     )
     llm_adapter_registry = _build_llm_adapter_registry()
     browser_system_config = _build_browser_system_config(resolved_settings)
@@ -1801,8 +2132,12 @@ def build_container(
     daemon_infrastructure = _build_daemon_infrastructure(
         resolved_settings,
         browser_system_config=browser_system_config,
+        runtime_bootstrap_config=runtime_bootstrap_config,
     )
-    channels_infrastructure = _build_channels_infrastructure(resolved_settings)
+    channels_infrastructure = _build_channels_infrastructure(
+        resolved_settings,
+        channel_profiles=resolved_settings.channel_profiles,
+    )
     channel_control_service = ChannelControlService(
         profile_service=channels_infrastructure.profile_service,
         planner=channels_infrastructure.runtime_planner,
@@ -1825,17 +2160,23 @@ def build_container(
         daemon_service=daemon_infrastructure.service,
         daemon_manager=daemon_manager,
     )
+    access_service = AccessApplicationService()
     tool_infrastructure = _build_tool_infrastructure(
         resolved_settings,
+        credential_provider=access_service,
+        tool_bootstrap_config=tool_bootstrap_config,
+        tool_enablements=tool_enablements,
+        runtime_bootstrap_config=runtime_bootstrap_config,
         browser_infrastructure=browser_infrastructure,
         mobile_infrastructure=mobile_infrastructure,
     )
     operations_observation_store = FileBackedOperationsObservationStore(
         resolved_settings.operations_state_dir,
     )
-    operations_action_audit_store = SqlAlchemyOperationsActionAuditStore(session_factory)
+    operations_action_audit_store = SqlAlchemyOperationsActionAuditStore(
+        session_factory
+    )
     operations_projection_store = SqlAlchemyOperationsProjectionStore(session_factory)
-
     logger.info(
         "building app container",
         extra={
@@ -1859,19 +2200,22 @@ def build_container(
             "local_tool_count": len(
                 tool_infrastructure.tool_runtime_gateway.list_local_tools(),
             ),
-            "local_tool_path_count": len(resolved_settings.tool_local_paths),
+            "local_tool_path_count": len(tool_bootstrap_config.local_paths),
             "tool_discovery_provider_count": len(
                 tool_infrastructure.tool_discovery_registry.list_providers(),
             ),
-            "mcp_provider_count": len(resolved_settings.tool_mcp_providers),
-            "openapi_provider_count": len(resolved_settings.tool_openapi_providers),
+            "mcp_provider_count": len(tool_bootstrap_config.mcp_providers),
+            "openapi_provider_count": len(tool_bootstrap_config.openapi_providers),
             "sandbox_backend": resolved_settings.sandbox_backend,
             "sandbox_runtime_count": tool_infrastructure.sandbox_tool_registry.count(),
             "remote_runtime_count": tool_infrastructure.remote_tool_registry.count(),
-            "authorization_enabled": resolved_settings.authorization_enabled,
+            "authorization_enabled": authorization_bootstrap_config.enabled,
             "authorization_policy_count": authorization_policy_count,
-            "memory_retrieval_backend": resolved_settings.memory_retrieval_backend,
-            "memory_vector_provider": resolved_settings.memory_vector_provider,
+            "memory_retrieval_backend": memory_bootstrap_config.retrieval_backend,
+            "memory_vector_provider": memory_bootstrap_config.vector_provider,
+            "settings_materialization_warning_count": len(
+                settings_materializer.warnings,
+            ),
         },
     )
 
@@ -1883,8 +2227,19 @@ def build_container(
         uow_factory,
         llm_adapter_registry,
         tool_infrastructure.local_tool_catalog,
+        access_service=access_service,
+        memory_bootstrap_config=memory_bootstrap_config,
         events_service=container_events_service,
         enable_memory_watchers=enable_memory_watchers,
+    )
+    _bootstrap_llm_profiles_if_schema_ready(
+        engine,
+        core_services.llm_service,
+        resolved_settings.llm_profiles,
+    )
+    _bootstrap_agent_profiles_from_config(
+        core_services.agent_service,
+        resolved_settings.agent_profiles,
     )
     runtime_services = _build_runtime_services(
         resolved_settings,
@@ -1892,16 +2247,18 @@ def build_container(
         authorization_service,
         tool_infrastructure,
         core_services,
+        runtime_bootstrap_config,
+        skill_enablements,
         daemon_infrastructure.service,
         process_service,
         daemon_manager,
         artifact_service,
+        access_service,
         container_events_service,
     )
     tool_service = runtime_services.tool_service
     tool_scheduler_service = runtime_services.tool_scheduler_service
     tool_worker_service = runtime_services.tool_worker_service
-    access_service = runtime_services.access_service
     orchestration_run_query_service = runtime_services.orchestration_run_query_service
     orchestration_inspection_service = runtime_services.orchestration_inspection_service
     orchestration_approval_control_service = (
@@ -1954,10 +2311,7 @@ def build_container(
         metadata: dict[str, object] = {
             "active_session_id": run.active_session_id,
         }
-        if (
-            session_key is not None
-            and container_events_service is not None
-        ):
+        if session_key is not None and container_events_service is not None:
             metadata["observe_cursor"] = container_events_service.snapshot_event_topic(
                 turn_session_topic(session_key),
             )
@@ -1969,9 +2323,7 @@ def build_container(
             metadata=metadata,
         )
 
-    orchestration_scheduler_service.on_run_enqueued = (
-        _bind_channel_interactions_to_run
-    )
+    orchestration_scheduler_service.on_run_enqueued = _bind_channel_interactions_to_run
     orchestration_scheduler_runtime_event_service = (
         _build_orchestration_scheduler_runtime_event_service(
             events_service=container_events_service,
@@ -1986,12 +2338,18 @@ def build_container(
     )
     operations_projection_context = SimpleNamespace(
         settings=resolved_settings,
+        tool_bootstrap_config=tool_bootstrap_config,
+        memory_bootstrap_config=memory_bootstrap_config,
+        runtime_bootstrap_config=runtime_bootstrap_config,
         events_service=container_events_service,
         event_contract_registry=event_contract_registry,
         event_definition_registry=event_definition_registry,
         operations_observation_store=operations_observation_store,
         operations_action_audit_store=operations_action_audit_store,
         operations_projection_store=operations_projection_store,
+        access_governance_repository=access_governance_repository,
+        access_action_audit_repository=access_action_audit_repository,
+        settings_query_service=settings_query_service,
         operations_observer_runtime_event_service=None,
         orchestration_run_query_service=orchestration_run_query_service,
         orchestration_executor_service=orchestration_executor_service,
@@ -2054,6 +2412,11 @@ def build_container(
         session_factory=session_factory,
         event_bus=resolved_event_bus,
         events_service=container_events_service,
+        settings_query_service=settings_query_service,
+        settings_action_service=settings_action_service,
+        tool_bootstrap_config=tool_bootstrap_config,
+        memory_bootstrap_config=memory_bootstrap_config,
+        runtime_bootstrap_config=runtime_bootstrap_config,
         event_contract_registry=event_contract_registry,
         event_definition_registry=event_definition_registry,
         channel_system_config=channels_infrastructure.system_config,
@@ -2075,6 +2438,8 @@ def build_container(
         remote_tool_registry=tool_infrastructure.remote_tool_registry,
         llm_adapter_registry=llm_adapter_registry,
         access_service=access_service,
+        access_governance_repository=access_governance_repository,
+        access_action_audit_repository=access_action_audit_repository,
         authorization_service=authorization_service,
         uow_factory=uow_factory,
         browser_system_config=browser_infrastructure.system_config,
@@ -2137,5 +2502,9 @@ def build_container(
         + tool_infrastructure.cleanup_callbacks
         + (process_service.close,)
         + (close_async_http_clients_sync,)
-        + ((core_services.memory_watch_registry.close,) if core_services.memory_watch_registry is not None else ()),
+        + (
+            (core_services.memory_watch_registry.close,)
+            if core_services.memory_watch_registry is not None
+            else ()
+        ),
     )

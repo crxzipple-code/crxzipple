@@ -107,6 +107,75 @@ owner module runtime fact
 - 详情和长错误放右侧 drawer/panel，不要撑高表格行。
 - Tool / LLM / Orchestration 的设计稿是强约束；其他模块也按同样的全屏监控思路调整。
 
+## 4A. Settings 配置治理面约束
+
+Settings 是配置治理模块，不是各业务模块设置页的前端拼装层，也不是默认的模块实体真相源。
+
+Settings-owned config 的目标链路：
+
+```text
+Settings-owned config resource
+  -> SettingsResource / SettingsResourceVersion / SettingsOverride
+  -> SettingsEffectiveConfigMaterializer
+  -> shared settings contracts
+  -> owner module runtime/application service consumes effective config
+  -> /ui/settings*
+  -> frontend Settings page
+```
+
+module-owned entity 的目标链路：
+
+```text
+owner module entity store / backbone / registry
+  -> owner module application/query service
+  -> optional Settings governance overlay / read-only index
+  -> /ui/settings* page model with explicit owner metadata
+  -> frontend Settings page
+```
+
+规则：
+
+- Settings UI 主数据源是 `/ui/settings`、`/ui/settings/{resource}`、
+  `/ui/settings/{resource}/{id}`，但 `/ui/settings*` 必须明确 resource 的 owner
+  和 truth source。它不能把 module-owned entity 冒充成 Settings-owned truth。
+- Agent profile 的真相源是 Agent/backbone/home registry；创建、更新、启停、删除必须走
+  Agent application service。Settings 可以提供治理 overlay、审计入口或只读索引，但不能
+  直接写完整 Agent profile payload 后再要求 Agent sync。
+- LLM profile、Channel profile 默认按 module-owned entity 处理，除非当前架构文档明确
+  将某个 profile kind 重新分类为 Settings-owned config。
+- Settings 通用 action 只用于 Settings-owned config。module-owned entity 的 action 必须
+  dispatch 到 owner module application service，并由 owner module 负责领域校验、运行索引、
+  事件和必要的 runtime apply。
+- Authorization 和 Access 是两套不同边界：Authorization 负责内部 ABAC policy、
+  subject/resource/context/effect、approval 后的 run/session/agent grant；Access 负责外部
+  provider/account/credential 的创建、绑定、租用、停用、注销、readiness 和审计。
+- Authorization policy 的治理入口是 Authorization application/API：策略 CRUD、
+  import/export、dry-run、impact preview 和内部授权治理审计都归 Authorization。
+  Settings 或 Operations 只能通过 Authorization port/API 编排这些动作，不能落到
+  Access 或 Settings 自己的 config 表。
+- Settings-owned access config 只能包括外部访问治理声明，例如 access asset、credential binding、
+  consumer binding、provider/account/scope enablement、rotation/export/redaction policy 等。
+  不得把内部 ABAC policy 或内部 authorization grant 放进 Access。
+- Access 模块不得 import `crxzipple.modules.authorization`；Authorization runtime 不得使用
+  `AccessBackedAuthorization*` repository。历史阶段性判断以
+  `docs/reports/authorization-access-boundary-remediation-checklist-20260508.md` 为准。
+- Access readiness 可以作为 Settings 页面的辅助状态合入，但不能反向成为配置
+  真相。
+- Skill Catalog 当前只能治理 skill enablement；技能包发现、安装、manifest 和
+  catalog runtime 仍属于 Skills。
+- Tool Catalog 在 Settings 中只表示 provider/root/enablement 配置治理；运行时
+  tool run、worker、discovered runtime 状态在 Operations/Tool。
+- Event Registry 和 Backup Restore 当前不是完整 Settings-backed 配置面；没有
+  后台 workflow 前不要展示可编辑假页面。
+- 写操作必须走 Settings action service，提供 reason，并记录 Settings audit。
+- shared settings contracts 只能承载跨模块治理协议、来源/覆盖/解析链路和窄配置契约；
+  不要复制完整模块 domain entity。
+- UI 不能显示假数据、假用户、假日期、假 provider health、假 backup size；无资源
+  时展示真实空态。
+- 参考接入清单：
+  `docs/reports/settings-module-boundary-complexity-review-20260508.md` 和
+  `docs/reports/settings-ui-backend-alignment-checklist-20260507.md`。
+
 ## 5. Orchestration 约束
 
 `orchestration` 是 agent run 协调中心。它拥有外层 run 生命周期，但不拥有所有被协调模块的内部状态。

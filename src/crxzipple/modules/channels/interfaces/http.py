@@ -19,6 +19,7 @@ from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.channels.domain import (
     ChannelAccountProfile,
     ChannelProfile,
+    ChannelValidationError,
     channel_broadcast_topic,
     channel_connection_control_topic,
     channel_dead_letter_topic,
@@ -35,6 +36,7 @@ from crxzipple.modules.orchestration.application import (
     turn_session_live_topic,
     turn_session_topic,
 )
+from crxzipple.shared.access import AccessConsumerRef, CredentialProvider
 
 
 router = APIRouter()
@@ -202,6 +204,22 @@ class LarkEventAcceptedResponse(BaseModel):
     active_session_id: str | None = None
 
 
+class ChannelProfileUpsertRequest(BaseModel):
+    channel_type: str | None = None
+    enabled: bool = True
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    accounts: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChannelProfileResponse(BaseModel):
+    channel_type: str
+    enabled: bool
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    accounts: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 def _format_sse_event(event_name: str, payload: dict[str, object]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -302,10 +320,35 @@ def _resolve_channel_account_profile(
     return None
 
 
+def _channel_access_consumer(
+    *,
+    channel_type: str,
+    component: str,
+    channel_account_id: str,
+    field: str,
+) -> AccessConsumerRef:
+    normalized_channel = channel_type.strip().lower()
+    normalized_account = channel_account_id.strip()
+    return AccessConsumerRef(
+        consumer_id=(
+            f"channels.{normalized_channel}.account:{normalized_account}.{field.strip()}"
+        ),
+        module="channels",
+        component=component,
+        runtime_ref=normalized_channel,
+        metadata={
+            "channel_type": normalized_channel,
+            "channel_account_id": normalized_account,
+            "field": field,
+        },
+    )
+
+
 def _webhook_signature_config(
     profile: ChannelProfile | None,
     *,
     channel_account_id: str,
+    credential_provider: CredentialProvider | None = None,
 ) -> tuple[str, str] | None:
     account = _resolve_channel_account_profile(
         profile,
@@ -313,10 +356,34 @@ def _webhook_signature_config(
     )
     account_metadata = dict(account.metadata) if account is not None else {}
     profile_metadata = dict(profile.metadata) if profile is not None else {}
-    raw_secret = account_metadata.get("webhook_signing_secret")
-    if not isinstance(raw_secret, str) or not raw_secret.strip():
-        raw_secret = profile_metadata.get("webhook_signing_secret")
-    if not isinstance(raw_secret, str) or not raw_secret.strip():
+    secret = resolve_channel_metadata_binding(
+        account_metadata,
+        key="webhook_signing_secret",
+        description="Webhook signing secret",
+        required=False,
+        credential_provider=credential_provider,
+        consumer=_channel_access_consumer(
+            channel_type="webhook",
+            component="inbound_signature",
+            channel_account_id=channel_account_id,
+            field="webhook_signing_secret",
+        ),
+    )
+    if not secret:
+        secret = resolve_channel_metadata_binding(
+            profile_metadata,
+            key="webhook_signing_secret",
+            description="Webhook signing secret",
+            required=False,
+            credential_provider=credential_provider,
+            consumer=_channel_access_consumer(
+                channel_type="webhook",
+                component="inbound_signature",
+                channel_account_id=channel_account_id,
+                field="webhook_signing_secret",
+            ),
+        )
+    if not secret:
         return None
     raw_header = account_metadata.get("webhook_signature_header")
     if not isinstance(raw_header, str) or not raw_header.strip():
@@ -326,7 +393,7 @@ def _webhook_signature_config(
         if isinstance(raw_header, str) and raw_header.strip()
         else "X-Crx-Webhook-Signature"
     )
-    return raw_secret.strip(), header_name
+    return secret.strip(), header_name
 
 
 def _normalize_webhook_signature(value: str) -> str:
@@ -411,6 +478,43 @@ def _channel_account_metadata(
         **(dict(profile.metadata) if profile is not None else {}),
         **dict(account.metadata),
     }
+
+
+def _ensure_profile_accepts_account(
+    profile: ChannelProfile | None,
+    *,
+    channel_type: str,
+    channel_account_id: str,
+) -> None:
+    if profile is None:
+        return
+    if not profile.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Channel profile '{channel_type}' is disabled.",
+        )
+    account = _resolve_channel_account_profile(
+        profile,
+        channel_account_id=channel_account_id,
+    )
+    if account is not None and not account.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Channel account '{channel_account_id}' is disabled for "
+                f"profile '{channel_type}'."
+            ),
+        )
+
+
+def _channel_profile_response(profile: ChannelProfile) -> ChannelProfileResponse:
+    return ChannelProfileResponse(
+        channel_type=profile.channel_type,
+        enabled=profile.enabled,
+        capabilities=profile.capabilities.to_payload(),
+        accounts=[account.to_payload() for account in profile.accounts],
+        metadata=dict(profile.metadata),
+    )
 
 
 def _normalize_lark_chat_type(value: object) -> str:
@@ -616,38 +720,6 @@ def _normalize_lark_message_content(
     }
 
 
-def _is_truthy(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    normalized = str(value or "").strip().lower()
-    return normalized in {"1", "true", "yes", "on"}
-
-
-def _should_accept_lark_message(
-    *,
-    account_metadata: dict[str, Any],
-    chat_type: str,
-    mentions: list[dict[str, Any]],
-) -> bool:
-    if chat_type != "group":
-        return True
-    if not _is_truthy(account_metadata.get("lark_group_require_bot_mention")):
-        return True
-    bot_open_id = resolve_channel_metadata_binding(
-        account_metadata,
-        key="lark_bot_open_id",
-        description="Lark bot open id",
-        required=False,
-    ) or ""
-    if not bot_open_id:
-        return False
-    return any(
-        str(item.get("open_id") or "").strip() == bot_open_id
-        for item in mentions
-        if isinstance(item, dict)
-    )
-
-
 def _runtime_summary_response(
     *,
     container: AppContainer,
@@ -669,6 +741,101 @@ def _runtime_summary_response(
         account_count=len(account_bindings),
         connection_count=len(connection_bindings),
     )
+
+
+@router.get("/profiles")
+def list_channel_profiles(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[ChannelProfileResponse]:
+    return [
+        _channel_profile_response(profile)
+        for profile in container.channel_profile_service.list_profiles()
+    ]
+
+
+@router.get("/profiles/{channel_type}")
+def get_channel_profile(
+    channel_type: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> ChannelProfileResponse:
+    profile = container.channel_profile_service.get_profile(channel_type)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Channel profile not found.")
+    return _channel_profile_response(profile)
+
+
+@router.put("/profiles/{channel_type}")
+def upsert_channel_profile(
+    channel_type: str,
+    payload: ChannelProfileUpsertRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> ChannelProfileResponse:
+    normalized_channel = channel_type.strip().lower()
+    if not normalized_channel:
+        raise HTTPException(status_code=400, detail="channel_type is required.")
+    payload_channel = (
+        payload.channel_type.strip().lower()
+        if isinstance(payload.channel_type, str) and payload.channel_type.strip()
+        else normalized_channel
+    )
+    if payload_channel != normalized_channel:
+        raise HTTPException(
+            status_code=400,
+            detail="channel_type in path and payload must match.",
+        )
+    try:
+        profile = ChannelProfile.from_payload(
+            {
+                "channel_type": normalized_channel,
+                "enabled": payload.enabled,
+                "capabilities": dict(payload.capabilities),
+                "accounts": [dict(item) for item in payload.accounts],
+                "metadata": dict(payload.metadata),
+            },
+        )
+        saved = container.channel_profile_service.upsert_profile(profile)
+    except (ChannelValidationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _channel_profile_response(saved)
+
+
+@router.post("/profiles/{channel_type}/enable")
+def enable_channel_profile(
+    channel_type: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> ChannelProfileResponse:
+    try:
+        profile = container.channel_profile_service.enable_profile(channel_type)
+    except ChannelValidationError as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "channel_profile_not_found" else 400,
+            detail=exc.to_payload() if exc.has_payload else str(exc),
+        ) from exc
+    return _channel_profile_response(profile)
+
+
+@router.post("/profiles/{channel_type}/disable")
+def disable_channel_profile(
+    channel_type: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> ChannelProfileResponse:
+    try:
+        profile = container.channel_profile_service.disable_profile(channel_type)
+    except ChannelValidationError as exc:
+        raise HTTPException(
+            status_code=404 if exc.code == "channel_profile_not_found" else 400,
+            detail=exc.to_payload() if exc.has_payload else str(exc),
+        ) from exc
+    return _channel_profile_response(profile)
+
+
+@router.delete("/profiles/{channel_type}")
+def remove_channel_profile(
+    channel_type: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[ChannelProfileResponse]:
+    config = container.channel_profile_service.remove_profile(channel_type)
+    return [_channel_profile_response(profile) for profile in config.profiles]
 
 
 @router.get("/runtimes")
@@ -830,6 +997,11 @@ async def submit_lark_event(
     if not isinstance(raw_payload, dict):
         raise HTTPException(status_code=400, detail="Lark event payload must be an object.")
     lark_profile = container.channel_profile_service.get_profile("lark")
+    _ensure_profile_accepts_account(
+        lark_profile,
+        channel_type="lark",
+        channel_account_id=normalized_account,
+    )
     account_metadata = _channel_account_metadata(
         lark_profile,
         channel_account_id=normalized_account,
@@ -839,6 +1011,13 @@ async def submit_lark_event(
         key="lark_encrypt_key",
         description="Lark encrypt key",
         required=False,
+        credential_provider=container.access_service,
+        consumer=_channel_access_consumer(
+            channel_type="lark",
+            component="event_signature",
+            channel_account_id=normalized_account,
+            field="lark_encrypt_key",
+        ),
     ) or ""
     raw_encrypt = raw_payload.get("encrypt")
     if isinstance(raw_encrypt, str) and raw_encrypt.strip():
@@ -872,6 +1051,13 @@ async def submit_lark_event(
         key="lark_verification_token",
         description="Lark verification token",
         required=False,
+        credential_provider=container.access_service,
+        consumer=_channel_access_consumer(
+            channel_type="lark",
+            component="event_verification",
+            channel_account_id=normalized_account,
+            field="lark_verification_token",
+        ),
     ) or ""
     payload_header = raw_payload.get("header")
     header_payload = payload_header if isinstance(payload_header, dict) else {}
@@ -916,9 +1102,15 @@ async def submit_webhook_inbound(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> WebhookInboundAcceptedResponse:
     webhook_profile = container.channel_profile_service.get_profile("webhook")
+    _ensure_profile_accepts_account(
+        webhook_profile,
+        channel_type="webhook",
+        channel_account_id=channel_account_id,
+    )
     signature_config = _webhook_signature_config(
         webhook_profile,
         channel_account_id=channel_account_id,
+        credential_provider=container.access_service,
     )
     if signature_config is not None:
         secret, header_name = signature_config

@@ -25,6 +25,9 @@ from crxzipple.modules.channels.application.runtime import (
     WebhookChannelRuntimeService,
     WebChannelRuntimeService,
 )
+from crxzipple.modules.channels.application.settings_integration import (
+    channel_profile_from_settings,
+)
 
 __all__ = [
     "ChannelControlService",
@@ -38,6 +41,7 @@ __all__ = [
     "channel_event_route_contracts",
     "channel_event_surfaces",
     "channel_event_topic_contracts",
+    "channel_profile_from_settings",
     "LarkChannelRuntimeService",
     "ChannelRuntimeManager",
     "ChannelRuntimeRegistryStore",

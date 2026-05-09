@@ -52,6 +52,11 @@ class SqlAlchemyLlmProfileRepository:
             ),
         )
 
+    def delete(self, llm_id: str) -> None:
+        model = self.session.get(LlmProfileModel, llm_id)
+        if model is not None:
+            self.session.delete(model)
+
     def get(self, llm_id: str) -> LlmProfile | None:
         model = self.session.get(LlmProfileModel, llm_id)
         if model is None:

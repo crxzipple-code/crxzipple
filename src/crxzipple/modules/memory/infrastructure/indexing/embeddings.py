@@ -55,6 +55,7 @@ class OpenAICompatibleMemoryEmbeddingProvider:
         base_url: str,
         model_name: str,
         credential_binding: str,
+        resolved_credential: str | None = None,
         timeout_seconds: int = 30,
     ) -> None:
         normalized_base_url = base_url.strip()
@@ -71,6 +72,11 @@ class OpenAICompatibleMemoryEmbeddingProvider:
         self._base_url = normalized_base_url
         self._model_name = normalized_model_name
         self._credential_binding = normalized_binding
+        self._resolved_credential = (
+            resolved_credential.strip()
+            if resolved_credential is not None and resolved_credential.strip()
+            else None
+        )
         self._timeout_seconds = max(timeout_seconds, 1)
 
     @property
@@ -99,6 +105,7 @@ class OpenAICompatibleMemoryEmbeddingProvider:
             self._credential_binding,
             required=True,
             description="memory vector provider",
+            resolved_credential=self._resolved_credential,
         )
         response = requests.post(
             join_url(self._base_url, "/embeddings"),

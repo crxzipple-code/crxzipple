@@ -530,11 +530,16 @@ Settings 共享契约分成两层。
 - `GET /ui/settings/{resource}`
 - `GET /ui/settings/{resource}/{id}`
 
-第二阶段再补 action endpoints，动作仍回 owner module：
+第二阶段再补 action endpoints，动作按治理 owner 路由：
 
 - `POST /ui/actions/{action_id}`
 
-该 endpoint 只作为 console action dispatcher，payload 必须包含 owner、target、confirmation、reason 和 trace。实际写操作不在 `/ui` 内部完成，而是路由到 owner module application service。
+该 endpoint 只作为 console action dispatcher，payload 必须包含 owner、target、confirmation、reason 和 trace。实际写操作不在 `/ui` 内部完成，而是路由到治理 owner 的 application service：
+
+- Settings-owned config resource 写入 Settings action service；access asset、credential binding 声明、authorization policy、permission enable/disable 等访问配置也属于 Settings-owned config resource。
+- Access runtime action 只处理 secret material capture、credential verification、setup session、temporary runtime grant 等运行时事实，不持有配置治理真相。
+- Operations/runtime action 写入 Operations 或对应 runtime control action service。
+- 业务模块可以提供 validator、runtime summary 和 apply hook，但不能绕过 Settings / Access 成为配置或访问治理写入口。
 
 ## 近期落地顺序
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from crxzipple.modules.llm.application.services import public_credential_binding_label
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmDefaults,
@@ -67,7 +68,7 @@ class LlmProfileDTO:
             capabilities=tuple(item.value for item in profile.capabilities),
             default_params=LlmDefaultsDTO.from_value(profile.default_params),
             base_url=profile.base_url,
-            credential_binding=profile.credential_binding,
+            credential_binding=public_credential_binding_label(profile.credential_binding),
             timeout_seconds=profile.timeout_seconds,
             max_concurrency=profile.max_concurrency,
             concurrency_key=profile.concurrency_key,

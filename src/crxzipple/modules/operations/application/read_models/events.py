@@ -2136,9 +2136,9 @@ def _health(
     dead_letter_count: int,
     uncovered_topic_count: int,
 ) -> str:
-    if not events_service_available or stuck_count or dead_letter_count:
+    if not events_service_available or dead_letter_count:
         return "error"
-    if lagging_count or uncovered_topic_count:
+    if stuck_count or lagging_count or uncovered_topic_count:
         return "warning"
     return "healthy"
 

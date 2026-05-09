@@ -35,6 +35,8 @@ from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 _MAX_DAEMON_EVENT_TOPICS = 160
 _MAX_RECENT_DAEMON_EVENTS = 160
 _RECENT_DAEMON_TOPIC_LIMIT = 80
+_RECENT_DAEMON_HEALTH_SECONDS = 900.0
+_RECENT_PROCESS_HEALTH_SECONDS = 300.0
 _DAEMON_DIRECT_EVENT_TOPICS = (
     "events.named.daemon.service.ensure_requested",
     "events.named.daemon.service.healthcheck_requested",
@@ -217,13 +219,17 @@ class DaemonOperationsReadModelProvider:
             process_sessions=process_sessions,
             instances_by_process_id=instances_by_process_id,
         )
+        current_instances = _current_instances(instances, now=now)
+        current_instances_by_service = _group_by_key(current_instances, "service_key")
+        current_process_rows = _current_process_rows(process_rows, now=now)
+        current_leases = _current_leases(leases, now=now)
         health = _health(
             service_available=self.daemon_service is not None,
             services=services,
-            instances=instances,
-            leases=leases,
-            instances_by_service=instances_by_service,
-            process_rows=process_rows,
+            instances=current_instances,
+            leases=current_leases,
+            instances_by_service=current_instances_by_service,
+            process_rows=current_process_rows,
         )
         filtered_instances = _filter_instances(
             instances,
@@ -271,6 +277,7 @@ class DaemonOperationsReadModelProvider:
         processes_table = _processes_table(
             visible_process_rows,
             total=len(filtered_process_rows),
+            now=now,
         )
         daemon_events_table = _daemon_events_table(observed_events)
 
@@ -290,11 +297,11 @@ class DaemonOperationsReadModelProvider:
                 health=health,
                 service_sets=service_sets,
                 services=services,
-                instances=instances,
-                leases=leases,
-                process_rows=process_rows,
+                instances=current_instances,
+                leases=current_leases,
+                process_rows=current_process_rows,
                 observed_events=observed_events,
-                instances_by_service=instances_by_service,
+                instances_by_service=current_instances_by_service,
             ),
             tabs=_tabs(
                 service_sets=service_sets_table.total,
@@ -312,9 +319,9 @@ class DaemonOperationsReadModelProvider:
             instances=instances_table,
             leases=leases_table,
             processes=processes_table,
-            process_health=_process_health(process_rows),
-            restart_summary=_state_summary(instances),
-            lease_health=_lease_health(leases),
+            process_health=_process_health(current_process_rows),
+            restart_summary=_state_summary(current_instances),
+            lease_health=_lease_health(current_leases),
             dependency_health=_dependency_health_table(
                 services=services,
                 instances_by_service=instances_by_service,
@@ -322,10 +329,10 @@ class DaemonOperationsReadModelProvider:
             ),
             drain_overview=_drain_overview(
                 services=services,
-                instances=instances,
-                leases=leases,
-                process_rows=process_rows,
-                instances_by_service=instances_by_service,
+                instances=current_instances,
+                leases=current_leases,
+                process_rows=current_process_rows,
+                instances_by_service=current_instances_by_service,
                 leases_by_service=leases_by_service,
             ),
             daemon_events=daemon_events_table,
@@ -390,7 +397,18 @@ def _safe_daemon_instances(daemon_manager: Any | None) -> tuple[Any, ...]:
     try:
         value = method(refresh=True)
     except (DaemonValidationError, DaemonNotFoundError):
-        return ()
+        value = _daemon_instances_without_refresh(method)
+    except Exception:
+        value = _daemon_instances_without_refresh(method)
+    refreshed = tuple(value or ())
+    if refreshed:
+        return refreshed
+    return _daemon_instances_without_refresh(method)
+
+
+def _daemon_instances_without_refresh(method: Any) -> tuple[Any, ...]:
+    try:
+        value = method(refresh=False)
     except Exception:
         return ()
     return tuple(value or ())
@@ -576,6 +594,68 @@ def _dedupe_topic_names(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _current_instances(
+    instances: tuple[dict[str, Any], ...],
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(instance for instance in instances if _is_current_instance(instance, now=now))
+
+
+def _is_current_instance(instance: dict[str, Any], *, now: datetime) -> bool:
+    del now
+    status = _text(instance.get("status"), "").lower()
+    return status != "stopped"
+
+
+def _current_process_rows(
+    process_rows: tuple[dict[str, Any], ...],
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(row for row in process_rows if _is_current_process_row(row, now=now))
+
+
+def _current_leases(
+    leases: tuple[dict[str, Any], ...],
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(lease for lease in leases if _is_current_lease(lease, now=now))
+
+
+def _is_current_lease(lease: dict[str, Any], *, now: datetime) -> bool:
+    status = _text(lease.get("status"), "").lower()
+    if status == "active":
+        return True
+    updated_at = _first_datetime(
+        lease.get("heartbeat_at"),
+        lease.get("expires_at"),
+        lease.get("acquired_at"),
+    )
+    return (
+        updated_at is not None
+        and _seconds_since_datetime(updated_at, now=now) <= _RECENT_DAEMON_HEALTH_SECONDS
+    )
+
+
+def _is_current_process_row(row: dict[str, Any], *, now: datetime) -> bool:
+    status = _text(row.get("status"), "").lower()
+    if status == "running":
+        return True
+    if status == "missing":
+        updated_at = _first_datetime(row.get("updated_at"), row.get("started_at"))
+        return (
+            updated_at is not None
+            and _seconds_since_datetime(updated_at, now=now)
+            <= _RECENT_PROCESS_HEALTH_SECONDS
+        )
+    ended_at = _first_datetime(row.get("ended_at"))
+    if ended_at is None:
+        return status in {"starting", "stopping", "queued"}
+    return _seconds_since_datetime(ended_at, now=now) <= _RECENT_PROCESS_HEALTH_SECONDS
+
+
 def _health(
     *,
     service_available: bool,
@@ -619,7 +699,7 @@ def _desired_unmet_services(
 ) -> tuple[dict[str, Any], ...]:
     unmet: list[dict[str, Any]] = []
     for service in services:
-        if _text(service.get("start_policy"), "") not in {"eager", "ensure"}:
+        if _text(service.get("start_policy"), "") != "eager":
             continue
         desired = _int(service.get("desired_replicas"), 1)
         ready = _ready_count(instances_by_service.get(_text(service.get("key"), ""), []))
@@ -807,7 +887,7 @@ def _service_sets_table(
             for key in matched_keys
             for lease in leases_by_service.get(key, [])
         ]
-        desired = sum(_int(service.get("desired_replicas"), 1) for service in matched_services)
+        desired = sum(_health_desired_replicas(service) for service in matched_services)
         ready = _ready_count(matched_instances)
         degraded = _count_status(matched_instances, "degraded")
         stopped = _count_status(matched_instances, "stopped")
@@ -873,7 +953,6 @@ def _services_table(
         ready = _ready_count(service_instances)
         failed = _count_status(service_instances, "failed")
         degraded = _count_status(service_instances, "degraded")
-        stopped = _count_status(service_instances, "stopped")
         active_leases = _count_status(service_leases, "active")
         status = _service_status(service, ready=ready, failed=failed, degraded=degraded)
         rows.append(
@@ -1048,11 +1127,13 @@ def _processes_table(
     process_rows: tuple[dict[str, Any], ...],
     *,
     total: int,
+    now: datetime,
 ) -> OperationsTableSectionModel:
     rows: list[OperationsTableRowModel] = []
     for item in sorted(
         process_rows,
         key=lambda row: (
+            not _is_current_process_row(row, now=now),
             _status_sort(_text(row.get("status"), "")),
             _text(row.get("service_key"), ""),
             _text(row.get("updated_at"), ""),
@@ -1122,7 +1203,7 @@ def _dependency_health_table(
         group_leases = [
             lease for key in keys for lease in leases_by_service.get(key, [])
         ]
-        desired = sum(_int(service.get("desired_replicas"), 1) for service in group_services)
+        desired = sum(_health_desired_replicas(service) for service in group_services)
         ready = _ready_count(group_instances)
         failed = _count_status(group_instances, "failed")
         degraded = _count_status(group_instances, "degraded")
@@ -1265,6 +1346,7 @@ def _process_rows(
             _process_is_managed(row)
             and status == "running"
             and instance_id == "-"
+            and not _process_is_supervisor(row)
         )
         rows.append(row)
     rows.extend(
@@ -1937,6 +2019,12 @@ def _ready_count(records: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> 
     return _count_status(records, "ready")
 
 
+def _health_desired_replicas(service: dict[str, Any]) -> int:
+    if _text(service.get("start_policy"), "") != "eager":
+        return 0
+    return _int(service.get("desired_replicas"), 1)
+
+
 def _service_status(
     service: dict[str, Any],
     *,
@@ -1950,7 +2038,7 @@ def _service_status(
         return "Degraded"
     start_policy = _text(service.get("start_policy"), "")
     desired = _int(service.get("desired_replicas"), 1)
-    if start_policy in {"eager", "ensure"} and ready < desired:
+    if start_policy == "eager" and ready < desired:
         return "Desired Unmet"
     if ready:
         return "Ready"
@@ -2038,7 +2126,15 @@ def _process_binding_tone(process: dict[str, Any]) -> str:
 def _process_is_managed(process: dict[str, Any]) -> bool:
     service_key = _text(process.get("service_key"), "")
     session_key = _text(process.get("session_key"), "")
+    if _process_is_supervisor(process):
+        return False
     return service_key not in {"", "-"} or session_key.startswith("daemon:")
+
+
+def _process_is_supervisor(process: dict[str, Any]) -> bool:
+    service_key = _text(process.get("service_key"), "")
+    session_key = _text(process.get("session_key"), "")
+    return service_key == "supervisor" or session_key == "daemon:supervisor"
 
 
 def _process_output_marker(process: dict[str, Any]) -> str:
@@ -2072,6 +2168,31 @@ def _datetime_text(value: Any) -> str:
     if isinstance(value, datetime):
         return format_datetime_utc(coerce_utc_datetime(value))
     return _text(value)
+
+
+def _first_datetime(*values: Any) -> datetime | None:
+    for value in values:
+        parsed = _parse_datetime(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return coerce_utc_datetime(value)
+    if isinstance(value, str) and value.strip() and value.strip() != "-":
+        try:
+            return coerce_utc_datetime(
+                datetime.fromisoformat(value.strip().replace("Z", "+00:00")),
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def _seconds_since_datetime(value: datetime, *, now: datetime) -> float:
+    return max(0.0, (coerce_utc_datetime(now) - coerce_utc_datetime(value)).total_seconds())
 
 
 def _as_dict(value: Any) -> dict[str, Any]:

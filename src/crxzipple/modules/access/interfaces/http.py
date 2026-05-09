@@ -3,10 +3,20 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from crxzipple.bootstrap import AppContainer
 from crxzipple.interfaces.http.dependencies import get_container
+from crxzipple.modules.access.application.actions import (
+    AccessActionRequest as AccessActionCommand,
+    AccessActionService,
+)
+from crxzipple.modules.access.application.setup import AccessSetupSessionService
+from crxzipple.modules.access.application.settings_integration import (
+    AccessSettingsActionAdapter,
+    AccessSettingsConfigProvider,
+)
 from crxzipple.modules.access.interfaces.inventory import collect_access_inventory
 from crxzipple.modules.access.interfaces.presenters import (
     present_readiness,
@@ -75,6 +85,28 @@ class AccessSetupRequest(BaseModel):
     workspace_dir: str | None = None
 
 
+class AccessActionRequest(BaseModel):
+    action_id: str
+    resource_kind: str
+    target_id: str | None = None
+    intent: str
+    changes: dict[str, object] = Field(default_factory=dict)
+    reason: str
+    confirmation: str | None = None
+    risk_acknowledged: bool = False
+    actor: str | None = None
+    trace_context: dict[str, object] = Field(default_factory=dict)
+
+
+class AccessActionResultResponse(BaseModel):
+    status: str
+    asset: dict[str, object] | None = None
+    audit_ref: str | None = None
+    validation: dict[str, object] = Field(default_factory=dict)
+    readiness: dict[str, object] | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AccessRequirementSetResponse(BaseModel):
     ready: bool
     checks: list[AccessReadinessResponse] = Field(default_factory=list)
@@ -108,14 +140,15 @@ def check_access(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AccessCheckResponse:
     checks: list[dict[str, object]] = []
+    access_service = _access_service(container)
     for requirement in payload.requirements:
-        readiness = container.access_service.check_requirement(
+        readiness = access_service.check_requirement(
             requirement,
             workspace_dir=payload.workspace_dir,
         )
         checks.append(present_readiness(readiness, target_type="requirement"))
     for binding in payload.credential_bindings:
-        readiness = container.access_service.check_credential_binding(
+        readiness = access_service.check_credential_binding(
             binding,
             workspace_dir=payload.workspace_dir,
             allow_literal=payload.allow_literal_credentials,
@@ -132,11 +165,58 @@ def begin_access_setup(
     payload: AccessSetupRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AccessSetupFlowResponse:
-    flow = container.access_service.begin_setup(
+    flow = _access_service(container).begin_setup(
         payload.target,
         workspace_dir=payload.workspace_dir,
     )
     return AccessSetupFlowResponse.model_validate(present_setup_flow(flow))
+
+
+@router.post("/actions", response_model=AccessActionResultResponse)
+def execute_access_action(
+    payload: AccessActionRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AccessActionResultResponse:
+    governance_repository = container.access_governance_repository
+    audit_repository = container.access_action_audit_repository
+    service = AccessActionService(
+        binding_repository=governance_repository,
+        audit_repository=audit_repository,
+        setup_session_service=AccessSetupSessionService(
+            repository=governance_repository,
+            audit_repository=audit_repository,
+        ),
+        settings_action_adapter=AccessSettingsActionAdapter(
+            action_service=container.settings_action_service,
+            query_service=container.settings_query_service,
+            environment=container.settings.environment,
+        ),
+    )
+    try:
+        result = service.execute(
+            AccessActionCommand(
+                action_id=payload.action_id,
+                resource_kind=payload.resource_kind,
+                target_id=payload.target_id,
+                intent=payload.intent,
+                changes=dict(payload.changes),
+                reason=payload.reason,
+                confirmation=payload.confirmation,
+                risk_acknowledged=payload.risk_acknowledged,
+                actor=payload.actor,
+                trace_context=dict(payload.trace_context),
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AccessActionResultResponse(
+        status=result.status,
+        asset=result.asset,
+        audit_ref=result.audit_ref,
+        validation=result.validation,
+        readiness=result.readiness,
+        warnings=list(result.warnings),
+    )
 
 
 @router.get("/inventory", response_model=AccessInventoryResponse)
@@ -174,5 +254,14 @@ def get_access_setup(
         Query(description="Workspace for relative credential files."),
     ] = None,
 ) -> AccessSetupFlowResponse:
-    flow = container.access_service.begin_setup(target, workspace_dir=workspace_dir)
+    flow = _access_service(container).begin_setup(target, workspace_dir=workspace_dir)
     return AccessSetupFlowResponse.model_validate(present_setup_flow(flow))
+
+
+def _access_service(container: AppContainer):
+    service = container.access_service
+    service.config_view = AccessSettingsConfigProvider(
+        getattr(container, "settings_query_service", None),
+        environment=getattr(getattr(container, "settings", None), "environment", None),
+    )
+    return service

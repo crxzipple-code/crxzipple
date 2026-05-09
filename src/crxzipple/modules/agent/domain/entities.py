@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from crxzipple.modules.agent.domain.exceptions import AgentValidationError
 from crxzipple.modules.agent.domain.value_objects import (
@@ -12,6 +13,7 @@ from crxzipple.modules.agent.domain.value_objects import (
 )
 from crxzipple.shared.domain import AggregateRoot
 from crxzipple.shared.domain.events import Event
+from crxzipple.shared.time import coerce_utc_datetime
 
 
 @dataclass(kw_only=True)
@@ -27,6 +29,12 @@ class AgentProfile(AggregateRoot[str]):
     execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
+    )
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
     )
 
     def __post_init__(self) -> None:
@@ -45,6 +53,8 @@ class AgentProfile(AggregateRoot[str]):
                 "Agent profile max_turns must be greater than zero.",
             )
         self.description = self.description.strip()
+        self.created_at = coerce_utc_datetime(self.created_at)
+        self.updated_at = coerce_utc_datetime(self.updated_at)
 
     def apply_updates(
         self,
@@ -57,6 +67,8 @@ class AgentProfile(AggregateRoot[str]):
         llm_routing_policy: AgentLlmRoutingPolicy | None = None,
         execution_policy: AgentExecutionPolicy | None = None,
         runtime_preferences: AgentRuntimePreferences | None = None,
+        reason: str | None = None,
+        actor: str | None = None,
     ) -> None:
         if name is not None:
             if not name.strip():
@@ -88,33 +100,61 @@ class AgentProfile(AggregateRoot[str]):
             self.execution_policy = execution_policy
         if runtime_preferences is not None:
             self.runtime_preferences = runtime_preferences
+        self.updated_at = datetime.now(timezone.utc)
         self.record_event(
             Event(
                 name="agent.profile.updated",
-                payload={"agent_profile_id": self.id, "agent_profile_name": self.name},
+                payload=self._event_payload(reason=reason, actor=actor),
             ),
         )
 
-    def enable(self) -> bool:
+    def enable(self, *, reason: str | None = None, actor: str | None = None) -> bool:
         if self.enabled:
             return False
         self.enabled = True
+        self.updated_at = datetime.now(timezone.utc)
         self.record_event(
             Event(
                 name="agent.profile.enabled",
-                payload={"agent_profile_id": self.id, "agent_profile_name": self.name},
+                payload=self._event_payload(reason=reason, actor=actor),
             ),
         )
         return True
 
-    def disable(self) -> bool:
+    def disable(self, *, reason: str | None = None, actor: str | None = None) -> bool:
         if not self.enabled:
             return False
         self.enabled = False
+        self.updated_at = datetime.now(timezone.utc)
         self.record_event(
             Event(
                 name="agent.profile.disabled",
-                payload={"agent_profile_id": self.id, "agent_profile_name": self.name},
+                payload=self._event_payload(reason=reason, actor=actor),
             ),
         )
         return True
+
+    def _event_payload(
+        self,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "agent_profile_id": self.id,
+            "agent_profile_name": self.name,
+        }
+        normalized_reason = _normalize_optional_text(reason)
+        normalized_actor = _normalize_optional_text(actor)
+        if normalized_reason is not None:
+            payload["reason"] = normalized_reason
+        if normalized_actor is not None:
+            payload["actor"] = normalized_actor
+        return payload
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None

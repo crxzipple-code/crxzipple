@@ -48,7 +48,7 @@ local_tools:
       - surface:interactive
       - surface:creative
     required_effect_ids:
-      - remote_tool_access
+      - remote_tool_execution
     access_requirements:
       - env:OPENAI_API_KEY
     mutates_state: false
@@ -128,8 +128,8 @@ local_tools:
       - surface:interactive
       - surface:creative
     required_effect_ids:
-      - remote_tool_access
-      - sensitive_access
+      - remote_tool_execution
+      - sensitive_operation_confirmation
     access_requirements:
       - env:OPENAI_API_KEY
     mutates_state: false

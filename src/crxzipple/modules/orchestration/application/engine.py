@@ -8,7 +8,6 @@ from typing import Any
 
 from crxzipple.modules.llm.domain import (
     LlmMessage,
-    ToolCallIntent,
     ToolSchema,
 )
 from crxzipple.modules.orchestration.application.ports import (

@@ -4,9 +4,7 @@ from typing import Protocol
 
 from crxzipple.modules.authorization.domain import (
     AuthorizationDecision,
-    AuthorizationPolicy,
     AuthorizationRequest,
-    TemporaryAuthorizationGrant,
     ToolExecutionAuthorizationRequest,
 )
 
@@ -24,7 +22,7 @@ class AuthorizationPort(Protocol):
     ) -> AuthorizationDecision:
         ...
 
-    def grant_run_access(
+    def grant_run_authorization(
         self,
         *,
         run_id: str,
@@ -32,10 +30,10 @@ class AuthorizationPort(Protocol):
         approval_request_id: str | None,
         effect_ids: tuple[str, ...],
         tool_ids: tuple[str, ...],
-    ) -> TemporaryAuthorizationGrant:
+    ) -> None:
         ...
 
-    def grant_session_access(
+    def grant_session_authorization(
         self,
         *,
         session_key: str,
@@ -43,13 +41,21 @@ class AuthorizationPort(Protocol):
         approval_request_id: str | None,
         effect_ids: tuple[str, ...],
         tool_ids: tuple[str, ...],
-    ) -> TemporaryAuthorizationGrant:
+    ) -> None:
         ...
 
-    def grant_agent_effect_access(
+    def grant_agent_effect_authorization(
         self,
         *,
         agent_id: str,
         effect_id: str,
-    ) -> AuthorizationPolicy:
+    ) -> None:
+        ...
+
+    def grant_agent_tool_authorization(
+        self,
+        *,
+        agent_id: str,
+        tool_id: str,
+    ) -> None:
         ...

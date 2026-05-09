@@ -33,6 +33,7 @@ import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
 import { loadChannelsOperations, pruneStaleChannelRuntimes, replayChannelDeadLetter } from "../api";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
   id: string;
@@ -551,6 +552,8 @@ async function replaySelectedDeadLetter() {
     actionBusy.value = null;
   }
 }
+
+useOperationsProjectionRefresh("channels", refreshPage);
 
 onMounted(() => {
   void refreshPage();

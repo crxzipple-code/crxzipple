@@ -136,7 +136,7 @@ def list_tool_roots(
 ) -> list[ToolRootResponse]:
     return [
         ToolRootResponse(path=path, exists=Path(path).exists())
-        for path in container.settings.tool_local_paths
+        for path in container.tool_bootstrap_config.local_paths
     ]
 
 

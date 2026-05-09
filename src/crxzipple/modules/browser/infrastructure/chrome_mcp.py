@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ from crxzipple.modules.browser.domain import (
 from crxzipple.modules.daemon import (
     DaemonApplicationService,
     DaemonLease,
+    DaemonNotFoundError,
     DaemonValidationError,
 )
 

@@ -20,6 +20,7 @@ import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
 import { cancelToolRun, loadToolOperations, loadToolRunDetail, pruneExpiredToolWorkers, retryToolRun } from "../api";
 import { dynamicValueKeyPart, titleCaseDynamicValue } from "../mapping";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 import {
   artifactAssetUrl,
   artifactPreviewItem,
@@ -1171,6 +1172,8 @@ watch([
   syncRunFilterUrl();
   void refreshPage();
 });
+
+useOperationsProjectionRefresh("tool", refreshPage);
 
 onMounted(() => {
   if (typeof window !== "undefined") {

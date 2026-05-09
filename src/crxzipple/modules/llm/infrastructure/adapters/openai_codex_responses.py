@@ -33,7 +33,6 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS,
     openai_tool_schema,
     RetryableOpenAIStreamError,
-    resolve_openai_tool_name,
     resolve_credential_binding,
     sleep_before_openai_stream_retry,
 )
@@ -232,6 +231,7 @@ class OpenAICodexResponsesAdapter:
             profile.credential_binding or "codex_auth_json",
             required=True,
             description=f"LLM profile '{profile.id}'",
+            resolved_credential=request.resolved_credential,
         )
         payload = self._build_payload(
             profile,

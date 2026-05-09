@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -14,7 +15,7 @@ from crxzipple.core.logger import configure_logging
 from crxzipple.interfaces.cli.crxzipple import guard_runtime_database
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.channels.application.runtime import ChannelRuntimeBootstrapService
-from crxzipple.modules.channels.domain import ChannelValidationError
+from crxzipple.modules.channels.domain import ChannelProfile, ChannelValidationError
 
 
 def _resolve_runtime_id(channel: str, runtime_id: str | None) -> str:
@@ -32,8 +33,144 @@ def _exit_error(exc: Exception) -> None:
     raise typer.Exit(code=1) from None
 
 
+def _load_json_object(raw: str | None, option_name: str) -> dict[str, object]:
+    if raw is None:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(
+            f"{option_name} must be valid JSON: {exc.msg}",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{option_name} must be a JSON object.")
+    return dict(payload)
+
+
+def _load_account_payloads(raw_accounts: list[str] | None) -> list[dict[str, object]]:
+    accounts: list[dict[str, object]] = []
+    for raw_account in raw_accounts or ():
+        accounts.append(_load_json_object(raw_account, "--account-json"))
+    return accounts
+
+
+def _profile_payload(profile: ChannelProfile) -> dict[str, object]:
+    return profile.to_payload()
+
+
 def build_cli() -> typer.Typer:
     app = typer.Typer(help="Run channel runtime processes.", no_args_is_help=True)
+
+    @app.command("list-profiles")
+    def list_profiles() -> None:
+        settings = load_settings()
+        configure_logging(settings)
+        container = build_container(settings=settings)
+        try:
+            echo_data(
+                [
+                    _profile_payload(profile)
+                    for profile in container.channel_profile_service.list_profiles()
+                ],
+            )
+        finally:
+            container.close()
+
+    @app.command("get-profile")
+    def get_profile(
+        channel: str = typer.Argument(..., help="Channel type."),
+    ) -> None:
+        settings = load_settings()
+        configure_logging(settings)
+        container = build_container(settings=settings)
+        try:
+            profile = container.channel_profile_service.get_profile(channel)
+            if profile is None:
+                _exit_error(
+                    ChannelValidationError(
+                        f"channel profile '{channel}' was not found.",
+                        code="channel_profile_not_found",
+                        details={"channel_type": channel},
+                    ),
+                )
+            echo_data(_profile_payload(profile))
+        finally:
+            container.close()
+
+    @app.command("upsert-profile")
+    def upsert_profile(
+        channel: str = typer.Argument(..., help="Channel type."),
+        enabled: bool = typer.Option(True, "--enabled/--disabled"),
+        capabilities_json: str | None = typer.Option(
+            None,
+            "--capabilities-json",
+            help="Channel capabilities as a JSON object.",
+        ),
+        account_json: list[str] = typer.Option(
+            None,
+            "--account-json",
+            help="Repeatable account profile JSON object.",
+        ),
+        metadata_json: str | None = typer.Option(
+            None,
+            "--metadata-json",
+            help="Profile metadata as a JSON object.",
+        ),
+    ) -> None:
+        settings = load_settings()
+        configure_logging(settings)
+        container = build_container(settings=settings)
+        try:
+            profile = ChannelProfile.from_payload(
+                {
+                    "channel_type": channel,
+                    "enabled": enabled,
+                    "capabilities": _load_json_object(
+                        capabilities_json,
+                        "--capabilities-json",
+                    ),
+                    "accounts": _load_account_payloads(account_json),
+                    "metadata": _load_json_object(metadata_json, "--metadata-json"),
+                },
+            )
+            saved = container.channel_profile_service.upsert_profile(profile)
+            echo_data(_profile_payload(saved))
+        except ChannelValidationError as exc:
+            _exit_error(exc)
+        finally:
+            container.close()
+
+    @app.command("enable-profile")
+    def enable_profile(
+        channel: str = typer.Argument(..., help="Channel type."),
+    ) -> None:
+        settings = load_settings()
+        configure_logging(settings)
+        container = build_container(settings=settings)
+        try:
+            echo_data(
+                _profile_payload(container.channel_profile_service.enable_profile(channel)),
+            )
+        except ChannelValidationError as exc:
+            _exit_error(exc)
+        finally:
+            container.close()
+
+    @app.command("disable-profile")
+    def disable_profile(
+        channel: str = typer.Argument(..., help="Channel type."),
+    ) -> None:
+        settings = load_settings()
+        configure_logging(settings)
+        container = build_container(settings=settings)
+        try:
+            echo_data(
+                _profile_payload(container.channel_profile_service.disable_profile(channel)),
+            )
+        except ChannelValidationError as exc:
+            _exit_error(exc)
+        finally:
+            container.close()
 
     @app.command("run")
     def run_runtime(

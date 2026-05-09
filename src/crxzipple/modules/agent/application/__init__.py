@@ -2,6 +2,7 @@ from crxzipple.modules.agent.application.services import (
     AgentApplicationService,
     AgentHomeFileSnapshot,
     AgentHomeSnapshot,
+    AgentProfileActionInput,
     ExportAgentHomeInput,
     ExportAgentHomeResult,
     MigrateAgentHomeInput,
@@ -12,11 +13,38 @@ from crxzipple.modules.agent.application.services import (
     UpdateAgentHomeFilesInput,
     UpdateAgentProfileInput,
 )
+from crxzipple.modules.agent.application.resolution import (
+    AgentAccessGrant,
+    AgentAuthorizationGrant,
+    AgentProfileResolution,
+    AgentProfileResolutionQueryService,
+    AgentResolutionSummary,
+    AgentResolutionTrace,
+    AgentResolvedLlm,
+    AgentResolvedSkill,
+    AgentResolvedTool,
+    AgentValidationIssue,
+)
+from crxzipple.modules.agent.application.settings_integration import (
+    agent_profile_input_from_settings,
+    agent_profile_inputs_from_settings,
+)
 
 __all__ = [
     "AgentApplicationService",
+    "AgentAccessGrant",
+    "AgentAuthorizationGrant",
     "AgentHomeFileSnapshot",
     "AgentHomeSnapshot",
+    "AgentProfileResolution",
+    "AgentProfileActionInput",
+    "AgentProfileResolutionQueryService",
+    "AgentResolutionSummary",
+    "AgentResolutionTrace",
+    "AgentResolvedLlm",
+    "AgentResolvedSkill",
+    "AgentResolvedTool",
+    "AgentValidationIssue",
     "ExportAgentHomeInput",
     "ExportAgentHomeResult",
     "MigrateAgentHomeInput",
@@ -26,4 +54,6 @@ __all__ = [
     "SyncAgentHomeResult",
     "UpdateAgentHomeFilesInput",
     "UpdateAgentProfileInput",
+    "agent_profile_input_from_settings",
+    "agent_profile_inputs_from_settings",
 ]

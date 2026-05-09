@@ -678,24 +678,29 @@ class OrchestrationTestCaseBase(unittest.TestCase):
         context_window_tokens: int | None = None,
         runtime_preferences: AgentRuntimePreferences | None = None,
     ) -> None:
-        self.container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id=llm_id,
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-                context_window_tokens=context_window_tokens,
+        self.container.llm_service.sync_profiles(
+            (
+                RegisterLlmProfileInput(
+                    id=llm_id,
+                    provider=LlmProviderKind.OPENAI,
+                    api_family=LlmApiFamily.OPENAI_RESPONSES,
+                    model_name="gpt-5.4-mini",
+                    context_window_tokens=context_window_tokens,
+                ),
             ),
         )
-        self.container.agent_service.register_profile(
-            RegisterAgentProfileInput(
-                id="assistant",
-                name="Assistant",
-                instruction_policy=AgentInstructionPolicy(
-                    system_prompt="Be helpful and concise.",
+        self.container.agent_service.sync_profiles(
+            (
+                RegisterAgentProfileInput(
+                    id="assistant",
+                    name="Assistant",
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt="Be helpful and concise.",
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id=llm_id),
+                    runtime_preferences=runtime_preferences
+                    or AgentRuntimePreferences(),
                 ),
-                llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id=llm_id),
-                runtime_preferences=runtime_preferences or AgentRuntimePreferences(),
             ),
         )
 

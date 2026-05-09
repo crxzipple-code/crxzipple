@@ -21,8 +21,6 @@ from crxzipple.modules.events.domain import (
     EventTopicRecord,
     EventTopicWatch,
 )
-from crxzipple.shared.domain.events import Event
-
 logger = get_logger(__name__)
 
 

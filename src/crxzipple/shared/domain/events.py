@@ -8,7 +8,7 @@ from uuid import uuid4
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 if TYPE_CHECKING:
-    from crxzipple.modules.events.domain import EventSelector, EventTarget
+    from crxzipple.modules.events.domain import EventTarget
 
 VALID_EVENT_KINDS = frozenset(
     {

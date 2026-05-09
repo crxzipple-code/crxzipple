@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentLlmRoutingPolicy,
     AgentRuntimePreferences,
 )
+from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 
 def render_agent_home_config(profile: AgentProfile, *, root: Path) -> str:
@@ -118,6 +120,7 @@ def profile_from_agent_home_config_payload(
             ),
         }
 
+    created_at, updated_at = _profile_timestamps(payload, home_dir=home_dir)
     return AgentProfile(
         id=profile_id,
         name=_optional_text(payload.get("name")) or profile_id,
@@ -128,6 +131,8 @@ def profile_from_agent_home_config_payload(
         llm_routing_policy=AgentLlmRoutingPolicy.from_payload(llm_payload),
         execution_policy=AgentExecutionPolicy.from_payload(execution_payload),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
@@ -191,6 +196,10 @@ def apply_agent_home_config_payload(
         ),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
     )
+    profile.created_at, profile.updated_at = _profile_timestamps(
+        payload,
+        home_dir=home_dir,
+    )
     return profile
 
 
@@ -219,6 +228,8 @@ def build_agent_home_config_payload(
         "name": profile.name,
         "description": profile.description,
         "enabled": profile.enabled,
+        "created_at": format_datetime_utc(profile.created_at),
+        "updated_at": format_datetime_utc(profile.updated_at),
         "identity": profile.identity.to_payload(),
         "instruction_policy": profile.instruction_policy.to_payload(),
         "llm_routing_policy": profile.llm_routing_policy.to_payload(),
@@ -280,3 +291,40 @@ def _optional_text(value: object) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _profile_timestamps(
+    payload: dict[str, Any],
+    *,
+    home_dir: str,
+) -> tuple[datetime, datetime]:
+    fallback = _agent_config_mtime(home_dir)
+    parsed_created_at = _optional_datetime(payload.get("created_at"))
+    parsed_updated_at = _optional_datetime(payload.get("updated_at"))
+    created_at = parsed_created_at or parsed_updated_at or fallback
+    updated_at = parsed_updated_at or fallback
+    return created_at, updated_at
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return coerce_utc_datetime(value)
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    try:
+        return coerce_utc_datetime(datetime.fromisoformat(normalized))
+    except ValueError as exc:
+        raise AgentValidationError(
+            f"Agent home config timestamp '{normalized}' is not valid ISO datetime.",
+        ) from exc
+
+
+def _agent_config_mtime(home_dir: str) -> datetime:
+    config_path = Path(home_dir).expanduser() / "agent.json"
+    try:
+        return datetime.fromtimestamp(config_path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return datetime.now(timezone.utc)

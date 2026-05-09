@@ -5,6 +5,7 @@ import unittest
 from crxzipple.bootstrap.container import _bootstrap_daemon_specs
 from crxzipple.core.config import Settings
 from crxzipple.modules.browser.domain import BrowserSystemConfig
+from crxzipple.modules.orchestration.application import RuntimeSettingsBootstrapConfig
 
 
 class OcrRuntimeConfigTestCase(unittest.TestCase):
@@ -30,6 +31,7 @@ class OcrRuntimeConfigTestCase(unittest.TestCase):
             browser_system_config=BrowserSystemConfig(
                 default_profile="crxzipple",
             ),
+            runtime_bootstrap_config=RuntimeSettingsBootstrapConfig(),
         )
 
         self.assertIn(
@@ -59,6 +61,7 @@ class OcrRuntimeConfigTestCase(unittest.TestCase):
             browser_system_config=BrowserSystemConfig(
                 default_profile="crxzipple",
             ),
+            runtime_bootstrap_config=RuntimeSettingsBootstrapConfig(),
         )
 
         self.assertNotIn(
@@ -88,6 +91,7 @@ class OcrRuntimeConfigTestCase(unittest.TestCase):
             browser_system_config=BrowserSystemConfig(
                 default_profile="crxzipple",
             ),
+            runtime_bootstrap_config=RuntimeSettingsBootstrapConfig(),
         )
 
         self.assertNotIn(

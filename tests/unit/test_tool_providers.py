@@ -223,7 +223,11 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             self.assertEqual(echo_run.output_payload["message"], "HELLO")
             self.assertEqual(echo_run.result.metadata["status_code"], 200)
             self.assertIn(
-                "api_key=sample-api-key",
+                "api_key=%5Bredacted%5D",
+                echo_run.result.metadata["request"]["url"],
+            )
+            self.assertNotIn(
+                "sample-api-key",
                 echo_run.result.metadata["request"]["url"],
             )
 

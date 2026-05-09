@@ -311,9 +311,15 @@ class OrchestrationServiceGraph:
             resume_input_factory=lambda **kwargs: ResumeOrchestrationRunInput(
                 **kwargs,
             ),
-            grant_run_tool_access=self.approval_service.grant_run_tool_access,
-            grant_session_tool_access=self.approval_service.grant_session_tool_access,
-            grant_agent_effect_access=self.approval_service.grant_agent_effect_access,
+            grant_run_tool_authorization=(
+                self.approval_service.grant_run_tool_authorization
+            ),
+            grant_session_tool_authorization=(
+                self.approval_service.grant_session_tool_authorization
+            ),
+            grant_agent_effect_authorization=(
+                self.approval_service.grant_agent_effect_authorization
+            ),
             append_approval_resolution_message=(
                 self.approval_service.append_resolution_message
             ),

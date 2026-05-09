@@ -53,9 +53,9 @@ EFFECTS: dict[str, EffectDescriptor] = {
         label="Local tool access",
         description="Use locally provided tools that are gated by approval.",
     ),
-    "remote_tool_access": EffectDescriptor(
-        id="remote_tool_access",
-        label="Remote tool access",
+    "remote_tool_execution": EffectDescriptor(
+        id="remote_tool_execution",
+        label="Remote tool execution",
         description="Use remote provider tools that are gated by approval.",
     ),
     "state_mutation": EffectDescriptor(
@@ -63,9 +63,9 @@ EFFECTS: dict[str, EffectDescriptor] = {
         label="State-changing access",
         description="Use tools that mutate local or external state.",
     ),
-    "sensitive_access": EffectDescriptor(
-        id="sensitive_access",
-        label="Sensitive access",
+    "sensitive_operation_confirmation": EffectDescriptor(
+        id="sensitive_operation_confirmation",
+        label="Sensitive operation confirmation",
         description="Use tools that explicitly require user confirmation.",
     ),
 }

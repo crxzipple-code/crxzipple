@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from crxzipple.modules.authorization.domain import (
+    AuthorizationContext,
+    AuthorizationResource,
+    AuthorizationSubject,
+    ToolExecutionAuthorizationRequest,
+)
+from crxzipple.modules.orchestration.application.approval import ApprovalResolutionService
+from crxzipple.modules.orchestration.infrastructure.adapters import (
+    AuthorizationServiceAdapter,
+)
 from crxzipple.modules.tool.domain import ToolRunResult
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
@@ -39,6 +49,57 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         "sessions_yield",
     ]
     _POST_SKILL_SESSION_TOOL_IDS = ["subagents"]
+
+    def test_approval_session_grant_writes_temporary_authorization(self) -> None:
+        self._register_agent_and_llm()
+        run = self.container.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-session-access-grant",
+                inbound_instruction=InboundInstruction(source="cli", content="hello"),
+            ),
+        )
+        prepared = self.container.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        session_key = str(prepared.metadata.get("session_key") or "")
+        approval_service = ApprovalResolutionService(
+            authorization_port=AuthorizationServiceAdapter(
+                self.container.authorization_service,
+            ),
+            session_service=None,
+            get_run=self.container.orchestration_run_query_service.get_run,
+        )
+
+        approval_service.grant_session_tool_authorization(
+            run_id=run.id,
+            approval_request_id="approval-session",
+            effect_ids=("local_tool_access",),
+            tool_ids=("echo",),
+        )
+
+        decision = self.container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="llm"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="echo",
+                    attrs={"authorization_effect_ids": ["local_tool_access"]},
+                ),
+                context=AuthorizationContext(
+                    attrs={"agent_id": "assistant", "session_key": session_key},
+                ),
+                required_effect_ids=("local_tool_access",),
+            ),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertIn("local_tool_access", decision.details["granted_effect_ids"])
 
     def test_tool_resolver_reuses_run_context_during_surface_filtering(self) -> None:
         self._register_agent_and_llm()
@@ -139,7 +200,9 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     required_effect_ids=("weather_data",),
                 ),
             )
-            container.authorization_service.grant_agent_tool_access(
+            AuthorizationServiceAdapter(
+                container.authorization_service,
+            ).grant_agent_tool_authorization(
                 agent_id="assistant",
                 tool_id="brave_search.news_search",
             )
@@ -261,7 +324,9 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     required_effect_ids=("weather_data",),
                 ),
             )
-            container.authorization_service.grant_agent_effect_access(
+            AuthorizationServiceAdapter(
+                container.authorization_service,
+            ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="network_search",
             )
@@ -394,7 +459,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     id="deny_echo_tool_access",
                     description="Do not expose echo to this agent.",
                     effect=AuthorizationEffect.DENY,
-                    actions=("tool.access_tool",),
+                    actions=("tool.authorize",),
                     resource_kind="tool",
                     resource_id="echo",
                     context_match={"agent_id": "assistant"},
@@ -501,7 +566,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                     id="deny_network_search_effect_access",
                     description="Do not expose network search to this agent.",
                     effect=AuthorizationEffect.DENY,
-                    actions=("tool.access_effect",),
+                    actions=("tool.effect.authorize",),
                     resource_kind="tool",
                     resource_match={"authorization_effect_ids": ["network_search"]},
                     context_match={"agent_id": "assistant"},
@@ -729,6 +794,23 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             ),
         )
         self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
+
+        decision = self.container.authorization_service.check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="llm"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="echo",
+                    attrs={"authorization_effect_ids": ["local_tool_access"]},
+                ),
+                context=AuthorizationContext(
+                    attrs={"agent_id": "writer", "run_id": run.id},
+                ),
+                required_effect_ids=("local_tool_access",),
+            ),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertIn("local_tool_access", decision.details["granted_effect_ids"])
 
         completed = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
@@ -1255,9 +1337,14 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
 
             policies = container.authorization_service.list_policies()
             self.assertTrue(
-                any(policy.actions == ("tool.access_effect",) for policy in policies),
+                any(
+                    policy.context_match == {"agent_id": "writer"}
+                    and policy.resource_match == {
+                        "authorization_effect_ids": ["local_tool_access"],
+                    }
+                    for policy in policies
+                ),
             )
-
             completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
             )

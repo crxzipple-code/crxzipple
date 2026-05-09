@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import {
-  Archive,
-  ArrowRight,
   Box,
   Brain,
   Database,
   FileClock,
   GitBranch,
   Home,
+  KeyRound,
   Layers,
   Package,
   Shield,
@@ -22,6 +21,7 @@ import { useI18n } from "@/shared/i18n";
 import AccessAssetsSettingsPage from "./modules/AccessAssetsSettingsPage.vue";
 import AgentProfilesSettingsPage from "./modules/AgentProfilesSettingsPage.vue";
 import AuditLogsSettingsPage from "./modules/AuditLogsSettingsPage.vue";
+import AuthorizationPoliciesSettingsPage from "./modules/AuthorizationPoliciesSettingsPage.vue";
 import BackupRestoreSettingsPage from "./modules/BackupRestoreSettingsPage.vue";
 import ChannelProfilesSettingsPage from "./modules/ChannelProfilesSettingsPage.vue";
 import EnvironmentSettingsPage from "./modules/EnvironmentSettingsPage.vue";
@@ -41,6 +41,7 @@ type SettingsResourceId =
   | "skill-catalog"
   | "memory-config"
   | "access-assets"
+  | "authorization-policies"
   | "channel-profiles"
   | "event-registry"
   | "runtime-defaults"
@@ -53,6 +54,7 @@ interface SettingsNavItem {
   id: SettingsResourceId;
   path: string;
   labelKey: string;
+  label?: string;
   icon: LucideIcon;
 }
 
@@ -64,15 +66,14 @@ const settingsNav: SettingsNavItem[] = [
   { groupKey: "settings.group.agentLlm", id: "agent-profiles", path: "/settings/agent-profiles", labelKey: "settings.resource.agentProfiles", icon: Brain },
   { groupKey: "settings.group.agentLlm", id: "llm-profiles", path: "/settings/llm-profiles", labelKey: "settings.resource.llmProfiles", icon: Layers },
   { groupKey: "settings.group.capabilities", id: "tool-catalog", path: "/settings/tool-catalog", labelKey: "settings.resource.toolCatalog", icon: Wrench },
-  { groupKey: "settings.group.capabilities", id: "skill-catalog", path: "/settings/skill-catalog", labelKey: "settings.resource.skillCatalog", icon: Package },
+  { groupKey: "settings.group.capabilities", id: "skill-catalog", path: "/settings/skill-catalog", labelKey: "settings.resource.skillCatalog", label: "Skill Enablement", icon: Package },
   { groupKey: "settings.group.dataMemory", id: "memory-config", path: "/settings/memory-config", labelKey: "settings.resource.memoryConfig", icon: Database },
   { groupKey: "settings.group.accessAuth", id: "access-assets", path: "/settings/access-assets", labelKey: "settings.resource.accessAssets", icon: Shield },
+  { groupKey: "settings.group.accessAuth", id: "authorization-policies", path: "/settings/authorization-policies", labelKey: "settings.resource.authorizationPolicies", icon: KeyRound },
   { groupKey: "settings.group.channelsEvents", id: "channel-profiles", path: "/settings/channel-profiles", labelKey: "settings.resource.channelProfiles", icon: GitBranch },
-  { groupKey: "settings.group.channelsEvents", id: "event-registry", path: "/settings/event-registry", labelKey: "settings.resource.eventContracts", icon: FileClock },
   { groupKey: "settings.group.runtime", id: "runtime-defaults", path: "/settings/runtime-defaults", labelKey: "settings.resource.runtimeDefaults", icon: SlidersHorizontal },
   { groupKey: "settings.group.administration", id: "environment", path: "/settings/environment", labelKey: "settings.resource.environment", icon: Box },
   { groupKey: "settings.group.administration", id: "audit-logs", path: "/settings/audit-logs", labelKey: "settings.resource.auditLogs", icon: FileClock },
-  { groupKey: "settings.group.administration", id: "backup-restore", path: "/settings/backup-restore", labelKey: "settings.resource.backupRestore", icon: Archive },
 ];
 
 const settingsComponents = {
@@ -83,6 +84,7 @@ const settingsComponents = {
   "skill-catalog": SkillCatalogSettingsPage,
   "memory-config": MemoryConfigSettingsPage,
   "access-assets": AccessAssetsSettingsPage,
+  "authorization-policies": AuthorizationPoliciesSettingsPage,
   "channel-profiles": ChannelProfilesSettingsPage,
   "event-registry": EventRegistrySettingsPage,
   "runtime-defaults": RuntimeDefaultsSettingsPage,
@@ -103,15 +105,20 @@ function normalizeResource(value: unknown): SettingsResourceId {
   if (raw === "skill" || raw === "skills") return "skill-catalog";
   if (raw === "memory") return "memory-config";
   if (raw === "access") return "access-assets";
+  if (raw === "authorization" || raw === "auth" || raw === "authorization-policies") return "authorization-policies";
   if (raw === "channel" || raw === "channels") return "channel-profiles";
   if (raw === "runtime") return "runtime-defaults";
   if (raw === "audit") return "audit-logs";
   if (raw === "backup") return "backup-restore";
-  return settingsNav.some((item) => item.id === raw) ? raw as SettingsResourceId : "overview";
+  return isSettingsResourceId(raw) ? raw : "overview";
 }
 
 function navGroupStarts(index: number): boolean {
   return index === 0 || settingsNav[index - 1]?.groupKey !== settingsNav[index].groupKey;
+}
+
+function isSettingsResourceId(value: string): value is SettingsResourceId {
+  return Object.prototype.hasOwnProperty.call(settingsComponents, value);
 }
 </script>
 
@@ -124,14 +131,10 @@ function navGroupStarts(index: number): boolean {
           <h2 v-if="navGroupStarts(index)">{{ t(item.groupKey) }}</h2>
           <RouterLink :to="item.path" :class="{ active: item.id === activeResource }">
             <component :is="item.icon" :size="14" />
-            <span>{{ t(item.labelKey) }}</span>
+            <span>{{ item.label ?? t(item.labelKey) }}</span>
           </RouterLink>
         </template>
       </nav>
-      <RouterLink class="settings-doc-link" to="/settings/audit-logs">
-        {{ t("settings.documentation") }}
-        <ArrowRight :size="13" />
-      </RouterLink>
     </aside>
 
     <component :is="activeComponent" />
@@ -186,8 +189,7 @@ function navGroupStarts(index: number): boolean {
   text-transform: uppercase;
 }
 
-.settings-sidebar a,
-.settings-doc-link {
+.settings-sidebar a {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -202,13 +204,6 @@ function navGroupStarts(index: number): boolean {
 .settings-sidebar a.active {
   background: var(--surface-active);
   color: var(--text-primary);
-}
-
-.settings-doc-link {
-  justify-content: space-between;
-  min-height: 34px;
-  margin-top: auto;
-  border: 1px solid var(--border-subtle);
 }
 
 .settings-module {

@@ -3,12 +3,11 @@ from __future__ import annotations
 import base64
 import json
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
 from crxzipple.core.config import OpenApiCredentialBinding
-from crxzipple.modules.access import CredentialResolutionError, CredentialResolver
 from crxzipple.modules.tool.domain import ToolRunResult
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.infrastructure.discovery.openapi import (
@@ -17,13 +16,19 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
     OpenApiSecurityScheme,
 )
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    CredentialBindingRef,
+    CredentialProvider,
+)
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 from crxzipple.shared.infrastructure.http import get_async_http_client
 
-_CREDENTIAL_RESOLVER = CredentialResolver()
-
 
 class OpenApiRemoteInvoker:
+    def __init__(self, credential_provider: CredentialProvider) -> None:
+        self.credential_provider = credential_provider
+
     async def execute(
         self,
         operation: OpenApiOperation,
@@ -32,6 +37,7 @@ class OpenApiRemoteInvoker:
         url, query_items, headers, json_body = _build_request(
             operation,
             dict(arguments),
+            credential_provider=self.credential_provider,
         )
 
         try:
@@ -61,6 +67,7 @@ class OpenApiRemoteInvoker:
         content_type = response.headers.get("Content-Type", "")
         status_code = response.status_code
         final_url = str(response.url)
+        sanitized_url = _sanitize_request_url(final_url, operation)
 
         decoded_body = _decode_response_body(payload, content_type)
         return ToolRunResult.text(
@@ -71,7 +78,7 @@ class OpenApiRemoteInvoker:
                 "environment": "remote",
                 "request": {
                     "method": operation.method,
-                    "url": final_url,
+                    "url": sanitized_url,
                 },
                 "status_code": status_code,
             },
@@ -82,9 +89,10 @@ def register_openapi_remote_handlers(
     registry: ToolRuntimeRegistry,
     operations: list[OpenApiOperation] | tuple[OpenApiOperation, ...],
     *,
+    credential_provider: CredentialProvider,
     max_concurrency: int | None = None,
 ) -> None:
-    invoker = OpenApiRemoteInvoker()
+    invoker = OpenApiRemoteInvoker(credential_provider)
     for operation in operations:
 
         async def handler(
@@ -106,6 +114,8 @@ def register_openapi_remote_handlers(
 def _build_request(
     operation: OpenApiOperation,
     arguments: dict[str, Any],
+    *,
+    credential_provider: CredentialProvider,
 ) -> tuple[
     str,
     list[tuple[str, str]],
@@ -146,6 +156,7 @@ def _build_request(
     query_items.extend(
         _build_security_query_items(
             operation,
+            credential_provider=credential_provider,
             headers=headers,
             cookies=cookies,
         ),
@@ -186,6 +197,7 @@ def _decode_response_body(payload: bytes, content_type: str) -> Any:
 def _build_security_query_items(
     operation: OpenApiOperation,
     *,
+    credential_provider: CredentialProvider,
     headers: dict[str, str],
     cookies: list[str],
 ) -> list[tuple[str, str]]:
@@ -202,8 +214,10 @@ def _build_security_query_items(
         try:
             return _apply_security_requirement(
                 requirement,
+                operation=operation,
                 schemes_by_name=schemes_by_name,
                 bindings_by_name=bindings_by_name,
+                credential_provider=credential_provider,
                 headers=headers,
                 cookies=cookies,
             )
@@ -218,8 +232,10 @@ def _build_security_query_items(
 def _apply_security_requirement(
     requirement: OpenApiSecurityRequirement,
     *,
+    operation: OpenApiOperation,
     schemes_by_name: dict[str, OpenApiSecurityScheme],
     bindings_by_name: dict[str, OpenApiCredentialBinding],
+    credential_provider: CredentialProvider,
     headers: dict[str, str],
     cookies: list[str],
 ) -> list[tuple[str, str]]:
@@ -239,7 +255,12 @@ def _apply_security_requirement(
             )
 
         if scheme.scheme_type == "apiKey":
-            secret = _resolve_secret_source(binding.source, scheme_name=scheme_name)
+            secret = _resolve_secret_source(
+                binding.source,
+                scheme_name=scheme_name,
+                operation=operation,
+                credential_provider=credential_provider,
+            )
             if scheme.location == "header":
                 if not scheme.parameter_name:
                     raise ToolValidationError(
@@ -271,11 +292,15 @@ def _apply_security_requirement(
                     binding.username_source,
                     scheme_name=scheme_name,
                     field_name="username_source",
+                    operation=operation,
+                    credential_provider=credential_provider,
                 )
                 password = _resolve_secret_source(
                     binding.password_source,
                     scheme_name=scheme_name,
                     field_name="password_source",
+                    operation=operation,
+                    credential_provider=credential_provider,
                 )
                 token = base64.b64encode(
                     f"{username}:{password}".encode("utf-8"),
@@ -283,7 +308,12 @@ def _apply_security_requirement(
                 draft_headers["Authorization"] = f"Basic {token}"
                 continue
 
-            token = _resolve_secret_source(binding.source, scheme_name=scheme_name)
+            token = _resolve_secret_source(
+                binding.source,
+                scheme_name=scheme_name,
+                operation=operation,
+                credential_provider=credential_provider,
+            )
             if http_scheme == "bearer":
                 draft_headers["Authorization"] = f"Bearer {token}"
             elif http_scheme:
@@ -295,7 +325,12 @@ def _apply_security_requirement(
             continue
 
         if scheme.scheme_type in {"oauth2", "openIdConnect"}:
-            token = _resolve_secret_source(binding.source, scheme_name=scheme_name)
+            token = _resolve_secret_source(
+                binding.source,
+                scheme_name=scheme_name,
+                operation=operation,
+                credential_provider=credential_provider,
+            )
             draft_headers["Authorization"] = f"Bearer {token}"
             continue
 
@@ -315,6 +350,8 @@ def _resolve_secret_source(
     *,
     scheme_name: str,
     field_name: str = "source",
+    operation: OpenApiOperation,
+    credential_provider: CredentialProvider,
 ) -> str:
     if source is None or not source.strip():
         raise ToolValidationError(
@@ -322,8 +359,73 @@ def _resolve_secret_source(
         )
 
     try:
-        return _CREDENTIAL_RESOLVER.resolve(source)
-    except CredentialResolutionError as exc:
+        return credential_provider.resolve_credential(
+            CredentialBindingRef(
+                binding_id=f"openapi:{operation.provider_name}:{scheme_name}:{field_name}",
+                source_type=_credential_source_type(source),
+                source_ref=source,
+                metadata={
+                    "provider": operation.provider_name,
+                    "scheme_name": scheme_name,
+                    "field": field_name,
+                },
+            ),
+            consumer=AccessConsumerRef(
+                consumer_id=f"tool.openapi:{operation.tool_id}",
+                module="tool",
+                component="openapi_remote",
+                runtime_ref=operation.runtime_key,
+                metadata={
+                    "provider": operation.provider_name,
+                    "scheme_name": scheme_name,
+                    "field": field_name,
+                },
+            ),
+        )
+    except Exception as exc:
         raise ToolValidationError(
             f"OpenAPI credential binding for security scheme '{scheme_name}' {exc}",
         ) from exc
+
+
+def _credential_source_type(binding: str) -> str:
+    if binding.startswith("env:"):
+        return "env"
+    if binding.startswith("file:"):
+        return "file"
+    if binding.startswith("codex_auth_json") or binding in {
+        "codex-cli",
+        "codex_auth_json",
+    }:
+        return "codex_auth_json"
+    return "binding"
+
+
+def _sanitize_request_url(url: str, operation: OpenApiOperation) -> str:
+    sensitive_query_names = {
+        scheme.parameter_name
+        for scheme in operation.security_schemes
+        if scheme.scheme_type == "apiKey"
+        and scheme.location == "query"
+        and scheme.parameter_name
+    }
+    if not sensitive_query_names:
+        return url
+
+    parts = urlsplit(url)
+    redacted_query = urlencode(
+        [
+            (name, "[redacted]" if name in sensitive_query_names else value)
+            for name, value in parse_qsl(parts.query, keep_blank_values=True)
+        ],
+        doseq=True,
+    )
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            redacted_query,
+            parts.fragment,
+        ),
+    )

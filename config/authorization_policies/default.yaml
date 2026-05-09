@@ -33,7 +33,7 @@
   description: Allow the state_mutation effect for session-context tools inside a bound session run.
   effect: allow
   actions:
-    - tool.access_effect
+    - tool.effect.authorize
   resource:
     kind: tool
   condition:
@@ -49,7 +49,7 @@
   description: Hide tools when the current run context does not provide the required scope.
   effect: deny
   actions:
-    - tool.access_tool
+    - tool.authorize
     - tool.run
   resource:
     kind: tool
@@ -65,7 +65,7 @@
   description: Hide tools on declared-only surfaces unless the tool explicitly declares support.
   effect: deny
   actions:
-    - tool.access_tool
+    - tool.authorize
     - tool.run
   resource:
     kind: tool
@@ -83,7 +83,7 @@
   description: Hide tools whose declared surface does not match the current run surface.
   effect: deny
   actions:
-    - tool.access_tool
+    - tool.authorize
     - tool.run
   resource:
     kind: tool

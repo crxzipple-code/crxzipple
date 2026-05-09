@@ -77,6 +77,69 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
             f"{timestamp}{nonce}{encrypt_key}{body}".encode("utf-8"),
         ).hexdigest()
 
+    def test_channel_profile_http_upsert_enable_disable_uses_channels_service(self) -> None:
+        response = self.client.put(
+            "/channels/profiles/web",
+            json={
+                "enabled": True,
+                "capabilities": {"supports_streaming": True},
+                "accounts": [
+                    {
+                        "account_id": "browser",
+                        "transport_mode": "sse",
+                    },
+                ],
+                "metadata": {"owner": "channels"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["channel_type"], "web")
+        self.assertTrue(response.json()["capabilities"]["supports_streaming"])
+
+        disabled = self.client.post("/channels/profiles/web/disable")
+
+        self.assertEqual(disabled.status_code, 200)
+        self.assertFalse(disabled.json()["enabled"])
+        container = self.client.app.state.container
+        stored = container.channel_profile_service.get_profile("web")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertFalse(stored.enabled)
+
+        enabled = self.client.post("/channels/profiles/web/enable")
+
+        self.assertEqual(enabled.status_code, 200)
+        self.assertTrue(enabled.json()["enabled"])
+        listed = self.client.get("/channels/profiles")
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn("web", {item["channel_type"] for item in listed.json()})
+
+    def test_disabled_lark_profile_rejects_inbound_before_settings_materialization(self) -> None:
+        container = self.client.app.state.container
+        container.channel_profile_service.upsert_profile(
+            ChannelProfile(
+                channel_type="lark",
+                enabled=False,
+                accounts=(
+                    ChannelAccountProfile(
+                        account_id="default",
+                        transport_mode="webhook",
+                    ),
+                ),
+            ),
+        )
+
+        response = self.client.post(
+            "/channels/lark/events/default",
+            json={
+                "type": "url_verification",
+                "challenge": "challenge-value",
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+
     def test_lark_events_endpoint_handles_url_verification(self) -> None:
         container = self.client.app.state.container
         container.channel_profile_service.upsert_profile(

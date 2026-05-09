@@ -106,6 +106,7 @@ class OpenAIChatCompatibleAdapter:
             profile.credential_binding,
             required=profile.provider.value == "openai_compatible",
             description=f"LLM profile '{profile.id}'",
+            resolved_credential=request.resolved_credential,
         )
         headers = {"Content-Type": "application/json"}
         if token is not None:
@@ -343,6 +344,7 @@ class OpenAIChatCompatibleAdapter:
             profile.credential_binding,
             required=profile.provider.value == "openai_compatible",
             description=f"LLM profile '{profile.id}'",
+            resolved_credential=request.resolved_credential,
         )
         headers = {
             "Content-Type": "application/json",

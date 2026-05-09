@@ -10,6 +10,12 @@ from crxzipple.modules.agent.application import (
     MigrateAgentHomeInput,
     RegisterAgentProfileInput,
     SyncAgentHomeInput,
+    UpdateAgentProfileInput,
+)
+from crxzipple.modules.agent.domain.exceptions import (
+    AgentAlreadyExistsError,
+    AgentNotFoundError,
+    AgentValidationError,
 )
 from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
@@ -23,29 +29,6 @@ from crxzipple.modules.orchestration.infrastructure import MemoryBindingService
 
 
 _memory_binding_service = MemoryBindingService()
-
-
-def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentProfileInput:
-    return RegisterAgentProfileInput(
-        id=profile.id,
-        name=profile.name,
-        description=profile.description,
-        enabled=profile.enabled,
-        identity=AgentIdentity.from_payload(profile.identity),
-        instruction_policy=AgentInstructionPolicy.from_payload(
-            profile.instruction_policy,
-        ),
-        llm_routing_policy=AgentLlmRoutingPolicy.from_payload(
-            profile.llm_routing_policy,
-        ),
-        execution_policy=AgentExecutionPolicy.from_payload(profile.execution_policy),
-        runtime_preferences=AgentRuntimePreferences.from_payload(
-            profile.runtime_preferences,
-        ),
-        home_sidecar_files=_memory_binding_service.sidecar_files_from_runtime_preferences_payload(
-            profile.runtime_preferences,
-        ),
-    )
 
 
 def build_cli() -> typer.Typer:
@@ -115,45 +98,83 @@ def build_cli() -> typer.Typer:
         emoji: str | None = typer.Option(None, help="Optional identity emoji."),
         avatar: str | None = typer.Option(None, help="Optional identity avatar."),
         enabled: bool = typer.Option(True, "--enabled/--disabled"),
+        reason: str | None = typer.Option(
+            None,
+            "--reason",
+            help="Optional reason for the profile change.",
+        ),
     ) -> None:
         container = ensure_container(ctx)
-        profile = container.agent_service.register_profile(
-            RegisterAgentProfileInput(
-                id=agent_id,
-                name=name,
-                description=description,
-                enabled=enabled,
-                identity=AgentIdentity(
-                    display_name=display_name,
-                    theme=theme,
-                    emoji=emoji,
-                    avatar=avatar,
+        del reason
+        try:
+            profile = container.agent_service.register_profile(
+                RegisterAgentProfileInput(
+                    id=agent_id,
+                    name=name,
+                    description=description,
+                    enabled=enabled,
+                    identity=AgentIdentity(
+                        display_name=display_name,
+                        theme=theme,
+                        emoji=emoji,
+                        avatar=avatar,
+                    ),
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt=system_prompt,
+                        response_style=response_style,
+                        thinking_default=thinking_default,
+                        stream_by_default=stream_by_default,
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(
+                        default_llm_id=default_llm_id,
+                        fallback_llm_ids=tuple(fallback_llm_id or ()),
+                        image_llm_id=image_llm_id,
+                        document_llm_id=document_llm_id,
+                    ),
+                    execution_policy=AgentExecutionPolicy(
+                        timeout_seconds=timeout_seconds,
+                        max_turns=max_turns,
+                    ),
+                    runtime_preferences=AgentRuntimePreferences(
+                        home_dir=home_dir,
+                        workdir=workdir,
+                        workspace=workspace,
+                        sandbox_mode=sandbox_mode,
+                        memory_retrieval_backend=memory_retrieval_backend,
+                    ),
                 ),
-                instruction_policy=AgentInstructionPolicy(
-                    system_prompt=system_prompt,
-                    response_style=response_style,
-                    thinking_default=thinking_default,
-                    stream_by_default=stream_by_default,
-                ),
-                llm_routing_policy=AgentLlmRoutingPolicy(
-                    default_llm_id=default_llm_id,
-                    fallback_llm_ids=tuple(fallback_llm_id or ()),
-                    image_llm_id=image_llm_id,
-                    document_llm_id=document_llm_id,
-                ),
-                execution_policy=AgentExecutionPolicy(
-                    timeout_seconds=timeout_seconds,
-                    max_turns=max_turns,
-                ),
-                runtime_preferences=AgentRuntimePreferences(
-                    home_dir=home_dir,
-                    workdir=workdir,
-                    workspace=workspace,
-                    sandbox_mode=sandbox_mode,
-                    memory_retrieval_backend=memory_retrieval_backend,
-                ),
-            ),
-        )
+            )
+        except (AgentAlreadyExistsError, AgentValidationError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        echo_data(AgentProfileDTO.from_entity(profile))
+
+    @app.command("update-profile")
+    def update_profile(
+        ctx: typer.Context,
+        agent_id: str = typer.Argument(..., help="Agent profile identifier."),
+        name: str | None = typer.Option(None, help="New agent profile display name."),
+        description: str | None = typer.Option(None, help="New agent description."),
+        default_llm_id: str | None = typer.Option(
+            None,
+            help="New default LLM profile id.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        updates: dict[str, object] = {}
+        if name is not None:
+            updates["name"] = name
+        if description is not None:
+            updates["description"] = description
+        if default_llm_id is not None:
+            updates["llm_routing_policy"] = AgentLlmRoutingPolicy(
+                default_llm_id=default_llm_id,
+            )
+        try:
+            profile = container.agent_service.update_profile(
+                UpdateAgentProfileInput(id=agent_id, **updates),
+            )
+        except (AgentNotFoundError, AgentValidationError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
         echo_data(AgentProfileDTO.from_entity(profile))
 
     @app.command("sync-profiles")
@@ -203,8 +224,12 @@ def build_cli() -> typer.Typer:
         agent_id: str = typer.Argument(..., help="Agent profile identifier."),
     ) -> None:
         container = ensure_container(ctx)
+        try:
+            profile = container.agent_service.enable_profile(agent_id)
+        except AgentNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         echo_data(
-            AgentProfileDTO.from_entity(container.agent_service.enable_profile(agent_id)),
+            AgentProfileDTO.from_entity(profile),
         )
 
     @app.command("disable")
@@ -213,9 +238,25 @@ def build_cli() -> typer.Typer:
         agent_id: str = typer.Argument(..., help="Agent profile identifier."),
     ) -> None:
         container = ensure_container(ctx)
+        try:
+            profile = container.agent_service.disable_profile(agent_id)
+        except AgentNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         echo_data(
-            AgentProfileDTO.from_entity(container.agent_service.disable_profile(agent_id)),
+            AgentProfileDTO.from_entity(profile),
         )
+
+    @app.command("delete")
+    def delete_profile(
+        ctx: typer.Context,
+        agent_id: str = typer.Argument(..., help="Agent profile identifier."),
+    ) -> None:
+        container = ensure_container(ctx)
+        try:
+            container.agent_service.delete_profile(agent_id)
+        except (AgentNotFoundError, AgentValidationError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        echo_data({"id": agent_id, "deleted": True})
 
     @app.command("migrate-home")
     def migrate_home(
@@ -289,3 +330,28 @@ def build_cli() -> typer.Typer:
         )
 
     return app
+
+
+def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentProfileInput:
+    return RegisterAgentProfileInput(
+        id=profile.id,
+        name=profile.name,
+        description=profile.description,
+        enabled=profile.enabled,
+        identity=AgentIdentity.from_payload(profile.identity),
+        instruction_policy=AgentInstructionPolicy.from_payload(
+            profile.instruction_policy,
+        ),
+        llm_routing_policy=AgentLlmRoutingPolicy.from_payload(
+            profile.llm_routing_policy,
+        ),
+        execution_policy=AgentExecutionPolicy.from_payload(profile.execution_policy),
+        runtime_preferences=AgentRuntimePreferences.from_payload(
+            profile.runtime_preferences,
+        ),
+        home_sidecar_files=(
+            _memory_binding_service.sidecar_files_from_runtime_preferences_payload(
+                profile.runtime_preferences,
+            )
+        ),
+    )

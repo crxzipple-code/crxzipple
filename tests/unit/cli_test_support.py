@@ -34,7 +34,7 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0041_create_operations_action_audits"
+HEAD_REVISION = "0043_settings_governance"
 
 
 class CliModuleTestCase(unittest.TestCase):

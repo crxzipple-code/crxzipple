@@ -13,7 +13,7 @@ from crxzipple.modules.session.domain import (
 )
 
 
-type SessionInterfaceErrorFactory = Callable[[str], Exception]
+SessionInterfaceErrorFactory = Callable[[str], Exception]
 
 
 def parse_json_object(

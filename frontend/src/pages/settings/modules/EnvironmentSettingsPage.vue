@@ -1,225 +1,268 @@
 <script setup lang="ts">
-import { ArrowRight, Box, CheckCircle2, Copy, Download, GitBranch, Info, KeyRound, Lock, MoreVertical, Save, Search, Shield, Upload } from "lucide-vue-next";
+import { Box, GitBranch, Info, RefreshCcw, Shield } from "lucide-vue-next";
+import { computed, onMounted, ref } from "vue";
 
+import { useI18n } from "@/shared/i18n";
 import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
+import { listSettingsResources } from "../api";
 
-const environments = [
-  { name: "prod-us-east-1", role: "Production", status: "Active", region: "us-east-1", initial: "P" },
-  { name: "staging-us-east-1", role: "Staging", status: "Active", region: "us-east-1", initial: "S" },
-  { name: "dev-us-west-2", role: "Development", status: "Active", region: "us-west-2", initial: "D" },
-  { name: "test-us-west-2", role: "Testing", status: "Inactive", region: "us-west-2", initial: "T" },
-  { name: "local", role: "Local", status: "Inactive", region: "local", initial: "L" },
-] as const;
+type JsonRecord = Record<string, unknown>;
 
-const variables = [
-  { Key: "RUNTIME_TRACE_LEVEL", Value: "key_events", Source: "Environment", Scope: "Prod", "Last Changed": "2h ago" },
-  { Key: "MAX_RUN_CONCURRENCY", Value: "200", Source: "Environment", Scope: "Prod", "Last Changed": "2h ago" },
-  { Key: "TOOL_TIMEOUT_MS", Value: "30000", Source: "Runtime Defaults", Scope: "All", "Last Changed": "1d ago" },
-];
+interface SettingsResourceSummaryPayload {
+  id?: string;
+  resource_id?: string;
+  display_name?: string;
+  status?: string;
+  enabled?: boolean;
+  source?: string | null;
+  version?: string | number | null;
+  updated_at?: string | null;
+  metadata?: JsonRecord;
+  payload?: JsonRecord;
+  effective_config?: JsonRecord;
+  resolution?: {
+    value?: unknown;
+    source?: { kind?: string; name?: string };
+    override_trace?: unknown[];
+  };
+}
 
-const secrets = [
-  { Name: "OPENAI_API_KEY", Provider: "Access Assets", Rotation: "30 days", Status: "Healthy", "Used By": "LLM Profiles" },
-  { Name: "PINECONE_API_KEY", Provider: "Access Assets", Rotation: "60 days", Status: "Healthy", "Used By": "Memory Stores" },
-  { Name: "SLACK_BOT_TOKEN", Provider: "Access Assets", Rotation: "Manual", Status: "Warning", "Used By": "Channels" },
-];
+interface SettingsResourcePagePayload {
+  resource?: string;
+  status?: string;
+  description?: string;
+  resources?: SettingsResourceSummaryPayload[];
+  list?: {
+    total?: number;
+  };
+}
 
-const groups = [
-  { Group: "production-runtime", Members: "12", Scope: "Prod", Status: "Active" },
-  { Group: "support-admins", Members: "6", Scope: "Prod", Status: "Active" },
-  { Group: "release-observers", Members: "18", Scope: "Read-only", Status: "Active" },
-];
+const settingsPage = ref<SettingsResourcePagePayload | null>(null);
+const isLoading = ref(false);
+const loadError = ref<string | null>(null);
+const { t } = useI18n();
+
+const resources = computed(() => settingsPage.value?.resources ?? []);
+const selectedResource = computed(() => resources.value[0] ?? null);
+const selectedConfig = computed(() => selectedResource.value ? resourceConfig(selectedResource.value) : {});
+
+const environmentRows = computed(() =>
+  resources.value.map((resource) => {
+    const config = resourceConfig(resource);
+    return {
+      Name: textValue(resource.display_name, settingsResourceId(resource)),
+      Environment: textValue(config.environment, settingsResourceId(resource)),
+      Status: resource.enabled === false ? t("text.disabled") : textValue(resource.status, "ready"),
+      Source: textValue(resource.source, resource.resolution?.source?.name ?? "settings_application"),
+      Version: textValue(resource.version, "-"),
+      "Updated At": formatTime(resource.updated_at),
+    };
+  }),
+);
+
+const effectiveRows = computed(() =>
+  Object.entries(selectedConfig.value)
+    .filter(([key]) => key !== "metadata")
+    .map(([key, value]) => ({
+      Key: key,
+      Value: formatConfigValue(key, value),
+    })),
+);
+
+const metadataRows = computed(() => {
+  const metadata = objectValue(selectedConfig.value.metadata) ?? objectValue(selectedResource.value?.metadata) ?? {};
+  return Object.entries(metadata).slice(0, 10).map(([key, value]) => ({
+    Key: key,
+    Value: formatConfigValue(key, value),
+  }));
+});
+
+const resolutionRows = computed(() => {
+  const source = selectedResource.value?.resolution?.source;
+  const overrideTrace = selectedResource.value?.resolution?.override_trace;
+  return [
+    {
+      Layer: "Effective environment",
+      Source: textValue(source?.name, textValue(selectedResource.value?.source, "settings_application")),
+      Overrides: String(Array.isArray(overrideTrace) ? overrideTrace.length : 0),
+    },
+  ];
+});
+
+const environmentName = computed(() =>
+  textValue(selectedConfig.value.environment, selectedResource.value ? settingsResourceId(selectedResource.value) : "-"),
+);
+
+onMounted(() => {
+  void loadEnvironment();
+});
+
+async function loadEnvironment(): Promise<void> {
+  isLoading.value = true;
+  loadError.value = null;
+  try {
+    settingsPage.value = await listSettingsResources("environment") as SettingsResourcePagePayload;
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : String(error);
+    settingsPage.value = null;
+  } finally {
+    isLoading.value = false;
+  }
+}
+
+function resourceConfig(resource: SettingsResourceSummaryPayload): JsonRecord {
+  return objectValue(resource.effective_config)
+    ?? objectValue(resource.payload)
+    ?? objectValue(resource.resolution?.value)
+    ?? {};
+}
+
+function settingsResourceId(resource: SettingsResourceSummaryPayload): string {
+  return textValue(resource.resource_id, textValue(resource.id, "unknown"));
+}
+
+function objectValue(value: unknown): JsonRecord | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as JsonRecord;
+  return null;
+}
+
+function textValue(value: unknown, fallback = ""): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
+function formatConfigValue(key: string, value: unknown): string {
+  if (isSensitiveKey(key)) return "***";
+  if (typeof value === "string") return maskUrlCredentials(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map((item) => formatConfigValue(key, item)).join(", ") || "-";
+  if (value && typeof value === "object") {
+    return JSON.stringify(redactRecord(value as JsonRecord));
+  }
+  return "-";
+}
+
+function redactRecord(value: JsonRecord): JsonRecord {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      isSensitiveKey(key)
+        ? "***"
+        : item && typeof item === "object" && !Array.isArray(item)
+          ? redactRecord(item as JsonRecord)
+          : typeof item === "string"
+            ? maskUrlCredentials(item)
+            : item,
+    ]),
+  );
+}
+
+function isSensitiveKey(key: string): boolean {
+  return /(api[_-]?key|token|secret|password|credential|private[_-]?key)/i.test(key);
+}
+
+function maskUrlCredentials(value: string): string {
+  const masked = value.replace(/\/\/([^:/\s]+):([^@\s]+)@/g, "//***:***@");
+  if (masked !== value) return masked;
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password) {
+      parsed.username = "***";
+      parsed.password = "***";
+      return parsed.toString();
+    }
+  } catch {
+    return value;
+  }
+  return value;
+}
+
+function formatTime(value: string | null | undefined): string {
+  if (!value) return "-";
+  return value.replace("T", " ").replace(/\.\d+/, "").replace("+00:00", " UTC");
+}
 </script>
 
 <template>
   <main class="settings-module environment-settings scroll-area">
     <header class="settings-page-header">
       <div>
-        <h1>Environment <a>Docs</a></h1>
-        <p>Manage isolated configuration used to deploy and run agents, skills, and integrations.</p>
+        <h1>Effective Environment</h1>
+        <p>Read-only effective environment resolved by Settings. Variable editors, secret editors, groups, and import/export are hidden until backend workflows exist.</p>
       </div>
       <div class="settings-header-actions">
-        <UiButton size="sm" variant="primary"><Box :size="14" /> New Environment</UiButton>
-        <UiButton size="sm" variant="secondary"><MoreVertical :size="14" /></UiButton>
+        <UiButton size="sm" variant="secondary" @click="loadEnvironment"><RefreshCcw :size="14" /> {{ t("common.refresh") }}</UiButton>
       </div>
     </header>
 
-    <nav class="settings-tabs environment-tabs">
-      <button class="active" type="button">Environments</button>
-      <button type="button">Variables</button>
-      <button type="button">Secrets</button>
-      <button type="button">Groups</button>
-      <button type="button">Import / Export</button>
-    </nav>
-
     <section class="settings-panel environment-info-band">
-      <article><Info :size="16" /><div><span>Environment Role</span><small>Environments provide deployment-scoped configuration and secrets.</small></div></article>
-      <article><GitBranch :size="16" /><div><span>Precedence</span><small>Environment overrides System/Platform Defaults.</small><a>View Runtime Defaults <ArrowRight :size="12" /></a></div></article>
-      <article><Shield :size="16" /><div><span>Access Assets Scope</span><small>Access Assets can be scoped per environment.</small><a>Manage Access Assets <ArrowRight :size="12" /></a></div></article>
-      <article><ArrowRight :size="16" /><div><span>Learn more</span><small>Understand environment model and best practices.</small><a>Environment Guide <ArrowRight :size="12" /></a></div></article>
+      <article><Info :size="16" /><div><span>Settings Read Model</span><small>Configuration source is /ui/settings/environment.</small></div></article>
+      <article><GitBranch :size="16" /><div><span>Resolution</span><small>Values are effective Settings output, not a local editor buffer.</small></div></article>
+      <article><Shield :size="16" /><div><span>Secrets</span><small>Sensitive keys and URL credentials are masked in this page.</small></div></article>
     </section>
 
-    <section class="environment-layout">
-      <aside class="settings-panel environment-picker">
-        <div class="environment-picker-head">
-          <h2>Environments (5)</h2>
-          <button type="button"><MoreVertical :size="14" /></button>
-        </div>
-        <div class="environment-picker-filter">
-          <label><Search :size="14" /><input placeholder="Search environments..." /></label>
-          <select><option>All Status</option></select>
-        </div>
-        <div class="environment-list">
-          <button v-for="environment in environments" :key="environment.name" :class="{ active: environment.name === 'prod-us-east-1' }" type="button">
-            <span>{{ environment.initial }}</span>
-            <strong>{{ environment.name }}<small>{{ environment.role }} / {{ environment.region }}</small></strong>
-            <em>{{ environment.status }}</em>
-          </button>
-        </div>
-      </aside>
+    <section class="settings-panel environment-list-panel">
+      <div v-if="loadError" class="environment-empty">{{ loadError }}</div>
+      <div v-else-if="isLoading" class="environment-empty">Loading effective environment...</div>
+      <DataTable
+        v-else
+        :columns="['Name', 'Environment', 'Status', 'Source', 'Version', 'Updated At']"
+        :rows="environmentRows"
+        section-id="environment-effective-resources"
+      />
+      <footer>Showing {{ environmentRows.length }} of {{ settingsPage?.list?.total ?? environmentRows.length }} Settings resources</footer>
+    </section>
 
-      <div class="environment-workspace">
-        <section class="settings-panel environment-detail">
-          <header>
-            <div class="environment-title">
-              <span><Box :size="19" /></span>
-              <div>
-                <h2>prod-us-east-1 <em><StatusDot tone="success" />Active</em></h2>
-                <p>ID: <code>env_prod_us_east_1</code> <Copy :size="12" /></p>
-              </div>
+    <section v-if="selectedResource" class="environment-layout">
+      <section class="settings-panel environment-detail">
+        <header>
+          <div class="environment-title">
+            <span><Box :size="19" /></span>
+            <div>
+              <h2>{{ environmentName }} <em><StatusDot :tone="selectedResource.enabled === false ? 'warning' : 'success'" />{{ selectedResource.enabled === false ? t("text.disabled") : textValue(selectedResource.status, "ready") }}</em></h2>
+              <p>ID: <code>{{ settingsResourceId(selectedResource) }}</code></p>
             </div>
-            <div class="settings-header-actions">
-              <UiButton size="sm" variant="secondary">Set as Default</UiButton>
-              <UiButton size="sm" variant="primary"><Save :size="14" /> Edit Environment</UiButton>
-              <UiButton size="sm" variant="secondary"><MoreVertical :size="14" /></UiButton>
-            </div>
-          </header>
-
-          <nav class="environment-detail-tabs">
-            <button class="active" type="button">Overview</button>
-            <button type="button">Variables (86)</button>
-            <button type="button">Secrets (12)</button>
-            <button type="button">Groups (4)</button>
-            <button type="button">Access Assets (18)</button>
-            <button type="button">History</button>
-          </nav>
-
-          <div class="environment-overview-grid">
-            <article>
-              <h3>Environment Information</h3>
-              <div class="environment-form-grid">
-                <label><span>Name</span><input value="prod-us-east-1" /></label>
-                <label><span>Role</span><select><option>Production</option></select></label>
-                <label><span>Region</span><input value="us-east-1" /></label>
-                <label><span>Owner</span><input value="Platform Team" /></label>
-                <label class="wide"><span>Description</span><textarea>Primary production environment with guarded overrides and audited activation.</textarea></label>
-              </div>
-            </article>
-            <article>
-              <h3>Override Summary</h3>
-              <dl class="settings-kv">
-                <div><dt>Runtime Defaults</dt><dd>216 inherited</dd></div>
-                <div><dt>Environment Overrides</dt><dd class="settings-tone-warning">7 active</dd></div>
-                <div><dt>Conflict Count</dt><dd class="settings-tone-success">0</dd></div>
-                <div><dt>Rollback Points</dt><dd>5 available</dd></div>
-              </dl>
-            </article>
-            <article>
-              <h3>Configuration Validation</h3>
-              <ul class="validation-list">
-                <li><CheckCircle2 :size="14" />Variables resolved</li>
-                <li><CheckCircle2 :size="14" />Secret metadata valid</li>
-                <li><CheckCircle2 :size="14" />Access scope allowed</li>
-                <li><Lock :size="14" />Activation requires approval</li>
-              </ul>
-            </article>
           </div>
-        </section>
+        </header>
 
-        <section class="environment-mid-grid">
-          <article class="settings-panel precedence-card">
-            <div class="settings-panel-heading"><h2>Precedence & Inheritance</h2><a>View resolution trace <ArrowRight :size="12" /></a></div>
-            <div class="precedence-flow">
-              <span>Runtime Defaults</span><ArrowRight :size="14" /><span>Organization</span><ArrowRight :size="14" /><span class="active">Environment</span><ArrowRight :size="14" /><span>Deployment</span><ArrowRight :size="14" /><span>Run</span>
-            </div>
-            <dl class="settings-kv">
-              <div><dt>Winning Layer</dt><dd>Environment for 7 keys</dd></div>
-              <div><dt>Dry-run Impact</dt><dd>18 active runs affected</dd></div>
-              <div><dt>Rollback Strategy</dt><dd>Restore previous environment snapshot</dd></div>
-            </dl>
+        <div class="environment-overview-grid">
+          <article>
+            <h3>Effective Values</h3>
+            <DataTable :columns="['Key', 'Value']" :rows="effectiveRows" section-id="environment-effective-values" />
           </article>
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Access Assets Scope</h2><span>12 assets</span></div>
-            <dl class="settings-kv">
-              <div><dt>LLM Credentials</dt><dd class="settings-tone-success">4 healthy</dd></div>
-              <div><dt>Memory Stores</dt><dd class="settings-tone-success">3 healthy</dd></div>
-              <div><dt>Channel Tokens</dt><dd class="settings-tone-warning">1 warning</dd></div>
-            </dl>
+          <article>
+            <h3>Resolution Trace</h3>
+            <DataTable :columns="['Layer', 'Source', 'Overrides']" :rows="resolutionRows" section-id="environment-resolution-trace" />
           </article>
-          <article class="settings-panel activation-card">
-            <div class="settings-panel-heading"><h2>Environment Activation</h2><span>Guarded</span></div>
-            <p>Activation changes require validation, impact preview, and an approval note.</p>
-            <button type="button">Run Activation Check</button>
+          <article>
+            <h3>Resource Metadata</h3>
+            <DataTable :columns="['Key', 'Value']" :rows="metadataRows" section-id="environment-metadata" />
           </article>
-        </section>
+        </div>
+      </section>
+    </section>
 
-        <section class="environment-bottom-grid">
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Environment Variables</h2><a>Edit variables</a></div>
-            <DataTable :columns="['Key', 'Value', 'Source', 'Scope', 'Last Changed']" :rows="variables" section-id="environment-variables" />
-          </article>
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Secrets</h2><a>Manage secrets</a></div>
-            <DataTable :columns="['Name', 'Provider', 'Rotation', 'Status', 'Used By']" :rows="secrets" section-id="environment-secrets" />
-          </article>
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Groups</h2><a>Manage groups</a></div>
-            <DataTable :columns="['Group', 'Members', 'Scope', 'Status']" :rows="groups" section-id="environment-groups" />
-          </article>
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Import / Export</h2><span>YAML / JSON</span></div>
-            <div class="environment-action-row"><button type="button"><Upload :size="14" /> Import Config</button><button type="button"><Download :size="14" /> Export Snapshot</button></div>
-          </article>
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Change Management</h2><span>Required</span></div>
-            <dl class="settings-kv"><div><dt>Reviewer</dt><dd>Platform Admin</dd></div><div><dt>Ticket</dt><dd>REL-2038</dd></div><div><dt>Audit</dt><dd class="settings-tone-success">Enabled</dd></div></dl>
-          </article>
-        </section>
-      </div>
+    <section v-else class="settings-panel environment-empty-state">
+      <Box :size="22" />
+      <h2>No environment resources</h2>
+      <p>/ui/settings/environment returned no Settings-owned effective environment resources.</p>
     </section>
 
     <footer class="settings-footer">
-      <span><Box :size="14" />Config Source: Environment</span>
-      <span><GitBranch :size="14" />Override layer: deployment</span>
-      <span><KeyRound :size="14" />Secrets resolved through Access Assets</span>
-      <span><Save :size="14" />Last Saved: 2 minutes ago</span>
-      <a>Audit History <ArrowRight :size="13" /></a>
+      <span><Box :size="14" />Config source: /ui/settings/environment</span>
+      <span><GitBranch :size="14" />Read-only effective Settings resolution</span>
+      <span><Shield :size="14" />No secret values are rendered</span>
     </footer>
   </main>
 </template>
 
 <style scoped>
-.settings-page-header h1 {
-  display: inline-flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.settings-page-header h1 a {
-  color: var(--color-blue);
-  font-size: 12px;
-  font-weight: 600;
-  text-decoration: none;
-}
-
-.environment-tabs {
-  margin-bottom: 8px;
-}
-
 .environment-info-band {
   display: grid;
-  grid-template-columns: 0.8fr 1.2fr 0.85fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
   margin-bottom: 10px;
   padding: 0;
@@ -230,7 +273,7 @@ const groups = [
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
   gap: 10px;
-  min-height: 88px;
+  min-height: 82px;
   padding: 18px 20px;
   border-right: 1px solid var(--border-subtle);
 }
@@ -256,162 +299,29 @@ const groups = [
   font-weight: 750;
 }
 
-.environment-info-band a {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 10px;
-  color: var(--color-accent);
+.environment-list-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.environment-list-panel footer {
+  min-height: 28px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
   font-size: 11px;
-  text-decoration: none;
+}
+
+.environment-empty {
+  padding: 22px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .environment-layout {
   display: grid;
-  grid-template-columns: 310px minmax(0, 1fr);
   gap: 12px;
-}
-
-.environment-picker {
-  display: grid;
-  align-content: start;
-  gap: 10px;
-  padding: 10px;
-}
-
-.environment-picker-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 28px;
-}
-
-.environment-picker-head h2 {
-  font-size: 13px;
-}
-
-.environment-picker-head button {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-muted);
-}
-
-.environment-picker-filter {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px;
-  gap: 8px;
-}
-
-.environment-picker label {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  min-height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-muted);
-}
-
-.environment-picker input,
-.environment-picker select,
-.environment-form-grid input,
-.environment-form-grid select,
-.environment-form-grid textarea {
-  width: 100%;
-  min-height: 30px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.environment-picker input {
-  border: 0;
-  outline: 0;
-  background: transparent;
-}
-
-.environment-picker select,
-.environment-form-grid input,
-.environment-form-grid select,
-.environment-form-grid textarea {
-  padding: 0 9px;
-}
-
-.environment-form-grid textarea {
-  min-height: 58px;
-  padding-top: 7px;
-  resize: vertical;
-}
-
-.environment-list {
-  display: grid;
-  gap: 6px;
-}
-
-.environment-list button {
-  display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  min-height: 54px;
-  padding: 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-2);
-  background: transparent;
-  color: var(--text-secondary);
-  text-align: left;
-}
-
-.environment-list button.active {
-  border-color: color-mix(in srgb, var(--color-accent) 54%, var(--border-subtle));
-  background: var(--surface-active);
-}
-
-.environment-list button > span {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-2);
-  background: color-mix(in srgb, var(--color-blue) 18%, transparent);
-  color: var(--color-blue);
-}
-
-.environment-list strong,
-.environment-list small {
-  display: block;
-  min-width: 0;
-}
-
-.environment-list strong {
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.environment-list small,
-.environment-list em {
-  color: var(--text-muted);
-  font-size: 10.5px;
-  font-style: normal;
-}
-
-.environment-workspace {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
+  margin-top: 10px;
 }
 
 .environment-detail {
@@ -428,7 +338,6 @@ const groups = [
 }
 
 .environment-detail > header {
-  justify-content: space-between;
   gap: 12px;
   padding: 12px;
   border-bottom: 1px solid var(--border-subtle);
@@ -472,30 +381,9 @@ const groups = [
   font-size: 11px;
 }
 
-.environment-detail-tabs {
-  display: flex;
-  gap: 22px;
-  min-height: 38px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.environment-detail-tabs button {
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.environment-detail-tabs .active {
-  border-color: var(--color-accent);
-  color: var(--text-primary);
-}
-
 .environment-overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.85fr) minmax(220px, 0.85fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr) minmax(240px, 0.8fr);
   gap: 10px;
   padding: 12px;
 }
@@ -513,112 +401,18 @@ const groups = [
   font-size: 13px;
 }
 
-.environment-form-grid {
+.environment-empty-state {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  place-items: center;
   gap: 8px;
-}
-
-.environment-form-grid label {
-  display: grid;
-  gap: 4px;
-}
-
-.environment-form-grid span {
-  color: var(--text-muted);
-  font-size: 10.5px;
-}
-
-.environment-form-grid .wide {
-  grid-column: 1 / -1;
-}
-
-.validation-list {
-  display: grid;
-  gap: 8px;
-  padding: 0;
-  list-style: none;
-}
-
-.validation-list li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.validation-list svg {
-  color: var(--color-success);
-}
-
-.environment-mid-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(230px, 0.7fr) minmax(230px, 0.7fr);
-  gap: 10px;
-}
-
-.precedence-flow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 10px;
-}
-
-.precedence-flow span {
-  padding: 6px 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-1);
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
-.precedence-flow .active {
-  border-color: color-mix(in srgb, var(--color-accent) 62%, var(--border-subtle));
-  background: var(--surface-active);
-  color: var(--text-primary);
-}
-
-.activation-card p {
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.activation-card button,
-.environment-action-row button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.activation-card button {
+  min-height: 220px;
   margin-top: 10px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
-.environment-bottom-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 0.8fr);
-  gap: 10px;
-}
-
-.environment-bottom-grid article:nth-child(4),
-.environment-bottom-grid article:nth-child(5) {
-  min-height: 110px;
-}
-
-.environment-action-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+.environment-empty-state h2 {
+  color: var(--text-primary);
+  font-size: 15px;
 }
 </style>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 from crxzipple.modules.channels.application.ports import (
     ChannelInteractionRegistryStore,
@@ -90,6 +91,38 @@ class ChannelProfileApplicationService:
         if resolved is None:
             raise ChannelValidationError("channel profile upsert did not persist.")
         return resolved
+
+    def set_profile_enabled(self, channel_type: str, *, enabled: bool) -> ChannelProfile:
+        normalized = _normalize_key(channel_type)
+        if not normalized:
+            raise ChannelValidationError("channel_type is required.")
+        resolved: ChannelProfile | None = None
+
+        def _mutate(config: ChannelSystemConfig) -> ChannelSystemConfig:
+            nonlocal resolved
+            profiles: list[ChannelProfile] = []
+            for item in config.profiles:
+                if _normalize_key(item.channel_type) == normalized:
+                    resolved = replace(item, enabled=enabled)
+                    profiles.append(resolved)
+                else:
+                    profiles.append(item)
+            return replace(config, profiles=tuple(profiles))
+
+        self.system_config_store.update(_mutate)
+        if resolved is None:
+            raise ChannelValidationError(
+                f"channel profile '{channel_type}' was not found.",
+                code="channel_profile_not_found",
+                details={"channel_type": channel_type},
+            )
+        return resolved
+
+    def enable_profile(self, channel_type: str) -> ChannelProfile:
+        return self.set_profile_enabled(channel_type, enabled=True)
+
+    def disable_profile(self, channel_type: str) -> ChannelProfile:
+        return self.set_profile_enabled(channel_type, enabled=False)
 
     def remove_profile(self, channel_type: str) -> ChannelSystemConfig:
         normalized = _normalize_key(channel_type)

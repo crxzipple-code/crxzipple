@@ -10,4 +10,5 @@
 ## 历史审计报告
 
 - [reports/code-quality-audit-20260506.md](reports/code-quality-audit-20260506.md)：第一轮代码质量审计原始报告，已被当前 follow-up checklist 取代。
+- [reports/code-quality-audit-checklist-template-20260506.md](reports/code-quality-audit-checklist-template-20260506.md)：第一轮审计模板，已不再作为 active checklist。
 - [reports/code-quality-remediation-tasks-20260506.md](reports/code-quality-remediation-tasks-20260506.md)：第一轮整改闭环记录，已关闭。

@@ -5,7 +5,6 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.operations.application.action_audit import (

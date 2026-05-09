@@ -34,6 +34,10 @@ from crxzipple.modules.tool.domain import (
 from crxzipple.shared.domain.effects import get_effect_descriptor
 
 
+TOOL_VISIBILITY_AUTHORIZATION_ACTION = "tool.authorize"
+TOOL_EFFECT_AUTHORIZATION_ACTION = "tool.effect.authorize"
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedTool:
     tool: Tool
@@ -118,10 +122,12 @@ class ToolResolver:
     authorization_port: AuthorizationPort
     access_port: AccessReadinessPort | None = None
     run_context_provider: Callable[[OrchestrationRun], dict[str, object]] | None = None
-    default_remote_ask_effect_id: str = field(default="remote_tool_access")
+    default_remote_ask_effect_id: str = field(default="remote_tool_execution")
     default_background_effect_id: str = field(default="background_execution")
     default_mutation_effect_id: str = field(default="state_mutation")
-    default_confirmation_effect_id: str = field(default="sensitive_access")
+    default_confirmation_effect_id: str = field(
+        default="sensitive_operation_confirmation",
+    )
 
     def resolve(self, run: OrchestrationRun) -> ResolvedToolSet:
         self.tool_catalog.ensure_local_system_tools_registered()
@@ -428,7 +434,7 @@ class ToolResolver:
                     id=run.inbound_instruction.source,
                     attrs={"run_id": run.id},
                 ),
-                action="tool.access_effect",
+                action=TOOL_EFFECT_AUTHORIZATION_ACTION,
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,
@@ -462,7 +468,7 @@ class ToolResolver:
                     id=run.inbound_instruction.source,
                     attrs={"run_id": run.id},
                 ),
-                action="tool.access_tool",
+                action=TOOL_VISIBILITY_AUTHORIZATION_ACTION,
                 resource=AuthorizationResource(
                     kind="tool",
                     id=tool.id,

@@ -26,6 +26,16 @@ from crxzipple.modules.tool.application.services import (
     SetToolAvailabilityInput,
     ToolApplicationService,
 )
+from crxzipple.modules.tool.application.settings_integration import (
+    ToolEnablementDiscoveryGateway,
+    ToolEnablementRuntimeGateway,
+    ToolEnablementService,
+    ToolEnablementTarget,
+    ToolSettingsBootstrapConfig,
+    mcp_provider_settings_from_config,
+    openapi_provider_settings_from_config,
+    tool_settings_bootstrap_config_from_settings,
+)
 from crxzipple.modules.tool.application.submission_service import ToolSubmissionService
 from crxzipple.modules.tool.domain import ToolExecutionContext
 
@@ -41,13 +51,21 @@ __all__ = [
     "ToolDispatchRecoveryHandler",
     "ToolExecutionContext",
     "ToolDispatchEventSubscriber",
+    "ToolEnablementDiscoveryGateway",
+    "ToolEnablementRuntimeGateway",
+    "ToolEnablementService",
+    "ToolEnablementTarget",
     "ToolRuntimeEventService",
     "ToolRunDispatchClaim",
     "ToolRunDispatchPort",
     "ToolRuntimeGateway",
     "ToolSchedulerRuntimePort",
+    "ToolSettingsBootstrapConfig",
     "ToolSpec",
     "ToolSubmissionService",
     "ToolUnitOfWork",
     "ToolWorkerRuntimePort",
+    "mcp_provider_settings_from_config",
+    "openapi_provider_settings_from_config",
+    "tool_settings_bootstrap_config_from_settings",
 ]

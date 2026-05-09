@@ -9,7 +9,7 @@ from crxzipple.modules.mobile.application import (
 )
 from crxzipple.modules.mobile.domain import MobileActionResult
 
-from .requests import MobileActionRequest, MobileControlRequest, MobileInterfaceRequest
+from .requests import MobileControlRequest, MobileInterfaceRequest
 
 
 @dataclass(slots=True)

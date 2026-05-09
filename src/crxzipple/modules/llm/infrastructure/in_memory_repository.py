@@ -10,6 +10,9 @@ class InMemoryLlmProfileRepository:
     def add(self, profile: LlmProfile) -> None:
         self._items[profile.id] = profile
 
+    def delete(self, llm_id: str) -> None:
+        self._items.pop(llm_id, None)
+
     def get(self, llm_id: str) -> LlmProfile | None:
         return self._items.get(llm_id)
 

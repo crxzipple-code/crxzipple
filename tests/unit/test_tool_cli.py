@@ -183,7 +183,11 @@ class ToolCliTestCase(CliModuleTestCase):
             self.assertEqual(run_payload["status"], "succeeded")
             self.assertEqual(run_payload["output_payload"]["message"], "CLI")
             self.assertIn(
-                "api_key=sample-api-key",
+                "api_key=%5Bredacted%5D",
+                run_payload["result"]["metadata"]["request"]["url"],
+            )
+            self.assertNotIn(
+                "sample-api-key",
                 run_payload["result"]["metadata"]["request"]["url"],
             )
 

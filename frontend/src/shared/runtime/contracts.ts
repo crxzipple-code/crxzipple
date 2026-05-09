@@ -18,11 +18,13 @@ export type SettingsResourceId =
   | "memory-config"
   | "access-assets"
   | "channel-profiles"
-  | "event-contracts"
+  | "event-registry"
   | "runtime-defaults"
   | "environment"
   | "audit-logs"
   | "backup-restore";
+
+export type SettingsResourceKind = Exclude<SettingsResourceId, "overview">;
 
 export type UiTone = "neutral" | "info" | "success" | "warning" | "danger";
 export type UiHealthStatus = "healthy" | "warning" | "error" | "unknown";
@@ -779,82 +781,347 @@ export type OperationsReadModel =
   | OperationsEventsReadModel
   | OperationsDaemonReadModel;
 
+export type SettingsStatus =
+  | "ready"
+  | "empty"
+  | "warning"
+  | "error"
+  | "valid"
+  | "invalid"
+  | "unknown"
+  | (string & {});
+
+export type SettingsPayload = Record<string, unknown>;
+export type SettingsTableColumn = string | UiTableColumn;
+export type SettingsTableCellValue = string | number | boolean | null | UiTableCellValue;
+export type SettingsTableRow = Record<string, SettingsTableCellValue> | UiTableRow;
+
+export type SettingsActionName =
+  | "dry-run"
+  | "validate"
+  | "publish"
+  | "rollback"
+  | "enable"
+  | "disable"
+  | "create"
+  | "update";
+
+export interface SettingsHealth {
+  status: SettingsStatus;
+  degraded: boolean;
+  source: string;
+  missing_resource_kinds?: SettingsResourceKind[];
+}
+
+export interface SettingsKeyValueItem {
+  label: string;
+  value: string | number | boolean | null;
+  tone?: UiTone;
+  route?: string;
+  copy_value?: string;
+}
+
+export interface SettingsKeyValueSection {
+  id?: string;
+  title: string;
+  items: SettingsKeyValueItem[];
+  actions?: SettingsActionDescriptor[];
+}
+
+export interface SettingsTableSection {
+  id?: string;
+  title: string;
+  description?: string;
+  columns: SettingsTableColumn[];
+  rows: SettingsTableRow[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+  view_all_route?: string | null;
+  empty_state?: string | null;
+  actions?: SettingsActionDescriptor[];
+}
+
+export interface SettingsChartSeriesItem {
+  id?: string;
+  label: string;
+  value?: number;
+  tone?: UiTone;
+  points?: Array<{ x: string; y: number }>;
+}
+
+export interface SettingsChartSection {
+  id?: string;
+  title: string;
+  kind?: "line" | "bar" | "donut" | "flow" | "graph" | (string & {});
+  total?: string | number;
+  series?: SettingsChartSeriesItem[];
+  segments?: Array<{ id: string; label: string; value: number; tone?: UiTone }>;
+  rows?: SettingsTableRow[];
+  actions?: SettingsActionDescriptor[];
+}
+
+export interface SettingsActionDescriptor {
+  id: string;
+  label: string;
+  method?: RuntimeActionMethod | string;
+  route?: string;
+  endpoint?: string | null;
+  requires_reason?: boolean;
+  reason_required?: boolean;
+  risk?: "low" | "medium" | "high" | RuntimeActionRisk | (string & {});
+  allowed?: boolean;
+  disabled_reason?: string | null;
+  requires_confirmation?: boolean;
+}
+
+export interface SettingsLink {
+  id?: string;
+  label: string;
+  route: string;
+}
+
 export interface SettingsOverviewReadModel {
   resource: "overview";
   title: string;
   description: string;
-  contract_summary: UiKeyValueSection;
-  configuration_summary: UiKeyValueSection;
-  resource_counts: UiMetricCard[];
-  configuration_health: UiTableSection;
-  recent_changes: UiTableSection;
-  configuration_distribution: UiChartSection;
-  configuration_issues: UiTableSection;
-  configuration_inheritance: UiChartSection | UiKeyValueSection;
-  sources_versioning: UiKeyValueSection;
-  quick_actions: UiRuntimeAction[];
-  useful_links: UiLinkedEntity[];
+  status: SettingsStatus;
+  health: SettingsHealth;
+  counts: {
+    resources: number;
+    kinds: number;
+    audits: number;
+  };
+  resource_counts: Array<{
+    id: SettingsResourceKind;
+    label: string;
+    value: number;
+    tone: UiTone | (string & {});
+    route: string;
+  }>;
+  contract_summary: SettingsKeyValueSection;
+  configuration_summary: SettingsKeyValueSection;
+  configuration_health: SettingsTableSection;
+  recent_changes: SettingsTableSection;
+  configuration_distribution: SettingsChartSection;
+  configuration_issues: SettingsTableSection;
+  configuration_inheritance: SettingsChartSection | SettingsKeyValueSection;
+  sources_versioning: SettingsKeyValueSection;
+  quick_actions: SettingsActionDescriptor[];
+  useful_links: SettingsLink[];
+}
+
+export interface SettingsResolutionSource {
+  kind: string;
+  name: string;
+  source_id: string;
+  version?: number | string | null;
+  version_id?: string | null;
+  override_id?: string | null;
+  applied: boolean;
+  reason?: string | null;
+}
+
+export interface SettingsResolutionPayload {
+  resource_ref: {
+    kind: SettingsResourceKind | string;
+    id: string;
+  };
+  value: unknown;
+  source: SettingsResolutionSource;
+  sources: SettingsResolutionSource[];
+  override_trace: SettingsResolutionSource[];
+  snapshot_id: string | null;
+  resolved_at: string | null;
+  validation: SettingsPayload;
+}
+
+export interface SettingsResourceSummary {
+  id: string;
+  resource_id: string;
+  kind: SettingsResourceKind;
+  display_name: string;
+  status: SettingsStatus;
+  enabled: boolean;
+  source: string | null;
+  version: number | null;
+  updated_at: string | null;
+  metadata: SettingsPayload;
+  effective_config: unknown;
+  resolution: SettingsResolutionPayload;
 }
 
 export interface SettingsDetailPanel {
   id: string;
   title: string;
-  status?: UiRuntimeStatus | UiHealthStatus | string;
+  status?: SettingsStatus;
   tabs: OperationsTab[];
   active_tab: string;
-  sections: Array<UiKeyValueSection | UiTableSection | UiChartSection>;
-  actions: UiRuntimeAction[];
+  sections: Array<SettingsKeyValueSection | SettingsTableSection | SettingsChartSection>;
+  actions: SettingsActionDescriptor[];
   linked_entities?: UiLinkedEntity[];
 }
 
 export interface SettingsValidationSummary {
-  status: "valid" | "warning" | "error" | "unknown";
-  checks: UiTableSection;
-  last_validated_at?: string;
-  actions: UiRuntimeAction[];
+  status: SettingsStatus;
+  checks: SettingsTableSection;
+  result?: SettingsPayload;
+  last_validated_at?: string | null;
+  actions: SettingsActionDescriptor[];
 }
 
 export interface SettingsEffectiveConfiguration {
   title: string;
-  values: UiTableSection;
-  resolution_trace?: UiChartSection | UiTableSection;
-  export_actions: UiRuntimeAction[];
+  values: SettingsTableSection;
+  resolution_trace?: SettingsTableSection | SettingsChartSection;
+  export_actions: SettingsActionDescriptor[];
 }
 
 export interface SettingsImpactPreview {
-  level: UiTone;
-  summary: UiKeyValueSection;
-  affected_entities: UiTableSection;
-  dry_run_action?: UiRuntimeAction;
+  level: UiTone | (string & {});
+  summary: SettingsKeyValueSection;
+  affected_entities: SettingsTableSection;
+  dry_run_action?: SettingsActionDescriptor;
 }
 
 export interface SettingsDangerZone {
   title: string;
   description?: string;
-  actions: UiRuntimeAction[];
+  actions: SettingsActionDescriptor[];
+}
+
+export interface SettingsAuditRecord {
+  audit_id: string;
+  id: string;
+  action: SettingsActionName | (string & {});
+  action_type: string;
+  kind: SettingsResourceKind | string;
+  resource_id: string | null;
+  actor: string | null;
+  reason: string | null;
+  risk: string | null;
+  dry_run: boolean;
+  status: SettingsStatus;
+  request_metadata: unknown;
+  result: unknown;
+  error: unknown;
+  created_at: string | null;
+  completed_at: string | null;
 }
 
 export interface SettingsAuditSummary {
-  recent_changes: UiTableSection;
+  recent_changes: SettingsTableSection;
   audit_history_route?: string;
   reason_required: boolean;
 }
 
-export interface SettingsResourcePageReadModel {
-  resource: Exclude<SettingsResourceId, "overview">;
+export interface SettingsResourceDetailReadModel {
+  resource: SettingsResourceKind;
+  kind: SettingsResourceKind;
+  id: string;
+  resource_id: string;
   title: string;
-  description: string;
-  tabs: OperationsTab[];
-  active_tab: string;
-  list: UiTableSection;
-  detail: SettingsDetailPanel | null;
-  summary: UiKeyValueSection[];
-  effective_configuration?: SettingsEffectiveConfiguration;
-  validation?: SettingsValidationSummary;
-  impact?: SettingsImpactPreview;
-  audit?: SettingsAuditSummary;
-  danger_zone?: SettingsDangerZone;
-  actions: UiRuntimeAction[];
+  status: SettingsStatus;
+  enabled: boolean;
+  version: number | null;
+  source: string | null;
+  payload: unknown;
+  effective_config: unknown;
+  resolution: SettingsResolutionPayload;
+  detail: SettingsDetailPanel;
+  validation: SettingsValidationSummary;
+  impact: SettingsImpactPreview;
+  audit: SettingsAuditSummary;
+  actions: SettingsActionDescriptor[];
+  versions: SettingsPayload[];
 }
 
-export type SettingsReadModel = SettingsOverviewReadModel | SettingsResourcePageReadModel;
+export interface SettingsResourcePageReadModel {
+  resource: Exclude<SettingsResourceKind, "audit-logs">;
+  kind: Exclude<SettingsResourceKind, "audit-logs">;
+  title: string;
+  description: string;
+  status: SettingsStatus;
+  health: SettingsHealth;
+  tabs: OperationsTab[];
+  active_tab: string;
+  resources: SettingsResourceSummary[];
+  list: SettingsTableSection;
+  detail: SettingsResourceDetailReadModel | null;
+  summary: SettingsKeyValueSection[];
+  effective_configuration: SettingsEffectiveConfiguration;
+  validation: SettingsValidationSummary;
+  impact: SettingsImpactPreview;
+  audit: SettingsAuditSummary;
+  danger_zone: SettingsDangerZone;
+  actions: SettingsActionDescriptor[];
+}
+
+export interface SettingsAuditLogsPageReadModel {
+  resource: "audit-logs";
+  kind: "audit-logs";
+  title: string;
+  description: string;
+  status: SettingsStatus;
+  health: SettingsHealth;
+  tabs: OperationsTab[];
+  active_tab: string;
+  resources: SettingsAuditRecord[];
+  list: SettingsTableSection;
+  detail: SettingsAuditRecord | null;
+  summary: SettingsKeyValueSection[];
+  validation: SettingsValidationSummary;
+  audit: SettingsAuditSummary;
+  actions: SettingsActionDescriptor[];
+}
+
+export type SettingsKindPageReadModel =
+  | SettingsResourcePageReadModel
+  | SettingsAuditLogsPageReadModel;
+
+export type SettingsDetailReadModel =
+  | SettingsResourceDetailReadModel
+  | SettingsAuditRecord;
+
+export interface SettingsActionRequest {
+  resource_id?: string | null;
+  payload?: SettingsPayload;
+  reason?: string | null;
+  actor?: string | null;
+  risk?: string | null;
+  dry_run?: boolean;
+  metadata?: SettingsPayload;
+}
+
+export interface SettingsActionResultPayload {
+  resource_id?: string | null;
+  mutation: SettingsActionName | (string & {});
+  applied: boolean;
+  resource?: SettingsPayload | null;
+  version?: SettingsPayload | null;
+  validation?: SettingsValidationSummary | SettingsPayload;
+  resolution?: SettingsResolutionPayload;
+  impact?: SettingsImpactPreview;
+  [key: string]: unknown;
+}
+
+export interface SettingsActionResponse<
+  Result extends SettingsActionResultPayload | SettingsPayload = SettingsActionResultPayload,
+> {
+  action: SettingsActionName | (string & {});
+  kind: SettingsResourceKind | string;
+  resource_id: string | null;
+  status: SettingsStatus;
+  dry_run: boolean;
+  audit: SettingsAuditRecord;
+  result: Result;
+}
+
+export interface SettingsBootstrapImportResponse {
+  action: "bootstrap-import";
+  status: SettingsStatus;
+  result: SettingsPayload;
+  imported_counts: Record<string, number>;
+}
+
+export type SettingsReadModel = SettingsOverviewReadModel | SettingsKindPageReadModel;

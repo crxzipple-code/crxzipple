@@ -51,9 +51,11 @@ def build_operations_source_read_model_provider(
             ingress_query=container.orchestration_run_query_service,
             scheduler_signal_query=container.orchestration_run_query_service,
             operations_observation=container.operations_observation_store,
-            worker_lease_seconds=container.settings.orchestration_run_lease_seconds,
+            worker_lease_seconds=(
+                container.runtime_bootstrap_config.orchestration_run_lease_seconds
+            ),
             worker_heartbeat_seconds=(
-                container.settings.orchestration_run_heartbeat_seconds
+                container.runtime_bootstrap_config.orchestration_run_heartbeat_seconds
             ),
         ),
         tool=ToolOperationsReadModelProvider(
@@ -95,12 +97,19 @@ def build_operations_source_read_model_provider(
         ),
         access=AccessOperationsReadModelProvider(
             access_service=container.access_service,
+            access_governance_repository=container.access_governance_repository,
             llm_service=container.llm_service,
             tool_service=container.tool_service,
             channel_profile_service=container.channel_profile_service,
             lark_channel_runtime_service=container.lark_channel_runtime_service,
             web_channel_runtime_service=container.web_channel_runtime_service,
             webhook_channel_runtime_service=container.webhook_channel_runtime_service,
+            settings_query_service=getattr(container, "settings_query_service", None),
+            settings_environment=getattr(
+                getattr(container, "settings", None),
+                "environment",
+                None,
+            ),
             events_service=container.events_service,
             event_definition_registry=container.event_definition_registry,
             operations_observation=container.operations_observation_store,
@@ -131,6 +140,7 @@ def build_operations_source_read_model_provider(
         modules=OperationsModuleReadModelProvider(
             module_query=OperationsModuleQuerySet(
                 access_service=container.access_service,
+                access_governance_repository=container.access_governance_repository,
                 agent_service=container.agent_service,
                 channel_profile_service=container.channel_profile_service,
                 channel_runtime_manager=container.channel_runtime_manager,

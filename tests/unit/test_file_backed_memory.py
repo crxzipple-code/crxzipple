@@ -297,6 +297,7 @@ class FileBackedMemoryTestCase(unittest.TestCase):
                         base_url=server.base_url + "/v1",
                         model_name="sample-embedding-model",
                         credential_binding="env:OPENAI_COMPATIBLE_TOKEN",
+                        resolved_credential="sample-embedding-token",
                         timeout_seconds=5,
                     ),
                 ),

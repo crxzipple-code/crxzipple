@@ -11,7 +11,6 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from crxzipple.core.config import load_settings
 from crxzipple.modules.llm.application.adapters import LlmAdapterResponse
 from crxzipple.modules.llm.domain import LlmResult
 from crxzipple.modules.orchestration.application.turn_submission import (
@@ -34,8 +33,11 @@ from crxzipple.modules.channels import (
     ChannelProfile,
     ChannelRuntimePlanner,
     ChannelRuntimeRegistration,
+    ChannelSystemConfig,
+    ChannelValidationError,
     channel_dead_letter_topic,
     FileBackedChannelInteractionRegistryStore,
+    FileBackedChannelSystemConfigStore,
 )
 from crxzipple.modules.events import Event, EventTarget
 from crxzipple.modules.llm.application import RegisterLlmProfileInput
@@ -223,6 +225,41 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertTrue(resolved.capabilities.supports_edit)
         self.assertEqual(resolved.accounts[0].transport_mode, "sse")
 
+    def test_channel_profile_service_enable_disable_updates_runtime_truth(self) -> None:
+        self.container.channel_profile_service.upsert_profile(
+            ChannelProfile(
+                channel_type="web",
+                accounts=(
+                    ChannelAccountProfile(
+                        account_id="default",
+                        transport_mode="sse",
+                    ),
+                ),
+            ),
+        )
+
+        disabled = self.container.channel_profile_service.disable_profile("WEB")
+
+        self.assertFalse(disabled.enabled)
+        with self.assertRaises(ChannelValidationError) as raised:
+            self.container.web_channel_runtime_service.ensure_registered(
+                runtime_id="web-runtime-disabled",
+            )
+        self.assertEqual(raised.exception.code, "channel_profile_disabled")
+
+        enabled = self.container.channel_profile_service.enable_profile("web")
+        registration = self.container.web_channel_runtime_service.ensure_registered(
+            runtime_id="web-runtime-enabled",
+        )
+
+        self.assertTrue(enabled.enabled)
+        self.assertEqual(registration.runtime_id, "web-runtime-enabled")
+        binding = self.container.channel_runtime_manager.resolve_account_binding(
+            channel_type="web",
+            channel_account_id="default",
+        )
+        self.assertIsNotNone(binding)
+
     def test_channel_runtime_manager_tracks_runtime_account_and_connection_bindings(self) -> None:
         manager = self.container.channel_runtime_manager
         registered = manager.register_runtime(
@@ -292,37 +329,33 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(registry_after_unregister.account_bindings, ())
         self.assertEqual(registry_after_unregister.connection_bindings, ())
 
-    def test_container_bootstraps_channel_profiles_from_settings(self) -> None:
-        settings = replace(
-            load_settings(),
-            channel_profiles=(
-                ChannelProfile(
-                    channel_type="lark",
-                    accounts=(
-                        ChannelAccountProfile(
-                            account_id="default",
-                            transport_mode="webhook",
-                            metadata={
-                                "agent_id": "assistant-lark",
-                                "lark_app_id": "cli_test",
-                                "lark_app_secret": "secret_test",
-                            },
+    def test_channel_system_config_store_bootstraps_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = FileBackedChannelSystemConfigStore(
+                tempdir,
+                bootstrap_config=ChannelSystemConfig(
+                    profiles=(
+                        ChannelProfile(
+                            channel_type="lark",
+                            accounts=(
+                                ChannelAccountProfile(
+                                    account_id="default",
+                                    transport_mode="webhook",
+                                    metadata={
+                                        "agent_id": "assistant-lark",
+                                        "lark_app_id": "cli_test",
+                                        "lark_app_secret": "secret_test",
+                                    },
+                                ),
+                            ),
                         ),
                     ),
                 ),
-            ),
-            channels_state_dir=os.path.join(
-                self.harness._tempdir.name,
-                "channels-from-settings",
-            ),
-        )
+            )
 
-        container = self.harness.build_container(settings=settings)
-
-        profile = container.channel_profile_service.get_profile("lark")
-        self.assertIsNotNone(profile)
-        assert profile is not None
-        self.assertEqual(profile.accounts[0].metadata["lark_app_id"], "cli_test")
+            profile = store.load().profiles[0]
+            self.assertEqual(profile.channel_type, "lark")
+            self.assertEqual(profile.accounts[0].metadata["lark_app_id"], "cli_test")
 
     def test_channel_system_config_store_exposed_on_container(self) -> None:
         profile = ChannelProfile(channel_type="telegram")

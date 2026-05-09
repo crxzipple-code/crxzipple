@@ -245,7 +245,11 @@ class ToolHttpTestCase(HttpModuleTestCase):
                 "HTTP",
             )
             self.assertIn(
-                "api_key=sample-api-key",
+                "api_key=%5Bredacted%5D",
+                echo_response.json()["result"]["metadata"]["request"]["url"],
+            )
+            self.assertNotIn(
+                "sample-api-key",
                 echo_response.json()["result"]["metadata"]["request"]["url"],
             )
 

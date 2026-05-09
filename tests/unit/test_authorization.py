@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 import unittest
-import yaml
 
 from crxzipple.core.config import load_settings
 from crxzipple.interfaces.authorization import (
@@ -15,10 +14,17 @@ from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
     AuthorizationDeniedError,
     AuthorizationDecisionCode,
+    AuthorizationEffect,
+    AuthorizationPolicy,
     AuthorizationRequest,
     AuthorizationResource,
     AuthorizationSubject,
     ToolExecutionAuthorizationRequest,
+)
+from crxzipple.modules.authorization.infrastructure.persistence import (
+    AuthorizationAuditModel,
+    AuthorizationPolicyModel,
+    TemporaryAuthorizationGrantModel,
 )
 from crxzipple.modules.llm.application import (
     InvokeLlmInput,
@@ -210,7 +216,178 @@ class AuthorizationTestCase(unittest.TestCase):
             interface_name="http",
         )
 
-        denied_settings = replace(
+        denied_harness = SqliteTestHarness()
+        try:
+            denied_settings = replace(
+                load_settings(),
+                database_url=denied_harness.database_url,
+                authorization_enabled=True,
+                authorization_policy_paths=(),
+                tool_openapi_providers=(),
+                tool_mcp_providers=(),
+                llm_profiles=(),
+            )
+            denied_harness.initialize_schema(settings=denied_settings)
+            denied_container = denied_harness.build_container(settings=denied_settings)
+            denied_registry = LlmAdapterRegistry()
+            denied_registry.register(LlmApiFamily.OPENAI_RESPONSES, _FakeLlmAdapter())
+            denied_service = LlmApplicationService(
+                denied_container.uow_factory,
+                denied_registry,
+            )
+            denied_service.register_profile(
+                RegisterLlmProfileInput(
+                    id="blocked",
+                    provider=LlmProviderKind.OPENAI,
+                    api_family=LlmApiFamily.OPENAI_RESPONSES,
+                    model_name="gpt-5.4-mini",
+                ),
+            )
+
+            direct_invocation = denied_service.invoke(
+                InvokeLlmInput(
+                    llm_id="blocked",
+                    messages=(
+                        LlmMessage(role=LlmMessageRole.USER, content="hello"),
+                    ),
+                ),
+            )
+            self.assertEqual(direct_invocation.status.value, "succeeded")
+
+            with self.assertRaises(AuthorizationDeniedError):
+                authorize_llm_action(
+                    denied_container,
+                    llm_id="blocked",
+                    action="llm.invoke",
+                    interface_name="http",
+                )
+        finally:
+            denied_harness.close()
+
+    def test_grant_agent_effect_authorization_persists_policy_and_allows_effect(self) -> None:
+        runtime_policy_path = Path(self.harness.authorization_runtime_policy_path)
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        policy = container.authorization_service.grant_agent_effect_authorization(
+            agent_id="assistant",
+            effect_id="network_search",
+        )
+
+        self.assertEqual(policy.actions, ("tool.effect.authorize",))
+        self.assertFalse(runtime_policy_path.exists())
+        with container.session_factory() as session:
+            stored = session.get(AuthorizationPolicyModel, policy.id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.policy_id, policy.id)
+        self.assertEqual(stored.actions_payload, ["tool.effect.authorize"])
+        self.assertEqual(
+            stored.resource_match_payload["authorization_effect_ids"],
+            ["network_search"],
+        )
+
+        allowed = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.effect.authorize",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="brave_search.news_search",
+                    attrs={"authorization_effect_ids": ["network_search"]},
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "assistant"},
+                ),
+            ),
+        )
+        denied = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.effect.authorize",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="brave_search.news_search",
+                    attrs={"authorization_effect_ids": ["network_search"]},
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "other-agent"},
+                ),
+            ),
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertIn(policy.id, allowed.matched_policy_ids)
+        self.assertFalse(denied.allowed)
+
+    def test_grant_agent_tool_authorization_persists_policy_and_allows_tool(self) -> None:
+        runtime_policy_path = Path(self.harness.authorization_runtime_policy_path)
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_container(settings=settings)
+
+        policy = container.authorization_service.grant_agent_tool_authorization(
+            agent_id="assistant",
+            tool_id="filesystem.read_text",
+        )
+
+        self.assertFalse(runtime_policy_path.exists())
+        with container.session_factory() as session:
+            stored = session.get(AuthorizationPolicyModel, policy.id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.policy_id, policy.id)
+        self.assertEqual(stored.actions_payload, ["tool.authorize"])
+        self.assertEqual(stored.resource_id, "filesystem.read_text")
+
+        allowed = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.authorize",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="filesystem.read_text",
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "assistant"},
+                ),
+            ),
+        )
+        denied = container.authorization_service.check(
+            AuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                action="tool.authorize",
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="filesystem.read_text",
+                ),
+                context=AuthorizationContext(
+                    attrs={"interface": "http", "agent_id": "other-agent"},
+                ),
+            ),
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertIn(policy.id, allowed.matched_policy_ids)
+        self.assertFalse(denied.allowed)
+
+    def test_authorization_governance_manages_policies_and_records_audit(self) -> None:
+        settings = replace(
             load_settings(),
             database_url=self.harness.database_url,
             authorization_enabled=True,
@@ -219,154 +396,93 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        denied_container = self.harness.build_container(settings=denied_settings)
-        denied_registry = LlmAdapterRegistry()
-        denied_registry.register(LlmApiFamily.OPENAI_RESPONSES, _FakeLlmAdapter())
-        denied_service = LlmApplicationService(
-            denied_container.uow_factory,
-            denied_registry,
-        )
-        denied_service.register_profile(
-            RegisterLlmProfileInput(
-                id="blocked",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-
-        direct_invocation = denied_service.invoke(
-            InvokeLlmInput(
-                llm_id="blocked",
-                messages=(
-                    LlmMessage(role=LlmMessageRole.USER, content="hello"),
-                ),
-            ),
-        )
-        self.assertEqual(direct_invocation.status.value, "succeeded")
-
-        with self.assertRaises(AuthorizationDeniedError):
-            authorize_llm_action(
-                denied_container,
-                llm_id="blocked",
-                action="llm.invoke",
-                interface_name="http",
-            )
-
-    def test_grant_agent_effect_access_persists_runtime_policy_and_allows_effect_access(self) -> None:
-        runtime_policy_path = Path(self.harness.authorization_runtime_policy_path)
-        settings = replace(
-            load_settings(),
-            database_url=self.harness.database_url,
-            authorization_enabled=True,
-            authorization_policy_paths=(self.policy_path,),
-            tool_openapi_providers=(),
-            tool_mcp_providers=(),
-            llm_profiles=(),
-        )
         container = self.harness.build_container(settings=settings)
 
-        policy = container.authorization_service.grant_agent_effect_access(
-            agent_id="assistant",
-            effect_id="network_search",
+        policy = AuthorizationPolicy(
+            id="local_allow_echo",
+            effect=AuthorizationEffect.ALLOW,
+            actions=("tool.run",),
+            resource_kind="tool",
+            resource_id="echo",
+            priority=50,
+            source_kind="local_managed",
         )
-
-        self.assertEqual(policy.actions, ("tool.access_effect",))
-        self.assertTrue(runtime_policy_path.exists())
-        payload = yaml.safe_load(runtime_policy_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload[0]["id"], policy.id)
-        self.assertEqual(payload[0]["actions"], ["tool.access_effect"])
-        self.assertEqual(
-            payload[0]["resource"]["match"]["authorization_effect_ids"],
-            ["network_search"],
+        container.authorization_service.create_policy(
+            policy,
+            actor_type="test",
+            actor_id="operator",
+            reason="unit test",
         )
-
-        allowed = container.authorization_service.check(
+        allowed = container.authorization_service.dry_run(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
-                action="tool.access_effect",
-                resource=AuthorizationResource(
-                    kind="tool",
-                    id="brave_search.news_search",
-                    attrs={"authorization_effect_ids": ["network_search"]},
-                ),
-                context=AuthorizationContext(
-                    attrs={"interface": "http", "agent_id": "assistant"},
-                ),
+                action="tool.run",
+                resource=AuthorizationResource(kind="tool", id="echo"),
+                context=AuthorizationContext(attrs={"interface": "http"}),
             ),
+            actor_type="test",
+            actor_id="operator",
         )
-        denied = container.authorization_service.check(
+        disabled = container.authorization_service.set_policy_enabled(
+            "local_allow_echo",
+            enabled=False,
+            actor_type="test",
+            actor_id="operator",
+        )
+        denied = container.authorization_service.dry_run(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
-                action="tool.access_effect",
-                resource=AuthorizationResource(
-                    kind="tool",
-                    id="brave_search.news_search",
-                    attrs={"authorization_effect_ids": ["network_search"]},
-                ),
-                context=AuthorizationContext(
-                    attrs={"interface": "http", "agent_id": "other-agent"},
+                action="tool.run",
+                resource=AuthorizationResource(kind="tool", id="echo"),
+                context=AuthorizationContext(attrs={"interface": "http"}),
+            ),
+        )
+        imported = container.authorization_service.import_policies(
+            (
+                AuthorizationPolicy(
+                    id="local_allow_llm",
+                    effect=AuthorizationEffect.ALLOW,
+                    actions=("llm.invoke",),
+                    resource_kind="llm_profile",
+                    source_kind="local_managed",
                 ),
             ),
+            actor_type="test",
+            actor_id="operator",
+            source="unit",
+        )
+        bundle = container.authorization_service.export_policy_bundle()
+        deleted = container.authorization_service.delete_policy(
+            "local_allow_llm",
+            actor_type="test",
+            actor_id="operator",
         )
 
         self.assertTrue(allowed.allowed)
-        self.assertIn(policy.id, allowed.matched_policy_ids)
+        self.assertFalse(disabled.enabled)
         self.assertFalse(denied.allowed)
-
-    def test_grant_agent_tool_access_persists_runtime_policy_and_allows_tool_access(self) -> None:
-        runtime_policy_path = Path(self.harness.authorization_runtime_policy_path)
-        settings = replace(
-            load_settings(),
-            database_url=self.harness.database_url,
-            authorization_enabled=True,
-            authorization_policy_paths=(self.policy_path,),
-            tool_openapi_providers=(),
-            tool_mcp_providers=(),
-            llm_profiles=(),
+        self.assertEqual(denied.code, AuthorizationDecisionCode.NO_MATCH)
+        self.assertEqual(imported[0].id, "local_allow_llm")
+        self.assertIn(
+            "local_allow_llm",
+            [item["id"] for item in bundle["policies"]],
         )
-        container = self.harness.build_container(settings=settings)
+        self.assertEqual(deleted.id, "local_allow_llm")
 
-        policy = container.authorization_service.grant_agent_tool_access(
-            agent_id="assistant",
-            tool_id="filesystem.read_text",
+        audit_records = container.authorization_service.list_audit_records(limit=20)
+        actions = {record.action for record in audit_records}
+        self.assertTrue(
+            {
+                "policy.create",
+                "policy.disable",
+                "policy.import",
+                "policy.delete",
+                "decision.dry_run",
+            }.issubset(actions),
         )
-
-        payload = yaml.safe_load(runtime_policy_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload[0]["id"], policy.id)
-        self.assertEqual(payload[0]["actions"], ["tool.access_tool"])
-        self.assertEqual(payload[0]["resource"]["id"], "filesystem.read_text")
-
-        allowed = container.authorization_service.check(
-            AuthorizationRequest(
-                subject=AuthorizationSubject(type="interface", id="http"),
-                action="tool.access_tool",
-                resource=AuthorizationResource(
-                    kind="tool",
-                    id="filesystem.read_text",
-                ),
-                context=AuthorizationContext(
-                    attrs={"interface": "http", "agent_id": "assistant"},
-                ),
-            ),
-        )
-        denied = container.authorization_service.check(
-            AuthorizationRequest(
-                subject=AuthorizationSubject(type="interface", id="http"),
-                action="tool.access_tool",
-                resource=AuthorizationResource(
-                    kind="tool",
-                    id="filesystem.read_text",
-                ),
-                context=AuthorizationContext(
-                    attrs={"interface": "http", "agent_id": "other-agent"},
-                ),
-            ),
-        )
-
-        self.assertTrue(allowed.allowed)
-        self.assertIn(policy.id, allowed.matched_policy_ids)
-        self.assertFalse(denied.allowed)
+        with container.session_factory() as session:
+            stored_audit = session.get(AuthorizationAuditModel, audit_records[0].id)
+        self.assertIsNotNone(stored_audit)
 
     def test_check_tool_execution_returns_approval_required_when_effect_is_missing(self) -> None:
         settings = replace(
@@ -418,13 +534,19 @@ class AuthorizationTestCase(unittest.TestCase):
             llm_profiles=(),
         )
         container = self.harness.build_container(settings=settings)
-        container.authorization_service.grant_run_access(
+        container.authorization_service.grant_run_authorization(
             run_id="run-weather-1",
             agent_id="assistant",
             approval_request_id="approval-weather-1",
             effect_ids=("weather_data",),
             tool_ids=("open_meteo_weather.forecast_weather",),
         )
+        with container.session_factory() as session:
+            stored_grant = session.get(
+                TemporaryAuthorizationGrantModel,
+                "run:run-weather-1:approval-weather-1",
+            )
+        self.assertIsNotNone(stored_grant)
 
         decision = container.authorization_service.check_tool_execution(
             ToolExecutionAuthorizationRequest(
@@ -456,7 +578,7 @@ class AuthorizationTestCase(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.code, AuthorizationDecisionCode.ALLOW)
 
-    def test_check_tool_execution_still_requires_effect_when_tool_access_policy_allows_tool(self) -> None:
+    def test_tool_execution_requires_effect_when_tool_authorization_allows_tool(self) -> None:
         settings = replace(
             load_settings(),
             database_url=self.harness.database_url,
@@ -467,7 +589,7 @@ class AuthorizationTestCase(unittest.TestCase):
             llm_profiles=(),
         )
         container = self.harness.build_container(settings=settings)
-        container.authorization_service.grant_agent_tool_access(
+        container.authorization_service.grant_agent_tool_authorization(
             agent_id="assistant",
             tool_id="open_meteo_weather.forecast_weather",
         )
@@ -543,7 +665,7 @@ class AuthorizationTestCase(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.code, AuthorizationDecisionCode.POLICY_DENIED)
 
-    def test_check_tool_execution_returns_policy_denied_when_required_scope_is_missing(self) -> None:
+    def test_tool_execution_returns_policy_denied_when_required_scope_is_missing(self) -> None:
         settings = replace(
             load_settings(),
             database_url=self.harness.database_url,

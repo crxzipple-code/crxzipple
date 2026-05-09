@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event as StopEvent
+import time
 
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.events import EventsApplicationService
@@ -31,6 +32,7 @@ logger = get_logger(__name__)
 OperationsObserverHandler = Callable[[EventTopicRecord], None]
 OperationsObserverBatchHandler = Callable[[tuple[EventTopicRecord, ...]], None]
 OperationsObserverHeartbeatHandler = Callable[[OperationsObserverHeartbeat], None]
+OperationsObserverMaintenanceHandler = Callable[[], None]
 
 _OPERATIONS_OBSERVER_STATIC_EVENT_NAMES: tuple[str, ...] = (
     *ORCHESTRATION_OPERATIONAL_EVENT_NAMES,
@@ -87,10 +89,18 @@ class OperationsObserverRuntimeService:
         subscriptions: tuple[OperationsObserverSubscription, ...] = (),
         runtime_name: str = "operations.observer",
         heartbeat_handler: OperationsObserverHeartbeatHandler | None = None,
+        maintenance_handler: OperationsObserverMaintenanceHandler | None = None,
+        full_scan_interval_seconds: float = 60.0,
     ) -> None:
         self.events_service = events_service
         self.runtime_name = runtime_name
         self._heartbeat_handler = heartbeat_handler
+        self._maintenance_handler = maintenance_handler
+        self._full_scan_interval_seconds = max(float(full_scan_interval_seconds), 1.0)
+        self._full_scan_completed = False
+        self._last_full_scan_at = 0.0
+        self._wakeup_topics: set[str] = set()
+        self._subscription_cursors: dict[tuple[str, str], str | None] = {}
         self._subscriptions: list[OperationsObserverSubscription] = list(
             subscriptions,
         )
@@ -130,22 +140,52 @@ class OperationsObserverRuntimeService:
                 batch_handler=batch_handler,
             ),
         )
+        self._full_scan_completed = False
 
     def process_available_events(
         self,
         *,
         limit_per_subscription: int = 100,
         from_beginning: bool = False,
+        event_driven: bool = False,
     ) -> int:
         limit = max(int(limit_per_subscription), 1)
         processed_count = 0
-        for subscription in self.subscriptions:
+        subscriptions = self.subscriptions
+        if not from_beginning and self._wakeup_topics:
+            wakeup_topics = set(self._wakeup_topics)
+            self._wakeup_topics.clear()
+            for subscription in subscriptions:
+                if subscription.source_topic not in wakeup_topics:
+                    continue
+                processed_count += self.process_subscription(
+                    subscription,
+                    limit=limit,
+                    from_beginning=False,
+                )
+            if event_driven and processed_count > 0:
+                return processed_count
+
+        if event_driven and not self._should_full_scan(from_beginning=from_beginning):
+            return processed_count
+
+        for subscription in subscriptions:
             processed_count += self.process_subscription(
                 subscription,
                 limit=limit,
                 from_beginning=from_beginning,
             )
+        self._full_scan_completed = True
+        self._last_full_scan_at = time.monotonic()
         return processed_count
+
+    def _should_full_scan(self, *, from_beginning: bool) -> bool:
+        if from_beginning or not self._full_scan_completed:
+            return True
+        return (
+            time.monotonic() - self._last_full_scan_at
+            >= self._full_scan_interval_seconds
+        )
 
     def record_heartbeat(
         self,
@@ -184,6 +224,17 @@ class OperationsObserverRuntimeService:
                 },
             )
 
+    def run_maintenance(self) -> None:
+        if self._maintenance_handler is None:
+            return
+        try:
+            self._maintenance_handler()
+        except Exception:
+            logger.exception(
+                "operations observer maintenance handler failed",
+                extra={"runtime_name": self.runtime_name},
+            )
+
     def process_subscription(
         self,
         subscription: OperationsObserverSubscription,
@@ -191,16 +242,13 @@ class OperationsObserverRuntimeService:
         limit: int = 100,
         from_beginning: bool = False,
     ) -> int:
-        state = self.events_service.get_subscription_cursor(
-            subscription.subscription_id,
-            source_topic=subscription.source_topic,
-        )
+        cursor = self._subscription_cursor(subscription)
         records = self.events_service.read_event_topic(
             subscription.source_topic,
             after_cursor=(
                 None
                 if from_beginning
-                else state.cursor if state is not None else None
+                else cursor
             ),
             limit=max(int(limit), 1),
         )
@@ -228,6 +276,7 @@ class OperationsObserverRuntimeService:
                 source_topic=subscription.source_topic,
                 cursor=last_cursor,
             )
+            self._set_subscription_cursor(subscription, last_cursor)
             return processed_count
 
         for record in records:
@@ -253,19 +302,39 @@ class OperationsObserverRuntimeService:
                 source_topic=subscription.source_topic,
                 cursor=last_cursor,
             )
+            self._set_subscription_cursor(subscription, last_cursor)
         return processed_count
 
-    def build_wait_watches(self) -> tuple[EventTopicWatch, ...]:
-        watches: list[EventTopicWatch] = []
-        for subscription in self.subscriptions:
+    def _subscription_cursor(
+        self,
+        subscription: OperationsObserverSubscription,
+    ) -> str | None:
+        key = (subscription.subscription_id, subscription.source_topic)
+        if key not in self._subscription_cursors:
             state = self.events_service.get_subscription_cursor(
                 subscription.subscription_id,
                 source_topic=subscription.source_topic,
             )
+            self._subscription_cursors[key] = state.cursor if state is not None else None
+        return self._subscription_cursors[key]
+
+    def _set_subscription_cursor(
+        self,
+        subscription: OperationsObserverSubscription,
+        cursor: str,
+    ) -> None:
+        self._subscription_cursors[
+            (subscription.subscription_id, subscription.source_topic)
+        ] = cursor
+
+    def build_wait_watches(self) -> tuple[EventTopicWatch, ...]:
+        watches: list[EventTopicWatch] = []
+        for subscription in self.subscriptions:
+            cursor = self._subscription_cursor(subscription)
             watches.append(
                 EventTopicWatch(
                     topic=subscription.source_topic,
-                    after_cursor=state.cursor if state is not None else None,
+                    after_cursor=cursor,
                 ),
             )
         return tuple(watches)
@@ -280,11 +349,13 @@ class OperationsObserverRuntimeService:
         if not watches:
             stop_event.wait(timeout_seconds)
             return
-        self.events_service.wait_for_event_topics(
+        triggered = self.events_service.wait_for_event_topics(
             watches,
             timeout_seconds=timeout_seconds,
             stop_event=stop_event,
         )
+        if triggered is not None:
+            self._wakeup_topics.add(triggered.topic)
 
     def run_until_stopped(
         self,
@@ -326,7 +397,9 @@ class OperationsObserverRuntimeService:
             while not stopper.is_set():
                 processed = self.process_available_events(
                     limit_per_subscription=limit_per_subscription,
+                    event_driven=True,
                 )
+                self.run_maintenance()
                 if processed <= 0:
                     idle_cycles += 1
                     self.record_heartbeat(

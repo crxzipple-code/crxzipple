@@ -9,7 +9,6 @@ from crxzipple.bootstrap import AppContainer
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.orchestration.application.turn_submission import (
     build_submission_options,
-    extract_output_text,
     resolve_profile,
     submit_turn,
 )

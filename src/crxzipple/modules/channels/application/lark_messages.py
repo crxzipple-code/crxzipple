@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from crxzipple.modules.channels.application.bindings import (
     resolve_channel_metadata_binding,
 )
+from crxzipple.shared.access import AccessConsumerRef, CredentialProvider
 
 
 def normalize_lark_chat_type(value: object) -> str:
@@ -87,6 +88,9 @@ def should_accept_lark_message(
     account_metadata: dict[str, Any],
     chat_type: str,
     mentions: list[dict[str, Any]],
+    credential_provider: CredentialProvider | None = None,
+    consumer: AccessConsumerRef | None = None,
+    trace_context: Mapping[str, Any] | None = None,
 ) -> bool:
     if chat_type != "group":
         return True
@@ -97,6 +101,9 @@ def should_accept_lark_message(
         key="lark_bot_open_id",
         description="Lark bot open id",
         required=False,
+        credential_provider=credential_provider,
+        consumer=consumer,
+        trace_context=trace_context,
     ) or ""
     if not bot_open_id:
         return False

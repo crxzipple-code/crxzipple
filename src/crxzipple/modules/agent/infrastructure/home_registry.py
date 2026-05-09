@@ -41,6 +41,18 @@ def register_agent_home(
     return _write_registry_entries(root, entries)
 
 
+def unregister_agent_home(
+    root_dir: str | Path,
+    *,
+    agent_id: str,
+) -> Path:
+    root = Path(root_dir).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    entries = _load_registry_entries(root)
+    entries.pop(agent_id, None)
+    return _write_registry_entries(root, entries)
+
+
 def load_registered_agent_profiles_from_root(root_dir: str | Path) -> tuple[tuple[str, str], ...]:
     root = Path(root_dir).expanduser()
     root.mkdir(parents=True, exist_ok=True)

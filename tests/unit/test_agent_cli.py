@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from tests.unit.cli_test_support import *
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from tests.unit.cli_test_support import CliModuleTestCase, app
 
 
 class AgentCliTestCase(CliModuleTestCase):
@@ -35,6 +40,101 @@ class AgentCliTestCase(CliModuleTestCase):
             self.assertEqual(get_result.exit_code, 0)
             self.assertIn('"name": "Writer"', list_result.stdout)
             self.assertIn('"default_llm_id": "openai.gpt-5.4-mini"', get_result.stdout)
+
+    def test_agent_cli_enable_disable_updates_agent_profile_truth(self) -> None:
+            with tempfile.TemporaryDirectory() as tempdir:
+                home_dir = Path(tempdir) / "agent-home"
+                register_result = self.runner.invoke(
+                    app,
+                    [
+                        "agent",
+                        "register-profile",
+                        "writer",
+                        "Writer",
+                        "openai.gpt-5.4-mini",
+                        "--home-dir",
+                        str(home_dir),
+                    ],
+                    env=self.env,
+                )
+                self.assertEqual(register_result.exit_code, 0)
+
+                disable_result = self.runner.invoke(
+                    app,
+                    ["agent", "disable", "writer"],
+                    env=self.env,
+                )
+                self.assertEqual(disable_result.exit_code, 0)
+                self.assertFalse(json.loads(disable_result.stdout)["enabled"])
+
+                get_disabled = self.runner.invoke(
+                    app,
+                    ["agent", "get", "writer"],
+                    env=self.env,
+                )
+                self.assertEqual(get_disabled.exit_code, 0)
+                self.assertFalse(json.loads(get_disabled.stdout)["enabled"])
+
+                enable_result = self.runner.invoke(
+                    app,
+                    ["agent", "enable", "writer"],
+                    env=self.env,
+                )
+                self.assertEqual(enable_result.exit_code, 0)
+                self.assertTrue(json.loads(enable_result.stdout)["enabled"])
+
+    def test_agent_cli_update_and_delete_use_agent_profile_truth(self) -> None:
+            with tempfile.TemporaryDirectory() as tempdir:
+                home_dir = Path(tempdir) / "agent-home"
+                register_result = self.runner.invoke(
+                    app,
+                    [
+                        "agent",
+                        "register-profile",
+                        "writer",
+                        "Writer",
+                        "openai.gpt-5.4-mini",
+                        "--home-dir",
+                        str(home_dir),
+                    ],
+                    env=self.env,
+                )
+                self.assertEqual(register_result.exit_code, 0)
+
+                update_result = self.runner.invoke(
+                    app,
+                    [
+                        "agent",
+                        "update-profile",
+                        "writer",
+                        "--name",
+                        "Writer Updated",
+                        "--default-llm-id",
+                        "openai.gpt-5.4",
+                    ],
+                    env=self.env,
+                )
+                self.assertEqual(update_result.exit_code, 0)
+                update_payload = json.loads(update_result.stdout)
+                self.assertEqual(update_payload["name"], "Writer Updated")
+                self.assertEqual(
+                    update_payload["llm_routing_policy"]["default_llm_id"],
+                    "openai.gpt-5.4",
+                )
+
+                delete_result = self.runner.invoke(
+                    app,
+                    ["agent", "delete", "writer"],
+                    env=self.env,
+                )
+                self.assertEqual(delete_result.exit_code, 0)
+                self.assertEqual(json.loads(delete_result.stdout), {"deleted": True, "id": "writer"})
+
+                list_result = self.runner.invoke(app, ["agent", "list"], env=self.env)
+                self.assertEqual(list_result.exit_code, 0)
+                self.assertEqual(json.loads(list_result.stdout), [])
+                self.assertFalse((home_dir / "agent.json").exists())
+                self.assertTrue((home_dir / "AGENT.md").exists())
 
     def test_agent_cli_migrates_profile_home(self) -> None:
             with tempfile.TemporaryDirectory() as tempdir:

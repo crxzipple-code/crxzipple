@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import {
-  Activity,
   Database,
   GitBranch,
   HeartPulse,
   KeyRound,
   RefreshCcw,
   Search,
+  Settings,
   ShieldAlert,
   ShieldCheck,
-  Terminal,
   X,
 } from "lucide-vue-next";
 import { computed, onMounted, onUnmounted, ref, type Component } from "vue";
+import { useRouter } from "vue-router";
 
 import { useI18n } from "@/shared/i18n";
 import { formatLocalTime, formatRawKeyLabel } from "@/shared/i18n/formatters";
@@ -23,7 +23,6 @@ import type {
   UiChartSection,
   UiKeyValueItem,
   UiMetricCard,
-  UiRuntimeAction,
   UiTableRow,
   UiTableSection,
   UiTone,
@@ -31,12 +30,8 @@ import type {
 import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
-import {
-  checkAccess,
-  getAccessSetup,
-  loadAccessInventory,
-  loadAccessOperations,
-} from "../api";
+import { loadAccessOperations } from "../api";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
   id: string;
@@ -53,14 +48,9 @@ const metricIconById: Record<string, Component> = {
   health: HeartPulse,
   access_assets: KeyRound,
   missing_access: ShieldAlert,
-  setup_available: Terminal,
+  setup_available: Settings,
   usage: GitBranch,
-  failed_auth: Activity,
-};
-const actionIconById: Record<string, Component> = {
-  open_access_inventory: Database,
-  check_access: ShieldCheck,
-  setup_access: Terminal,
+  failed_auth: Database,
 };
 const fallbackTabs: OperationsTab[] = [
   { id: "targets", label: "Access Targets" },
@@ -75,7 +65,7 @@ const knownTabIds = new Set(fallbackTabs.map((tab) => tab.id));
 const selectableTabs = new Set(["targets", "missing", "auth_status", "usage", "setup", "fallbacks"]);
 const accessTextKeys: Record<string, string> = {
   "Access": "operations.access.title",
-  "观察凭证绑定、访问要求、授权缺口、setup flow 与访问相关事件的运维视图。": "operations.access.subtitle",
+  "观察凭证绑定、外部访问要求、访问缺口、setup flow 与访问相关事件的运维视图。": "operations.access.subtitle",
   "Access operator": "operations.access.role.operator",
   "Overall Health": "operations.access.metric.health",
   "Access Assets": "operations.access.metric.assets",
@@ -95,9 +85,6 @@ const accessTextKeys: Record<string, string> = {
   "Credentials by Kind": "operations.access.section.credentialsByKind",
   "Access Readiness Share": "operations.access.section.readinessShare",
   "Provider Auth / Access Blocked": "operations.access.section.providerBlocked",
-  "Open Access Inventory": "operations.access.action.openInventory",
-  "Check Access": "operations.access.action.checkAccess",
-  "Setup Access": "operations.access.action.setupAccess",
   "Asset": "table.asset",
   "Kind": "table.kind",
   "Status": "table.status",
@@ -134,8 +121,8 @@ const accessTextKeys: Record<string, string> = {
   "inline_credential": "text.inlineCredential",
   "Credential Set": "text.credentialSet",
   "credential_set": "text.credentialSet",
-  "Authorization Requirement": "text.authorizationRequirement",
-  "authorization_requirement": "text.authorizationRequirement",
+  "Access Requirement": "text.accessRequirement",
+  "access_requirement": "text.accessRequirement",
   "credential_binding": "text.credentialBinding",
   "llm_profile": "text.llmProfile",
   "tool": "text.tool",
@@ -164,16 +151,10 @@ const statusFilter = ref("all");
 const kindFilter = ref("all");
 const usageTypeFilter = ref("all");
 const refreshTimer = ref<number | null>(null);
-const actionBusy = ref<string | null>(null);
-const actionNotice = ref<string | null>(null);
+const router = useRouter();
 
 const displayMetrics = computed(() => page.value?.metrics ?? []);
 const lastUpdatedLabel = computed(() => page.value?.updated_at ? formatLocalTime(page.value.updated_at) : "-");
-const accessActions = computed(() => (page.value?.actions ?? []).filter((action) => (
-  action.id === "open_access_inventory"
-  || action.id === "check_access"
-  || action.id === "setup_access"
-)));
 const tabs = computed(() => {
   const sourceTabs = page.value?.tabs.length ? page.value.tabs : [];
   const sourceById = new Map(sourceTabs.map((tab) => [tab.id, tab]));
@@ -245,7 +226,6 @@ const drawerDetail = computed<OperationsAccessTargetDetail | null>(() => {
   if (!selectedTargetId.value) return null;
   return page.value?.target_details.find((item) => item.target_id === selectedTargetId.value) ?? null;
 });
-const selectedAccessTargetLabel = computed(() => drawerDetail.value?.title ?? selectedTargetId.value);
 const drawerOpen = computed(() => Boolean(drawerDetail.value));
 
 function selectTab(tabId: string) {
@@ -347,7 +327,7 @@ function chartSegments(section: UiChartSection): ChartSegmentView[] {
 }
 
 function metricIcon(metric: UiMetricCard, index: number): Component {
-  return metricIconById[metric.id] ?? [HeartPulse, KeyRound, ShieldAlert, Terminal, GitBranch, Activity][index % 6];
+  return metricIconById[metric.id] ?? [HeartPulse, KeyRound, ShieldAlert, Settings, GitBranch, Database][index % 6];
 }
 
 function metricLabel(metric: UiMetricCard) {
@@ -370,18 +350,6 @@ function emptyState(section: UiTableSection) {
   return accessText(section.empty_state ?? "No records.");
 }
 
-function actionLabel(action: UiRuntimeAction) {
-  return accessText(action.label);
-}
-
-function actionIcon(action: UiRuntimeAction): Component {
-  return actionIconById[action.id] ?? ShieldCheck;
-}
-
-function actionVariant(action: UiRuntimeAction): "secondary" | "danger" {
-  return action.risk === "dangerous" ? "danger" : "secondary";
-}
-
 function detailItems(items: UiKeyValueItem[]) {
   return items.map((item) => ({
     ...item,
@@ -392,10 +360,25 @@ function detailItems(items: UiKeyValueItem[]) {
 
 function detailPayload(value: unknown): string {
   try {
-    return JSON.stringify(value ?? {}, null, 2);
+    return JSON.stringify(redactAccessPayload(value ?? {}), null, 2);
   } catch {
     return String(value ?? "");
   }
+}
+
+function redactAccessPayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactAccessPayload(item));
+  if (value === null || typeof value !== "object") return value;
+
+  const redacted: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    redacted[key] = isSensitiveAccessKey(key) ? "[redacted]" : redactAccessPayload(item);
+  }
+  return redacted;
+}
+
+function isSensitiveAccessKey(key: string): boolean {
+  return /(^|_)(secret|token|password|api[_-]?key|private[_-]?key|source_ref|storage_key|credential_value)(_|$)/i.test(key);
 }
 
 function accessText(value: string | null | undefined): string {
@@ -451,91 +434,12 @@ function resetSearch() {
   void refreshPage();
 }
 
-function canRunAccessAction(action: UiRuntimeAction) {
-  return action.allowed && !loading.value && actionBusy.value === null;
+function openAccessSettings() {
+  void router.push("/settings/access-assets");
 }
 
-function normalizeActionTarget(value: unknown): string | null {
-  const normalized = cellValueText(value).trim();
-  if (!normalized || normalized === "-") return null;
-  return normalized;
-}
-
-function selectedAccessPayload(): { target: string; requirements: string[]; credentialBindings: string[] } | null {
-  const detail = drawerDetail.value;
-  if (!detail) return null;
-  const requirements: string[] = [];
-  const credentialBindings: string[] = [];
-  for (const row of detail.checks.rows) {
-    const requirement = normalizeActionTarget(row.cells.requirement);
-    if (!requirement) continue;
-    const targetType = cellValueText(row.cells.target_type).toLowerCase();
-    if (targetType === "credential_binding") credentialBindings.push(requirement);
-    else requirements.push(requirement);
-  }
-  const target = requirements[0] ?? credentialBindings[0] ?? normalizeActionTarget(detail.target_id);
-  return target ? { target, requirements, credentialBindings } : null;
-}
-
-function promptAccessPayload(): { target: string; requirements: string[]; credentialBindings: string[] } | null {
-  if (typeof window === "undefined") return null;
-  const target = normalizeActionTarget(window.prompt(t("operations.access.action.targetPrompt")));
-  if (!target) return null;
-  const isRequirement = target.includes(":");
-  return {
-    target,
-    requirements: isRequirement ? [target] : [],
-    credentialBindings: isRequirement ? [] : [target],
-  };
-}
-
-function resolveAccessPayload(): { target: string; requirements: string[]; credentialBindings: string[] } | null {
-  return selectedAccessPayload() ?? promptAccessPayload();
-}
-
-async function runAccessAction(action: UiRuntimeAction) {
-  if (!canRunAccessAction(action)) return;
-  actionBusy.value = action.id;
-  actionNotice.value = null;
-  loadError.value = null;
-  try {
-    if (action.id === "open_access_inventory") {
-      const inventory = await loadAccessInventory(true, false);
-      actionNotice.value = t("operations.access.action.inventoryNotice", {
-        ready: inventory.counts.ready,
-        total: inventory.counts.total,
-        blocked: inventory.counts.blocked,
-      });
-    } else if (action.id === "check_access") {
-      const payload = resolveAccessPayload();
-      if (!payload) return;
-      const result = await checkAccess({
-        requirements: payload.requirements,
-        credential_bindings: payload.credentialBindings,
-      });
-      const readyCount = result.checks.filter((check) => check.ready).length;
-      actionNotice.value = t("operations.access.action.checkNotice", {
-        ready: readyCount,
-        total: result.checks.length,
-        target: payload.target,
-      });
-    } else if (action.id === "setup_access") {
-      const payload = resolveAccessPayload();
-      if (!payload) return;
-      const flow = await getAccessSetup(payload.target);
-      actionNotice.value = t("operations.access.action.setupNotice", {
-        title: flow.title,
-        target: payload.target,
-      });
-    } else {
-      throw new Error(t("operations.access.action.unsupportedAction"));
-    }
-    await refreshPage();
-  } catch (error) {
-    loadError.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    actionBusy.value = null;
-  }
+function openTrace() {
+  void router.push("/trace");
 }
 
 async function refreshPage() {
@@ -563,6 +467,8 @@ async function refreshPage() {
   }
 }
 
+useOperationsProjectionRefresh("access", refreshPage);
+
 onMounted(() => {
   void refreshPage();
   refreshTimer.value = window.setInterval(() => {
@@ -583,7 +489,7 @@ onUnmounted(() => {
     <header class="access-header">
       <div>
         <h2>{{ accessText(page?.title ?? "Access") }} <span>{{ page?.health ? accessText(page.health) : "-" }}</span></h2>
-        <p>{{ accessText(page?.subtitle ?? "观察凭证绑定、访问要求、授权缺口、setup flow 与访问相关事件的运维视图。") }}</p>
+        <p>{{ accessText(page?.subtitle ?? "观察凭证绑定、外部访问要求、访问缺口、setup flow 与访问相关事件的运维视图。") }}</p>
       </div>
       <div class="access-header__ops">
         <span>{{ t("common.lastUpdated") }}: <strong>{{ lastUpdatedLabel }}</strong></span>
@@ -601,27 +507,17 @@ onUnmounted(() => {
       <StatusDot tone="danger" />
       <span>{{ loadError }}</span>
     </div>
-    <div v-if="actionNotice" class="access-alert access-alert--success">
-      <StatusDot tone="success" />
-      <span>{{ actionNotice }}</span>
-    </div>
 
-    <section v-if="accessActions.length" class="access-action-strip">
+    <section class="access-action-strip">
       <div class="access-action-target">
-        <span>{{ t("operations.access.action.target") }}</span>
-        <strong>{{ selectedAccessTargetLabel ?? t("operations.access.action.noTargetSelected") }}</strong>
+        <span>{{ t("operations.access.boundary.label") }}</span>
+        <strong>{{ t("operations.access.boundary.observeOnly") }}</strong>
       </div>
-      <UiButton
-        v-for="action in accessActions"
-        :key="action.id"
-        size="sm"
-        :variant="actionVariant(action)"
-        :disabled="!canRunAccessAction(action)"
-        :title="action.endpoint ?? ''"
-        @click="runAccessAction(action)"
-      >
-        <component :is="actionIcon(action)" :class="{ 'motion-spin': actionBusy === action.id }" :size="13" />
-        {{ actionLabel(action) }}
+      <UiButton size="sm" variant="secondary" @click="openAccessSettings">
+        <Settings :size="13" /> {{ t("operations.access.nav.openSettings") }}
+      </UiButton>
+      <UiButton size="sm" variant="secondary" @click="openTrace">
+        <Database :size="13" /> {{ t("operations.access.nav.openTrace") }}
       </UiButton>
     </section>
 

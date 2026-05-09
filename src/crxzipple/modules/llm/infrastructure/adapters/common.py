@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import json
-from pathlib import Path
 import re
 import time
 from typing import Any
@@ -12,12 +11,6 @@ from typing import Any
 import httpx
 import requests
 
-from crxzipple.modules.access import (
-    CredentialResolutionError,
-    CredentialResolver,
-    default_codex_auth_json_path as access_default_codex_auth_json_path,
-    load_codex_auth_json_access_token as access_load_codex_auth_json_access_token,
-)
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmCapability,
@@ -29,7 +22,6 @@ from crxzipple.shared.content_blocks import (
     describe_content_for_text_fallback,
     extract_text_content,
     has_image_content_blocks,
-    has_non_text_content_blocks,
     normalize_content_blocks,
 )
 
@@ -38,7 +30,6 @@ OPENAI_TOOL_NAME_MAX_LENGTH = 64
 OPENAI_TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 OPENAI_TRANSIENT_STREAM_MAX_ATTEMPTS = 3
 OPENAI_TRANSIENT_STREAM_INITIAL_BACKOFF_SECONDS = 0.25
-_CREDENTIAL_RESOLVER = CredentialResolver()
 
 
 class RetryableOpenAIStreamError(RuntimeError):
@@ -77,38 +68,36 @@ def join_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
-def default_codex_auth_json_path() -> Path:
-    return access_default_codex_auth_json_path()
-
-
-def load_codex_auth_json_access_token(path: Path) -> str | None:
-    try:
-        return access_load_codex_auth_json_access_token(path)
-    except CredentialResolutionError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
 def resolve_credential_binding(
     binding: str | None,
     *,
     required: bool,
     description: str,
+    resolved_credential: str | None = None,
 ) -> str | None:
-    if binding is None:
-        if required:
-            raise RuntimeError(f"{description} requires a credential binding.")
-        return None
+    if resolved_credential is not None and resolved_credential.strip():
+        return resolved_credential.strip()
 
-    normalized = binding.strip()
-    if not normalized:
-        if required:
-            raise RuntimeError(f"{description} has an empty credential binding.")
-        return None
+    normalized_binding = binding.strip() if binding is not None else ""
+    if normalized_binding:
+        raise RuntimeError(
+            f"{description} declares {_credential_binding_label(normalized_binding)} "
+            "but no resolved credential was injected.",
+        )
+    if required:
+        raise RuntimeError(f"{description} requires an injected resolved credential.")
+    return None
 
-    try:
-        return _CREDENTIAL_RESOLVER.resolve(normalized, allow_literal=True)
-    except CredentialResolutionError as exc:
-        raise RuntimeError(f"{description} {exc}") from exc
+
+def _credential_binding_label(binding: str) -> str:
+    if binding.startswith("env:"):
+        env_name = binding.removeprefix("env:").strip()
+        return f"credential binding 'env:{env_name}'" if env_name else "env credential binding"
+    if binding.startswith("file:"):
+        return "file credential binding"
+    if binding.startswith("codex_auth_json") or binding in {"codex-cli", "codex_auth_json"}:
+        return "Codex auth json credential binding"
+    return "credential binding"
 
 
 def ensure_json_response(

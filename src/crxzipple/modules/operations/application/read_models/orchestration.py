@@ -105,7 +105,6 @@ class OrchestrationOperationsReadModelProvider:
         leases = self.executor_control.list_executor_leases(status=None)
         ingress_requests = _list_ingress_requests(self.ingress_query)
         pending_ingress_requests = _pending_ingress_requests(ingress_requests)
-        counts = Counter(run.status for run in runs)
         visible_ingress_count = len(pending_ingress_requests)
         queued_runs = [
             run for run in runs if run.status is OrchestrationRunStatus.QUEUED

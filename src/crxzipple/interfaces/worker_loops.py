@@ -6,9 +6,7 @@ from typing import Protocol
 
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.daemon.application import DaemonManager
-from crxzipple.modules.dispatch.application import dispatch_wakeup_topic
 from crxzipple.modules.events import EventsApplicationService
-from crxzipple.modules.events.domain import EventTopicWatch
 from crxzipple.modules.orchestration.application import (
     OrchestrationExecutorService,
     OrchestrationSchedulerService,

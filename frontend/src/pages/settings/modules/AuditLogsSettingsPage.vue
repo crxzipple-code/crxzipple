@@ -1,114 +1,388 @@
 <script setup lang="ts">
-import { ArrowRight, CalendarDays, Download, FileClock, GitBranch, ListFilter, MoreVertical, Save, Search, User, X } from "lucide-vue-next";
+import {
+  ArrowRight,
+  CalendarDays,
+  Download,
+  FileClock,
+  GitBranch,
+  ListFilter,
+  MoreVertical,
+  RefreshCcw,
+  Save,
+  Search,
+  User,
+  X,
+} from "lucide-vue-next";
+import { computed, onMounted, ref } from "vue";
 
-const logs = [
-  { time: "May 19, 2025 10:15:42 AM", actor: "Jane Doe", role: "Admin", initials: "JD", action: "Updated", resourceType: "Environment", resource: "Production", status: "Success", ip: "203.0.113.24" },
-  { time: "May 19, 2025 10:12:18 AM", actor: "Michael Chen", role: "Developer", initials: "MC", action: "Created", resourceType: "Agent Profile", resource: "Support Agent", status: "Success", ip: "203.0.113.41" },
-  { time: "May 19, 2025 09:58:07 AM", actor: "Alex Rivera", role: "Admin", initials: "AR", action: "Deleted", resourceType: "Channel Profile", resource: "Legacy Webhook", status: "Success", ip: "198.51.100.17" },
-  { time: "May 19, 2025 09:45:33 AM", actor: "Priya Shah", role: "Developer", initials: "PS", action: "Updated", resourceType: "LLM Profile", resource: "GPT-4o Profile", status: "Success", ip: "203.0.113.55" },
-  { time: "May 19, 2025 09:30:21 AM", actor: "Jane Doe", role: "Admin", initials: "JD", action: "Updated", resourceType: "Runtime Defaults", resource: "General Settings", status: "Success", ip: "203.0.113.24" },
-  { time: "May 19, 2025 09:15:12 AM", actor: "Michael Chen", role: "Developer", initials: "MC", action: "Created", resourceType: "Tool", resource: "Web Search", status: "Success", ip: "203.0.113.41" },
-  { time: "May 19, 2025 08:47:55 AM", actor: "System", role: "System", initials: "SY", action: "Login", resourceType: "Authentication", resource: "User Login", status: "Success", ip: "203.0.113.1" },
-  { time: "May 19, 2025 08:22:10 AM", actor: "Alex Rivera", role: "Admin", initials: "AR", action: "Updated", resourceType: "Access Asset", resource: "OpenAI API Key", status: "Success", ip: "198.51.100.17" },
-  { time: "May 19, 2025 07:59:44 AM", actor: "Priya Shah", role: "Developer", initials: "PS", action: "Failed", resourceType: "Environment", resource: "Test", status: "Failed", ip: "203.0.113.55" },
-  { time: "May 19, 2025 07:42:31 AM", actor: "Jane Doe", role: "Admin", initials: "JD", action: "Created", resourceType: "Event", resource: "agent.run.completed", status: "Success", ip: "203.0.113.24" },
-] as const;
+import { useI18n } from "@/shared/i18n";
+import UiButton from "@/shared/ui/UiButton.vue";
+import { getSettingsResource, listSettingsResources } from "../api";
+
+interface SettingsAuditPayload {
+  audit_id?: string;
+  id?: string;
+  action?: string;
+  action_type?: string;
+  kind?: string;
+  resource_id?: string | null;
+  actor?: string | null;
+  reason?: string | null;
+  risk?: string | null;
+  dry_run?: boolean;
+  status?: string;
+  request_metadata?: unknown;
+  result?: unknown;
+  error?: unknown;
+  created_at?: string;
+  completed_at?: string;
+}
+
+interface SettingsAuditListPayload {
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+interface SettingsAuditPagePayload {
+  title?: string;
+  description?: string;
+  status?: string;
+  resources?: SettingsAuditPayload[];
+  list?: SettingsAuditListPayload;
+  detail?: SettingsAuditPayload | null;
+}
+
+const { t } = useI18n();
+const auditPage = ref<SettingsAuditPagePayload | null>(null);
+const selectedAuditDetail = ref<SettingsAuditPayload | null>(null);
+const selectedAuditId = ref<string | null>(null);
+const isLoading = ref(false);
+const detailLoading = ref(false);
+const loadError = ref<string | null>(null);
+const detailError = ref<string | null>(null);
+const searchQuery = ref("");
+const currentPage = ref(1);
+const pageSize = 10;
+
+const audits = computed(() => auditPage.value?.resources ?? []);
+const filteredAudits = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return audits.value;
+  return audits.value.filter((audit) =>
+    [
+      audit.audit_id,
+      audit.action,
+      audit.kind,
+      audit.resource_id,
+      audit.actor,
+      audit.reason,
+      audit.status,
+      audit.risk,
+    ]
+      .map((value) => textValue(value, "").toLowerCase())
+      .some((value) => value.includes(query)),
+  );
+});
+const totalRecords = computed(() => auditPage.value?.list?.total ?? audits.value.length);
+const totalPages = computed(() => Math.max(1, Math.ceil(totalRecords.value / pageSize)));
+const pageStart = computed(() => {
+  if (!totalRecords.value || !filteredAudits.value.length) return 0;
+  return (currentPage.value - 1) * pageSize + 1;
+});
+const pageEnd = computed(() =>
+  Math.min((currentPage.value - 1) * pageSize + filteredAudits.value.length, totalRecords.value),
+);
+const timeRangeLabel = computed(() => {
+  const first = audits.value[0]?.created_at;
+  const last = audits.value[audits.value.length - 1]?.created_at;
+  if (!first || !last) return t("table.noRecords");
+  return `${formatTime(last)} - ${formatTime(first)}`;
+});
+const selectedActor = computed(() => actorLabel(selectedAuditDetail.value?.actor));
+const selectedTarget = computed(() => targetLabel(selectedAuditDetail.value));
+const selectedRequestMetadata = computed(() => formatJson(selectedAuditDetail.value?.request_metadata));
+const selectedResult = computed(() => {
+  if (selectedAuditDetail.value?.error) return formatJson(selectedAuditDetail.value.error);
+  return formatJson(selectedAuditDetail.value?.result);
+});
+
+onMounted(() => {
+  void loadAuditLogs();
+});
+
+async function loadAuditLogs(): Promise<void> {
+  isLoading.value = true;
+  loadError.value = null;
+  try {
+    const offset = (currentPage.value - 1) * pageSize;
+    const payload = await listSettingsResources("audit-logs", {
+      limit: pageSize,
+      offset,
+    }) as SettingsAuditPagePayload;
+    auditPage.value = payload;
+    const firstAudit = payload.resources?.[0] ?? null;
+    if (!firstAudit) {
+      selectedAuditId.value = null;
+      selectedAuditDetail.value = null;
+      return;
+    }
+    const existingDetail = payload.detail?.audit_id === auditId(firstAudit) ? payload.detail : null;
+    await selectAudit(auditId(firstAudit), existingDetail);
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    isLoading.value = false;
+  }
+}
+
+async function selectAudit(auditIdValue: string, existingDetail?: SettingsAuditPayload | null): Promise<void> {
+  if (!auditIdValue) return;
+  selectedAuditId.value = auditIdValue;
+  detailError.value = null;
+  if (existingDetail) {
+    selectedAuditDetail.value = existingDetail;
+    return;
+  }
+  detailLoading.value = true;
+  try {
+    selectedAuditDetail.value = await getSettingsResource(
+      "audit-logs",
+      auditIdValue,
+    ) as SettingsAuditPayload;
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+function goToPreviousPage(): void {
+  if (currentPage.value <= 1 || isLoading.value) return;
+  currentPage.value -= 1;
+  void loadAuditLogs();
+}
+
+function goToNextPage(): void {
+  if (currentPage.value >= totalPages.value || isLoading.value) return;
+  currentPage.value += 1;
+  void loadAuditLogs();
+}
+
+function auditId(audit: SettingsAuditPayload | null | undefined): string {
+  return textValue(audit?.audit_id ?? audit?.id, "");
+}
+
+function actorLabel(actor: unknown): string {
+  return textValue(actor, t("text.system"));
+}
+
+function actorInitials(actor: unknown): string {
+  const label = actorLabel(actor);
+  return label
+    .split(/[\s._@-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("") || "SY";
+}
+
+function targetLabel(audit: SettingsAuditPayload | null | undefined): string {
+  if (!audit) return "-";
+  const kind = resourceLabel(audit.kind);
+  const resourceId = textValue(audit.resource_id, "*");
+  return `${kind} / ${resourceId}`;
+}
+
+function resourceLabel(value: unknown): string {
+  const raw = textValue(value, "settings");
+  const labels: Record<string, string> = {
+    "agent-profiles": t("settings.resource.agentProfiles"),
+    "llm-profiles": t("settings.resource.llmProfiles"),
+    "tool-catalog": t("settings.resource.toolCatalog"),
+    "skill-catalog": t("settings.resource.skillCatalog"),
+    "memory-config": t("settings.resource.memoryConfig"),
+    "access-assets": t("settings.resource.accessAssets"),
+    "channel-profiles": t("settings.resource.channelProfiles"),
+    "event-registry": "Event Registry",
+    "runtime-defaults": t("settings.resource.runtimeDefaults"),
+    environment: t("settings.resource.environment"),
+    "audit-logs": t("settings.resource.auditLogs"),
+    "backup-restore": t("settings.resource.backupRestore"),
+    settings: t("common.settings"),
+  };
+  return labels[raw] ?? titleize(raw);
+}
+
+function statusClass(value: unknown): string {
+  const text = textValue(value, "").toLowerCase();
+  if (/(failed|error|invalid|blocked)/.test(text)) return "failed";
+  if (/(warning|pending|empty|unknown)/.test(text)) return "warning";
+  return "success";
+}
+
+function textValue(value: unknown, fallback = ""): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
+function titleize(value: unknown, fallback = "-"): string {
+  const raw = textValue(value, "");
+  if (!raw) return fallback;
+  return raw
+    .split(/[_\s.-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatTime(value: string | null | undefined): string {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatJson(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "{}";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
 </script>
 
 <template>
   <main class="settings-module audit-settings scroll-area">
     <header class="settings-page-header">
       <div>
-        <h1>Audit Logs</h1>
-        <p>View and search audit logs for system activity and changes across the platform.</p>
+        <h1>{{ t("settings.resource.auditLogs") }}</h1>
+        <p>{{ auditPage?.description ?? t("settings.auditLogsDesc") }}</p>
+      </div>
+      <div class="settings-header-actions">
+        <UiButton size="sm" variant="secondary" :disabled="isLoading" @click="loadAuditLogs">
+          <RefreshCcw :size="14" /> {{ t("common.refresh") }}
+        </UiButton>
       </div>
     </header>
 
     <section class="audit-filter-row">
-      <button class="date-range" type="button">May 18, 2025 <span>-</span> May 19, 2025 <CalendarDays :size="14" /></button>
-      <select><option>All Actions</option></select>
-      <select><option>All Resources</option></select>
-      <select><option>All Users</option></select>
-      <select><option>All Status</option></select>
-      <label><Search :size="14" /><input placeholder="Search logs..." /></label>
-      <button type="button"><ListFilter :size="14" /> Filters</button>
-      <button type="button"><Download :size="14" /> Export</button>
+      <button class="date-range" type="button" disabled>{{ timeRangeLabel }} <CalendarDays :size="14" /></button>
+      <select disabled><option>{{ t("common.all") }} {{ t("common.actions") }}</option></select>
+      <select disabled><option>{{ t("common.all") }} {{ t("table.resources") }}</option></select>
+      <select disabled><option>{{ t("common.all") }} {{ t("common.owner") }}</option></select>
+      <select disabled><option>{{ t("common.all") }} {{ t("common.status") }}</option></select>
+      <label><Search :size="14" /><input v-model="searchQuery" :placeholder="t('common.search')" /></label>
+      <button type="button" disabled><ListFilter :size="14" /> {{ t("trace.threadFilters") }}</button>
+      <button type="button" disabled><Download :size="14" /> {{ t("common.export") }}</button>
+    </section>
+
+    <section v-if="loadError" class="settings-panel audit-state audit-state--error">
+      <strong>{{ t("table.error") }}</strong>
+      <span>{{ loadError }}</span>
+      <UiButton size="sm" variant="secondary" @click="loadAuditLogs">{{ t("common.refresh") }}</UiButton>
     </section>
 
     <section class="audit-layout">
       <article class="settings-panel audit-list-panel">
         <div class="audit-table">
           <div class="audit-table-head">
-            <span>Time</span><span>User</span><span>Action</span><span>Resource Type</span><span>Resource</span><span>Status</span><span>IP Address</span><span></span>
+            <span>{{ t("table.time") }}</span><span>{{ t("table.owner") }}</span><span>{{ t("table.action") }}</span><span>{{ t("table.type") }}</span><span>{{ t("table.target") }}</span><span>{{ t("table.status") }}</span><span>{{ t("operations.tool.tab.risk") }}</span><span></span>
           </div>
-          <button v-for="log in logs" :key="`${log.time}-${log.resource}`" :class="{ active: log.resource === 'Production' }" type="button" class="audit-row">
-            <span>{{ log.time }}</span>
-            <span class="audit-user"><em>{{ log.initials }}</em><strong>{{ log.actor }}<small>{{ log.role }}</small></strong></span>
-            <span :class="['audit-action', log.action.toLowerCase()]">{{ log.action }}</span>
-            <span>{{ log.resourceType }}</span>
-            <span class="audit-resource">{{ log.resource }}</span>
-            <span :class="['audit-status', log.status.toLowerCase()]">{{ log.status }}</span>
-            <span>{{ log.ip }}</span>
+          <button
+            v-for="log in filteredAudits"
+            :key="auditId(log)"
+            :class="{ active: auditId(log) === selectedAuditId }"
+            type="button"
+            class="audit-row"
+            @click="selectAudit(auditId(log))"
+          >
+            <span>{{ formatTime(log.created_at) }}</span>
+            <span class="audit-user"><em>{{ actorInitials(log.actor) }}</em><strong>{{ actorLabel(log.actor) }}<small>{{ auditId(log) }}</small></strong></span>
+            <span :class="['audit-action', statusClass(log.status)]">{{ titleize(log.action) }}</span>
+            <span>{{ resourceLabel(log.kind) }}</span>
+            <span class="audit-resource">{{ textValue(log.resource_id, "*") }}</span>
+            <span :class="['audit-status', statusClass(log.status)]">{{ titleize(log.status, t("status.unknown")) }}</span>
+            <span>{{ titleize(log.risk, "-") }}</span>
             <span class="audit-menu"><MoreVertical :size="15" /></span>
           </button>
+
+          <div v-if="isLoading && !auditPage" class="audit-empty">{{ t("common.loading") }}...</div>
+          <div v-else-if="!filteredAudits.length" class="audit-empty">{{ t("table.noRecords") }}</div>
         </div>
         <footer>
-          <span>Showing 1 to 10 of 2,431 logs</span>
-          <nav><button type="button">1</button><button type="button">2</button><button type="button">3</button><button type="button">4</button><span>...</span><button type="button">244</button><ArrowRight :size="13" /></nav>
+          <span>{{ pageStart }}-{{ pageEnd }} / {{ totalRecords }}</span>
+          <nav>
+            <button type="button" :disabled="currentPage <= 1 || isLoading" @click="goToPreviousPage">{{ t("common.previous") }}</button>
+            <button type="button" class="active-page">{{ currentPage }}</button>
+            <button type="button" :disabled="currentPage >= totalPages || isLoading" @click="goToNextPage">{{ t("common.next") }}</button>
+          </nav>
         </footer>
       </article>
 
       <aside class="settings-panel audit-detail-panel">
         <header>
-          <h2>Log Details</h2>
-          <button type="button"><X :size="15" /></button>
+          <h2>{{ t("table.details") }}</h2>
+          <button type="button" disabled><X :size="15" /></button>
         </header>
 
-        <section class="detail-block">
-          <h3>Time</h3>
-          <p>May 19, 2025 10:15:42 AM (UTC)</p>
-        </section>
+        <div v-if="detailError" class="audit-detail-empty">{{ detailError }}</div>
+        <div v-else-if="detailLoading" class="audit-detail-empty">{{ t("common.loading") }}...</div>
+        <div v-else-if="!selectedAuditDetail" class="audit-detail-empty">{{ t("table.noRecords") }}</div>
+        <template v-else>
+          <section class="detail-block">
+            <h3>{{ t("table.time") }}</h3>
+            <p>{{ formatTime(selectedAuditDetail.created_at) }}</p>
+          </section>
 
-        <section class="detail-block">
-          <h3>User</h3>
-          <div class="detail-user"><em>JD</em><strong>Jane Doe <span>(jane.doe@acme.com)</span><small>Admin</small></strong></div>
-        </section>
+          <section class="detail-block">
+            <h3>{{ t("table.owner") }}</h3>
+            <div class="detail-user"><em>{{ actorInitials(selectedAuditDetail.actor) }}</em><strong>{{ selectedActor }}<small>{{ auditId(selectedAuditDetail) }}</small></strong></div>
+          </section>
 
-        <section class="detail-block compact">
-          <h3>Action</h3>
-          <p>Updated</p>
-          <h3>Resource</h3>
-          <p>Environment <a>Production</a></p>
-          <h3>Status</h3>
-          <p class="success-dot">Success</p>
-          <h3>IP Address</h3>
-          <p>203.0.113.24</p>
-          <h3>User Agent</h3>
-          <p>Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36</p>
-        </section>
+          <section class="detail-block compact">
+            <h3>{{ t("table.action") }}</h3>
+            <p>{{ titleize(selectedAuditDetail.action) }}</p>
+            <h3>{{ t("table.target") }}</h3>
+            <p>{{ selectedTarget }}</p>
+            <h3>{{ t("table.status") }}</h3>
+            <p :class="`${statusClass(selectedAuditDetail.status)}-dot`">{{ titleize(selectedAuditDetail.status, t("status.unknown")) }}</p>
+            <h3>{{ t("table.reason") }}</h3>
+            <p>{{ selectedAuditDetail.reason ?? "-" }}</p>
+            <h3>{{ t("operations.tool.tab.risk") }}</h3>
+            <p>{{ titleize(selectedAuditDetail.risk, "-") }}</p>
+            <h3>{{ t("table.completedAt") }}</h3>
+            <p>{{ formatTime(selectedAuditDetail.completed_at) }}</p>
+          </section>
 
-        <section class="detail-block changes">
-          <h3>Changes</h3>
-          <pre>{
-  "name": {
-    "before": "Production",
-    "after": "Production"
-  },
-  "description": {
-    "before": "Primary production environment",
-    "after": "Production environment for live workloads"
-  }
-}</pre>
-        </section>
+          <section class="detail-block changes">
+            <h3>{{ t("table.metadata") }}</h3>
+            <pre>{{ selectedRequestMetadata }}</pre>
+          </section>
+
+          <section class="detail-block changes">
+            <h3>{{ selectedAuditDetail.error ? t("table.error") : t("table.result") }}</h3>
+            <pre>{{ selectedResult }}</pre>
+          </section>
+        </template>
       </aside>
     </section>
 
     <footer class="settings-footer">
-      <span><FileClock :size="14" />Config Source: Audit Logs</span>
-      <span><GitBranch :size="14" />Records are immutable</span>
-      <span><User :size="14" />Selected Actor: Jane Doe</span>
-      <span><Save :size="14" />Filter saved locally</span>
-      <a>Audit History <ArrowRight :size="13" /></a>
+      <span><FileClock :size="14" />{{ auditPage?.title ?? t("settings.resource.auditLogs") }}</span>
+      <span><GitBranch :size="14" />{{ totalRecords }} {{ t("table.resources") }}</span>
+      <span><User :size="14" />{{ selectedActor }}</span>
+      <span><Save :size="14" />{{ auditPage?.status ?? t("status.unknown") }}</span>
+      <a>{{ t("settings.resource.auditLogs") }} <ArrowRight :size="13" /></a>
     </footer>
   </main>
 </template>
@@ -166,12 +440,33 @@ const logs = [
   padding: 0 10px;
 }
 
+.audit-filter-row button:disabled,
+.audit-filter-row select:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .date-range {
   justify-content: space-between !important;
 }
 
-.date-range span {
-  color: var(--text-muted);
+.audit-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 54px;
+  margin-bottom: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.audit-state--error {
+  border-color: color-mix(in srgb, var(--color-danger) 44%, var(--border-subtle));
+}
+
+.audit-state strong {
+  color: var(--color-danger);
 }
 
 .audit-layout {
@@ -194,7 +489,7 @@ const logs = [
 .audit-table-head,
 .audit-row {
   display: grid;
-  grid-template-columns: 170px 144px 88px 146px 128px 98px 102px 34px;
+  grid-template-columns: 170px 156px 88px 146px 128px 98px 86px 34px;
   align-items: center;
   min-width: 910px;
 }
@@ -264,16 +559,18 @@ const logs = [
 }
 
 .audit-user small,
-.detail-user small,
-.detail-user span {
+.detail-user small {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 500;
 }
 
-.audit-action.deleted,
 .audit-action.failed {
   color: var(--color-danger);
+}
+
+.audit-action.warning {
+  color: var(--color-warning);
 }
 
 .audit-resource {
@@ -296,6 +593,11 @@ const logs = [
   color: var(--color-success);
 }
 
+.audit-status.warning {
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+  color: var(--color-warning);
+}
+
 .audit-status.failed {
   background: color-mix(in srgb, var(--color-danger) 16%, transparent);
   color: var(--color-danger);
@@ -305,6 +607,15 @@ const logs = [
   display: grid;
   place-items: center;
   color: var(--text-muted);
+}
+
+.audit-empty,
+.audit-detail-empty {
+  display: grid;
+  min-height: 320px;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .audit-list-panel footer {
@@ -320,12 +631,13 @@ const logs = [
 .audit-list-panel footer nav {
   display: flex;
   align-items: center;
-  gap: 13px;
+  gap: 8px;
 }
 
 .audit-list-panel footer button {
-  width: 26px;
+  min-width: 30px;
   height: 26px;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-1);
   background: transparent;
@@ -333,7 +645,12 @@ const logs = [
   font-size: 12px;
 }
 
-.audit-list-panel footer button:first-child {
+.audit-list-panel footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.audit-list-panel footer .active-page {
   border-color: color-mix(in srgb, var(--color-accent) 70%, var(--border-subtle));
   background: var(--surface-active);
   color: var(--text-primary);
@@ -382,12 +699,6 @@ const logs = [
   line-height: 1.42;
 }
 
-.detail-block a {
-  display: block;
-  margin-top: 3px;
-  color: var(--color-accent);
-}
-
 .detail-block.compact {
   display: grid;
   gap: 6px;
@@ -397,9 +708,19 @@ const logs = [
   color: var(--color-success) !important;
 }
 
+.warning-dot {
+  color: var(--color-warning) !important;
+}
+
+.failed-dot {
+  color: var(--color-danger) !important;
+}
+
 .changes pre {
   margin: 0;
-  min-height: 196px;
+  min-height: 126px;
+  max-height: 210px;
+  overflow: auto;
   padding: 14px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);

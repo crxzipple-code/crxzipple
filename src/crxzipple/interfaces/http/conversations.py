@@ -5,7 +5,7 @@ import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from crxzipple.bootstrap import AppContainer
 from crxzipple.interfaces.http.dependencies import get_container

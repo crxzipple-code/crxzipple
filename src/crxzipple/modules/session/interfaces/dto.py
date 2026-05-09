@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 
 from crxzipple.modules.session.application.services import RoutedSessionResult
 from crxzipple.modules.session.domain.entities import Session, SessionInstance

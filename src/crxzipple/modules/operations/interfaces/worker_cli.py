@@ -168,7 +168,7 @@ def build_cli() -> typer.Typer:
     @app.command("run")
     def run(
         poll_interval_seconds: float = typer.Option(
-            0.5,
+            0.2,
             "--poll-interval-seconds",
             min=0.05,
             help="Idle wait time between operations observer polls.",

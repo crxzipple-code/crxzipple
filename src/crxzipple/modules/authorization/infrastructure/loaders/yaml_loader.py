@@ -29,18 +29,35 @@ class YamlAuthorizationPolicyLoader:
             ),
         )
 
+    def load_text(
+        self,
+        raw: str,
+        *,
+        source_description: str = "inline authorization policy payload",
+    ) -> tuple[AuthorizationPolicy, ...]:
+        payload = yaml.safe_load(raw) if raw.strip() else []
+        return self._load_payload(payload, source_description=source_description)
+
     def _load_path(self, path: Path) -> tuple[AuthorizationPolicy, ...]:
         payload = self._load_structured_config(path)
+        return self._load_payload(payload, source_description=str(path))
+
+    def _load_payload(
+        self,
+        payload: Any,
+        *,
+        source_description: str,
+    ) -> tuple[AuthorizationPolicy, ...]:
         if isinstance(payload, dict):
             items = [payload]
         elif isinstance(payload, list):
             items = payload
         else:
             raise ValueError(
-                f"Authorization policy config '{path}' must decode to an object or list.",
+                f"Authorization policy config '{source_description}' must decode to an object or list.",
             )
         return tuple(
-            self._build_policy(item, source_description=str(path))
+            self._build_policy(item, source_description=source_description)
             for item in items
         )
 
@@ -149,4 +166,3 @@ class YamlAuthorizationPolicyLoader:
                 f"Authorization policy '{policy_id}' obligations must be strings or objects.",
             )
         return tuple(obligations)
-

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from crxzipple.modules.memory.domain.entities import IndexedMemoryFile
 
 
 MemoryFileKind = Literal["long_term", "daily", "archive"]

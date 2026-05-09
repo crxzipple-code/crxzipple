@@ -63,6 +63,9 @@ def build_session_factory(engine: Engine) -> SessionFactory:
 
 
 def import_models() -> None:
+    from crxzipple.modules.access.infrastructure.persistence import (
+        models as _access_models,
+    )
     from crxzipple.modules.dispatch.infrastructure.persistence import (
         models as _dispatch_models,
     )
@@ -79,15 +82,20 @@ def import_models() -> None:
     from crxzipple.modules.session.infrastructure.persistence import (
         models as _session_models,
     )
+    from crxzipple.modules.settings.infrastructure.persistence import (
+        models as _settings_models,
+    )
     from crxzipple.modules.tool.infrastructure.persistence import models as _tool_models
 
     _ = (
+        _access_models,
         _dispatch_models,
         _authorization_models,
         _llm_models,
         _orchestration_models,
         _operations_models,
         _session_models,
+        _settings_models,
         _tool_models,
     )
 

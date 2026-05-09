@@ -506,7 +506,7 @@ def cancel_orchestration_run_from_operations(
     run_id: str,
     request: OperationsActionReasonRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> OrchestrationRunResponse:
+) -> dict[str, Any]:
     reason, audit_id = _begin_operations_action_audit(
         container,
         request,
@@ -546,7 +546,7 @@ def resume_orchestration_run_from_operations(
     run_id: str,
     request: OperationsActionReasonRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> OrchestrationRunResponse:
+) -> dict[str, Any]:
     reason, audit_id = _begin_operations_action_audit(
         container,
         request,
@@ -705,7 +705,7 @@ def replay_channel_dead_letter_from_operations(
     channel_type: str,
     request: OperationsChannelDeadLetterReplayRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> ChannelDeadLetterReplayResponse:
+) -> dict[str, Any]:
     reason, audit_id = _begin_operations_action_audit(
         container,
         request,
@@ -766,7 +766,7 @@ def replay_channel_dead_letter_from_operations(
 def validate_skill_package_from_operations(
     request: OperationsSkillValidateRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> SkillResponse:
+) -> dict[str, Any]:
     reason, audit_id = _begin_operations_action_audit(
         container,
         request,
@@ -798,7 +798,7 @@ def validate_skill_package_from_operations(
 def install_global_skill_from_operations(
     request: OperationsSkillInstallRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> SkillInstallResponse:
+) -> dict[str, Any]:
     reason, audit_id = _begin_operations_action_audit(
         container,
         request,
@@ -837,7 +837,7 @@ def get_access_inventory_from_operations(
     workspace_dir: str | None = Query(default=None),
     include_ready: bool = Query(default=True),
     include_disabled: bool = Query(default=False),
-) -> AccessInventoryResponse:
+) -> dict[str, Any]:
     payload = _operations_action_service(container).collect_access_inventory(
         workspace_dir=workspace_dir,
         include_ready=include_ready,
@@ -850,7 +850,7 @@ def get_access_inventory_from_operations(
 def check_access_from_operations(
     request: OperationsAccessCheckRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> AccessCheckResponse:
+) -> dict[str, Any]:
     _reason, audit_id = _begin_operations_action_audit(
         container,
         request,
@@ -890,7 +890,7 @@ def get_access_setup_from_operations(
     target: Annotated[str, Query(...)],
     container: Annotated[AppContainer, Depends(get_container)],
     workspace_dir: str | None = Query(default=None),
-) -> AccessSetupFlowResponse:
+) -> dict[str, Any]:
     flow = _operations_action_service(container).begin_access_setup(
         target=target,
         workspace_dir=workspace_dir,

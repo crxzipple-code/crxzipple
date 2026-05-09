@@ -12,7 +12,6 @@ from crxzipple.modules.browser.domain import BrowserActionResult
 from .requests import (
     BrowserControlRequest,
     BrowserInterfaceRequest,
-    BrowserPageActionRequest,
 )
 
 

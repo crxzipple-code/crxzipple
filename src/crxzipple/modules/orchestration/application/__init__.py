@@ -137,6 +137,10 @@ from crxzipple.modules.orchestration.application.worker import (
     OrchestrationExecutorService,
     orchestration_executor_assignment_requested_topic,
 )
+from crxzipple.modules.orchestration.application.settings_integration import (
+    RuntimeSettingsBootstrapConfig,
+    runtime_bootstrap_config_from_settings,
+)
 
 __all__ = [
     "ApprovalControlService",
@@ -197,6 +201,7 @@ __all__ = [
     "ResolvedTool",
     "ResolvedToolSet",
     "ResumeOrchestrationRunInput",
+    "runtime_bootstrap_config_from_settings",
     "RunDispatchClaim",
     "RunDispatchPort",
     "RunCancellationService",
@@ -212,6 +217,7 @@ __all__ = [
     "TOOL_OBSERVATION_SOURCE_EVENT_NAMES",
     "RunObservationObserver",
     "RuntimeObservationObserver",
+    "RuntimeSettingsBootstrapConfig",
     "SessionMessageObservationObserver",
     "ToolRunObservationObserver",
     "ToolResolver",

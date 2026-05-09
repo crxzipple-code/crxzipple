@@ -29,11 +29,19 @@ from crxzipple.modules.skills.application.ports import (
     SkillReadPort,
     SkillRepositoryPort,
 )
+from crxzipple.modules.skills.application.settings_integration import (
+    SkillEnablementManagerAdapter,
+    SkillEnablementService,
+    SkillEnablementTarget,
+)
 
 __all__ = [
     "InstalledSkill",
     "SkillCatalogPrompt",
     "SkillCatalogPort",
+    "SkillEnablementManagerAdapter",
+    "SkillEnablementService",
+    "SkillEnablementTarget",
     "SkillEventEmitter",
     "SkillInspectionPort",
     "SkillInstallationPort",

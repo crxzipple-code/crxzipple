@@ -9,7 +9,13 @@
 
 ## 查验与报告
 
+- [reports/closure-status-20260507.md](reports/closure-status-20260507.md)：当前收口状态、验证结果、版本控制边界和剩余风险。
 - [reports/code-quality-followup-checklist-20260506.md](reports/code-quality-followup-checklist-20260506.md)：当前仍需处理的代码规范性问题清单。
+- [reports/settings-module-boundary-complexity-review-20260508.md](reports/settings-module-boundary-complexity-review-20260508.md)：Settings 与模块实体边界复杂度审查、当前整改任务清单。
+- [reports/settings-governance-construction-checklist-20260507.md](reports/settings-governance-construction-checklist-20260507.md)：Settings 配置治理重构施工清单；其中 profile 真相源迁移判断以 2026-05-08 边界审查为准。
+- [reports/settings-ui-backend-alignment-checklist-20260507.md](reports/settings-ui-backend-alignment-checklist-20260507.md)：Settings UI 与后台设计对齐、接入/滞后/移除清单；其中 ownership 判断以 2026-05-08 边界审查为准。
+- [reports/settings-integration-dev-checklist-20260506.md](reports/settings-integration-dev-checklist-20260506.md)：已过期的 Settings 面板前后端接通开发清单，仅作历史背景。
+- [reports/access-governance-redesign-checklist-20260506.md](reports/access-governance-redesign-checklist-20260506.md)：Access 横向治理与配置真相重构清单。
 
 已关闭的历史审计和整改报告放在 `docs/archive/reports/`，只作背景，不作为当前待办入口。
 

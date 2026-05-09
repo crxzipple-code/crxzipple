@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import threading
 
+from crxzipple.modules.orchestration.infrastructure.adapters import (
+    AuthorizationServiceAdapter,
+)
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.shared.domain.events import Event
 
@@ -231,12 +234,14 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 LlmApiFamily.OPENAI_RESPONSES,
                 adapter,
             )
-            container.llm_service.register_profile(
-                RegisterLlmProfileInput(
-                    id="openai.gpt-5.4-mini",
-                    provider=LlmProviderKind.OPENAI,
-                    api_family=LlmApiFamily.OPENAI_RESPONSES,
-                    model_name="gpt-5.4-mini",
+            container.llm_service.sync_profiles(
+                (
+                    RegisterLlmProfileInput(
+                        id="openai.gpt-5.4-mini",
+                        provider=LlmProviderKind.OPENAI,
+                        api_family=LlmApiFamily.OPENAI_RESPONSES,
+                        model_name="gpt-5.4-mini",
+                    ),
                 ),
             )
             container.agent_service.register_profile(
@@ -1294,7 +1299,9 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 )
 
             container.local_tool_catalog.register(tool, background_echo)
-            container.authorization_service.grant_agent_effect_access(
+            AuthorizationServiceAdapter(
+                container.authorization_service,
+            ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="background_execution",
             )
@@ -1427,7 +1434,9 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 )
 
             container.local_tool_catalog.register(tool, background_echo)
-            container.authorization_service.grant_agent_effect_access(
+            AuthorizationServiceAdapter(
+                container.authorization_service,
+            ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="background_execution",
             )
@@ -1563,7 +1572,9 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 )
 
             container.local_tool_catalog.register(tool, background_echo)
-            container.authorization_service.grant_agent_effect_access(
+            AuthorizationServiceAdapter(
+                container.authorization_service,
+            ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="background_execution",
             )

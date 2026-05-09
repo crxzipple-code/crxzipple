@@ -276,58 +276,6 @@ export interface SkillInstallResponse {
   skill: SkillPackageResponse;
 }
 
-export interface AccessCheckRequest extends OperationsActionPayload {
-  requirements?: string[];
-  credential_bindings?: string[];
-  workspace_dir?: string | null;
-  allow_literal_credentials?: boolean;
-}
-
-export interface AccessReadinessResponse {
-  target_type: "requirement" | "credential_binding" | string;
-  requirement: string;
-  provider?: string | null;
-  kind?: string | null;
-  scopes: string[];
-  status: string;
-  ready: boolean;
-  setup_available: boolean;
-  reason: string;
-  setup_flow?: AccessSetupFlowResponse | null;
-}
-
-export interface AccessCheckResponse {
-  ready: boolean;
-  checks: AccessReadinessResponse[];
-}
-
-export interface AccessSetupFlowResponse {
-  kind: string;
-  title: string;
-  description: string;
-  action_label?: string | null;
-  env_vars: string[];
-  path?: string | null;
-  command: string[];
-  authorize_url?: string | null;
-  callback_url?: string | null;
-  verification_url?: string | null;
-  user_code?: string | null;
-  expires_at?: string | null;
-  metadata: RawRecord;
-  actions: RawRecord[];
-}
-
-export interface AccessInventoryResponse {
-  ready: boolean;
-  targets: RawRecord[];
-  counts: {
-    total: number;
-    ready: number;
-    blocked: number;
-  };
-}
-
 export type DaemonServiceActionKind = "ensure" | "healthcheck" | "reconcile" | "stop";
 
 export interface OperationsModulePageReadModel {
@@ -735,41 +683,6 @@ export async function installGlobalSkill(sourceDir: string): Promise<SkillInstal
         }),
       }),
     },
-  );
-}
-
-export async function loadAccessInventory(
-  includeReady = true,
-  includeDisabled = false,
-): Promise<AccessInventoryResponse> {
-  const search = new URLSearchParams({
-    include_ready: String(includeReady),
-    include_disabled: String(includeDisabled),
-  });
-  return requestJson<AccessInventoryResponse>(`/operations/access/inventory?${search.toString()}`);
-}
-
-export async function checkAccess(
-  payload: AccessCheckRequest,
-): Promise<AccessCheckResponse> {
-  return requestJson<AccessCheckResponse>(
-    "/operations/access/check",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        ...payload,
-        ...operationsActionPayload({
-          ...payload,
-          defaultReason: "Operations access readiness check",
-        }),
-      }),
-    },
-  );
-}
-
-export async function getAccessSetup(target: string): Promise<AccessSetupFlowResponse> {
-  return requestJson<AccessSetupFlowResponse>(
-    `/operations/access/setup?target=${encodeURIComponent(target)}`,
   );
 }
 

@@ -29,6 +29,7 @@ from crxzipple.modules.memory.application.models import (
 )
 from crxzipple.modules.memory.domain import (
     ChunkRange,
+    IndexedChunk,
     MemoryChunkingPolicy,
     MemoryIndexPlanner,
     MemoryItem,
@@ -298,7 +299,7 @@ class SyncMemoryIndexService:
         self,
         *,
         context: MemoryUseContext,
-        chunks: tuple["IndexedChunk", ...],
+        chunks: tuple[IndexedChunk, ...],
     ) -> tuple[tuple[float, ...], ...] | None:
         if self._index_mode(context) != "vector" or self.embedding_provider is None:
             return None

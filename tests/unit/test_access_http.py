@@ -1,12 +1,108 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import tempfile
+import unittest
+from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
+from crxzipple.core.config import load_settings
+from crxzipple.interfaces.http.app import create_app
 from crxzipple.modules.channels import ChannelAccountProfile, ChannelProfile
-from tests.unit.http_test_support import *
+from crxzipple.modules.tool.application import RegisterToolInput
+from tests.unit.http_test_support import HttpModuleTestCase
 
 
 class AccessHttpTestCase(HttpModuleTestCase):
+    def test_access_action_rejects_internal_abac_policy_governance(
+        self,
+    ) -> None:
+        response = self.client.post(
+            "/access/actions",
+            json={
+                "action_id": "act_create_policy",
+                "resource_kind": "authorization_policy",
+                "target_id": "policy_allow_http_llm",
+                "intent": "create_authorization_policy",
+                "changes": {
+                    "name": "Allow HTTP LLM",
+                    "effect": "allow",
+                    "policy_spec": {
+                        "actions": ["llm.invoke.special"],
+                        "subject": {"type": "interface", "id": "http"},
+                        "resource": {"kind": "llm_profile", "id": "writer"},
+                    },
+                },
+                "reason": "internal ABAC policy belongs to authorization",
+                "actor": "unit-test",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unsupported access action intent", response.text)
+        self.assertNotIn("raw-secret", response.text)
+
+    def test_access_action_registers_binding_through_settings_actions(self) -> None:
+        response = self.client.post(
+            "/access/actions",
+            json={
+                "action_id": "act_register_openai",
+                "resource_kind": "credential_binding",
+                "target_id": "cred_openai_env",
+                "intent": "register_env_binding",
+                "changes": {
+                    "source_ref": "OPENAI_API_KEY",
+                    "binding_kind": "api_key",
+                },
+                "reason": "register OpenAI credential source",
+                "actor": "unit-test",
+                "trace_context": {"request_id": "trace-1"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertEqual(payload["asset"]["binding_id"], "cred_openai_env")
+        self.assertNotIn("sk-should-not-persist", response.text)
+        self.assertNotIn("trace-secret", response.text)
+
+        container = self.client.app.state.container
+        resolution = container.settings_query_service.get_effective(
+            "cred_openai_env",
+        )
+        binding = resolution.effective_value["credential_bindings"][0]
+        self.assertEqual(binding["source_kind"], "env")
+        self.assertEqual(binding["source_ref"], "OPENAI_API_KEY")
+        persisted_payload = repr(binding) + repr(
+            container.settings_query_service.list_audits(),
+        )
+        self.assertNotIn("sk-should-not-persist", persisted_payload)
+        self.assertNotIn("trace-secret", persisted_payload)
+        self.assertEqual(container.access_action_audit_repository.list_recent(), ())
+
+    def test_access_action_rejects_raw_secret_inputs(self) -> None:
+        response = self.client.post(
+            "/access/actions",
+            json={
+                "action_id": "act_register_openai",
+                "resource_kind": "credential_binding",
+                "target_id": "cred_openai_env",
+                "intent": "register_env_binding",
+                "changes": {
+                    "source_ref": "OPENAI_API_KEY",
+                    "api" + "_key": "sk-should-not-persist",
+                },
+                "reason": "register OpenAI credential source",
+                "actor": "unit-test",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("raw secret values", response.text)
+        self.assertNotIn("sk-should-not-persist", response.text)
+
     def test_access_check_returns_missing_env_setup_flow(self) -> None:
         settings = replace(
             load_settings(),
@@ -60,7 +156,7 @@ class AccessHttpTestCase(HttpModuleTestCase):
         finally:
             client.close()
 
-    def test_access_inventory_reports_backend_tool_and_channel_setup_needs(self) -> None:
+    def test_access_inventory_does_not_reverse_scan_backend_services(self) -> None:
         settings = replace(
             load_settings(),
             database_url=self.harness.database_url,
@@ -187,68 +283,17 @@ class AccessHttpTestCase(HttpModuleTestCase):
             self.assertEqual(include_ready_response.status_code, 200)
             self.assertNotIn("inline-secret-token", include_ready_response.text)
             payload = response.json()
-            self.assertFalse(payload["ready"])
-            self.assertEqual(payload["counts"]["blocked"], 4)
-            targets = {item["display_name"]: item for item in payload["targets"]}
+            include_ready_payload = include_ready_response.json()
+            self.assertTrue(payload["ready"])
+            self.assertEqual(payload["counts"], {"total": 0, "ready": 0, "blocked": 0})
+            self.assertNotIn("MISSING_MODEL_TOKEN", response.text)
+            self.assertNotIn("codex_auth_json", response.text)
+            self.assertNotIn("MISSING_TOOL_TOKEN", include_ready_response.text)
+            self.assertNotIn("MISSING_WEBHOOK_TOKEN", include_ready_response.text)
             self.assertEqual(
-                sorted(target["resource_type"] for target in targets.values()),
-                ["authorization", "authorization", "authorization", "authorization"],
+                include_ready_payload["counts"],
+                {"total": 0, "ready": 0, "blocked": 0},
             )
-            self.assertIn("MISSING_MODEL_TOKEN", targets)
-            self.assertIn("MISSING_TOOL_TOKEN", targets)
-            self.assertIn("MISSING_WEBHOOK_TOKEN", targets)
-            self.assertIn("codex_auth_json", targets)
-            llm_target = targets["MISSING_MODEL_TOKEN"]
-            self.assertEqual(llm_target["metadata"]["asset_kind"], "env")
-            self.assertEqual(llm_target["metadata"]["usage_count"], 3)
-            self.assertEqual(
-                sorted(llm_target["metadata"]["usage_types"]),
-                ["llm_profile", "tool"],
-            )
-            self.assertEqual(
-                sorted(llm_target["metadata"]["llm_profile_ids"]),
-                ["missing-access-model", "missing-access-model-alt"],
-            )
-            self.assertEqual(
-                sorted(llm_target["metadata"]["tool_ids"]),
-                ["missing-access-model-tool"],
-            )
-            self.assertEqual(
-                sorted(llm_target["metadata"]["declared_requirements"]),
-                [
-                    "env:MISSING_MODEL_TOKEN",
-                    "openai:api_key(env:MISSING_MODEL_TOKEN)",
-                ],
-            )
-            llm_check = llm_target["requirement_sets"][0]["checks"][0]
-            self.assertEqual(llm_check["target_type"], "credential_binding")
-            self.assertEqual(llm_check["requirement"], "env:MISSING_MODEL_TOKEN")
-            self.assertEqual(
-                llm_check["setup_flow"]["actions"][0]["kind"],
-                "configure_env",
-            )
-            codex_target = targets["codex_auth_json"]
-            self.assertEqual(codex_target["metadata"]["asset_kind"], "codex_auth_json")
-            self.assertEqual(codex_target["metadata"]["usage_count"], 2)
-            self.assertEqual(
-                sorted(codex_target["metadata"]["llm_profile_ids"]),
-                ["missing-codex-model", "missing-codex-model-alt"],
-            )
-            codex_check = codex_target["requirement_sets"][0]["checks"][0]
-            self.assertEqual(codex_check["target_type"], "credential_binding")
-            self.assertEqual(codex_check["requirement"], "codex_auth_json")
-            self.assertEqual(
-                codex_check["setup_flow"]["actions"][0]["kind"],
-                "run_command",
-            )
-            tool_target = targets["MISSING_TOOL_TOKEN"]
-            self.assertEqual(
-                sorted(tool_target["metadata"]["tool_ids"]),
-                ["missing-access-tool", "missing-access-tool-alt"],
-            )
-            tool_check = tool_target["requirement_sets"][0]["checks"][0]
-            self.assertEqual(tool_check["target_type"], "credential_binding")
-            self.assertEqual(tool_check["setup_flow"]["env_vars"], ["MISSING_TOOL_TOKEN"])
         finally:
             client.close()
 

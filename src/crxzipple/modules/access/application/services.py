@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+from typing import Mapping, Protocol
 
 from crxzipple.modules.access.domain import (
     AccessReadinessStatus,
@@ -15,6 +16,7 @@ from crxzipple.modules.access.domain import (
     AccessSetupFlowKind,
     CredentialResolutionError,
 )
+from crxzipple.shared.access import AccessConsumerRef, CredentialBindingRef
 
 _CODEX_AUTH_JSON_BINDINGS = {
     "codex_auth_json",
@@ -23,6 +25,10 @@ _CODEX_AUTH_JSON_BINDINGS = {
     "codex-cli",
 }
 _CODEX_AUTH_JSON_PREFIXES = tuple(f"{name}:" for name in _CODEX_AUTH_JSON_BINDINGS)
+
+
+class AccessCredentialConfigView(Protocol):
+    def get_credential_binding(self, binding_id: str) -> object | None: ...
 
 
 @dataclass(slots=True)
@@ -121,6 +127,7 @@ class CredentialResolver:
 class AccessApplicationService:
     credential_resolver: CredentialResolver = field(default_factory=CredentialResolver)
     ready_auth_requirements: tuple[str, ...] = ()
+    config_view: AccessCredentialConfigView | None = None
 
     def check_requirement(
         self,
@@ -146,6 +153,13 @@ class AccessApplicationService:
                 requirement=parsed,
                 status=AccessReadinessStatus.READY,
                 reason="requirement is marked ready by the access registry",
+            )
+        configured_binding = self._configured_credential_source(normalized)
+        if configured_binding is not None:
+            return self.check_credential_binding(
+                configured_binding,
+                workspace_dir=workspace_dir,
+                requirement=parsed,
             )
         if is_credential_binding(normalized):
             return self.check_credential_binding(
@@ -218,9 +232,10 @@ class AccessApplicationService:
         requirement: AccessRequirement | None = None,
     ) -> AccessRequirementReadiness:
         parsed = requirement or parse_access_requirement(binding)
+        binding_value = self._configured_credential_source(binding) or binding
         try:
             self.credential_resolver.resolve(
-                binding,
+                binding_value,
                 workspace_dir=workspace_dir,
                 allow_literal=allow_literal,
             )
@@ -239,7 +254,7 @@ class AccessApplicationService:
                     else AccessReadinessStatus.SETUP_NEEDED
                 ),
                 reason=str(exc),
-                setup_flow=self.begin_setup(binding, workspace_dir=workspace_dir),
+                setup_flow=self.begin_setup(binding_value, workspace_dir=workspace_dir),
             )
         return AccessRequirementReadiness(
             requirement=parsed,
@@ -254,13 +269,22 @@ class AccessApplicationService:
 
     def resolve_credential(
         self,
-        binding: str,
+        binding: str | CredentialBindingRef,
         *,
         workspace_dir: str | None = None,
         allow_literal: bool = False,
+        consumer: AccessConsumerRef | None = None,
+        trace_context: Mapping[str, object] | None = None,
     ) -> str:
+        del consumer, trace_context
+        binding_value = (
+            binding.source_ref if isinstance(binding, CredentialBindingRef) else binding
+        )
+        configured_binding = self._configured_credential_source(binding_value)
+        if configured_binding is not None:
+            binding_value = configured_binding
         return self.credential_resolver.resolve(
-            binding,
+            binding_value,
             workspace_dir=workspace_dir,
             allow_literal=allow_literal,
         )
@@ -387,6 +411,30 @@ class AccessApplicationService:
             for item in (*self.ready_auth_requirements, *env_values.split(","))
             if item is not None and item.strip()
         }
+
+    def _configured_credential_source(self, binding_id: str) -> str | None:
+        view = self.config_view
+        if view is None:
+            return None
+        get_binding = getattr(view, "get_credential_binding", None)
+        if not callable(get_binding):
+            return None
+        record = get_binding(binding_id.strip())
+        if record is None:
+            return None
+        source_kind = str(getattr(record, "source_kind", "")).strip()
+        source_ref = str(getattr(record, "source_ref", "")).strip()
+        if not source_kind or not source_ref:
+            return None
+        if source_kind in {"env", "file"}:
+            return f"{source_kind}:{source_ref}"
+        if source_kind == "codex_auth_json":
+            return (
+                "codex_auth_json"
+                if source_ref == str(default_codex_auth_json_path())
+                else f"codex_auth_json:{source_ref}"
+            )
+        return source_ref
 
 
 def parse_access_requirement(requirement: str) -> AccessRequirement:

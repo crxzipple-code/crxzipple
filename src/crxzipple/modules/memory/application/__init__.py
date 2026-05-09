@@ -36,6 +36,10 @@ from crxzipple.modules.memory.application.models import (
     MemoryWriteResult,
 )
 from crxzipple.modules.memory.application.services import FileBackedMemoryService
+from crxzipple.modules.memory.application.settings_integration import (
+    MemorySettingsBootstrapConfig,
+    memory_bootstrap_config_from_settings,
+)
 
 __all__ = [
     "MemoryIndexStore",
@@ -43,6 +47,7 @@ __all__ = [
     "MemorySearchGateway",
     "MemorySearchRecord",
     "MemorySourceScanner",
+    "MemorySettingsBootstrapConfig",
     "MemoryStorePort",
     "FileBackedMemoryService",
     "MEMORY_CONTEXT_RESOLVE_FAILED_EVENT",
@@ -68,4 +73,5 @@ __all__ = [
     "SyncMemoryIndexService",
     "emit_memory_event",
     "memory_event_from_payload",
+    "memory_bootstrap_config_from_settings",
 ]

@@ -7,6 +7,7 @@ from crxzipple.interfaces.http.conversations import router as conversations_rout
 from crxzipple.interfaces.http.turns import router as turns_router
 from crxzipple.interfaces.http.ui import router as ui_router
 from crxzipple.modules.access.interfaces.http import router as access_router
+from crxzipple.modules.access.interfaces.ui_http import router as ui_access_router
 from crxzipple.modules.agent.interfaces.http import router as agent_router
 from crxzipple.modules.artifacts.interfaces.http import router as artifacts_router
 from crxzipple.modules.browser.interfaces.http import router as browser_router
@@ -24,6 +25,7 @@ from crxzipple.modules.orchestration.interfaces.http import (
     router as orchestration_router,
 )
 from crxzipple.modules.session.interfaces.http import router as session_router
+from crxzipple.modules.settings.interfaces.http import router as settings_router
 from crxzipple.modules.skills.interfaces.http import router as skills_router
 from crxzipple.modules.tool.interfaces.http import router as tool_router
 
@@ -67,7 +69,14 @@ api_router.include_router(llm_router, prefix="/llms", tags=["llms"])
 api_router.include_router(memory_router, tags=["memory"])
 api_router.include_router(agent_router, prefix="/agents", tags=["agents"])
 api_router.include_router(skills_router, prefix="/skills", tags=["skills"])
+api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
 api_router.include_router(access_router, prefix="/access", tags=["access"])
+api_router.include_router(ui_access_router, prefix="/ui/access", tags=["ui", "access"])
+api_router.include_router(
+    settings_router,
+    prefix="/ui/settings",
+    tags=["ui", "settings"],
+)
 api_router.include_router(
     authorization_router,
     prefix="/authorization",

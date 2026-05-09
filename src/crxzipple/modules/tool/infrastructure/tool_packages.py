@@ -94,6 +94,11 @@ def register_scanned_tool_packages(
     remote_tool_registry = getattr(container, "remote_tool_registry", None)
     sandbox_tool_registry = getattr(container, "sandbox_tool_registry", None)
     tool_discovery_registry = getattr(container, "tool_discovery_registry", None)
+    credential_provider = getattr(container, "credential_provider", None) or getattr(
+        container,
+        "access_service",
+        None,
+    )
 
     registered_namespaces: list[str] = []
     for namespace in discover_tool_namespaces(root_dir=root_dir):
@@ -127,11 +132,16 @@ def register_scanned_tool_packages(
             and isinstance(tool_discovery_registry, ToolDiscoveryRegistry)
             and isinstance(remote_tool_registry, ToolRuntimeRegistry)
         ):
+            if credential_provider is None:
+                raise ToolValidationError(
+                    f"OpenAPI tool namespace '{namespace.name}' requires an injected credential provider.",
+                )
             provider = OpenApiDiscoveryProvider(namespace.openapi_provider)
             tool_discovery_registry.register(provider)
             register_openapi_remote_handlers(
                 remote_tool_registry,
                 provider.operations(),
+                credential_provider=credential_provider,
                 max_concurrency=(
                     namespace.openapi_provider.max_concurrency
                     or getattr(

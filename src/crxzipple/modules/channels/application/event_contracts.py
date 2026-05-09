@@ -6,7 +6,6 @@ from crxzipple.modules.channels.domain import (
     channel_dead_letter_topic,
 )
 from crxzipple.modules.events import EventRouteContract, EventTopicContract
-from crxzipple.modules.orchestration.application.observers import turn_session_topic
 from crxzipple.shared import EventDefinition, EventDefinitionField, EventSurface
 
 

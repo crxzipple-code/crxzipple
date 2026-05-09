@@ -1,144 +1,42 @@
 # crxzipple
 
-CRXZipple is a DDD-oriented local Agent Runtime console and runtime. It
-coordinates agent runs, tool and LLM execution, daemon-managed workers,
-event-backed observation, Operations projections, and the fullscreen
-`frontend` Workbench / Trace / Operations / Settings console.
+CRXZipple is a local Agent Runtime and fullscreen operations console. It is a
+DDD-oriented modular monolith that coordinates agent runs, LLM invocations,
+tool execution, daemon-managed workers, channel runtimes, event-backed
+observation, and Settings/Operations governance surfaces.
 
-## Layout
+The current product UI lives in `frontend` and exposes four main work areas:
 
-- `src/crxzipple/core`: process-level configuration and bootstrap helpers
-- `src/crxzipple/shared`: shared building blocks used across bounded contexts
-- `src/crxzipple/modules`: bounded contexts split by business capability
-- `tests`: unit and integration test suites
+- Workbench: chat/session/run entrypoint.
+- Operations: event-driven operations read models for runtime monitoring.
+- Trace: run and event inspection.
+- Settings: configuration governance and owner-module management surfaces.
 
-## Current modules
+## Current Direction
 
-- `access`
-- `agent`
-- `artifacts`
-- `authorization`
-- `browser`
-- `channels`
-- `daemon`
-- `dispatch`
-- `events`
-- `llm`
-- `memory`
-- `mobile`
-- `ocr`
-- `operations`
-- `orchestration`
-- `process`
-- `session`
-- `skills`
-- `tool`
+The project is being converged toward clear owner-module boundaries:
 
-## Agent Development Contract
+- business truth stays in the owner module;
+- cross-process runtime facts flow through the events backend;
+- Operations observes from the side and materializes read models;
+- Settings governs configuration without stealing ownership of module entities;
+- long-running runtime processes are owned by daemon;
+- `frontend` is the only active frontend line.
 
-Hosted coding agents should start from `AGENTS.md`. Larger follow-up work should
-also read `docs/agents/hosted-agent-operating-contract.md` before changing code.
-The active documentation index lives in `docs/README.md`; archived design notes
-under `docs/archive/` are historical background only.
+If code and older docs disagree, start with `AGENTS.md`, `docs/README.md`, and
+the active architecture docs. Files under `docs/archive/` are historical context
+only.
 
-## CLI
+## Quick Start
 
-The unified CLI entrypoint lives in `src/crxzipple/interfaces/cli/main.py`.
+Prerequisites:
 
-Example:
+- Python 3.11+
+- Node.js and npm
+- Docker with Compose support
+- `make`
 
-```bash
-PYTHONPATH=src python3 -m crxzipple.main --help
-PYTHONPATH=src python3 -m crxzipple.main db upgrade head
-PYTHONPATH=src python3 -m crxzipple.main llm sync-profiles
-PYTHONPATH=src python3 -m crxzipple.main tool providers
-PYTHONPATH=src python3 -m crxzipple.main tool roots
-PYTHONPATH=src python3 -m crxzipple.main auth policies
-PYTHONPATH=src python3 -m crxzipple.main tool discover --provider local_builtin
-APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers PYTHONPATH=src python3 -m crxzipple.main tool discover --provider sample_api
-APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"]}]' PYTHONPATH=src python3 -m crxzipple.main tool discover --provider sample_mcp
-PYTHONPATH=src python3 -m crxzipple.main tool run echo --strategy thread --input '{"message":"hello from thread"}'
-PYTHONPATH=src python3 -m crxzipple.main tool run echo --strategy process --input '{"message":"hello from process"}'
-PYTHONPATH=src python3 -m crxzipple.main tool run echo --mode background --strategy process --input '{"message":"hello from background process"}'
-APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers PYTHONPATH=src python3 -m crxzipple.main tool run sample_api.search_docs --environment remote --input '{"body":{"query":"ddd","limit":3}}'
-APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"]}]' PYTHONPATH=src python3 -m crxzipple.main tool run sample_mcp.echo --environment remote --input '{"message":"hello","uppercase":true}'
-```
-
-Background tool runs are processed by daemon-managed scheduler and worker
-services. Start the local infra first, then start the worker stack through
-daemon, not by launching an unmanaged long-running worker:
-
-```bash
-bash scripts/dev/up-infra.sh
-source scripts/dev/infra-env.sh
-python3 -m crxzipple.main daemon run --service-set workers
-python3 -m crxzipple.main daemon status
-python3 -m crxzipple.main daemon show worker:tool
-python3 -m crxzipple.main tool cancel-run <run-id>
-```
-
-The `tool-worker` and `tool-scheduler` CLI entrypoints are hidden from root
-help, but remain invokable for daemon service specs and short diagnostic `once`
-commands.
-
-The `process` CLI group is a local diagnostic primitive used underneath daemon.
-Do not use it as the application runtime entrypoint for long-lived internal
-services; start those through `daemon run` / `daemon ensure` so ownership,
-health, and shutdown stay centralized.
-
-## HTTP
-
-The unified HTTP entrypoint lives in `src/crxzipple/interfaces/http/app.py`.
-
-Examples:
-
-```bash
-PYTHONPATH=src python3 -c "from crxzipple.interfaces.http.app import app; print(app.title)"
-PYTHONPATH=src python3 -m uvicorn crxzipple.interfaces.http.app:app --reload
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/daemon/status
-```
-
-## Database
-
-The default local runtime path uses Postgres from `compose.yaml` together with
-Redis for cross-process events:
-
-```bash
-bash scripts/dev/up-infra.sh
-source scripts/dev/infra-env.sh
-python -m crxzipple.main db upgrade head
-```
-
-SQLite is only for explicit lightweight fallback or tests. Run migrations
-against SQLite only when you intentionally want the single-file fallback:
-
-```bash
-APP_DATABASE_URL=sqlite:///./crxzipple.db alembic upgrade head
-```
-
-The unified CLI now exposes the same migration flow:
-
-```bash
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db upgrade head
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db downgrade base
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db stamp head
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db current
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db history
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db revision "add session metadata" --autogenerate
-APP_DATABASE_URL=sqlite:///./crxzipple.db PYTHONPATH=src python3 -m crxzipple.main db revision-empty "manual checkpoint"
-```
-
-Future revisions can be generated with:
-
-```bash
-APP_DATABASE_URL=sqlite:///./crxzipple.db alembic revision --autogenerate -m "describe change"
-```
-
-## Local Dev
-
-The default local development path runs Postgres and Redis through Docker
-Compose, then starts API, daemon, and frontend as local processes:
+Start the full local development stack:
 
 ```bash
 make dev-up
@@ -149,8 +47,8 @@ This starts:
 - Postgres on `127.0.0.1:5432`
 - Redis on `127.0.0.1:6379`
 - API on `http://127.0.0.1:8000`
-- daemon supervisor through `daemon run` for `workers` and `channels-stack`
-- frontend Vite dev server on `http://127.0.0.1:4173`
+- daemon supervisor for workers and channel runtimes
+- frontend Vite server on `http://127.0.0.1:4173`
 
 Useful companion commands:
 
@@ -159,7 +57,7 @@ make dev-status
 make dev-down
 ```
 
-Infra-only commands are also available:
+Infra-only commands:
 
 ```bash
 make dev-infra-up
@@ -167,315 +65,316 @@ make dev-infra-status
 make dev-infra-down
 ```
 
-If you prefer the explicit multi-terminal flow, keep using:
+The dev scripts read `.env` when present. Start from `.env.example` for local
+overrides and never commit real credentials.
+
+## Manual Runtime Flow
+
+The default local runtime uses Postgres and Redis. SQLite is only an explicit
+lightweight fallback or test backend.
 
 ```bash
-# terminal 1
-cd /path/to/crxzipple
 source scripts/dev/infra-env.sh
 python -m crxzipple.main db upgrade head
 python -m crxzipple.main serve
 ```
 
+In another terminal:
+
 ```bash
-# terminal 2
-cd /path/to/crxzipple
 source scripts/dev/infra-env.sh
 python -m crxzipple.main daemon run --service-set workers --service-set channels-stack
 python -m crxzipple.main daemon status
 ```
 
+In another terminal:
+
 ```bash
-# terminal 3
-cd /path/to/crxzipple/frontend
+cd frontend
 npm run dev
 ```
 
-To stop only Postgres and Redis:
+## Repository Layout
 
-```bash
-bash scripts/dev/down-infra.sh
+```text
+src/crxzipple/
+  bootstrap/        composition root and dependency wiring
+  core/             settings, database, logging, process config
+  interfaces/       HTTP and CLI entrypoints
+  modules/          bounded contexts
+  shared/           cross-module primitives and contracts
+
+frontend/           Vue 3 runtime console
+config/             local profile and policy config
+tools/              bundled tool packages and provider manifests
+docs/               active architecture and UI docs
+tests/              unit and integration-oriented test suites
+alembic/            database migrations
+scripts/dev/        local stack scripts
 ```
 
-If you need the old file-backed fallback explicitly:
+Each bounded context follows the same internal layering:
 
-```bash
-export APP_EVENTS_BACKEND=file
+- `domain`: entities, value objects, domain exceptions, repository protocols.
+- `application`: use cases, services, ports, query services, runtime services.
+- `infrastructure`: SQLAlchemy repositories, file/Redis stores, external
+  adapters.
+- `interfaces`: HTTP/CLI DTOs, routers, serializers. Keep this layer thin.
+
+`src/crxzipple/bootstrap/container.py` is the composition root. Add wiring
+there, not business behavior.
+
+## Modules
+
+Current bounded contexts under `src/crxzipple/modules` include:
+
+- `access`: external provider/account/credential readiness and inventory.
+- `agent`: agent profiles, home/workspace config, profile resolution.
+- `artifacts`: artifact metadata, filesystem storage, preview/download.
+- `authorization`: internal ABAC policy, decisions, approvals, grants, audit.
+- `browser`, `mobile`, `ocr`: managed capability runtimes.
+- `channels`: channel profiles, runtime bindings, delivery, dead letters.
+- `daemon`: service specs, instances, leases, process supervision.
+- `dispatch`: generic task dispatch lifecycle.
+- `events`: topic/cursor/event backend and contract registry.
+- `llm`: model/provider profiles, invocation records, adapters, token data.
+- `memory`: memory files, store, indexing, retrieval, write facts.
+- `operations`: observer runtime and operations read-model projections.
+- `orchestration`: agent run intake, scheduler, executor, engine, waits.
+- `session`: conversation/session/message persistence.
+- `settings`: configuration governance, effective config, audit.
+- `skills`: filesystem-backed skill catalog and validation.
+- `tool`: tool catalog, tool runs, scheduler, worker, runtime adapters.
+
+Some supporting modules, such as `delivery` and `event_relay`, provide narrower
+runtime capabilities and should be treated with the same owner-boundary rules.
+
+## Data Truth
+
+Business facts belong to owner modules:
+
+- orchestration owns run lifecycle and engine progress;
+- tool owns tool catalog, tool runs, assignments, worker facts;
+- llm owns profiles, invocations, streaming/token records;
+- channels owns channel profiles, runtimes and delivery/dead-letter facts;
+- session owns conversations and messages;
+- access owns external credential/provider readiness;
+- authorization owns internal policy and grants;
+- settings owns settings resources, versions, overrides and audit;
+- operations owns operations projections, not business truth.
+
+Cross-process facts flow through the events backend. Shared local runtime should
+use Redis-backed events. Do not treat an in-memory event bus as a cross-process
+runtime backend.
+
+Operations follows this path:
+
+```text
+owner module runtime fact
+  -> events backend
+  -> operations-observer daemon service
+  -> operations projection materializer
+  -> Postgres operations_projections
+  -> /operations/{module}
+  -> frontend Operations page
 ```
 
-## Logging
+Frontend Operations pages should read `/operations/{module}` and
+`/operations/stream`, not stitch together truth by directly calling owner
+module APIs.
 
-The project uses Python's standard `logging` module with a shared config entrypoint in `src/crxzipple/core/logger.py`.
+## Settings, Access and Authorization
+
+These three surfaces are intentionally separate:
+
+- Settings governs configuration resources, versions, overrides and effective
+  config materialization.
+- Access manages external providers, accounts, credentials, setup flows,
+  readiness, inventory and external access audit.
+- Authorization manages internal ABAC policy, subject/resource/context checks,
+  approval-driven temporary grants, impact preview and authorization audit.
+
+Module-owned entities remain owned by their module. For example, Agent Profile
+create/update/enable/disable/delete operations go through the Agent application
+service. Settings may provide a centralized governance view or orchestration of
+owner-module actions, but it must not become a generic proxy that rewrites owner
+truth behind the module.
+
+## UI
+
+The current UI source is `frontend/`.
+
+Routes:
+
+- `/workbench`
+- `/workbench/threads/:sessionKey`
+- `/workbench/runs/:runId`
+- `/operations/:module?`
+- `/trace/:traceId?`
+- `/settings/:resource?`
+
+Operations modules currently include orchestration, tool, llm, access,
+channels, memory, skills, events and daemon. Settings resources include
+overview, agent profiles, llm profiles, tool catalog, skill catalog, memory
+config, access assets, authorization policies, channel profiles, runtime
+defaults, environment, audit logs, event registry and backup restore.
+
+Frontend API calls should go through `frontend/src/shared/api/client.ts`.
+`VITE_API_BASE` defaults to `/api`; Vite proxying should return JSON API
+responses, not HTML fallbacks.
+
+## HTTP
+
+The unified HTTP app is `src/crxzipple/interfaces/http/app.py`.
+
+```bash
+PYTHONPATH=src python -m crxzipple.main serve
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/about
+curl http://127.0.0.1:8000/daemon/status
+```
+
+Major route groups:
+
+- `/agents`
+- `/llms`
+- `/tools`
+- `/orchestration`
+- `/operations`
+- `/settings` and `/ui/settings`
+- `/access` and `/ui/access`
+- `/authorization`
+- `/events`
+- `/channels`
+- `/sessions`
+- `/memory/*`
+- `/artifacts`
+- `/daemon`
+
+## CLI
+
+The unified CLI entrypoint is `src/crxzipple/interfaces/cli/main.py`.
+
+```bash
+PYTHONPATH=src python -m crxzipple.main --help
+PYTHONPATH=src python -m crxzipple.main about
+PYTHONPATH=src python -m crxzipple.main db upgrade head
+PYTHONPATH=src python -m crxzipple.main daemon status
+PYTHONPATH=src python -m crxzipple.main llm sync-profiles
+PYTHONPATH=src python -m crxzipple.main agent sync-profiles
+PYTHONPATH=src python -m crxzipple.main tool providers
+PYTHONPATH=src python -m crxzipple.main auth policies
+```
+
+Visible command groups include `agent`, `auth`, `access`, `browser`, `daemon`,
+`dispatch`, `llm`, `memory`, `mobile`, `ocr`, `orchestration`, `session`,
+`skills`, `tool` and `db`. Runtime/worker command groups such as
+`channel-runtime`, `operations-observer`, `tool-worker`, `tool-scheduler`,
+`orchestration-scheduler` and `orchestration-executor` are hidden from root
+help and are normally launched by daemon service specs.
+
+## Configuration
+
+Important local config paths:
+
+- `.env.example`: local environment template.
+- `config/llm_profiles/`: LLM profile files.
+- `config/agent_profiles/`: agent profile files.
+- `config/channel_profiles/`: channel profile files.
+- `config/authorization_policies/`: authorization policy files.
+- `tools/*/tool.yaml`: bundled tool/provider manifests.
 
 Useful environment variables:
 
 ```bash
-APP_LOG_LEVEL=DEBUG
-APP_LOG_JSON=true
-APP_TOOL_RUN_MAX_ATTEMPTS=3
-APP_TOOL_RUN_LEASE_SECONDS=30
-APP_TOOL_RUN_HEARTBEAT_SECONDS=5
-APP_TOOL_OPENAPI_PROVIDER_PATHS=/tmp/openapi-providers
-APP_TOOL_MCP_PROVIDERS='[{"name":"sample_mcp","command":["python3","./mcp_server.py"],"timeout_seconds":10}]'
+APP_DATABASE_URL=postgresql+psycopg://crxzipple:crxzipple@127.0.0.1:5432/crxzipple
+APP_EVENTS_BACKEND=redis
+APP_EVENTS_REDIS_URL=redis://127.0.0.1:6379/0
 APP_LLM_PROFILE_PATHS=./config/llm_profiles
 APP_AGENT_PROFILE_PATHS=./config/agent_profiles
-APP_AUTHORIZATION_ENABLED=false
+APP_AUTHORIZATION_ENABLED=true
 APP_AUTHORIZATION_POLICY_PATHS=./config/authorization_policies
+APP_LOG_LEVEL=INFO
 ```
 
-Bundled tool assets are governed from the repository `tools/` root. Each direct
-child is one namespace and must include `tool.yaml`.
+Provider credentials are optional until the matching provider/tool is used.
+Common examples are `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+`BRAVE_SEARCH_API_KEY` and `ITICK_API_TOKEN`.
 
-Filesystem-discovered local tool extensions are still discovered from:
+## Tools
 
-- `.crxzipple/tools/`
-- `tools/`
+Bundled tool namespaces are stored under `tools/`; each direct child should
+include `tool.yaml`.
 
-Place each extension in its own subdirectory with a `tool.json` manifest and
-entrypoint script.
+Current bundled namespaces include:
 
-Bundled OpenAPI providers now live under `tools/<namespace>/tool.yaml` with the
-spec beside them. Set `APP_TOOL_OPENAPI_PROVIDER_PATHS` to switch to the
-explicit config/env path flow for custom provider files; the variable accepts an
-`os.pathsep`-separated list of files or directories.
+- `brave_search`
+- `browser`
+- `command`
+- `debug`
+- `itick_market`
+- `memory`
+- `mobile`
+- `open_meteo_geocoding`
+- `open_meteo_weather`
+- `openai_image`
+- `sessions`
+- `skills`
+- `workspace`
 
-LLM profile configs are loaded from `config/llm_profiles/*.yaml`, `*.yml`, or
-`*.json` by default when that directory exists. Override the search path with
-`APP_LLM_PROFILE_PATHS`, which also accepts an `os.pathsep`-separated list of
-files or directories. Profiles can set `max_concurrency` and an optional shared
-`concurrency_key` to protect slower model backends while the executor advances
-other runs concurrently.
+See `tools/README.md` and `src/crxzipple/modules/tool/README.md` for tool
+manifest and runtime details.
 
-Agent profile configs are loaded from `config/agent_profiles/*.yaml`, `*.yml`,
-or `*.json` by default when that directory exists. Override the search path
-with `APP_AGENT_PROFILE_PATHS`.
+## Development Checks
 
-Authorization policy configs are loaded from
-`config/authorization_policies/*.yaml`, `*.yml`, or `*.json` by default when
-that directory exists. Authorization enforcement is enabled by default; set
-`APP_AUTHORIZATION_ENABLED=false` to disable it, and override the search path
-with `APP_AUTHORIZATION_POLICY_PATHS`.
-
-Authorization enforcement currently lives at the outer interface/orchestration
-layer. The `tool` and `llm` subsystems remain authorization-agnostic and do not
-depend on the authorization module directly.
-
-The bundled default policy set currently:
-
-- allows `llm.invoke` and `llm.stream`
-- allows `tool.run` for non-mutating tools
-- denies scope/surface-mismatched tools before they reach orchestration
-- denies everything else by default unless a policy or approval grants access
-
-Useful authorization commands:
+Run targeted checks for the area you changed. Common commands:
 
 ```bash
-APP_AUTHORIZATION_ENABLED=true PYTHONPATH=src python3 -m crxzipple.main auth policies
-APP_AUTHORIZATION_ENABLED=true PYTHONPATH=src python3 -m crxzipple.main auth check llm.invoke llm_profile --resource-id openai.gpt-5.4-mini --context '{"interface":"cli"}'
+PYTHONPATH=src pytest -q tests/unit/test_operations_observation.py
+PYTHONPATH=src pytest -q tests/unit/test_tool_background.py
+PYTHONPATH=src pytest -q tests/unit/test_agent_http.py
+PYTHONPATH=src pytest -q tests/unit/test_authorization.py
 ```
 
-Bundled LLM profile configs:
-
-- `openai.gpt-5.4`
-- `openai.gpt-5.4-mini`
-- `openai.gpt-5-codex`
-- `openai_codex.gpt-5-codex`
-
-Sync the configured profiles into the database with:
+Frontend:
 
 ```bash
-PYTHONPATH=src python3 -m crxzipple.main llm sync-profiles
-PYTHONPATH=src python3 -m crxzipple.main llm sync-profiles --profile openai.gpt-5.4
+cd frontend
+npm run typecheck
+npm run build
+npm run audit:operations-layout
 ```
 
-Agent profiles can also be synced from config files. The loader supports an
-optional `defaults` block plus a `profiles` list:
+Use `APP_DATABASE_URL` with the same database you are developing against when
+running schema-dependent tests or CLI commands.
 
-```yaml
-defaults:
-  instruction_policy:
-    stream_by_default: true
-  llm_routing_policy:
-    default_llm_id: openai.gpt-5.4-mini
-  execution_policy:
-    timeout_seconds: 120
-    max_turns: 12
+## Agent Development Contract
 
-profiles:
-  - id: writer
-    name: Writer
-    identity:
-      display_name: Writer Agent
-    instruction_policy:
-      system_prompt: You write concise, structured answers.
-```
+Hosted coding agents should start from:
 
-Sync the configured agent profiles with:
+- `AGENTS.md`
+- `docs/README.md`
+- `docs/agents/hosted-agent-operating-contract.md`
 
-```bash
-PYTHONPATH=src python3 -m crxzipple.main agent sync-profiles
-PYTHONPATH=src python3 -m crxzipple.main agent sync-profiles --profile writer
-```
+The most important rules:
 
-`openai_codex.gpt-5-codex` is an experimental profile that uses the local
-Codex login stored in `~/.codex/auth.json` and the ChatGPT Codex backend rather
-than the public OpenAI API key flow.
+- inspect the dirty worktree before editing;
+- do not revert user changes;
+- do not add compatibility layers for retired structures;
+- identify the owner module and data truth before changing behavior;
+- keep long-running services under daemon;
+- keep Operations event/projection-driven;
+- keep Settings as governance, not owner-module replacement.
 
-The LLM HTTP interface also exposes a streaming SSE endpoint:
+## More Documentation
 
-```bash
-curl -N \
-  -X POST http://127.0.0.1:8000/llms/openai_codex.gpt-5-codex/stream \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"system","content":"You are a concise coding assistant."},{"role":"user","content":"Reply with exactly the single word codex-stream-ok."}]}'
-```
-
-Bundled streaming-capable profiles currently include:
-
-- `openai.gpt-5.4`
-- `openai.gpt-5.4-mini`
-- `openai.gpt-5-codex`
-- `openai_codex.gpt-5-codex`
-
-The existing CLI `llm invoke` command remains non-streaming and returns the
-final invocation record after completion.
-
-Bundled OpenAPI provider configs:
-
-- `brave_search`: Brave web search, news search, and autosuggest.
-- `open_meteo_geocoding`: Open-Meteo place search and ID lookup.
-- `open_meteo_weather`: Open-Meteo forecast weather endpoint.
-- `itick_market`: iTick stock metadata, stock quotes, and crypto quotes.
-
-Credential requirements:
-
-- `BRAVE_SEARCH_API_KEY` for `brave_search`
-- `ITICK_API_TOKEN` for `itick_market`
-- `open_meteo_geocoding` and `open_meteo_weather` work without credentials on the public endpoints
-
-Example discovery flow for the bundled providers:
-
-```bash
-PYTHONPATH=src python3 -m crxzipple.main tool providers
-PYTHONPATH=src python3 -m crxzipple.main tool discover --provider brave_search
-PYTHONPATH=src python3 -m crxzipple.main tool discover --provider open_meteo_geocoding
-PYTHONPATH=src python3 -m crxzipple.main tool discover --provider open_meteo_weather
-PYTHONPATH=src python3 -m crxzipple.main tool discover --provider itick_market
-```
-
-Recommended layout:
-
-```text
-config/
-└─ tool_providers/
-   └─ sample_api.yaml
-
-specs/
-└─ sample_api.openapi.json
-```
-
-Example OpenAPI provider config:
-
-```yaml
-name: sample_api
-spec_location: ../../specs/sample_api.openapi.json
-base_url: https://api.example.com
-timeout_seconds: 10
-credentials:
-  ApiKeyQuery: env:SAMPLE_API_KEY
-  BearerAuth: env:SAMPLE_BEARER_TOKEN
-```
-
-Example filesystem tool layout:
-
-```text
-tools/
-└─ greeter/
-   ├─ tool.json
-   └─ handler.py
-```
-
-Example manifest:
-
-```json
-{
-  "id": "greeter",
-  "name": "Greeter",
-  "description": "Greet a person locally",
-  "entrypoint": "handler.py:run",
-  "supported_modes": ["inline", "background"],
-  "supported_strategies": ["async", "thread", "process"],
-  "supported_environments": ["local"]
-}
-```
-
-Recommended handler contract:
-
-```python
-from typing import Any
-
-from crxzipple.modules.tool import ToolRunResult
-
-
-async def run(arguments: dict[str, Any]) -> ToolRunResult:
-    return ToolRunResult(
-        content={"message": f"hello {arguments['name']}"},
-        metadata={"environment": "local"},
-    )
-```
-
-Plain dict returns are still supported for backward compatibility, but new local
-tools should prefer `ToolRunResult` so business content and runtime metadata stay
-separate.
-
-Recommended local tool conventions:
-
-- Handler signature: use a top-level callable like `run(arguments: dict[str, Any])`
-  so `thread` and `process` strategies can import and serialize it reliably.
-- Async first: prefer `async def` handlers unless the tool is naturally blocking.
-- Result shape: put user-facing business output in `ToolRunResult.content`.
-- Metadata shape: keep runtime diagnostics such as `environment`, `process_id`,
-  `thread_ident`, `working_directory`, or transport details in
-  `ToolRunResult.metadata`.
-- Exceptions: raise normal Python exceptions with a clear message; the tool
-  runtime will convert them into `ToolRunError`.
-- Compatibility: plain dict return values still work, but they make it easier to
-  mix business data with runtime metadata.
-
-OpenAPI provider config files support:
-
-- `name`: provider identifier used by `tool discover --provider ...`
-- `spec_location`: local path, `file://` URL, or `http(s)://` OpenAPI JSON document
-- `base_url`: optional execution base URL override
-- `description`: optional provider description
-- `timeout_seconds`: optional per-provider HTTP timeout
-- `credentials`: optional mapping from OpenAPI `securitySchemes` name to
-  credential source, for example `"ApiKeyQuery": "env:SAMPLE_API_KEY"` or
-  `{ "BasicAuth": { "username_source": "env:API_USER", "password_source": "env:API_PASSWORD" } }`
-
-`APP_TOOL_OPENAPI_PROVIDERS` remains available as a compatibility fallback when
-you want to inject the same provider config as an env JSON list instead of file-
-based config.
-
-The current `http_openapi` path supports discovery and execution for OpenAPI JSON
-operations using path parameters, query parameters, JSON request bodies, and
-standard OpenAPI `securitySchemes` / `security` requirements. Credential values
-still come from external config or env vars; the spec tells the runtime where to
-inject them. The discovered tools run through the existing `remote` runtime.
-
-`APP_TOOL_MCP_PROVIDERS` currently accepts a JSON list of MCP stdio provider
-configs. Each item supports:
-
-- `name`: provider identifier used by `tool discover --provider ...`
-- `command`: string or string list used to launch the MCP stdio process
-- `args`: optional extra args when `command` is a string
-- `description`: optional provider description
-- `timeout_seconds`: optional per-request timeout
-
-The current MCP path is a lightweight stdio adapter that uses `tools/list` for
-discovery and `tools/call` for execution. It now keeps a local stdio MCP
-process alive as a reusable session, performs `initialize`, sends
-`notifications/initialized`, and reuses that session across multiple tool
-calls within the same container. It is still intentionally narrower than a full
-remote-capable MCP session client, but it fits the current provider/runtime
-extension model cleanly.
+- `docs/README.md`: active documentation index.
+- `docs/orchestration-design.md`: orchestration architecture.
+- `docs/operations-data-truth-audit.md`: operations data truth and projection
+  model.
+- `docs/ui/current-ui-design-functional-spec.md`: current UI design/function
+  spec.
+- `docs/ui/runtime-ui-read-model-contracts.md`: UI read-model contracts.
+- `src/crxzipple/modules/daemon/README.md`: daemon/runtime notes.
+- `src/crxzipple/modules/tool/README.md`: tool runtime notes.
+- `tests/unit/README.md`: test-suite notes.

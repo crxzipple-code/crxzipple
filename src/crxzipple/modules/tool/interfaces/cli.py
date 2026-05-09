@@ -65,7 +65,7 @@ def build_cli() -> typer.Typer:
                     "path": path,
                     "exists": Path(path).exists(),
                 }
-                for path in container.settings.tool_local_paths
+                for path in container.tool_bootstrap_config.local_paths
             ],
         )
 

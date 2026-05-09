@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from crxzipple.modules.llm.application import RegisterLlmProfileInput
-from crxzipple.modules.llm.domain import LlmApiFamily, LlmProviderKind
-from tests.unit.cli_test_support import *
+import unittest
+
+from crxzipple.modules.settings import CreateSettingsResourceInput
+from tests.unit.cli_test_support import CliModuleTestCase, app
 
 
 class AccessCliTestCase(CliModuleTestCase):
@@ -33,14 +34,21 @@ class AccessCliTestCase(CliModuleTestCase):
     def test_access_inventory_command_lists_missing_assets(self) -> None:
         container = self.harness.build_container()
         try:
-            container.llm_service.register_profile(
-                RegisterLlmProfileInput(
-                    id="missing-cli-model",
-                    provider=LlmProviderKind.OPENAI_COMPATIBLE,
-                    api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
-                    model_name="llama3.2",
-                    base_url="http://127.0.0.1:1/v1",
-                    credential_binding="env:MISSING_CLI_MODEL_TOKEN",
+            container.settings_action_service.create_resource(
+                CreateSettingsResourceInput(
+                    resource_id="missing-cli-model",
+                    resource_kind="llm-profiles",
+                    owner_module="llm",
+                    payload={
+                        "profile_id": "missing-cli-model",
+                        "provider": "openai_compatible",
+                        "api_family": "openai_chat_compatible",
+                        "model_name": "llama3.2",
+                        "base_url": "http://127.0.0.1:1/v1",
+                        "credential_binding": "env:MISSING_CLI_MODEL_TOKEN",
+                    },
+                    reason="seed settings-owned llm profile",
+                    publish=True,
                 ),
             )
         finally:
@@ -51,7 +59,7 @@ class AccessCliTestCase(CliModuleTestCase):
         result = self.runner.invoke(app, ["access", "inventory"], env=env)
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn('"resource_type": "authorization"', result.stdout)
+        self.assertIn('"resource_type": "access_requirement"', result.stdout)
         self.assertIn('"display_name": "MISSING_CLI_MODEL_TOKEN"', result.stdout)
         self.assertIn('"missing-cli-model"', result.stdout)
         self.assertIn('"blocked": 1', result.stdout)

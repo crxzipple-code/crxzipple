@@ -9,6 +9,9 @@ class LlmProfileRepository(Protocol):
     def add(self, profile: LlmProfile) -> None:
         ...
 
+    def delete(self, llm_id: str) -> None:
+        ...
+
     def get(self, llm_id: str) -> LlmProfile | None:
         ...
 

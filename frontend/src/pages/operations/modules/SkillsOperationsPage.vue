@@ -31,6 +31,7 @@ import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
 import { installGlobalSkill, loadSkillsOperations, validateSkillPackage } from "../api";
+import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
   id: string;
@@ -465,6 +466,8 @@ async function refreshPage() {
     loading.value = false;
   }
 }
+
+useOperationsProjectionRefresh("skills", refreshPage);
 
 onMounted(() => {
   void refreshPage();
