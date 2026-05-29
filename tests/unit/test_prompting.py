@@ -7,8 +7,10 @@ from crxzipple.modules.orchestration.application.prompting import (
     PromptBlockPolicy,
     PromptMode,
     apply_system_prompt_budget,
-    build_flow_prompt_block,
     estimate_text_tokens,
+)
+from crxzipple.modules.orchestration.application.flow_context import (
+    build_flow_context_payload,
 )
 
 
@@ -74,8 +76,8 @@ class PromptBudgetTestCase(unittest.TestCase):
 
 
 class PromptInstructionTestCase(unittest.TestCase):
-    def test_approval_resume_flow_prompt_explains_once_scope_expiry(self) -> None:
-        block = build_flow_prompt_block(
+    def test_approval_resume_flow_context_explains_once_scope_expiry(self) -> None:
+        payload = build_flow_context_payload(
             mode=PromptMode.APPROVAL_RESUME,
             hint_payload={
                 "decision": "allow_once",
@@ -84,12 +86,11 @@ class PromptInstructionTestCase(unittest.TestCase):
             },
         )
 
-        self.assertIsNotNone(block)
-        assert block is not None
-        self.assertIn("valid only for the current turn", block.content)
-        self.assertIn("request it again", block.content)
-        self.assertIn("applies only to the requested effect above", block.content)
-        self.assertIn("request a different effect", block.content)
+        self.assertEqual(payload.mode, "approval_resume")
+        self.assertIn("valid only for the current turn", payload.summary)
+        self.assertIn("request it again", payload.summary)
+        self.assertIn("applies only to the requested effect above", payload.summary)
+        self.assertIn("request a different effect", payload.summary)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ Browser MCP 旧路径清单放在
 - [memory-rewrite-cutover.md](memory-rewrite-cutover.md)：memory 重构后的当前状态。
 - [instruction-assets-memory-auth-design.md](instruction-assets-memory-auth-design.md)：skill、memory、access、authorization 的关系。
 - [context-workspace-prompt-tree-design.md](context-workspace-prompt-tree-design.md)：树化 Prompt / Context Workspace 目标设计；把 tool、skill、memory、session、artifact、workspace 收成 agent 和本地 runtime 共治的上下文树。
+- [context-workspace-prompt-tree-development.md](context-workspace-prompt-tree-development.md)：树化 Prompt / Context Workspace 详细开发文档；定义 domain、ports、storage、API、owner adapter、迁移阶段和验收清单。
 - [agent-workspace-bootstrap-design.md](agent-workspace-bootstrap-design.md)：agent workspace bootstrap 设计。
 - [tool-credential-requirements-guide.md](tool-credential-requirements-guide.md)：Tool 外部凭证 requirement/slot 开发约束。
 - [../tools/README.md](../tools/README.md)：内置 Tool source authoring contract。

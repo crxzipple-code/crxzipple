@@ -44,6 +44,17 @@ class AppKey(StrEnum):
     SESSION_WORKSPACE_LOOKUP = "session.workspace_lookup"
     SESSION_RUNTIME_CONTROL = "session.runtime_control"
 
+    CONTEXT_OWNER_REGISTRY = "context_workspace.owner_registry"
+    CONTEXT_WORKSPACE_SERVICE = "context_workspace.workspace_service"
+    CONTEXT_TREE_SERVICE = "context_workspace.tree_service"
+    CONTEXT_RENDER_SERVICE = "context_workspace.render_service"
+    CONTEXT_SESSION_NODE_PROVIDER = "context_workspace.session_node_provider"
+    CONTEXT_SKILL_NODE_PROVIDER = "context_workspace.skill_node_provider"
+    CONTEXT_TOOL_NODE_PROVIDER = "context_workspace.tool_node_provider"
+    CONTEXT_MEMORY_NODE_PROVIDER = "context_workspace.memory_node_provider"
+    CONTEXT_ARTIFACT_NODE_PROVIDER = "context_workspace.artifact_node_provider"
+    CONTEXT_WORKSPACE_NODE_PROVIDER = "context_workspace.workspace_node_provider"
+
     DISPATCH_SERVICE = "dispatch.service"
     CHANNEL_INFRASTRUCTURE = "channels.infrastructure"
     CHANNEL_PROFILE_SERVICE = "channels.profile_service"

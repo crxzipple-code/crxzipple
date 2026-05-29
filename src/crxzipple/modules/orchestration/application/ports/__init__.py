@@ -8,6 +8,8 @@ from crxzipple.modules.orchestration.application.ports.database import (
 from crxzipple.modules.orchestration.application.ports.context import (
     AgentProfileCatalogPort,
     ArtifactVariantReadPort,
+    ContextRenderSnapshotRecord,
+    ContextRenderSnapshotPort,
     EventBusPort,
     EventPublishPort,
     EventPublishManyPort,
@@ -60,6 +62,8 @@ __all__ = [
     "ArtifactVariantReadPort",
     "AuthorizationPort",
     "AccessReadinessPort",
+    "ContextRenderSnapshotPort",
+    "ContextRenderSnapshotRecord",
     "EventBusPort",
     "EventPublishManyPort",
     "EventPublishPort",

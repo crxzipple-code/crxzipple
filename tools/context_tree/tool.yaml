@@ -1,0 +1,371 @@
+kind: local_package
+namespace: context_tree
+capabilities:
+  - context_workspace.read
+  - context_workspace.write
+  - context_workspace.render
+  - memory.context_lookup
+  - memory.search
+  - artifact.read
+dependencies:
+  - id: context_tree_service
+    kind: service_dependency
+    description: Context Workspace tree application service used to list and mutate prompt tree nodes.
+    required: false
+  - id: context_render_service
+    kind: service_dependency
+    description: Context Workspace render service used to estimate visible prompt payloads and provider mirrors.
+    required: false
+  - id: memory_runtime_service
+    kind: service_dependency
+    description: Memory runtime service used to recall governed memory into context tree nodes.
+    required: false
+  - id: artifact_service
+    kind: service_dependency
+    description: Artifact application service used to resolve opened context artifact handles.
+    required: false
+local_tools:
+  - id: context_tree.list
+    name: Context Tree List
+    description: List the current prompt context tree nodes, their state, supported actions, and estimates.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_list
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.list
+  - id: context_tree.expand
+    name: Context Tree Expand
+    description: Expand a context tree node and load owner-provided children when available.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_expand
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Context node id to expand.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.expand
+  - id: context_tree.collapse
+    name: Context Tree Collapse
+    description: Collapse a context tree node while keeping it available as a handle.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_collapse
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Context node id to collapse.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.collapse
+  - id: context_tree.pin
+    name: Context Tree Pin
+    description: Pin a context tree node so it remains prominent in future context renders.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_pin
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Context node id to pin.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.pin
+  - id: context_tree.unpin
+    name: Context Tree Unpin
+    description: Unpin a context tree node.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_unpin
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Context node id to unpin.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.unpin
+  - id: context_tree.estimate
+    name: Context Tree Estimate
+    description: Estimate the current visible context tree prompt payload and provider mirrors.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_estimate
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.estimate
+  - id: context_tree.read_skill
+    name: Context Tree Read Skill
+    description: Read an available skill node and attach its instructions as a child context node.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_read_skill
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Skill context node id to read.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.read_skill
+  - id: context_tree.recall_memory
+    name: Context Tree Recall Memory
+    description: Recall governed memory for a query and attach the results under a memory context node.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_recall_memory
+    tool_kind: function
+    parameters:
+      - name: query
+        data_type: string
+        description: Query describing the memory to recall.
+        required: true
+      - name: node_id
+        data_type: string
+        description: Optional memory context node id. Defaults to memory.visible.
+        required: false
+      - name: limit
+        data_type: integer
+        description: Maximum number of memory items to attach.
+        required: false
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+      - agent_id
+    runtime_key: context_tree.recall_memory
+  - id: context_tree.open_artifact
+    name: Context Tree Open Artifact
+    description: Resolve a session artifact context node to a provider-ready local artifact variant.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_open_artifact
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Artifact context node id to open.
+        required: true
+      - name: variant
+        data_type: string
+        description: "Optional artifact variant: original, preview, or llm."
+        required: false
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.open_artifact
+  - id: context_tree.enable_tool_schema
+    name: Context Tree Enable Tool Schema
+    description: Mirror an expanded tool node as a provider tool schema on the next prompt render.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_enable_tool_schema
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Tool function context node id to mirror as a provider schema.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.enable_tool_schema
+  - id: context_tree.disable_tool_schema
+    name: Context Tree Disable Tool Schema
+    description: Stop mirroring an expanded tool node as a provider tool schema on the next prompt render.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_disable_tool_schema
+    tool_kind: function
+    parameters:
+      - name: node_id
+        data_type: string
+        description: Tool function context node id to stop mirroring as a provider schema.
+        required: true
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.disable_tool_schema

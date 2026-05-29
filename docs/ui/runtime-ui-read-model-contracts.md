@@ -156,6 +156,32 @@ owner module：
 - `linked_entities`
 - `actions`
 
+### WorkbenchContextTreeReadModel
+
+用途：Workbench 右侧 inspector 的“上下文”页签，让人和 agent 看到当前 session 绑定的真实 Context Tree。
+
+owner module：
+
+- context_workspace：workspace、nodes、estimate、render snapshot。
+- orchestration：当前 run id、`context_render_snapshot_id` 引用。
+- tool / skills / memory / artifacts：只通过 Context Workspace owner adapter 暴露节点或 provider mirror，不由 Workbench 直接拼 owner 数据。
+
+当前前端接口：
+
+- `GET /context-workspaces/by-session/{session_key}/tree`
+- `GET /context-workspaces/runs/{run_id}/render-snapshot`
+- `POST /context-workspaces/by-session/{session_key}/nodes/{node_id}/actions/{action}`
+
+字段：
+
+- `workspace`
+- `nodes`
+- `estimate`
+- `render_snapshot`
+- `actions`
+
+`nodes` 只展示节点元数据、状态、summary、estimate 和可执行 action。节点正文是否进入 prompt 由 `collapsed` / `prompt_visible` / `schema_enabled` 等状态控制；Workbench 不读取 owner module 内部文件或 secret。
+
 ## Trace
 
 ### TraceTimelineReadModel
@@ -392,6 +418,37 @@ section：
 - rebuild index
 - rescan source
 - view document
+
+### OperationsContextWorkspaceReadModel
+
+业务真相 owner：context_workspace。Operations read model owner：operations。
+
+当前后端接口：
+
+- `GET /operations/context_workspace`：返回 Context Workspace 运维页 projection。
+- `GET /operations/context_workspace/overview`：模块摘要 projection。
+
+section：
+
+- `workspaces`
+- `visible_nodes`
+- `render_snapshots`
+- `diagnostics`
+
+指标：
+
+- health
+- workspaces
+- visible nodes
+- pinned nodes
+- render snapshots
+- snapshot tokens
+
+动作：
+
+- open context tree
+
+Operations 只能展示 Context Workspace 运维状态和节点元信息；不得把节点正文、artifact bytes、secret 或 owner module 内部资源直接铺到运维页。需要查看正文时走 Workbench/Context Tree 的受控节点操作或 owner module 专门 read API。
 
 ### OperationsSkillsReadModel
 

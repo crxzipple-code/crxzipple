@@ -94,6 +94,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [
                 "brave_search",
                 "command",
+                "context_tree",
                 "debug",
                 "itick_market",
                 "memory",
@@ -110,6 +111,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [namespace.kind for namespace in namespaces],
             [
                 "openapi",
+                "local_package",
                 "local_package",
                 "local_package",
                 "openapi",
@@ -131,15 +133,15 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
         self.assertEqual(
             [len(namespace.local_bindings) for namespace in namespaces],
-            [0, 2, 1, 0, 4, 9, 0, 0, 2, 8, 7, 6],
+            [0, 2, 11, 1, 0, 4, 9, 0, 0, 2, 8, 7, 6],
         )
         self.assertEqual(
             [len(namespace.remote_bindings) for namespace in namespaces],
-            [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
         self.assertEqual(
             [len(namespace.sandbox_bindings) for namespace in namespaces],
-            [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
 
         plans = discover_tool_package_plans()
@@ -238,6 +240,13 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 remote_tool_registry=remote_registry,
                 sandbox_tool_registry=sandbox_registry,
                 dependency_bindings=tool_dependency_bindings({
+                    "artifact_service": self.artifact_service,
+                    "context_tree_service": self.container.require(
+                        AppKey.CONTEXT_TREE_SERVICE,
+                    ),
+                    "context_render_service": self.container.require(
+                        AppKey.CONTEXT_RENDER_SERVICE,
+                    ),
                     "credential_provider": self.access_service,
                     "memory_runtime_service": self.memory_runtime_service,
                     "process_service": self.process_service,
@@ -259,6 +268,17 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             sorted(
                 [
                     "echo",
+                    "context_tree.collapse",
+                    "context_tree.disable_tool_schema",
+                    "context_tree.enable_tool_schema",
+                    "context_tree.estimate",
+                    "context_tree.expand",
+                    "context_tree.list",
+                    "context_tree.open_artifact",
+                    "context_tree.pin",
+                    "context_tree.read_skill",
+                    "context_tree.recall_memory",
+                    "context_tree.unpin",
                     "apply_patch",
                     "exec",
                     "process",

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from crxzipple.modules.llm.interfaces.dto import LlmMessageDTO, ToolSchemaDTO
-from crxzipple.modules.orchestration.application import PromptPreview
+from crxzipple.modules.orchestration.application import PromptSurfacePreview
 from crxzipple.modules.orchestration.domain import (
     InboundInstruction,
     OrchestrationErrorPayload,
@@ -180,29 +180,21 @@ class OrchestrationExecutorLeaseDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class PromptPreviewContextFileDTO:
-    path: str
-    chars: int
-
-
-@dataclass(frozen=True, slots=True)
-class PromptPreviewDTO:
+class PromptSurfacePreviewDTO:
     run_id: str
     llm_id: str
     mode: str
     messages: tuple[LlmMessageDTO, ...]
     tool_schemas: tuple[ToolSchemaDTO, ...]
     prompt_report: dict[str, object] | None
-    workspace_context_workspace: str | None
-    workspace_context_files: tuple[PromptPreviewContextFileDTO, ...]
 
     @classmethod
     def from_value(
         cls,
         *,
         run_id: str,
-        preview: PromptPreview,
-    ) -> "PromptPreviewDTO":
+        preview: PromptSurfacePreview,
+    ) -> "PromptSurfacePreviewDTO":
         return cls(
             run_id=run_id,
             llm_id=preview.llm_id,
@@ -219,13 +211,5 @@ class PromptPreviewDTO:
                 preview.prompt_report.to_payload()
                 if preview.prompt_report is not None
                 else None
-            ),
-            workspace_context_workspace=preview.workspace_context_workspace,
-            workspace_context_files=tuple(
-                PromptPreviewContextFileDTO(
-                    path=item.path,
-                    chars=item.chars,
-                )
-                for item in preview.workspace_context_files
             ),
         )

@@ -66,6 +66,9 @@ def operations_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.AGENT_SERVICE,
                 AppKey.FILE_MEMORY_SERVICE,
                 AppKey.MEMORY_CONTEXT_RESOLVER,
+                AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_TREE_SERVICE,
+                AppKey.CONTEXT_RENDER_SERVICE,
                 AppKey.SKILL_MANAGER,
                 AppKey.BROWSER_QUERY_SERVICE,
                 AppKey.CHANNEL_INFRASTRUCTURE,
@@ -123,6 +126,9 @@ def _build_operations_projection_materializer(ctx) -> dict[str, Any]:
             if ctx.has(AppKey.MEMORY_WATCH_REGISTRY)
             else None
         ),
+        context_workspace_service=ctx.require(AppKey.CONTEXT_WORKSPACE_SERVICE),
+        context_tree_service=ctx.require(AppKey.CONTEXT_TREE_SERVICE),
+        context_render_service=ctx.require(AppKey.CONTEXT_RENDER_SERVICE),
         skill_manager=ctx.require(AppKey.SKILL_MANAGER),
         browser_profile_service=ctx.require(AppKey.BROWSER_QUERY_SERVICE),
         channel_profile_service=channels.profile_service,

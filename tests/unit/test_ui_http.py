@@ -1098,10 +1098,17 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_operations_module_pages_expose_named_sections(self) -> None:
         expected_sections = {
+            "context_workspace": {
+                "workspaces",
+                "visible_nodes",
+                "render_snapshots",
+                "diagnostics",
+            },
         }
 
         for module, section_ids in expected_sections.items():
             with self.subTest(module=module):
+                self._materialize_operations(module)
                 response = self.client.get(f"/operations/{module}")
 
                 self.assertEqual(response.status_code, 200)

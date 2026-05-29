@@ -15,6 +15,10 @@ from crxzipple.app.assembly.channel_runtime import (
     channel_runtime_activation_tasks,
     channel_runtime_factories,
 )
+from crxzipple.app.assembly.context_workspace import (
+    context_workspace_factories,
+    context_workspace_integration_factories,
+)
 from crxzipple.app.assembly.daemon import (
     daemon_activation_tasks,
     daemon_factories,
@@ -70,6 +74,7 @@ def runtime_module_local_factories(
         + agent_factories()
         + llm_factories()
         + session_factories()
+        + context_workspace_factories()
         + dispatch_factories()
         + daemon_factories()
         + process_factories()
@@ -91,6 +96,7 @@ def runtime_integration_factories() -> tuple[ApplicationFactory, ...]:
 
     return (
         memory_context_factories()
+        + context_workspace_integration_factories()
         + tool_queue_factories(targets=TOOL_QUEUE_SERVICE_TARGETS)
         + tool_queue_factories(
             targets=TOOL_ORCHESTRATION_QUEUE_SERVICE_TARGETS,

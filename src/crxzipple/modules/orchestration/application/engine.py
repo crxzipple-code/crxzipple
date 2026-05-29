@@ -3,23 +3,30 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from crxzipple.core.logger import get_logger
 from crxzipple.modules.llm.domain import (
     LlmMessage,
+    LlmMessageRole,
     ToolSchema,
 )
 from crxzipple.modules.memory.application import MemoryRuntimePort
 from crxzipple.modules.orchestration.application.ports import (
+    ContextRenderSnapshotRecord,
+    ContextRenderSnapshotPort,
     LlmPort,
     ToolExecutionPort,
 )
-from crxzipple.modules.orchestration.application.prompting import PromptReport
+from crxzipple.modules.orchestration.application.prompting import (
+    ContextRenderReport,
+    PromptReport,
+)
 from crxzipple.modules.orchestration.application.prompting import PromptMode
-from crxzipple.modules.orchestration.application.prompt_assembler import (
-    PromptAssembler,
-    PromptEnvelope,
+from crxzipple.modules.orchestration.application.prompt_surface import (
+    PromptSurfaceBuilder,
+    PromptSurface,
 )
 from crxzipple.modules.orchestration.application.engine_session_recorder import (
     OrchestrationSessionRecorder,
@@ -44,12 +51,9 @@ from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
     get_runtime_metrics_registry,
 )
+from crxzipple.shared.content_blocks import text_content_block
 
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceContextDebugEntry:
-    path: str
-    chars: int
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,48 +70,45 @@ class EngineAdvanceOutcome:
     pending_background_tools: tuple[dict[str, str], ...] = field(default_factory=tuple)
     pending_approval_request: PendingApprovalRequest | None = None
     prompt_report: PromptReport | None = None
-    workspace_context_workspace: str | None = None
-    workspace_context_files: tuple[WorkspaceContextDebugEntry, ...] = field(default_factory=tuple)
+    context_render_snapshot_id: str | None = None
     yield_requested: bool = False
     yield_reason: str | None = None
     continue_loop: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class PromptPreview:
+class PromptSurfacePreview:
     llm_id: str
     mode: PromptMode
     messages: tuple[LlmMessage, ...]
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     prompt_report: PromptReport | None = None
-    workspace_context_workspace: str | None = None
-    workspace_context_files: tuple[WorkspaceContextDebugEntry, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
 class _PromptSurface:
-    prompt: PromptEnvelope
+    prompt: PromptSurface
     resolved_tools: ResolvedToolSet
-    workspace_context_files: tuple[WorkspaceContextDebugEntry, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _AdvanceContext:
     session_key: str
     user_message_id: str | None
-    prompt: PromptEnvelope
+    prompt: PromptSurface
     resolved_tools: ResolvedToolSet
-    workspace_context_files: tuple[WorkspaceContextDebugEntry, ...]
+    context_render_snapshot_id: str | None = None
 
 
 @dataclass(slots=True)
 class OrchestrationEngine:
-    prompt_assembler: PromptAssembler
+    prompt_surface: PromptSurfaceBuilder
     session_recorder: OrchestrationSessionRecorder
     llm_port: LlmPort
     tool_resolver: ToolResolver
     tool_execution_port: ToolExecutionPort
     memory_port: MemoryRuntimePort | None = None
+    context_snapshot_port: ContextRenderSnapshotPort | None = None
     detailed_phase_metrics_enabled: bool = False
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
@@ -116,10 +117,10 @@ class OrchestrationEngine:
     tool_executor: OrchestrationEngineToolExecutor = field(init=False)
 
     def __post_init__(self) -> None:
-        self.prompt_assembler.detailed_phase_metrics_enabled = (
+        self.prompt_surface.detailed_phase_metrics_enabled = (
             self.detailed_phase_metrics_enabled
         )
-        self.prompt_assembler.metrics = self.metrics
+        self.prompt_surface.metrics = self.metrics
         self.llm_invoker = OrchestrationEngineLlmInvoker(
             llm_port=self.llm_port,
             metrics=self.metrics,
@@ -132,16 +133,14 @@ class OrchestrationEngine:
             metrics=self.metrics,
         )
 
-    def preview_prompt(self, run: OrchestrationRun) -> PromptPreview:
+    def preview_prompt(self, run: OrchestrationRun) -> PromptSurfacePreview:
         surface = self._build_prompt_surface(run)
-        return PromptPreview(
+        return PromptSurfacePreview(
             llm_id=surface.prompt.llm_id,
             mode=surface.prompt.mode,
             messages=surface.prompt.messages,
             tool_schemas=surface.prompt.tool_schemas,
             prompt_report=surface.prompt.report,
-            workspace_context_workspace=surface.prompt.workspace_dir,
-            workspace_context_files=surface.workspace_context_files,
         )
 
     def advance_once(
@@ -223,12 +222,42 @@ class OrchestrationEngine:
             )
         with self._timed_phase("build_prompt_surface", detailed=True):
             surface = self._build_prompt_surface(run)
+        with self._timed_phase("context_render_snapshot", detailed=True):
+            context_render_snapshot = self._record_context_render_snapshot(
+                run,
+                surface.prompt,
+            )
+        prompt = self._prompt_with_context_render_report(
+            surface.prompt,
+            context_render_snapshot,
+        )
+        prompt = self._prompt_with_context_provider_mirror(
+            prompt,
+            context_render_snapshot,
+        )
+        prompt = self._prompt_with_context_workspace_body(
+            prompt,
+            context_render_snapshot,
+        )
+        prompt = self._prompt_with_context_artifact_mirror(
+            prompt,
+            context_render_snapshot,
+        )
+        resolved_tools = self._resolved_tools_for_prompt(
+            surface.resolved_tools,
+            prompt,
+            context_render_snapshot,
+        )
         context = _AdvanceContext(
             session_key=session_key,
             user_message_id=user_message_id,
-            prompt=surface.prompt,
-            resolved_tools=surface.resolved_tools,
-            workspace_context_files=surface.workspace_context_files,
+            prompt=prompt,
+            resolved_tools=resolved_tools,
+            context_render_snapshot_id=(
+                context_render_snapshot.snapshot_id
+                if context_render_snapshot is not None
+                else None
+            ),
         )
         return context
 
@@ -365,7 +394,7 @@ class OrchestrationEngine:
         )
 
     @staticmethod
-    def _tool_execution_context_attrs(prompt: PromptEnvelope) -> dict[str, object]:
+    def _tool_execution_context_attrs(prompt: PromptSurface) -> dict[str, object]:
         catalog = prompt.skills_catalog
         if catalog is None:
             return {}
@@ -465,8 +494,7 @@ class OrchestrationEngine:
             pending_background_tools=pending_background_tools,
             pending_approval_request=pending_approval_request,
             prompt_report=context.prompt.report,
-            workspace_context_workspace=context.prompt.workspace_dir,
-            workspace_context_files=context.workspace_context_files,
+            context_render_snapshot_id=context.context_render_snapshot_id,
             yield_requested=yield_requested,
             yield_reason=yield_reason,
             continue_loop=continue_loop,
@@ -501,22 +529,149 @@ class OrchestrationEngine:
         with self._timed_phase("tool_resolve", detailed=True):
             resolved_tools = self.tool_resolver.resolve(run)
         with self._timed_phase("prompt_assemble", detailed=True):
-            prompt = self.prompt_assembler.assemble(
+            prompt = self.prompt_surface.build(
                 run,
                 resolved_tools=resolved_tools,
-            )
-        with self._timed_phase("workspace_context_summary", detailed=True):
-            workspace_context_files = tuple(
-                WorkspaceContextDebugEntry(
-                    path=context_file.path,
-                    chars=len(context_file.content),
-                )
-                for context_file in prompt.context_files
             )
         return _PromptSurface(
             prompt=prompt,
             resolved_tools=resolved_tools,
-            workspace_context_files=workspace_context_files,
+        )
+
+    def _record_context_render_snapshot(
+        self,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+    ) -> ContextRenderSnapshotRecord | None:
+        if self.context_snapshot_port is None:
+            return None
+        try:
+            return self.context_snapshot_port.record_run_prompt_snapshot(
+                run=run,
+                prompt=prompt,
+            )
+        except Exception as exc:  # pragma: no cover - defensive runtime guard.
+            logger.warning(
+                "Failed to record context render snapshot for orchestration run %s: %s",
+                run.id,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _prompt_with_context_render_report(
+        prompt: PromptSurface,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> PromptSurface:
+        if context_render_snapshot is None or prompt.report is None:
+            return prompt
+        return replace(
+            prompt,
+            report=replace(
+                prompt.report,
+                context_render=ContextRenderReport(
+                    snapshot_id=context_render_snapshot.snapshot_id,
+                    estimate=(
+                        dict(context_render_snapshot.estimate)
+                        if isinstance(context_render_snapshot.estimate, dict)
+                        else {}
+                    ),
+                    included_node_ids=tuple(
+                        context_render_snapshot.included_node_ids,
+                    ),
+                    mirrored_node_ids=tuple(
+                        context_render_snapshot.mirrored_node_ids,
+                    ),
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _prompt_with_context_provider_mirror(
+        prompt: PromptSurface,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> PromptSurface:
+        if context_render_snapshot is None:
+            return prompt
+        if context_render_snapshot.tool_schemas is None:
+            return prompt
+        return replace(
+            prompt,
+            tool_schemas=context_render_snapshot.tool_schemas,
+        )
+
+    @staticmethod
+    def _prompt_with_context_workspace_body(
+        prompt: PromptSurface,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> PromptSurface:
+        if context_render_snapshot is None:
+            return prompt
+        prompt_body = (context_render_snapshot.prompt_body or "").strip()
+        if not prompt_body:
+            return prompt
+        context_message = LlmMessage(
+            role=LlmMessageRole.SYSTEM,
+            content=prompt_body,
+            metadata={
+                "prompt_block_kind": "context_workspace",
+                "context_render_snapshot_id": context_render_snapshot.snapshot_id,
+            },
+        )
+        return replace(
+            prompt,
+            messages=_insert_after_system_prefix(prompt.messages, context_message),
+        )
+
+    @staticmethod
+    def _prompt_with_context_artifact_mirror(
+        prompt: PromptSurface,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> PromptSurface:
+        if context_render_snapshot is None:
+            return prompt
+        artifact_blocks = tuple(context_render_snapshot.artifact_content_blocks)
+        if not artifact_blocks:
+            return prompt
+        artifact_message = LlmMessage(
+            role=LlmMessageRole.USER,
+            content=[
+                text_content_block(
+                    "Opened context artifact attachments for this turn:",
+                ),
+                *artifact_blocks,
+            ],
+            metadata={
+                "prompt_block_kind": "context_artifacts",
+                "context_render_snapshot_id": context_render_snapshot.snapshot_id,
+            },
+        )
+        return replace(
+            prompt,
+            messages=prompt.messages + (artifact_message,),
+        )
+
+    @staticmethod
+    def _resolved_tools_for_prompt(
+        resolved_tools: ResolvedToolSet,
+        prompt: PromptSurface,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> ResolvedToolSet:
+        if context_render_snapshot is None:
+            return resolved_tools
+        if context_render_snapshot.tool_schemas is None:
+            return resolved_tools
+        visible_tool_names = {
+            schema.name for schema in prompt.tool_schemas if schema.name.strip()
+        }
+        return ResolvedToolSet(
+            tools=tuple(
+                item
+                for item in resolved_tools.tools
+                if item.schema.name in visible_tool_names
+                or item.tool.id in visible_tool_names
+            ),
+            blocked_access=resolved_tools.blocked_access,
         )
 
     def _timed_phase(
@@ -531,3 +686,15 @@ class OrchestrationEngine:
             "orchestration.engine.phase_seconds",
             labels={"phase": phase},
         )
+
+
+def _insert_after_system_prefix(
+    messages: tuple[LlmMessage, ...],
+    message: LlmMessage,
+) -> tuple[LlmMessage, ...]:
+    insert_at = 0
+    for existing in messages:
+        if existing.role is not LlmMessageRole.SYSTEM:
+            break
+        insert_at += 1
+    return messages[:insert_at] + (message,) + messages[insert_at:]

@@ -16,7 +16,7 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
-    PromptPreviewDTO,
+    PromptSurfacePreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.shared import (
     build_reset_policy,
@@ -240,7 +240,7 @@ def build_cli() -> typer.Typer:
             typer.secho(str(exc), err=True, fg=typer.colors.RED)
             raise typer.Exit(code=1) from None
         echo_data(
-            PromptPreviewDTO.from_value(
+            PromptSurfacePreviewDTO.from_value(
                 run_id=run_id,
                 preview=preview,
             ),

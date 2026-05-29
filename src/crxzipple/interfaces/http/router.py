@@ -13,6 +13,9 @@ from crxzipple.modules.artifacts.interfaces.http import router as artifacts_rout
 from crxzipple.modules.browser.interfaces.http import router as browser_router
 from crxzipple.modules.authorization.interfaces.http import router as authorization_router
 from crxzipple.modules.channels.interfaces.http import router as channels_router
+from crxzipple.modules.context_workspace.interfaces.http import (
+    router as context_workspace_router,
+)
 from crxzipple.modules.dispatch.interfaces.http import router as dispatch_router
 from crxzipple.modules.daemon.interfaces.http import router as daemon_router
 from crxzipple.modules.events.interfaces.http import router as events_router
@@ -51,6 +54,11 @@ api_router.include_router(tool_router, prefix="/tools", tags=["tools"])
 api_router.include_router(artifacts_router, prefix="/artifacts", tags=["artifacts"])
 api_router.include_router(browser_router, prefix="/browser", tags=["browser"])
 api_router.include_router(channels_router, prefix="/channels", tags=["channels"])
+api_router.include_router(
+    context_workspace_router,
+    prefix="/context-workspaces",
+    tags=["context-workspaces"],
+)
 api_router.include_router(mobile_router, prefix="/mobile", tags=["mobile"])
 api_router.include_router(ocr_router, prefix="/ocr", tags=["ocr"])
 api_router.include_router(daemon_router, prefix="/daemon", tags=["daemon"])

@@ -15,6 +15,7 @@ from crxzipple.modules.operations.application.read_models import (
     AccessOperationsQuery,
     BrowserOperationsQuery,
     ChannelsOperationsQuery,
+    ContextWorkspaceOperationsQuery,
     DaemonOperationsQuery,
     EventsOperationsQuery,
     LlmOperationsQuery,
@@ -37,6 +38,7 @@ OPERATIONS_PROJECTION_MODULES: tuple[str, ...] = (
     "access",
     "channels",
     "memory",
+    "context_workspace",
     "skills",
     "events",
     "daemon",
@@ -46,8 +48,8 @@ _PROJECTION_MODULE_PRIORITY = {
 }
 
 _EVENT_MODULE_TO_PROJECTION_MODULES: dict[str, tuple[str, ...]] = {
-    "orchestration": ("orchestration", "events"),
-    "dispatch": ("orchestration", "events"),
+    "orchestration": ("orchestration", "context_workspace", "events"),
+    "dispatch": ("orchestration", "context_workspace", "events"),
     "tool": ("tool", "events"),
     "browser": ("browser", "daemon", "events"),
     "llm": ("llm", "events"),
@@ -55,6 +57,8 @@ _EVENT_MODULE_TO_PROJECTION_MODULES: dict[str, tuple[str, ...]] = {
     "channels": ("channels", "events"),
     "channel": ("channels", "events"),
     "memory": ("memory", "events"),
+    "context_workspace": ("context_workspace", "events"),
+    "context": ("context_workspace", "events"),
     "skills": ("skills", "events"),
     "skill": ("skills", "events"),
     "events": ("events",),
@@ -232,6 +236,10 @@ def _module_page(provider: OperationsReadModelProvider, module: str) -> Any:
         return provider.channels_page(ChannelsOperationsQuery(limit=1000))
     if module == "memory":
         return provider.memory_page(MemoryOperationsQuery(limit=1000))
+    if module == "context_workspace":
+        return provider.context_workspace_page(
+            ContextWorkspaceOperationsQuery(limit=1000),
+        )
     if module == "skills":
         return provider.skills_page(SkillsOperationsQuery(limit=1000))
     if module == "events":

@@ -1766,7 +1766,6 @@ def _inspector_for_run(
                 title="Memory Context",
                 items=(
                     _kv("Agent", run.agent_id or "-"),
-                    _kv("Recalled blocks", str(_prompt_block_count(run, "recalled_memory"))),
                     _kv("Memory tools", str(_memory_tool_run_count(display_tool_runs))),
                     _kv("Prompt mode", _metadata_str(run, "prompt_mode") or "-"),
                 ),
@@ -1870,19 +1869,6 @@ def _agent_memory_scope(agent_profile: Any | None) -> str | None:
             return _optional_text(memory.effective_scope_ref(agent_id))
     return _optional_text(getattr(memory, "scope_ref", None)) or "agent default"
 
-
-def _prompt_block_count(run: OrchestrationRun, kind: str) -> int:
-    prompt_report = run.metadata.get("prompt_report")
-    if not isinstance(prompt_report, dict):
-        return 0
-    blocks = prompt_report.get("system_blocks")
-    if not isinstance(blocks, list):
-        return 0
-    return sum(
-        1
-        for block in blocks
-        if isinstance(block, dict) and block.get("kind") == kind
-    )
 
 
 def _memory_tool_run_count(display_tool_runs: tuple[_DisplayToolRun, ...]) -> int:

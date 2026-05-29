@@ -33,7 +33,7 @@ from crxzipple.modules.orchestration.application.ports import (
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
-    PromptPreviewDTO,
+    PromptSurfacePreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.http_models import OrchestrationRunResponse
 from crxzipple.modules.session.domain import DirectSessionScope
@@ -77,7 +77,7 @@ class TurnResponse(BaseModel):
         )
 
 
-class PromptPreviewMessageResponse(BaseModel):
+class PromptSurfacePreviewMessageResponse(BaseModel):
     role: str
     content: Any
     name: str | None = None
@@ -85,35 +85,28 @@ class PromptPreviewMessageResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class PromptPreviewToolSchemaResponse(BaseModel):
+class PromptSurfacePreviewToolSchemaResponse(BaseModel):
     name: str
     description: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
 
 
-class PromptPreviewContextFileResponse(BaseModel):
-    path: str
-    chars: int
-
-
-class PromptPreviewResponse(BaseModel):
+class PromptSurfacePreviewResponse(BaseModel):
     run_id: str
     llm_id: str
     mode: str
-    messages: list[PromptPreviewMessageResponse] = Field(default_factory=list)
-    tool_schemas: list[PromptPreviewToolSchemaResponse] = Field(default_factory=list)
+    messages: list[PromptSurfacePreviewMessageResponse] = Field(default_factory=list)
+    tool_schemas: list[PromptSurfacePreviewToolSchemaResponse] = Field(default_factory=list)
     prompt_report: dict[str, Any] | None = None
-    workspace_context_workspace: str | None = None
-    workspace_context_files: list[PromptPreviewContextFileResponse] = Field(default_factory=list)
 
     @classmethod
-    def from_dto(cls, dto: PromptPreviewDTO) -> "PromptPreviewResponse":
+    def from_dto(cls, dto: PromptSurfacePreviewDTO) -> "PromptSurfacePreviewResponse":
         return cls(
             run_id=dto.run_id,
             llm_id=dto.llm_id,
             mode=dto.mode,
             messages=[
-                PromptPreviewMessageResponse(
+                PromptSurfacePreviewMessageResponse(
                     role=item.role,
                     content=item.content,
                     name=item.name,
@@ -123,7 +116,7 @@ class PromptPreviewResponse(BaseModel):
                 for item in dto.messages
             ],
             tool_schemas=[
-                PromptPreviewToolSchemaResponse(
+                PromptSurfacePreviewToolSchemaResponse(
                     name=item.name,
                     description=item.description,
                     input_schema=dict(item.input_schema),
@@ -135,14 +128,6 @@ class PromptPreviewResponse(BaseModel):
                 if dto.prompt_report is not None
                 else None
             ),
-            workspace_context_workspace=dto.workspace_context_workspace,
-            workspace_context_files=[
-                PromptPreviewContextFileResponse(
-                    path=item.path,
-                    chars=item.chars,
-                )
-                for item in dto.workspace_context_files
-            ],
         )
 
 
@@ -273,11 +258,11 @@ def get_turn(
     return _turn_response_from_run(run)
 
 
-@router.get("/turns/{run_id}/prompt-preview", response_model=PromptPreviewResponse)
+@router.get("/turns/{run_id}/prompt-preview", response_model=PromptSurfacePreviewResponse)
 def get_turn_prompt_preview(
     run_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> PromptPreviewResponse:
+) -> PromptSurfacePreviewResponse:
     inspection_service = _inspection_port(container)
     try:
         preview = inspection_service.preview_prompt(run_id)
@@ -285,8 +270,8 @@ def get_turn_prompt_preview(
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except OrchestrationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    return PromptPreviewResponse.from_dto(
-        PromptPreviewDTO.from_value(
+    return PromptSurfacePreviewResponse.from_dto(
+        PromptSurfacePreviewDTO.from_value(
             run_id=run_id,
             preview=preview,
         ),

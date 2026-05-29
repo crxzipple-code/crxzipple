@@ -1128,7 +1128,6 @@ def get_operations_module(
         container,
         module=module,
         response_cls=OperationsModulePageResponse,
-        kind="module_page",
     )
 
 

@@ -12,6 +12,10 @@ from crxzipple.modules.operations.application.read_models.channels import (
     ChannelsOperationsQuery,
     ChannelsOperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.context_workspace import (
+    ContextWorkspaceOperationsQuery,
+    ContextWorkspaceOperationsReadModelProvider,
+)
 from crxzipple.modules.operations.application.read_models.browser import (
     BrowserOperationsPage,
     BrowserOperationsQuery,
@@ -98,6 +102,8 @@ __all__ = [
     "ChannelsOperationsPage",
     "ChannelsOperationsQuery",
     "ChannelsOperationsReadModelProvider",
+    "ContextWorkspaceOperationsQuery",
+    "ContextWorkspaceOperationsReadModelProvider",
     "DaemonInstanceDetailModel",
     "DaemonLeaseDetailModel",
     "DaemonOperationsPage",

@@ -5,6 +5,7 @@ import sqlite3
 from unittest.mock import patch
 
 from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.app.assembly.tool import browser_function_catalog_candidates
 from crxzipple.modules.tool.domain import (
     ToolDefinitionOrigin,
     ToolEnvironment,
@@ -292,7 +293,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("mobile", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
-    def test_browser_catalog_exposes_only_configured_runtime_functions(self) -> None:
+    def test_browser_catalog_exposes_configured_runtime_functions(self) -> None:
         browser_tools = [
             tool
             for tool in self.tool_service.list_tools()
@@ -300,20 +301,16 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         ]
 
         expected_ids = {
-            "browser.snapshot",
-            "browser.navigate",
-            "browser.click",
-            "browser.type",
-            "browser.evaluate",
-            "browser.screenshot",
-            "browser.tabs.list",
-            "browser.tabs.select",
-            "browser.tabs.close",
+            candidate.function_id
+            for candidate in browser_function_catalog_candidates(
+                source_id="configured.browser",
+            )
         }
         self.assertEqual({tool.id for tool in browser_tools}, expected_ids)
 
         enabled_ids = {item.id for item in self.tool_service.list_enabled_tools()}
         self.assertTrue(expected_ids.issubset(enabled_ids))
+        self.assertNotIn("mcp.browser", {tool.source_id for tool in browser_tools})
         self.assertNotIn("browser_cdp_raw", enabled_ids)
         self.assertNotIn("browser_network_inspect", enabled_ids)
 

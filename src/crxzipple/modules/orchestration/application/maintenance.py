@@ -11,7 +11,7 @@ from crxzipple.modules.orchestration.application.commands import (
 )
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    PromptPreview,
+    PromptSurfacePreview,
 )
 from crxzipple.modules.orchestration.application.ports import (
     LlmPort,
@@ -74,7 +74,7 @@ class OrchestrationMaintenanceService:
         session_key = str(run.metadata.get("session_key", "")).strip()
         if not session_key:
             return False, None
-        preview: PromptPreview | None = None
+        preview: PromptSurfacePreview | None = None
         trigger = self._preflight_compaction_trigger(
             run=run,
             preview=preview,
@@ -490,7 +490,7 @@ class OrchestrationMaintenanceService:
         self,
         *,
         run: OrchestrationRun,
-        preview: PromptPreview | None,
+        preview: PromptSurfacePreview | None,
         force: bool,
         failure_message: str | None,
     ) -> dict[str, object] | None:
@@ -520,7 +520,7 @@ class OrchestrationMaintenanceService:
         self,
         run: OrchestrationRun,
         *,
-        preview: PromptPreview | None,
+        preview: PromptSurfacePreview | None,
     ) -> dict[str, int | None]:
         estimated_total_tokens = 0
         transcript_chars = 0
@@ -529,7 +529,7 @@ class OrchestrationMaintenanceService:
         if preview is not None and preview.prompt_report is not None:
             report = preview.prompt_report
             estimated_total_tokens = (
-                report.system_estimated_tokens + report.transcript_estimated_tokens
+                report.context_estimated_tokens + report.transcript_estimated_tokens
             )
             transcript_chars = report.transcript_chars
             transcript_estimated_tokens = report.transcript_estimated_tokens
@@ -550,11 +550,11 @@ class OrchestrationMaintenanceService:
                     transcript_estimated_tokens = _coerce_non_negative_int(
                         transcript_payload.get("estimated_tokens"),
                     )
-                system_budget_payload = prompt_report.get("system_budget")
+                context_budget_payload = prompt_report.get("context_budget")
                 context_window_tokens = None
-                if isinstance(system_budget_payload, dict):
+                if isinstance(context_budget_payload, dict):
                     context_window_tokens = _coerce_optional_positive_int(
-                        system_budget_payload.get("llm_context_window_tokens"),
+                        context_budget_payload.get("llm_context_window_tokens"),
                     )
                 prompt_threshold_tokens = self._auto_compaction_prompt_threshold_tokens_for_context_window(
                     context_window_tokens,
@@ -599,14 +599,14 @@ class OrchestrationMaintenanceService:
             return 0, 0
         return len(content), estimate_text_tokens(content)
 
-    def _safe_preview_prompt(self, run: OrchestrationRun) -> PromptPreview | None:
+    def _safe_preview_prompt(self, run: OrchestrationRun) -> PromptSurfacePreview | None:
         if self.engine is None:
             return None
         try:
             return self.engine.preview_prompt(run)
         except Exception:
             logger.exception(
-                "failed to build prompt preview for preflight maintenance",
+                "failed to build prompt surface preview for preflight maintenance",
                 extra={"run_id": run.id},
             )
             return None

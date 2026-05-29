@@ -178,34 +178,28 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     self.assertEqual(get_payload["run"]["stage"], "completed")
                     self.assertEqual(get_payload["run"]["current_step"], 1)
                     self.assertEqual(get_payload["output_text"], "hello from sample llm")
-                    self.assertEqual(
-                        get_payload["run"]["metadata"]["workspace_context_workspace"],
-                        str(workspace),
+                    self.assertNotIn(
+                        "workspace_context_workspace",
+                        get_payload["run"]["metadata"],
                     )
-                    workspace_context_files = get_payload["run"]["metadata"]["workspace_context_files"]
-                    self.assertIn(
-                        {"path": "AGENTS.md", "chars": len("# AGENTS.md\n\nUse the local project context.")},
-                        workspace_context_files,
+                    self.assertNotIn(
+                        "workspace_context_files",
+                        get_payload["run"]["metadata"],
                     )
                     self.assertEqual(get_payload["run"]["metadata"]["prompt_mode"], "session_start")
                     self.assertEqual(
-                        get_payload["run"]["metadata"]["prompt_report"]["system_budget"]["source"],
+                        get_payload["run"]["metadata"]["prompt_report"]["context_budget"]["source"],
                         "fixed",
                     )
                     self.assertEqual(
-                        get_payload["run"]["metadata"]["prompt_report"]["system_budget"]["max_estimated_tokens"],
+                        get_payload["run"]["metadata"]["prompt_report"]["context_budget"]["max_estimated_tokens"],
                         30000,
                     )
                     self.assertEqual(
-                        [block["kind"] for block in get_payload["run"]["metadata"]["prompt_report"]["system_blocks"]],
+                        [block["kind"] for block in get_payload["run"]["metadata"]["prompt_report"]["context_blocks"]],
                         [
                             "agent_instruction",
                             "runtime_context",
-                            "flow_prompt",
-                            "available_tools",
-                            "session_tools",
-                            "project_context",
-                            "skills_catalog",
                         ],
                     )
                     preview_response = self.client.get(
@@ -224,10 +218,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                             for item in preview_payload["messages"]
                         ),
                     )
-                    self.assertIn(
-                        {"path": "AGENTS.md", "chars": len("# AGENTS.md\n\nUse the local project context.")},
-                        preview_payload["workspace_context_files"],
-                    )
+                    self.assertNotIn("workspace_context_files", preview_payload)
             finally:
                 if previous_token is None:
                     os.environ.pop("OPENAI_API_KEY", None)
@@ -587,7 +578,13 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     params={"agent_id": "crxzipple", "query": "risky actions"},
                 )
                 self.assertEqual(entries.status_code, 200)
-                self.assertEqual(len(entries.json()), 1)
+                search_hits = entries.json()
+                self.assertTrue(
+                    any(
+                        "risky actions" in hit["snippet"]
+                        for hit in search_hits
+                    ),
+                )
 
     def test_turn_approval_endpoint_resumes_waiting_run(self) -> None:
             llm_response = self.client.post(

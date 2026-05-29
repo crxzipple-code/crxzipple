@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from threading import Event as ThreadEvent
 from typing import TYPE_CHECKING, Protocol
 
@@ -12,6 +13,11 @@ if TYPE_CHECKING:
 
     from crxzipple.modules.agent.domain.entities import AgentProfile
     from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
+    from crxzipple.modules.llm.domain import ToolSchema
+    from crxzipple.modules.orchestration.application.prompt_surface import (
+        PromptSurface,
+    )
+    from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
     from crxzipple.modules.session.domain.entities import Session
     from crxzipple.modules.session.domain.value_objects import SessionMessage
     from crxzipple.modules.session.application.services import (
@@ -158,6 +164,28 @@ class ArtifactVariantReadPort(Protocol):
         *,
         variant: "ArtifactVariant",
     ) -> ResolvedArtifactVariantPort:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ContextRenderSnapshotRecord:
+    snapshot_id: str
+    prompt_body: str | None = None
+    estimate: dict[str, object] | None = None
+    included_node_ids: tuple[str, ...] = ()
+    mirrored_node_ids: tuple[str, ...] = ()
+    tool_schemas: tuple["ToolSchema", ...] | None = None
+    tool_schema_mirror_available: bool = False
+    artifact_content_blocks: tuple[dict[str, object], ...] = ()
+
+
+class ContextRenderSnapshotPort(Protocol):
+    def record_run_prompt_snapshot(
+        self,
+        *,
+        run: "OrchestrationRun",
+        prompt: "PromptSurface",
+    ) -> ContextRenderSnapshotRecord | None:
         ...
 
 

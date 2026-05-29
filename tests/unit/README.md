@@ -38,6 +38,20 @@ Split a file when one of these becomes true:
   - `tool_test_support.py`
   - `skill_test_support.py`
 
+## Context Workspace Coverage
+
+树化 Prompt / Context Workspace 的单元测试按边界拆开：
+
+- `test_context_workspace_domain.py`：Context Workspace domain value/entity 行为。
+- `test_context_workspace_tree_service.py`：workspace/tree/render service、节点状态、render snapshot 和 list_recent。
+- `test_context_workspace_http.py`：`/context-workspaces/*` HTTP API。
+- `test_context_workspace_*_adapter.py`：app integration owner adapters，把 session / memory / tool / skill / artifact / workspace facts 映射为 Context Workspace nodes。
+- `test_context_tree_tool.py`：agent-facing `context_tree.*` tools，只验证工具通过 application service 操作树。
+- `test_orchestration_context_workspace_snapshot.py`：orchestration 调用 Context Workspace render snapshot，并把 `<context_tree>` 与 provider mirror 放入真实 LLM prompt surface。
+- `test_operations_context_workspace_read_model.py`：Operations `context_workspace` read model/projection。
+
+这些测试不应真实调用 LLM，也不应启动 daemon worker。跨进程 Redis、完整 scheduler/executor 运行和浏览器截图属于 runtime/integration 层。
+
 ## Runtime Markers
 
 Markers are assigned centrally in `tests/conftest.py`.

@@ -3150,6 +3150,24 @@ def _tool_activation_bindings_from_context(
                 ),
             ),
         )
+    if ctx.has(AppKey.CONTEXT_TREE_SERVICE):
+        _ensure_tool_activation_binding(
+            bindings,
+            ToolDependencyBinding(
+                "context_tree_service",
+                ctx.require(AppKey.CONTEXT_TREE_SERVICE),
+                capability_ids=("context_workspace.read", "context_workspace.write"),
+            ),
+        )
+    if ctx.has(AppKey.CONTEXT_RENDER_SERVICE):
+        _ensure_tool_activation_binding(
+            bindings,
+            ToolDependencyBinding(
+                "context_render_service",
+                ctx.require(AppKey.CONTEXT_RENDER_SERVICE),
+                capability_ids=("context_workspace.read", "context_workspace.render"),
+            ),
+        )
     if ctx.has(AppKey.SKILL_MANAGER):
         skill_manager = ctx.require(AppKey.SKILL_MANAGER)
         _ensure_tool_activation_binding(

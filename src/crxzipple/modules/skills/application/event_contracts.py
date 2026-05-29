@@ -52,7 +52,7 @@ def skill_event_definitions() -> tuple[EventDefinition, ...]:
             owner="skills",
             event_name=event_name,
             description="Skill runtime and catalog operation fact observed for operations observation.",
-            producers=("SkillManager", "SkillAuthoringService", "PromptAssembler"),
+            producers=("SkillManager", "SkillAuthoringService", "PromptSurfaceBuilder"),
             consumers=("OperationsEventObserver", "SkillsOperationsReadModelProvider"),
             fields=common_fields,
             durability="persistent",

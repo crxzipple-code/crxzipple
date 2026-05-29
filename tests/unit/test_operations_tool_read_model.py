@@ -108,7 +108,7 @@ def test_tool_operations_source_health_exposes_single_browser_source() -> None:
     assert row.cells["endpoint"] == "-"
     assert row.cells["runtime"] == "Browser profile context"
     assert row.cells["tools_list"] == "-"
-    assert row.cells["functions"] == "9/9"
+    assert row.cells["functions"] == f"{len(functions)}/{len(functions)}"
 
 
 def test_browser_source_health_is_not_downgraded_by_runtime_readiness() -> None:

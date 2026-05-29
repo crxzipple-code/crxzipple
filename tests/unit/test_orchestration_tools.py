@@ -293,7 +293,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         finally:
             custom_harness.close()
 
-    def test_process_next_orchestration_assignment_injects_available_skills_catalog(self) -> None:
+    def test_process_next_orchestration_assignment_exposes_available_skills_via_context_tree(self) -> None:
         adapter = _StaticTextAdapter(text="hello with skill catalog")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -354,23 +354,31 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 for message in adapter.requests[0].messages
                 if message.role is LlmMessageRole.SYSTEM
             ]
-            self.assertTrue(
-                any(
-                    "# Available Skills" in str(message.content)
-                    and "repo-review" in str(message.content)
-                    and "SKILL.md" in str(message.content)
-                    for message in system_messages
-                ),
+            context_tree_message = next(
+                message
+                for message in system_messages
+                if message.metadata.get("prompt_block_kind") == "context_workspace"
             )
+            self.assertIn("skills.available", str(context_tree_message.content))
+            self.assertFalse(
+                any("# Available Skills" in str(message.content) for message in system_messages),
+            )
+            context_workspace = self.container.require(
+                AppKey.CONTEXT_WORKSPACE_SERVICE,
+            ).get_by_session("agent:assistant:main")
             self.assertIn(
+                "repo-review",
+                context_workspace.metadata["available_skill_names"],
+            )
+            self.assertNotIn(
                 "skills_catalog",
                 [
                     block["kind"]
-                    for block in processed.metadata["prompt_report"]["system_blocks"]
+                    for block in processed.metadata["prompt_report"]["context_blocks"]
                 ],
             )
 
-    def test_process_next_orchestration_assignment_injects_session_tools_guidance(self) -> None:
+    def test_process_next_orchestration_assignment_uses_tool_descriptions_for_session_tools(self) -> None:
         adapter = _StaticTextAdapter(text="hello with session tools")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -410,22 +418,27 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        self.assertTrue(
-            any(
-                "# Session Tools" in str(message.content)
-                and "sessions_send" in str(message.content)
-                and "sessions_spawn" in str(message.content)
-                and "sessions_yield" in str(message.content)
-                and "not memory recall" in str(message.content)
-                and "Prefer `session_status` first" in str(message.content)
-                for message in system_messages
-            ),
+        self.assertFalse(
+            any("# Session Tools" in str(message.content) for message in system_messages),
         )
-        self.assertIn(
+        self.assertFalse(
+            any("# Available Tools" in str(message.content) for message in system_messages),
+        )
+        tool_schema_names = {schema.name for schema in adapter.requests[0].tool_schemas}
+        self.assertIn("sessions_send", tool_schema_names)
+        self.assertIn("sessions_spawn", tool_schema_names)
+        self.assertIn("sessions_yield", tool_schema_names)
+        context_tree_message = next(
+            message
+            for message in system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        self.assertIn("tools.available", str(context_tree_message.content))
+        self.assertNotIn(
             "session_tools",
             [
                 block["kind"]
-                for block in processed.metadata["prompt_report"]["system_blocks"]
+                for block in processed.metadata["prompt_report"]["context_blocks"]
             ],
         )
 
@@ -678,29 +691,43 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        skills_catalog_message = next(
+        context_tree_message = next(
             message
             for message in system_messages
-            if "# Available Skills" in str(message.content)
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
         )
-        self.assertIn("ready-review", str(skills_catalog_message.content))
-        self.assertNotIn("blocked-review", str(skills_catalog_message.content))
-        skills_catalog_block = next(
-            block
-            for block in processed.metadata["prompt_report"]["system_blocks"]
-            if block["kind"] == "skills_catalog"
+        self.assertIn("skills.available", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Available Skills" in str(message.content) for message in system_messages),
         )
-        resolved_skills = skills_catalog_block["metadata"]["resolved_skills"]
+        context_workspace = self.container.require(
+            AppKey.CONTEXT_WORKSPACE_SERVICE,
+        ).get_by_session("agent:assistant:main")
+        self.assertIn(
+            "ready-review",
+            context_workspace.metadata["available_skill_names"],
+        )
+        self.assertNotIn(
+            "blocked-review",
+            context_workspace.metadata["available_skill_names"],
+        )
+        resolution_event = next(
+            event
+            for event in self.container.require(AppKey.EVENTS_BUS).published_events
+            if event.event_name == "skills.resolution.completed"
+            and event.payload.get("run_id") == "run-resolve-skill-visibility"
+        )
+        resolved_skills = resolution_event.payload["skills"]
         readiness_by_name = {
-            item["name"]: item["readiness"]["status"]
+            item["skill"]: item["status"]
             for item in resolved_skills
         }
         self.assertEqual(readiness_by_name["ready-review"], "ready")
         self.assertEqual(readiness_by_name["blocked-review"], "setup_needed")
         blocked_readiness = next(
-            item["readiness"]
+            item
             for item in resolved_skills
-            if item["name"] == "blocked-review"
+            if item["skill"] == "blocked-review"
         )
         self.assertEqual(blocked_readiness["missing_tools"], ["missing_review_tool"])
         self.assertEqual(
@@ -774,28 +801,35 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        skills_catalog_message = next(
+        system_messages = [
             message
             for message in adapter.requests[0].messages
-            if "# Available Skills" in str(message.content)
+            if message.role is LlmMessageRole.SYSTEM
+        ]
+        context_tree_message = next(
+            message
+            for message in system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
         )
-        self.assertIn(
-            "No optional skills are currently available",
-            str(skills_catalog_message.content),
+        self.assertIn("skills.available", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Available Skills" in str(message.content) for message in system_messages),
         )
-        self.assertNotIn("blocked-review", str(skills_catalog_message.content))
-        self.assertNotIn("memory-recall", str(skills_catalog_message.content))
-        skills_catalog_block = next(
-            block
-            for block in processed.metadata["prompt_report"]["system_blocks"]
-            if block["kind"] == "skills_catalog"
+        context_workspace = self.container.require(
+            AppKey.CONTEXT_WORKSPACE_SERVICE,
+        ).get_by_session("agent:assistant:main")
+        self.assertEqual(context_workspace.metadata["available_skill_names"], [])
+        resolution_event = next(
+            event
+            for event in self.container.require(AppKey.EVENTS_BUS).published_events
+            if event.event_name == "skills.resolution.completed"
+            and event.payload.get("run_id") == "run-blocked-skills-observed"
         )
-        self.assertEqual(skills_catalog_block["metadata"]["count"], 0)
-        self.assertEqual(skills_catalog_block["metadata"]["skills"], [])
-        self.assertEqual(skills_catalog_block["metadata"]["available_skill_names"], [])
-        resolved_skills = skills_catalog_block["metadata"]["resolved_skills"]
+        self.assertEqual(resolution_event.payload["ready_count"], 0)
+        self.assertEqual(resolution_event.payload["setup_needed_count"], 2)
+        resolved_skills = resolution_event.payload["skills"]
         readiness_by_name = {
-            item["name"]: item["readiness"]
+            item["skill"]: item
             for item in resolved_skills
         }
         self.assertEqual(
@@ -1017,13 +1051,8 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertIn("memory_search", first_schema_names)
         self.assertIn("memory_write_daily", first_schema_names)
         self.assertIn("skill_read", first_schema_names)
-        self.assertEqual(
-            [message.role for message in adapter.requests[1].messages[:2]],
-            [
-                LlmMessageRole.SYSTEM,
-                LlmMessageRole.SYSTEM,
-            ],
-        )
+        self.assertEqual(adapter.requests[1].messages[0].role, LlmMessageRole.SYSTEM)
+        self.assertIn("<context_tree", str(adapter.requests[1].messages[0].content))
         self.assertEqual(
             [message.role for message in adapter.requests[1].messages[-3:]],
             [
@@ -1684,13 +1713,8 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "background loop complete",
             )
             self.assertEqual(len(adapter.requests), 2)
-            self.assertEqual(
-                [message.role for message in adapter.requests[1].messages[:2]],
-                [
-                    LlmMessageRole.SYSTEM,
-                    LlmMessageRole.SYSTEM,
-                ],
-            )
+            self.assertEqual(adapter.requests[1].messages[0].role, LlmMessageRole.SYSTEM)
+            self.assertIn("<context_tree", str(adapter.requests[1].messages[0].content))
             self.assertEqual(
                 [message.role for message in adapter.requests[1].messages[-3:]],
                 [
@@ -1705,12 +1729,19 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 for message in adapter.requests[1].messages
                 if message.role is LlmMessageRole.SYSTEM
             ]
-            self.assertTrue(
-                any(
-                    "# Recovery Update" in str(message.content)
-                    and "resuming after background work completed" in str(message.content)
-                    for message in recovery_system_messages
-                ),
+            context_tree_message = next(
+                message
+                for message in recovery_system_messages
+                if message.metadata.get("prompt_block_kind") == "context_workspace"
+            )
+            self.assertIn("run.flow", str(context_tree_message.content))
+            self.assertIn("Flow: Recovery Resume", str(context_tree_message.content))
+            self.assertIn(
+                "resuming after background work completed",
+                str(context_tree_message.content),
+            )
+            self.assertFalse(
+                any("# Recovery Update" in str(message.content) for message in recovery_system_messages),
             )
             self.assertFalse(
                 any(

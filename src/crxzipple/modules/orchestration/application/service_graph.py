@@ -30,7 +30,7 @@ from crxzipple.modules.orchestration.application.coordinators import (
 )
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    PromptPreview,
+    PromptSurfacePreview,
 )
 from crxzipple.modules.orchestration.application.execution import RunExecutionService
 from crxzipple.modules.orchestration.application.followups import (
@@ -362,7 +362,7 @@ class OrchestrationServiceGraph:
     def get_run(self, run_id: str) -> OrchestrationRun:
         return self.run_query_service.get_run(run_id)
 
-    def preview_prompt(self, run_id: str) -> PromptPreview:
+    def preview_prompt(self, run_id: str) -> PromptSurfacePreview:
         return self.inspection_service.preview_prompt(run_id)
 
     def resolve_tools(self, run: OrchestrationRun) -> ResolvedToolSet:

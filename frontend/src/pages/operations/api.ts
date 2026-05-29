@@ -327,6 +327,7 @@ const apiModules = new Set([
   "access",
   "channels",
   "memory",
+  "context_workspace",
   "skills",
   "events",
   "daemon",

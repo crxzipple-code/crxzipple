@@ -4,6 +4,7 @@ import {
   Bot,
   Box,
   Boxes,
+  Braces,
   Brain,
   CheckCircle2,
   ChevronDown,
@@ -51,11 +52,14 @@ import {
   type SkillDraftApiPayload,
 } from "../settings/ownerApis/skillCatalog";
 import {
+  applyWorkbenchContextAction,
   cancelWorkbenchTurn,
   createWorkbenchTurn,
   listWorkbenchAgents,
   listWorkbenchModels,
   listWorkbenchTools,
+  loadWorkbenchContextRenderSnapshot,
+  loadWorkbenchContextTree,
   loadWorkbenchData,
   openEventStream,
   resolveWorkbenchApproval,
@@ -66,6 +70,9 @@ import {
   type WorkbenchAgentProfile,
   type WorkbenchArtifactUpload,
   type WorkbenchContentBlock,
+  type WorkbenchContextNode,
+  type WorkbenchContextRenderSnapshot,
+  type WorkbenchContextTree,
   type WorkbenchLlmProfile,
   type WorkbenchToolSummary,
 } from "./api";
@@ -105,6 +112,12 @@ const toolsLoading = ref(false);
 const toolsLoaded = ref(false);
 const toolsError = ref<string | null>(null);
 const workbenchTools = ref<WorkbenchToolSummary[]>([]);
+const contextTree = ref<WorkbenchContextTree | null>(null);
+const contextRenderSnapshot = ref<WorkbenchContextRenderSnapshot | null>(null);
+const contextTreeLoading = ref(false);
+const contextTreeError = ref<string | null>(null);
+const contextActionBusy = ref<string | null>(null);
+const contextMemoryLayerFilter = ref<ContextMemoryLayerFilter>("all");
 const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
 const pendingRunId = ref<string | null>(null);
@@ -152,7 +165,8 @@ interface SkillApprovalDraftState {
   draft: SkillDraftApiPayload | null;
 }
 
-type InspectorTabId = "overview" | "step" | "debug" | "memory" | "agent";
+type InspectorTabId = "overview" | "step" | "debug" | "context" | "memory" | "agent";
+type ContextMemoryLayerFilter = "all" | "private" | "shared" | "project" | "team" | "system";
 
 const workbenchThreads = computed(() => home.value?.threads ?? []);
 const activeThread = computed(() => workbenchThreads.value.find((thread) => thread.id === activeThreadId.value));
@@ -246,6 +260,7 @@ const inspectorTabs = computed<Array<{ id: InspectorTabId; label: string }>>(() 
   { id: "overview", label: t("workbench.inspect.overview") },
   { id: "step", label: t("workbench.inspect.step") },
   { id: "debug", label: t("workbench.inspect.debug") },
+  { id: "context", label: t("workbench.inspect.context") },
   { id: "memory", label: t("workbench.inspect.memory") },
   { id: "agent", label: t("workbench.inspect.agent") },
 ]);
@@ -260,6 +275,53 @@ const stepStats = computed(() => {
   };
 });
 const activeTurnSummary = computed(() => displayedTurns.value.find((turn) => turn.turn_id === activeTurnId.value) ?? null);
+const contextSessionKey = computed(() => {
+  if (isNewSessionDraft.value) return draftSessionKey.value;
+  return run.value?.session_key ?? null;
+});
+const contextNodeRows = computed(() => flattenContextNodes(contextTree.value?.nodes ?? []));
+const filteredContextNodeRows = computed(() => (
+  filterContextNodeRows(contextNodeRows.value, contextMemoryLayerFilter.value)
+));
+const contextMemoryLayerOptions = computed<Array<{ id: ContextMemoryLayerFilter; label: string; count: number }>>(() => {
+  const rows = contextNodeRows.value;
+  const countFor = (layer: ContextMemoryLayerFilter) => (
+    layer === "all"
+      ? rows.length
+      : rows.filter((node) => contextMemoryLayer(node) === layer).length
+  );
+  return [
+    { id: "all", label: t("common.all"), count: countFor("all") },
+    { id: "private", label: t("workbench.context.memory.private"), count: countFor("private") },
+    { id: "shared", label: t("workbench.context.memory.shared"), count: countFor("shared") },
+    { id: "project", label: t("workbench.context.memory.project"), count: countFor("project") },
+    { id: "team", label: t("workbench.context.memory.team"), count: countFor("team") },
+    { id: "system", label: t("workbench.context.memory.system"), count: countFor("system") },
+  ];
+});
+const contextEstimateRows = computed(() => {
+  const estimate = contextTree.value?.estimate;
+  if (!estimate) return [];
+  return [
+    { label: t("workbench.context.textTokens"), value: formatNumber(estimate.text_tokens) },
+    { label: t("workbench.context.toolSchemaTokens"), value: formatNumber(estimate.tool_schema_tokens) },
+    { label: t("workbench.context.fileTokens"), value: formatNumber(estimate.file_tokens) },
+    { label: t("workbench.context.images"), value: formatNumber(estimate.image_count) },
+    { label: t("workbench.context.attachments"), value: formatNumber(estimate.provider_attachment_count) },
+  ];
+});
+const contextSnapshotRows = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return [];
+  return [
+    { label: t("trace.id.run"), value: compactIdentifier(snapshot.run_id) },
+    { label: t("workbench.context.revision"), value: String(snapshot.tree_revision) },
+    { label: t("workbench.context.includedNodes"), value: formatNumber(snapshot.included_node_ids.length) },
+    { label: t("workbench.context.mirroredNodes"), value: formatNumber(snapshot.mirrored_node_ids.length) },
+    { label: t("common.tokens"), value: formatNumber(snapshot.estimate.text_tokens + snapshot.estimate.tool_schema_tokens + snapshot.estimate.file_tokens) },
+    { label: t("table.createdAt"), value: formatLocalTime(snapshot.created_at) },
+  ];
+});
 
 const draftRunId = "__workbench_draft__";
 let refreshSerial = 0;
@@ -277,6 +339,15 @@ watch(
     void refreshWorkbench();
   },
   { immediate: true },
+);
+
+watch(
+  () => [activeInspectorTab.value, contextSessionKey.value],
+  () => {
+    if (activeInspectorTab.value === "context") {
+      void refreshContextTree();
+    }
+  },
 );
 
 if (dataMode === "api") {
@@ -344,6 +415,47 @@ async function refreshWorkbench() {
     if (serial === refreshSerial) {
       loadingRun.value = false;
     }
+  }
+}
+
+async function refreshContextTree() {
+  const sessionKey = contextSessionKey.value;
+  if (dataMode !== "api" || !sessionKey || isNewSessionDraft.value) {
+    contextTree.value = null;
+    contextRenderSnapshot.value = null;
+    contextTreeError.value = null;
+    return;
+  }
+  contextTreeLoading.value = true;
+  contextTreeError.value = null;
+  try {
+    const [tree, snapshot] = await Promise.all([
+      loadWorkbenchContextTree(sessionKey),
+      run.value?.run_id ? loadWorkbenchContextRenderSnapshot(run.value.run_id) : Promise.resolve(null),
+    ]);
+    contextTree.value = tree;
+    contextRenderSnapshot.value = snapshot;
+  } catch (error) {
+    contextTree.value = null;
+    contextRenderSnapshot.value = null;
+    contextTreeError.value = commandErrorMessage(error);
+  } finally {
+    contextTreeLoading.value = false;
+  }
+}
+
+async function runContextNodeAction(node: WorkbenchContextNode, action: string) {
+  const sessionKey = contextSessionKey.value;
+  if (!sessionKey || contextActionBusy.value) return;
+  contextActionBusy.value = `${node.id}:${action}`;
+  contextTreeError.value = null;
+  try {
+    await applyWorkbenchContextAction(sessionKey, node.id, action, run.value?.run_id ?? null);
+    await refreshContextTree();
+  } catch (error) {
+    contextTreeError.value = commandErrorMessage(error);
+  } finally {
+    contextActionBusy.value = null;
   }
 }
 
@@ -1230,6 +1342,128 @@ function compactInspectorValue(value: string | null | undefined) {
   return isMachineValue ? compactIdentifier(value) : value;
 }
 
+interface WorkbenchContextNodeRow extends WorkbenchContextNode {
+  depth: number;
+  childCount: number;
+}
+
+function flattenContextNodes(nodes: WorkbenchContextNode[]): WorkbenchContextNodeRow[] {
+  const byParent = new Map<string | null, WorkbenchContextNode[]>();
+  const knownIds = new Set(nodes.map((node) => node.id));
+  for (const node of nodes) {
+    const parentId = node.parent_id && knownIds.has(node.parent_id) ? node.parent_id : null;
+    const siblings = byParent.get(parentId) ?? [];
+    siblings.push(node);
+    byParent.set(parentId, siblings);
+  }
+  for (const siblings of byParent.values()) {
+    siblings.sort((left, right) => (
+      left.display_order - right.display_order
+      || left.title.localeCompare(right.title)
+      || left.id.localeCompare(right.id)
+    ));
+  }
+  const rows: WorkbenchContextNodeRow[] = [];
+  const visited = new Set<string>();
+  const visit = (parentId: string | null, depth: number) => {
+    for (const node of byParent.get(parentId) ?? []) {
+      if (visited.has(node.id)) continue;
+      visited.add(node.id);
+      const childCount = byParent.get(node.id)?.length ?? 0;
+      rows.push({ ...node, depth, childCount });
+      visit(node.id, depth + 1);
+    }
+  };
+  visit(null, 0);
+  return rows;
+}
+
+function filterContextNodeRows(rows: WorkbenchContextNodeRow[], filter: ContextMemoryLayerFilter) {
+  if (filter === "all") return rows;
+  const rowsById = new Map(rows.map((node) => [node.id, node]));
+  const matchingMemoryIds = new Set(
+    rows
+      .filter((node) => contextMemoryLayer(node) === filter)
+      .map((node) => node.id),
+  );
+  const included = new Set<string>(["memory.visible", ...matchingMemoryIds]);
+  for (const nodeId of matchingMemoryIds) {
+    let parentId = rowsById.get(nodeId)?.parent_id ?? null;
+    while (parentId) {
+      if (included.has(parentId)) break;
+      included.add(parentId);
+      parentId = rowsById.get(parentId)?.parent_id ?? null;
+    }
+  }
+  return rows.filter((node) => included.has(node.id));
+}
+
+function contextMemoryLayer(node: WorkbenchContextNode): ContextMemoryLayerFilter | null {
+  const value = node.metadata.governance_scope ?? node.metadata.layer_kind ?? node.owner_ref.layer_kind;
+  if (
+    value === "private"
+    || value === "shared"
+    || value === "project"
+    || value === "team"
+    || value === "system"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function contextMemoryAccessLabel(node: WorkbenchContextNode) {
+  if (contextMemoryLayer(node) === null) return null;
+  const readable = node.metadata.readable === true || node.owner_ref.readable === true;
+  const writable = node.metadata.writable === true || node.owner_ref.writable === true;
+  if (readable && writable) return t("workbench.context.memory.readWrite");
+  if (readable) return t("workbench.context.memory.readOnly");
+  if (writable) return t("workbench.context.memory.writeOnly");
+  return null;
+}
+
+function contextNodeStateLabel(node: WorkbenchContextNode) {
+  const labels = [
+    node.state.prompt_visible ? t("workbench.context.state.visible") : t("workbench.context.state.hidden"),
+    node.state.collapsed ? t("workbench.context.state.collapsed") : t("workbench.context.state.expanded"),
+  ];
+  if (node.state.pinned) labels.unshift(t("workbench.context.state.pinned"));
+  if (node.state.schema_enabled) labels.push(t("workbench.context.state.schemaEnabled"));
+  return labels.join(" · ");
+}
+
+function contextNodeTokenLabel(node: WorkbenchContextNode) {
+  const tokens = node.estimate.text_tokens + node.estimate.tool_schema_tokens + node.estimate.file_tokens;
+  return formatNumber(tokens);
+}
+
+function contextNodeActions(node: WorkbenchContextNode) {
+  const actions: Array<{ id: string; label: string }> = [];
+  if (node.actions.includes(node.state.collapsed ? "expand" : "collapse")) {
+    actions.push({
+      id: node.state.collapsed ? "expand" : "collapse",
+      label: node.state.collapsed ? t("workbench.context.action.expand") : t("workbench.context.action.collapse"),
+    });
+  }
+  if (node.actions.includes(node.state.pinned ? "unpin" : "pin")) {
+    actions.push({
+      id: node.state.pinned ? "unpin" : "pin",
+      label: node.state.pinned ? t("workbench.context.action.unpin") : t("workbench.context.action.pin"),
+    });
+  }
+  if (node.actions.includes(node.state.schema_enabled ? "disable_tool_schema" : "enable_tool_schema")) {
+    actions.push({
+      id: node.state.schema_enabled ? "disable_tool_schema" : "enable_tool_schema",
+      label: node.state.schema_enabled ? t("workbench.context.action.disableSchema") : t("workbench.context.action.enableSchema"),
+    });
+  }
+  return actions;
+}
+
+function contextActionBusyKey(node: WorkbenchContextNode, action: string) {
+  return `${node.id}:${action}`;
+}
+
 function estimatedCostLabel(value: number | null | undefined) {
   return typeof value === "number" ? `$${value.toFixed(3)}` : "-";
 }
@@ -1239,6 +1473,7 @@ function inspectorSectionsFor(tab: Exclude<InspectorTabId, "step">): UiKeyValueS
   if (!inspector) return [];
   if (tab === "overview") return inspector.overview ?? [];
   if (tab === "debug") return inspector.debug ?? [];
+  if (tab === "context") return [];
   if (tab === "memory") return inspector.memory ?? [];
   return inspector.agent ?? [];
 }
@@ -2403,6 +2638,123 @@ function handleTurnsWheel(event: WheelEvent) {
               <dd>{{ stepStats.tool }}</dd>
             </div>
           </dl>
+        </UiCard>
+      </template>
+
+      <template v-else-if="activeInspectorTab === 'context'">
+        <UiCard class="inspector-section context-tree-card">
+          <div class="context-tree-card__heading">
+            <h2>{{ t("workbench.context.title") }}</h2>
+            <button
+              type="button"
+              :disabled="contextTreeLoading || !contextSessionKey"
+              @click="refreshContextTree"
+            >
+              <Loader2 v-if="contextTreeLoading" class="motion-spin" :size="14" />
+              <span>{{ t("common.refresh") }}</span>
+            </button>
+          </div>
+          <p v-if="contextTreeError" class="context-tree-error">{{ contextTreeError }}</p>
+          <dl v-if="contextTree?.workspace" class="context-tree-summary">
+            <div>
+              <dt>{{ t("trace.id.session") }}</dt>
+              <dd :title="contextTree.workspace.session_key">{{ compactIdentifier(contextTree.workspace.session_key) }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("common.agent") }}</dt>
+              <dd :title="contextTree.workspace.agent_id">{{ compactIdentifier(contextTree.workspace.agent_id) }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("workbench.context.revision") }}</dt>
+              <dd>{{ contextTree.workspace.active_revision }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("table.updated") }}</dt>
+              <dd>{{ formatLocalTime(contextTree.workspace.updated_at) }}</dd>
+            </div>
+          </dl>
+          <p v-else-if="!contextTreeLoading && !contextTreeError" class="asset-empty">
+            {{ contextSessionKey ? t("workbench.context.empty") : t("workbench.context.noSession") }}
+          </p>
+        </UiCard>
+
+        <UiCard v-if="contextTree" class="inspector-section context-tree-card">
+          <h2>{{ t("workbench.context.estimate") }}</h2>
+          <dl>
+            <div v-for="row in contextEstimateRows" :key="row.label">
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            </div>
+          </dl>
+        </UiCard>
+
+        <UiCard v-if="contextRenderSnapshot" class="inspector-section context-tree-card">
+          <h2>{{ t("workbench.context.renderSnapshot") }}</h2>
+          <dl>
+            <div v-for="row in contextSnapshotRows" :key="row.label">
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            </div>
+          </dl>
+          <pre class="context-snapshot-preview">{{ contextRenderSnapshot.prompt_body.slice(0, 1800) }}</pre>
+        </UiCard>
+
+        <UiCard v-if="contextTree" class="inspector-section context-tree-card">
+          <div class="context-tree-card__heading context-tree-card__heading--stacked">
+            <h2>{{ t("workbench.context.nodes") }}</h2>
+            <div class="context-memory-filters" :aria-label="t('workbench.context.memory.filterLabel')">
+              <button
+                v-for="option in contextMemoryLayerOptions"
+                :key="option.id"
+                type="button"
+                :class="{ active: contextMemoryLayerFilter === option.id }"
+                @click="contextMemoryLayerFilter = option.id"
+              >
+                <span>{{ option.label }}</span>
+                <small>{{ option.count }}</small>
+              </button>
+            </div>
+          </div>
+          <div v-if="!filteredContextNodeRows.length" class="asset-empty">{{ t("workbench.context.emptyNodes") }}</div>
+          <div v-else class="context-node-list">
+            <article
+              v-for="node in filteredContextNodeRows"
+              :key="node.id"
+              class="context-node-row"
+              :style="{ paddingLeft: `${9 + node.depth * 14}px` }"
+            >
+              <div class="context-node-row__main">
+                <Braces :size="14" />
+                <span>
+                  <strong>{{ node.title }}</strong>
+                  <small :title="node.id">{{ compactIdentifier(node.id) }} · {{ node.owner }} / {{ node.kind }}</small>
+                </span>
+              </div>
+              <p v-if="node.summary">{{ node.summary }}</p>
+              <div class="context-node-row__meta">
+                <UiBadge :tone="node.state.prompt_visible ? 'success' : 'neutral'">{{ contextNodeStateLabel(node) }}</UiBadge>
+                <span>{{ t("common.tokens") }} {{ contextNodeTokenLabel(node) }}</span>
+                <span v-if="node.childCount">{{ t("workbench.context.children", { count: node.childCount }) }}</span>
+                <span v-if="contextMemoryAccessLabel(node)">{{ contextMemoryAccessLabel(node) }}</span>
+              </div>
+              <div v-if="contextNodeActions(node).length" class="context-node-row__actions">
+                <button
+                  v-for="action in contextNodeActions(node)"
+                  :key="action.id"
+                  type="button"
+                  :disabled="contextActionBusy !== null"
+                  @click="runContextNodeAction(node, action.id)"
+                >
+                  <Loader2
+                    v-if="contextActionBusy === contextActionBusyKey(node, action.id)"
+                    class="motion-spin"
+                    :size="12"
+                  />
+                  <span>{{ action.label }}</span>
+                </button>
+              </div>
+            </article>
+          </div>
         </UiCard>
       </template>
 
@@ -4066,7 +4418,7 @@ dd {
 
 .inspector-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0;
   min-height: 52px;
   padding: 0 8px;
@@ -4169,6 +4521,176 @@ dd {
 .inspector-section > button:disabled {
   cursor: not-allowed;
   opacity: 0.56;
+}
+
+.context-tree-card__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-tree-card__heading--stacked {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.context-tree-card__heading h2 {
+  margin: 0;
+}
+
+.context-tree-card__heading button,
+.context-node-row__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.context-tree-card__heading button:disabled,
+.context-node-row__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.context-memory-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.context-memory-filters button {
+  min-height: 24px;
+  gap: 5px;
+  padding: 0 7px;
+}
+
+.context-memory-filters button.active {
+  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-accent);
+}
+
+.context-memory-filters small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.context-tree-error {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 42%, transparent);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  color: var(--color-danger);
+  font-size: 12px;
+}
+
+.context-tree-summary {
+  grid-template-columns: 1fr;
+}
+
+.context-snapshot-preview {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.context-node-list {
+  display: grid;
+  gap: 7px;
+  max-height: min(54vh, 560px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.context-node-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-raised) 62%, transparent);
+}
+
+.context-node-row__main,
+.context-node-row__meta,
+.context-node-row__actions {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.context-node-row__main {
+  gap: 7px;
+}
+
+.context-node-row__main svg {
+  flex: 0 0 auto;
+  color: var(--color-accent);
+}
+
+.context-node-row__main span {
+  min-width: 0;
+}
+
+.context-node-row__main strong,
+.context-node-row__main small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-node-row__main strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.context-node-row__main small,
+.context-node-row__meta {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.context-node-row p {
+  margin: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.context-node-row__meta {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.context-node-row__actions {
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .asset-link {

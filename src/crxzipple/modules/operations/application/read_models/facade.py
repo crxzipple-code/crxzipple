@@ -17,6 +17,10 @@ from crxzipple.modules.operations.application.read_models.browser import (
     BrowserOperationsQuery,
     BrowserOperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.context_workspace import (
+    ContextWorkspaceOperationsQuery,
+    ContextWorkspaceOperationsReadModelProvider,
+)
 from crxzipple.modules.operations.application.read_models.daemon import (
     DaemonOperationsPage,
     DaemonOperationsQuery,
@@ -67,6 +71,7 @@ class OperationsReadModelProvider:
     browser: BrowserOperationsReadModelProvider
     llm: LlmOperationsReadModelProvider
     memory: MemoryOperationsReadModelProvider
+    context_workspace: ContextWorkspaceOperationsReadModelProvider
     skills: SkillsOperationsReadModelProvider
     access: AccessOperationsReadModelProvider
     channels: ChannelsOperationsReadModelProvider
@@ -100,6 +105,12 @@ class OperationsReadModelProvider:
         query: MemoryOperationsQuery | None = None,
     ) -> MemoryOperationsPage:
         return self.memory.page(query=query)
+
+    def context_workspace_page(
+        self,
+        query: ContextWorkspaceOperationsQuery | None = None,
+    ) -> OperationsModulePage:
+        return self.context_workspace.page(query=query)
 
     def skills_page(
         self,
@@ -145,6 +156,8 @@ class OperationsReadModelProvider:
             return self.llm.overview()
         if module == "memory":
             return self.memory.overview()
+        if module == "context_workspace":
+            return self.context_workspace.overview()
         if module == "skills":
             return self.skills.overview()
         if module == "access":

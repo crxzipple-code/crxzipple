@@ -8,18 +8,12 @@ from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.llm.domain import (
     LlmCapability,
     LlmMessage,
-    LlmMessageRole,
     LlmProfile,
     ToolSchema,
 )
-from crxzipple.modules.memory.application import MemoryRuntimePort
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationValidationError,
-)
-from crxzipple.modules.orchestration.application.memory_context import (
-    RecalledMemory,
-    recall_prompt_memories,
 )
 from crxzipple.modules.orchestration.application.llm_resolver import (
     LlmResolver,
@@ -36,19 +30,14 @@ from crxzipple.modules.orchestration.application.ports import (
 )
 from crxzipple.modules.orchestration.application.ports.skill import SkillCatalogPort
 from crxzipple.modules.orchestration.application.prompting import (
+    PromptBlock,
     PromptMode,
     PromptReport,
     PromptReportBlock,
     RunSurfacePolicy,
     apply_system_prompt_budget,
     build_agent_instruction_block,
-    build_available_tools_block,
-    build_flow_prompt_block,
-    build_recalled_memory_block,
     build_runtime_context_block,
-    build_session_tools_block,
-    build_skills_catalog_block,
-    build_workspace_context_block,
     estimate_text_tokens,
     resolve_run_surface_policy,
 )
@@ -56,10 +45,6 @@ from crxzipple.modules.orchestration.application.prompt_transcript import (
     build_prompt_transcript,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet
-from crxzipple.modules.orchestration.application.workspace_context import (
-    PromptContextFile,
-    load_workspace_context_files,
-)
 from crxzipple.modules.session.application import ListSessionMessagesInput
 from crxzipple.modules.session.domain import SessionRuntimeBinding
 from crxzipple.modules.session.domain import SessionMessageVisibility
@@ -155,35 +140,42 @@ def _available_tool_ids(resolved_tools: ResolvedToolSet | None) -> tuple[str, ..
 
 
 @dataclass(frozen=True, slots=True)
-class PromptEnvelope:
+class PromptSurface:
     llm_id: str
     session_key: str
     active_session_id: str
     messages: tuple[LlmMessage, ...]
     mode: PromptMode = PromptMode.NORMAL_TURN
     report: PromptReport | None = None
+    context_blocks: tuple[PromptBlock, ...] = ()
     workspace_dir: str | None = None
-    context_files: tuple[PromptContextFile, ...] = ()
-    recalled_memories: tuple[RecalledMemory, ...] = ()
     skills_catalog: SkillCatalogPrompt | None = None
     tool_schemas: tuple[ToolSchema, ...] = ()
+    flow_hint: dict[str, object] = field(default_factory=dict)
     surface_policy: RunSurfacePolicy = field(default_factory=RunSurfacePolicy)
 
 
 @dataclass(slots=True)
-class PromptAssembler:
+class PromptSurfaceBuilder:
+    """Collects run inputs for Context Workspace and provider invocation.
+
+    This builder does not render the final prompt body. Context Workspace owns
+    the tree render and provider attachment mirror; this object only gathers
+    transcript messages, routing, context blocks, and the initially resolved
+    tool surface needed by that render step.
+    """
+
     agent_service: AgentProfileCatalogPort
     llm_port: LlmPort
-    memory_port: MemoryRuntimePort | None
     skill_catalog_port: SkillCatalogPort
     session_service: SessionTranscriptPort
     artifact_service: ArtifactVariantReadPort | None = None
     access_port: AccessReadinessPort | None = None
     events_service: EventPublishPort | None = None
     llm_resolver: LlmResolver | None = None
-    system_prompt_max_chars: int = 120_000
-    system_prompt_max_tokens: int = 30_000
-    system_prompt_context_window_ratio: float = 0.15
+    context_block_max_chars: int = 120_000
+    context_block_max_tokens: int = 30_000
+    context_block_context_window_ratio: float = 0.15
     memory_flush_transcript_max_chars: int = 120_000
     llm_image_max_bytes: int = DEFAULT_LLM_IMAGE_MAX_BYTES
     llm_file_max_bytes: int = 4_000_000
@@ -193,26 +185,26 @@ class PromptAssembler:
         default_factory=get_runtime_metrics_registry,
     )
 
-    def assemble(
+    def build(
         self,
         run: OrchestrationRun,
         *,
         resolved_tools: ResolvedToolSet | None = None,
         mode: PromptMode | None = None,
-    ) -> PromptEnvelope:
+    ) -> PromptSurface:
         if run.agent_id is None or not run.agent_id.strip():
             raise OrchestrationValidationError(
-                "Orchestration run agent_id is required for prompt assembly.",
+                "Orchestration run agent_id is required for prompt surface building.",
             )
         if run.active_session_id is None or not run.active_session_id.strip():
             raise OrchestrationValidationError(
-                "Orchestration run active_session_id is required for prompt assembly.",
+                "Orchestration run active_session_id is required for prompt surface building.",
             )
 
         session_key = str(run.metadata.get("session_key", "")).strip()
         if not session_key:
             raise OrchestrationValidationError(
-                "Orchestration run metadata.session_key is required for prompt assembly.",
+                "Orchestration run metadata.session_key is required for prompt surface building.",
             )
 
         with self._timed_phase("profile_read"):
@@ -292,19 +284,6 @@ class PromptAssembler:
             )
         surface_policy = self._resolve_surface_policy(resolved_mode)
         prompt_flow_hint = self._prompt_flow_hint_payload(run)
-        with self._timed_phase("workspace_context_load"):
-            context_files = load_workspace_context_files(workspace_dir)
-        with self._timed_phase("memory_recall"):
-            recalled_memories = (
-                recall_prompt_memories(
-                    self.memory_port,
-                    run=run,
-                    session_key=session_key,
-                    workspace_dir=workspace_dir,
-                )
-                if surface_policy.auto_recall_memories and self.memory_port is not None
-                else ()
-            )
         with self._timed_phase("skills_catalog_build"):
             if not surface_policy.include_skills_catalog:
                 skills_catalog = None
@@ -327,23 +306,17 @@ class PromptAssembler:
                     resolved_skill_catalog=resolved_skill_catalog,
                 )
                 skills_catalog = resolved_skill_catalog.prompt_catalog
-        with self._timed_phase("system_blocks_build"):
-            effective_system_max_tokens, system_budget_source = (
-                self._resolve_system_prompt_budget(
+        with self._timed_phase("context_blocks_build"):
+            effective_context_max_tokens, context_budget_source = (
+                self._resolve_context_block_budget(
                     llm_profile.context_window_tokens,
                 )
             )
-            effective_system_max_chars = min(
-                self.system_prompt_max_chars,
-                max(1, effective_system_max_tokens * 4),
+            effective_context_max_chars = min(
+                self.context_block_max_chars,
+                max(1, effective_context_max_tokens * 4),
             )
-            available_tools = (
-                tuple(item.tool for item in resolved_tools.tools)
-                if resolved_tools is not None
-                else ()
-            )
-            available_tool_ids = tuple(tool.id for tool in available_tools)
-            system_blocks = apply_system_prompt_budget(
+            context_blocks = apply_system_prompt_budget(
                 tuple(
                     block
                     for block in (
@@ -356,51 +329,27 @@ class PromptAssembler:
                             home_dir=agent_home_dir,
                             workspace_dir=workspace_dir,
                         ),
-                        build_flow_prompt_block(
-                            mode=resolved_mode,
-                            hint_payload=prompt_flow_hint,
-                        ),
-                        build_available_tools_block(available_tools),
-                        build_session_tools_block(available_tool_ids),
-                        build_workspace_context_block(
-                            context_files,
-                            home_dir=agent_home_dir,
-                            workspace_dir=workspace_dir,
-                        ),
-                        build_recalled_memory_block(recalled_memories),
-                        build_skills_catalog_block(
-                            skills_catalog
-                            if surface_policy.include_skills_catalog
-                            else None
-                        ),
                     )
                     if block is not None
                 ),
                 mode=resolved_mode,
-                total_max_chars=effective_system_max_chars,
-                total_max_tokens=effective_system_max_tokens,
+                total_max_chars=effective_context_max_chars,
+                total_max_tokens=effective_context_max_tokens,
             )
-        llm_messages: list[LlmMessage] = [
-            LlmMessage(
-                role=LlmMessageRole.SYSTEM,
-                content=block.content,
-            )
-            for block in system_blocks
-        ]
-        llm_messages.extend(llm_transcript_messages)
-        if not llm_messages:
+        llm_messages: list[LlmMessage] = list(llm_transcript_messages)
+        if not llm_messages and not context_blocks:
             raise OrchestrationValidationError(
-                "Prompt assembly requires at least one llm message.",
+                "Prompt surface building requires at least one llm message or context block.",
             )
         with self._timed_phase("prompt_report_build"):
-            system_chars = sum(len(block.content) for block in system_blocks)
-            system_estimated_tokens = sum(
+            context_chars = sum(len(block.content) for block in context_blocks)
+            context_estimated_tokens = sum(
                 estimate_text_tokens(block.content)
-                for block in system_blocks
+                for block in context_blocks
             )
             report = PromptReport(
                 mode=resolved_mode,
-                system_blocks=tuple(
+                context_blocks=tuple(
                     PromptReportBlock(
                         kind=block.kind,
                         chars=len(block.content),
@@ -409,14 +358,14 @@ class PromptAssembler:
                         truncated=block.truncated,
                         policy=block.policy,
                     )
-                    for block in system_blocks
+                    for block in context_blocks
                 ),
-                system_budget_source=system_budget_source,
-                system_budget_chars=effective_system_max_chars,
-                system_budget_estimated_tokens=effective_system_max_tokens,
+                context_budget_source=context_budget_source,
+                context_budget_chars=effective_context_max_chars,
+                context_budget_estimated_tokens=effective_context_max_tokens,
                 llm_context_window_tokens=llm_profile.context_window_tokens,
-                system_chars=system_chars,
-                system_estimated_tokens=system_estimated_tokens,
+                context_chars=context_chars,
+                context_estimated_tokens=context_estimated_tokens,
                 transcript_message_count=transcript.message_count,
                 transcript_chars=transcript.chars,
                 transcript_estimated_tokens=transcript.estimated_tokens,
@@ -433,18 +382,18 @@ class PromptAssembler:
             else ()
         )
 
-        return PromptEnvelope(
+        return PromptSurface(
             llm_id=llm_selection.resolved_llm_id,
             session_key=session_key,
             active_session_id=run.active_session_id,
             messages=tuple(llm_messages),
             mode=resolved_mode,
             report=report,
+            context_blocks=context_blocks,
             workspace_dir=workspace_dir,
-            context_files=context_files,
-            recalled_memories=recalled_memories,
             skills_catalog=skills_catalog,
             tool_schemas=tool_schemas,
+            flow_hint=prompt_flow_hint,
             surface_policy=surface_policy,
         )
 
@@ -475,7 +424,7 @@ class PromptAssembler:
         if not self.detailed_phase_metrics_enabled:
             return nullcontext()
         return self.metrics.timed(
-            "orchestration.prompt_assembler.phase_seconds",
+            "orchestration.prompt_surface.phase_seconds",
             labels={"phase": phase},
         )
 
@@ -488,24 +437,24 @@ class PromptAssembler:
             return self.memory_flush_transcript_max_chars
         return None
 
-    def _resolve_system_prompt_budget(
+    def _resolve_context_block_budget(
         self,
         context_window_tokens: int | None,
     ) -> tuple[int, str]:
         if context_window_tokens is None or context_window_tokens <= 0:
-            return self.system_prompt_max_tokens, "fixed"
+            return self.context_block_max_tokens, "fixed"
         dynamic_budget = max(
             256,
-            int(context_window_tokens * self.system_prompt_context_window_ratio),
+            int(context_window_tokens * self.context_block_context_window_ratio),
         )
         effective_budget = min(
-            self.system_prompt_max_tokens,
+            self.context_block_max_tokens,
             dynamic_budget,
             context_window_tokens,
         )
         budget_source = (
             "context_window_scaled"
-            if effective_budget < self.system_prompt_max_tokens
+            if effective_budget < self.context_block_max_tokens
             else "fixed"
         )
         return effective_budget, budget_source
@@ -806,7 +755,7 @@ class PromptAssembler:
     ) -> PromptMode:
         if mode is not None:
             return mode
-        hint_payload = PromptAssembler._prompt_flow_hint_payload(run)
+        hint_payload = PromptSurfaceBuilder._prompt_flow_hint_payload(run)
         raw_mode = hint_payload.get("mode")
         if isinstance(raw_mode, str) and raw_mode.strip():
             try:

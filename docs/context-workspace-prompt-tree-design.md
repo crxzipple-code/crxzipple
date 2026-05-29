@@ -4,7 +4,7 @@
 
 ## 背景
 
-当前系统由 `PromptAssembler` 在 orchestration 内部运行时拼装 prompt，来源包括 agent instruction、runtime context、flow prompt、session transcript、workspace bootstrap、available tools、session tools、skills catalog、memory recall 和 artifact materialization。
+重构前系统由 orchestration 内部的 prompt 拼装器运行时拼装 prompt，来源包括 agent instruction、runtime context、flow prompt、session transcript、workspace bootstrap、available tools、session tools、skills catalog、memory recall 和 artifact materialization。当前主线已经转向 `context_workspace` 维护真实 Context Tree，orchestration 只通过 `PromptSurfaceBuilder` 取树渲染快照、初始工具与路由所需的薄上下文。
 
 这套实现能运行，但它仍然是“拼装器”：
 
@@ -387,10 +387,10 @@ Context Workspace 应发布事件，供 Operations observer 物化 read model。
 - Memory 提供 visible scope nodes 和 recall_memory action。
 - Artifacts 提供 image/file nodes、caption、thumbnail、payload handle。
 
-### Phase 4：PromptAssembler 收口
+### Phase 4：PromptSurface 收口
 
 - 将当前 `available_tools` 文本、skills catalog、memory recall、workspace bootstrap、session bulk 逐步迁到 Context Tree。
-- `PromptAssembler` 只保留 orchestration flow、LLM routing、provider call 所需薄逻辑。
+- `PromptSurfaceBuilder` 只保留 Context Workspace render、LLM routing、provider call 所需薄逻辑，不再拥有最终 prompt 拼装真相。
 - 删除长期双轨和大段兼容 shim。
 
 ### Phase 5：UI / Operations

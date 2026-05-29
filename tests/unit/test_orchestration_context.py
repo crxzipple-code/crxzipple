@@ -830,7 +830,7 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(len(adapter.requests), 1)
 
-    def test_process_next_orchestration_assignment_scales_system_budget_to_llm_context_window(
+    def test_process_next_orchestration_assignment_scales_context_budget_to_llm_context_window(
         self,
     ) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
@@ -888,18 +888,18 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         prompt_report = processed.metadata["prompt_report"]
-        self.assertEqual(prompt_report["system_budget"]["source"], "context_window_scaled")
-        self.assertEqual(prompt_report["system_budget"]["max_estimated_tokens"], 300)
-        self.assertEqual(prompt_report["system_budget"]["llm_context_window_tokens"], 2_000)
-        self.assertLessEqual(prompt_report["system"]["estimated_tokens"], 300)
+        self.assertEqual(prompt_report["context_budget"]["source"], "context_window_scaled")
+        self.assertEqual(prompt_report["context_budget"]["max_estimated_tokens"], 300)
+        self.assertEqual(prompt_report["context_budget"]["llm_context_window_tokens"], 2_000)
+        self.assertLessEqual(prompt_report["context"]["estimated_tokens"], 300)
         self.assertTrue(
             any(
                 block["kind"] == "agent_instruction" and block["truncated"]
-                for block in prompt_report["system_blocks"]
+                for block in prompt_report["context_blocks"]
             ),
         )
 
-    def test_process_next_orchestration_assignment_injects_agents_workspace_context(self) -> None:
+    def test_process_next_orchestration_assignment_exposes_workspace_context_tree_handle(self) -> None:
         adapter = _StaticTextAdapter(text="hello from fake llm")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -951,78 +951,74 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             self.assertIsNotNone(processed)
             self.assertEqual(len(adapter.requests), 1)
             messages = adapter.requests[0].messages
-            self.assertGreaterEqual(len(messages), 4)
+            self.assertGreaterEqual(len(messages), 2)
             system_messages = [
                 message
                 for message in messages
                 if message.role is LlmMessageRole.SYSTEM
             ]
-            self.assertEqual(str(system_messages[0].content), "Be helpful and concise.")
-            self.assertIn("# Runtime Context", str(system_messages[1].content))
-            self.assertIn("- Agent: assistant", str(system_messages[1].content))
-            self.assertIn("- Model: openai.gpt-5.4-mini", str(system_messages[1].content))
-            self.assertIn("# Session Start", str(system_messages[2].content))
-            self.assertIn("# Available Tools", str(system_messages[3].content))
-            self.assertIn("`read`", str(system_messages[3].content))
-            self.assertIn("`memory_search`", str(system_messages[3].content))
-            self.assertIn("`sessions_send`", str(system_messages[3].content))
-            self.assertIn("Do not assume only session tools are available.", str(system_messages[3].content))
-            self.assertIn("# Session Tools", str(system_messages[4].content))
-            self.assertIn("sessions_send", str(system_messages[4].content))
-            self.assertIn("not memory recall", str(system_messages[4].content))
-            self.assertIn("Prefer `session_status` first", str(system_messages[4].content))
-            self.assertIn("# Workspace Context", str(system_messages[5].content))
-            self.assertIn("## AGENTS.md", str(system_messages[5].content))
-            self.assertIn("Follow workspace conventions.", str(system_messages[5].content))
-            self.assertIn("## SOUL.md", str(system_messages[5].content))
-            self.assertIn("Respond with calm confidence.", str(system_messages[5].content))
-            self.assertIn("## TOOLS.md", str(system_messages[5].content))
-            self.assertIn(
-                "Prefer tools when grounded facts are needed.",
-                str(system_messages[5].content),
+            self.assertFalse(
+                any("# Available Tools" in str(message.content) for message in system_messages),
+            )
+            self.assertFalse(
+                any("# Session Tools" in str(message.content) for message in system_messages),
+            )
+            self.assertFalse(
+                any("# Session Start" in str(message.content) for message in system_messages),
+            )
+            tool_schema_names = {schema.name for schema in adapter.requests[0].tool_schemas}
+            self.assertIn("read", tool_schema_names)
+            self.assertIn("memory_search", tool_schema_names)
+            self.assertIn("sessions_send", tool_schema_names)
+            context_tree_message = next(
+                message
+                for message in system_messages
+                if message.metadata.get("prompt_block_kind") == "context_workspace"
+            )
+            self.assertIn("<context_tree", str(context_tree_message.content))
+            self.assertIn("Be helpful and concise.", str(context_tree_message.content))
+            self.assertIn("# Runtime Context", str(context_tree_message.content))
+            self.assertIn("- Agent: assistant", str(context_tree_message.content))
+            self.assertIn("- Model: openai.gpt-5.4-mini", str(context_tree_message.content))
+            self.assertIn("run.flow", str(context_tree_message.content))
+            self.assertIn("Flow: Session Start", str(context_tree_message.content))
+            self.assertIn("workspace.bootstrap", str(context_tree_message.content))
+            self.assertNotIn("Follow workspace conventions.", str(context_tree_message.content))
+            self.assertFalse(
+                any("# Workspace Context" in str(message.content) for message in system_messages),
             )
             self.assertIn(
                 f"- Agent home / workspace: {workspace}",
-                str(system_messages[1].content),
+                str(context_tree_message.content),
             )
             self.assertEqual(processed.metadata["prompt_mode"], "session_start")
+            self.assertTrue(str(processed.metadata["context_render_snapshot_id"]).startswith("ctxsnap_"))
             self.assertEqual(processed.metadata["prompt_report"]["mode"], "session_start")
             self.assertEqual(
-                [block["kind"] for block in processed.metadata["prompt_report"]["system_blocks"]],
+                processed.metadata["prompt_report"]["context_render"]["snapshot_id"],
+                processed.metadata["context_render_snapshot_id"],
+            )
+            self.assertIn(
+                "agent.identity",
+                processed.metadata["prompt_report"]["context_render"]["included_node_ids"],
+            )
+            self.assertEqual(
+                [block["kind"] for block in processed.metadata["prompt_report"]["context_blocks"]],
                 [
                     "agent_instruction",
                     "runtime_context",
-                    "flow_prompt",
-                    "available_tools",
-                    "session_tools",
-                    "project_context",
-                    "skills_catalog",
                 ],
             )
             self.assertGreater(
-                processed.metadata["prompt_report"]["system"]["estimated_tokens"],
+                processed.metadata["prompt_report"]["context"]["estimated_tokens"],
                 0,
             )
             self.assertGreater(
                 processed.metadata["prompt_report"]["transcript"]["estimated_tokens"],
                 0,
             )
-            self.assertEqual(processed.metadata["workspace_context_workspace"], str(workspace))
-            self.assertIn(
-                {"path": "AGENTS.md", "chars": len("# AGENTS.md\n\nFollow workspace conventions.")},
-                processed.metadata["workspace_context_files"],
-            )
-            self.assertIn(
-                {"path": "SOUL.md", "chars": len("Respond with calm confidence.")},
-                processed.metadata["workspace_context_files"],
-            )
-            self.assertIn(
-                {
-                    "path": "TOOLS.md",
-                    "chars": len("Prefer tools when grounded facts are needed."),
-                },
-                processed.metadata["workspace_context_files"],
-            )
+            self.assertNotIn("workspace_context_workspace", processed.metadata)
+            self.assertNotIn("workspace_context_files", processed.metadata)
             self.assertEqual(messages[-1].role, LlmMessageRole.USER)
             self.assertEqual(
                 messages[-1].content,
@@ -1090,29 +1086,13 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
             )
 
             self.assertIsNotNone(processed)
-            self.assertEqual(
-                processed.metadata["workspace_context_workspace"],
-                str(first_root),
-            )
-            self.assertIn(
-                {
-                    "path": "AGENTS.md",
-                    "chars": len("# AGENTS.md\n\nUse the first workspace context."),
-                },
-                processed.metadata["workspace_context_files"],
-            )
-            self.assertNotIn(
-                {
-                    "path": "AGENTS.md",
-                    "chars": len("# AGENTS.md\n\nUse the second workspace context."),
-                },
-                processed.metadata["workspace_context_files"],
-            )
+            self.assertNotIn("workspace_context_workspace", processed.metadata)
+            self.assertNotIn("workspace_context_files", processed.metadata)
             request = adapter.requests[-1]
             self.assertTrue(
                 any(
                     message.role is LlmMessageRole.SYSTEM
-                    and "Use the first workspace context." in str(message.content)
+                    and f"- Workspace: {first_root}" in str(message.content)
                     for message in request.messages
                 )
             )

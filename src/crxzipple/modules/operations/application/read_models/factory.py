@@ -12,6 +12,9 @@ from crxzipple.modules.operations.application.read_models.channels import (
 from crxzipple.modules.operations.application.read_models.browser import (
     BrowserOperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.context_workspace import (
+    ContextWorkspaceOperationsReadModelProvider,
+)
 from crxzipple.modules.operations.application.read_models.daemon import (
     DaemonOperationsReadModelProvider,
 )
@@ -39,6 +42,9 @@ from crxzipple.modules.operations.application.read_models.ports import (
     OperationsChannelInteractionPort,
     OperationsChannelProfilePort,
     OperationsChannelRuntimePort,
+    OperationsContextRenderPort,
+    OperationsContextTreePort,
+    OperationsContextWorkspacePort,
     OperationsDaemonManagerPort,
     OperationsDaemonRegistryPort,
     OperationsEventContractRegistryPort,
@@ -94,6 +100,9 @@ class OperationsSourceReadModelContext:
     agent_service: OperationsAgentProfilePort
     memory_query_service: OperationsMemoryQueryPort
     memory_watch_registry: OperationsMemoryWatchRegistryPort | None
+    context_workspace_service: OperationsContextWorkspacePort
+    context_tree_service: OperationsContextTreePort
+    context_render_service: OperationsContextRenderPort
     skill_manager: OperationsSkillCatalogPort
     browser_profile_service: OperationsBrowserProfilePort
     channel_profile_service: OperationsChannelProfilePort
@@ -172,6 +181,11 @@ def build_operations_source_read_model_provider(
             events_service=context.events_service,
             event_definition_registry=context.event_definition_registry,
             operations_observation=context.operations_observation_store,
+        ),
+        context_workspace=ContextWorkspaceOperationsReadModelProvider(
+            workspace_service=context.context_workspace_service,
+            tree_service=context.context_tree_service,
+            render_service=context.context_render_service,
         ),
         skills=SkillsOperationsReadModelProvider(
             skill_manager=context.skill_manager,

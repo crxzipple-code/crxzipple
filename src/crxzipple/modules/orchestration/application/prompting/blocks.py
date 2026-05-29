@@ -9,7 +9,6 @@ from crxzipple.modules.orchestration.application.prompting.modes import PromptMo
 class RunSurfacePolicy:
     surface: str = "interactive"
     surface_contract: str = "default_open"
-    auto_recall_memories: bool = False
     include_skills_catalog: bool = True
     include_tool_schemas: bool = True
     require_tool_call: bool = False
@@ -22,7 +21,6 @@ class RunSurfacePolicy:
         return {
             "surface": self.surface,
             "surface_contract": self.surface_contract,
-            "auto_recall_memories": self.auto_recall_memories,
             "include_skills_catalog": self.include_skills_catalog,
             "include_tool_schemas": self.include_tool_schemas,
             "require_tool_call": self.require_tool_call,
@@ -50,9 +48,6 @@ def resolve_run_surface_policy(mode: PromptMode) -> RunSurfacePolicy:
     return RunSurfacePolicy(
         surface=surface,
         surface_contract=surface_contract,
-        auto_recall_memories=mode in {
-            PromptMode.SESSION_START,
-        },
         include_skills_catalog=not maintenance_mode,
         include_tool_schemas=(mode is PromptMode.MEMORY_FLUSH or not maintenance_mode),
         require_tool_call=mode is PromptMode.MEMORY_FLUSH,
@@ -109,32 +104,62 @@ class PromptReportBlock:
 
 
 @dataclass(frozen=True, slots=True)
-class PromptReport:
-    mode: PromptMode
-    system_blocks: tuple[PromptReportBlock, ...]
-    system_budget_source: str
-    system_budget_chars: int
-    system_budget_estimated_tokens: int
-    llm_context_window_tokens: int | None
-    system_chars: int
-    system_estimated_tokens: int
-    transcript_message_count: int
-    transcript_chars: int
-    transcript_estimated_tokens: int
+class ContextRenderReport:
+    snapshot_id: str
+    estimate: dict[str, object] = field(default_factory=dict)
+    included_node_ids: tuple[str, ...] = ()
+    mirrored_node_ids: tuple[str, ...] = ()
+
+    def estimated_tokens(self, *, fallback: int) -> int:
+        total = 0
+        for key in ("text_tokens", "tool_schema_tokens", "file_tokens"):
+            value = self.estimate.get(key)
+            if isinstance(value, int):
+                total += max(value, 0)
+        return total if total > 0 else fallback
 
     def to_payload(self) -> dict[str, object]:
         return {
+            "snapshot_id": self.snapshot_id,
+            "estimate": dict(self.estimate),
+            "included_node_ids": list(self.included_node_ids),
+            "mirrored_node_ids": list(self.mirrored_node_ids),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PromptReport:
+    mode: PromptMode
+    context_blocks: tuple[PromptReportBlock, ...]
+    context_budget_source: str
+    context_budget_chars: int
+    context_budget_estimated_tokens: int
+    llm_context_window_tokens: int | None
+    context_chars: int
+    context_estimated_tokens: int
+    transcript_message_count: int
+    transcript_chars: int
+    transcript_estimated_tokens: int
+    context_render: ContextRenderReport | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        context_estimated_tokens = (
+            self.context_render.estimated_tokens(fallback=self.context_estimated_tokens)
+            if self.context_render is not None
+            else self.context_estimated_tokens
+        )
+        payload = {
             "mode": self.mode.value,
-            "system_blocks": [block.to_payload() for block in self.system_blocks],
-            "system_budget": {
-                "source": self.system_budget_source,
-                "max_chars": self.system_budget_chars,
-                "max_estimated_tokens": self.system_budget_estimated_tokens,
+            "context_blocks": [block.to_payload() for block in self.context_blocks],
+            "context_budget": {
+                "source": self.context_budget_source,
+                "max_chars": self.context_budget_chars,
+                "max_estimated_tokens": self.context_budget_estimated_tokens,
                 "llm_context_window_tokens": self.llm_context_window_tokens,
             },
-            "system": {
-                "chars": self.system_chars,
-                "estimated_tokens": self.system_estimated_tokens,
+            "context": {
+                "chars": self.context_chars,
+                "estimated_tokens": self.context_estimated_tokens,
             },
             "transcript": {
                 "message_count": self.transcript_message_count,
@@ -142,6 +167,9 @@ class PromptReport:
                 "estimated_tokens": self.transcript_estimated_tokens,
             },
             "estimated_total_tokens": (
-                self.system_estimated_tokens + self.transcript_estimated_tokens
+                context_estimated_tokens + self.transcript_estimated_tokens
             ),
         }
+        if self.context_render is not None:
+            payload["context_render"] = self.context_render.to_payload()
+        return payload

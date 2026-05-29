@@ -494,16 +494,12 @@ class RunExecutionService:
         if outcome.prompt_report is not None:
             metadata["prompt_mode"] = outcome.prompt_report.mode.value
             metadata["prompt_report"] = outcome.prompt_report.to_payload()
-        metadata["workspace_context_files"] = [
-            {"path": item.path, "chars": item.chars}
-            for item in outcome.workspace_context_files
-        ]
         if (
-            outcome.workspace_context_workspace is not None
-            and outcome.workspace_context_workspace.strip()
+            outcome.context_render_snapshot_id is not None
+            and outcome.context_render_snapshot_id.strip()
         ):
-            metadata["workspace_context_workspace"] = (
-                outcome.workspace_context_workspace.strip()
+            metadata["context_render_snapshot_id"] = (
+                outcome.context_render_snapshot_id.strip()
             )
         return metadata
 

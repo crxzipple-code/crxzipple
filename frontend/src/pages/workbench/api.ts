@@ -3,7 +3,7 @@ import {
   threads as fixtureThreadsSource,
   workbenchRun as fixtureRun,
 } from "@/mocks/fixtures/runtime";
-import { buildApiUrl, dataMode, requestJson } from "@/shared/api/client";
+import { ApiClientError, buildApiUrl, dataMode, requestJson } from "@/shared/api/client";
 import type {
   TurnStepView,
   WorkbenchHomeReadModel,
@@ -149,6 +149,77 @@ export interface WorkbenchLlmProfile {
   enabled: boolean;
 }
 
+export interface WorkbenchContextEstimate {
+  text_chars: number;
+  text_tokens: number;
+  tool_schema_tokens: number;
+  image_count: number;
+  file_count: number;
+  file_tokens: number;
+  provider_attachment_count: number;
+}
+
+export interface WorkbenchContextWorkspace {
+  id: string;
+  session_key: string;
+  agent_id: string;
+  status: string;
+  active_revision: number;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkbenchContextNode {
+  id: string;
+  workspace_id: string;
+  parent_id: string | null;
+  owner: string;
+  kind: string;
+  title: string;
+  summary: string;
+  state: {
+    collapsed: boolean;
+    loaded: boolean;
+    pinned: boolean;
+    prompt_visible: boolean;
+    schema_enabled: boolean;
+    opened: boolean;
+    consumed: boolean;
+    archived: boolean;
+  };
+  actions: string[];
+  owner_ref: Record<string, unknown>;
+  estimate: WorkbenchContextEstimate;
+  revision: string | null;
+  freshness: string;
+  display_order: number;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkbenchContextTree {
+  workspace: WorkbenchContextWorkspace;
+  nodes: WorkbenchContextNode[];
+  estimate: WorkbenchContextEstimate;
+}
+
+export interface WorkbenchContextRenderSnapshot {
+  id: string;
+  workspace_id: string;
+  session_key: string;
+  run_id: string;
+  tree_revision: number;
+  prompt_body: string;
+  provider_attachments: Record<string, unknown>;
+  estimate: WorkbenchContextEstimate;
+  included_node_ids: string[];
+  mirrored_node_ids: string[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface TurnCommandResponse {
   run: {
     id: string;
@@ -247,6 +318,52 @@ export function listWorkbenchAgents(): Promise<WorkbenchAgentProfile[]> {
 
 export function listWorkbenchModels(): Promise<WorkbenchLlmProfile[]> {
   return requestJson<WorkbenchLlmProfile[]>("/llms");
+}
+
+export async function loadWorkbenchContextTree(sessionKey: string): Promise<WorkbenchContextTree | null> {
+  try {
+    return await requestJson<WorkbenchContextTree>(
+      `/context-workspaces/by-session/${encodeURIComponent(sessionKey)}/tree`,
+    );
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function loadWorkbenchContextRenderSnapshot(
+  runId: string,
+): Promise<WorkbenchContextRenderSnapshot | null> {
+  try {
+    const payload = await requestJson<{ snapshot: WorkbenchContextRenderSnapshot }>(
+      `/context-workspaces/runs/${encodeURIComponent(runId)}/render-snapshot`,
+    );
+    return payload.snapshot;
+  } catch {
+    return null;
+  }
+}
+
+export function applyWorkbenchContextAction(
+  sessionKey: string,
+  nodeId: string,
+  action: string,
+  runId: string | null,
+): Promise<{ workspace: WorkbenchContextWorkspace; node: WorkbenchContextNode; action: string; operation_id: string }> {
+  return requestJson(
+    `/context-workspaces/by-session/${encodeURIComponent(sessionKey)}/nodes/${encodeURIComponent(nodeId)}/actions/${encodeURIComponent(action)}`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        actor_kind: "user",
+        actor_id: "workbench",
+        run_id: runId,
+        payload: { surface: "workbench" },
+      }),
+    },
+  );
 }
 
 export function openEventStream(

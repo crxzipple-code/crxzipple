@@ -1966,6 +1966,14 @@ class _FakeOperationsSourceProvider:
             ],
         }
 
+    def context_workspace_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {
+            "module": "context_workspace",
+            "title": "Context Workspace",
+            "sections": [],
+        }
+
     def skills_page(self, query: object | None = None) -> dict[str, object]:
         del query
         return {"module": "skills", "title": "Skills Runtime"}

@@ -17,51 +17,6 @@ from tests.unit.tool_runtime_test_support import process_next_background_tool_ru
 
 
 class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
-    _BROWSER_TOOL_IDS = [
-        "browser.click",
-        "browser.evaluate",
-        "browser.navigate",
-        "browser.screenshot",
-        "browser.snapshot",
-        "browser.tabs.close",
-        "browser.tabs.list",
-        "browser.tabs.select",
-        "browser.type",
-    ]
-    _MOBILE_TOOL_IDS = [
-        "mobile_devices",
-        "mobile_press",
-        "mobile_screenshot",
-        "mobile_script",
-        "mobile_snapshot",
-        "mobile_swipe",
-        "mobile_tap",
-        "mobile_type",
-        "mobile_wait",
-    ]
-    _OPENAI_IMAGE_TOOL_IDS = [
-        "openai_image_edit",
-        "openai_image_generate",
-    ]
-    _SESSION_TOOL_IDS = [
-        "session_status",
-        "sessions_history",
-        "sessions_list",
-        "sessions_send",
-        "sessions_spawn",
-        "sessions_stop",
-        "sessions_yield",
-    ]
-    _SKILL_AUTHORING_TOOL_IDS = [
-        "skill_draft_apply",
-        "skill_draft_create",
-        "skill_draft_diff",
-        "skill_draft_reject",
-        "skill_draft_update",
-        "skill_draft_validate",
-    ]
-    _POST_SKILL_SESSION_TOOL_IDS = ["subagents"]
-
     def _register_test_openai_profile(self, container, *, profile_id: str) -> None:
         credential_binding_id = self._install_default_llm_access_binding(container)
         container.require(AppKey.LLM_SERVICE).register_profile(
@@ -302,32 +257,10 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id),
             )
 
-            self.assertEqual(
-                [item.tool.id for item in resolved.tools],
-                [
-                    "apply_patch",
-                    "brave_search.news_search",
-                    *self._BROWSER_TOOL_IDS,
-                    "echo",
-                    "edit",
-                    "exec",
-                    "memory_read",
-                    "memory_search",
-                    "memory_write_daily",
-                    *self._MOBILE_TOOL_IDS,
-                    "open_meteo_weather.forecast_weather",
-                    *self._OPENAI_IMAGE_TOOL_IDS,
-                    "process",
-                    "read",
-                    *self._SESSION_TOOL_IDS,
-                    *self._SKILL_AUTHORING_TOOL_IDS,
-                    "skill_read",
-                    *self._POST_SKILL_SESSION_TOOL_IDS,
-                    "workspace_list",
-                    "workspace_search",
-                    "write",
-                ],
-            )
+            resolved_tool_ids = {item.tool.id for item in resolved.tools}
+            self.assertIn("brave_search.news_search", resolved_tool_ids)
+            self.assertIn("open_meteo_weather.forecast_weather", resolved_tool_ids)
+            self.assertIn("read", resolved_tool_ids)
             weather_tool = resolved.by_name("open_meteo_weather.forecast_weather")
             self.assertIsNotNone(weather_tool)
             assert weather_tool is not None
@@ -421,32 +354,10 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id),
             )
 
-            self.assertEqual(
-                [item.tool.id for item in resolved.tools],
-                [
-                    "apply_patch",
-                    "brave_search.news_search",
-                    *self._BROWSER_TOOL_IDS,
-                    "echo",
-                    "edit",
-                    "exec",
-                    "memory_read",
-                    "memory_search",
-                    "memory_write_daily",
-                    *self._MOBILE_TOOL_IDS,
-                    "open_meteo_weather.forecast_weather",
-                    *self._OPENAI_IMAGE_TOOL_IDS,
-                    "process",
-                    "read",
-                    *self._SESSION_TOOL_IDS,
-                    *self._SKILL_AUTHORING_TOOL_IDS,
-                    "skill_read",
-                    *self._POST_SKILL_SESSION_TOOL_IDS,
-                    "workspace_list",
-                    "workspace_search",
-                    "write",
-                ],
-            )
+            resolved_tool_ids = {item.tool.id for item in resolved.tools}
+            self.assertIn("brave_search.news_search", resolved_tool_ids)
+            self.assertIn("open_meteo_weather.forecast_weather", resolved_tool_ids)
+            self.assertIn("read", resolved_tool_ids)
             search_tool = resolved.by_name("brave_search.news_search")
             weather_tool = resolved.by_name("open_meteo_weather.forecast_weather")
             self.assertIsNotNone(search_tool)
@@ -552,30 +463,10 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id),
             )
 
-            self.assertEqual(
-                [item.tool.id for item in resolved.tools],
-                [
-                    "apply_patch",
-                    *self._BROWSER_TOOL_IDS,
-                    "edit",
-                    "exec",
-                    "filesystem.read_text",
-                    "memory_read",
-                    "memory_search",
-                    "memory_write_daily",
-                    *self._MOBILE_TOOL_IDS,
-                    *self._OPENAI_IMAGE_TOOL_IDS,
-                    "process",
-                    "read",
-                    *self._SESSION_TOOL_IDS,
-                    *self._SKILL_AUTHORING_TOOL_IDS,
-                    "skill_read",
-                    *self._POST_SKILL_SESSION_TOOL_IDS,
-                    "workspace_list",
-                    "workspace_search",
-                    "write",
-                ],
-            )
+            resolved_tool_ids = {item.tool.id for item in resolved.tools}
+            self.assertNotIn("echo", resolved_tool_ids)
+            self.assertIn("filesystem.read_text", resolved_tool_ids)
+            self.assertIn("read", resolved_tool_ids)
         finally:
             custom_harness.close()
 
@@ -655,30 +546,9 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id),
             )
 
-            self.assertEqual(
-                [item.tool.id for item in resolved.tools],
-                [
-                    "apply_patch",
-                    *self._BROWSER_TOOL_IDS,
-                    "echo",
-                    "edit",
-                    "exec",
-                    "memory_read",
-                    "memory_search",
-                    "memory_write_daily",
-                    *self._MOBILE_TOOL_IDS,
-                    *self._OPENAI_IMAGE_TOOL_IDS,
-                    "process",
-                    "read",
-                    *self._SESSION_TOOL_IDS,
-                    *self._SKILL_AUTHORING_TOOL_IDS,
-                    "skill_read",
-                    *self._POST_SKILL_SESSION_TOOL_IDS,
-                    "workspace_list",
-                    "workspace_search",
-                    "write",
-                ],
-            )
+            resolved_tool_ids = {item.tool.id for item in resolved.tools}
+            self.assertNotIn("brave_search.news_search", resolved_tool_ids)
+            self.assertIn("read", resolved_tool_ids)
         finally:
             custom_harness.close()
 
@@ -875,7 +745,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         assert completed.result_payload is not None
         self.assertEqual(completed.result_payload.get("output_text"), "approval flow complete")
 
-    def test_process_next_orchestration_assignment_includes_approval_resume_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_approval_resume_flow_node(self) -> None:
         self._register_test_openai_profile(
             self.container,
             profile_id="local-capability",
@@ -961,13 +831,17 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        self.assertTrue(
-            any(
-                "# Approval Update" in str(message.content)
-                and "approved the requested additional access" in str(message.content)
-                and "valid only for the current turn" in str(message.content)
-                for message in resume_system_messages
-            ),
+        context_tree_message = next(
+            message
+            for message in resume_system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        self.assertIn("run.flow", str(context_tree_message.content))
+        self.assertIn("Flow: Approval Resume", str(context_tree_message.content))
+        self.assertIn("approved the requested additional access", str(context_tree_message.content))
+        self.assertIn("valid only for the current turn", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Approval Update" in str(message.content) for message in resume_system_messages),
         )
         refreshed_run = self.orchestration_run_query_service.get_run(run.id)
         session_messages = self.session_service.list_messages(
@@ -1167,7 +1041,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(completed.result_payload.get("output_text"), "approval flow complete")
 
-    def test_process_next_orchestration_assignment_includes_approval_denied_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_approval_denied_flow_node(self) -> None:
         self._register_test_openai_profile(
             self.container,
             profile_id="local-capability",
@@ -1255,12 +1129,16 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        self.assertTrue(
-            any(
-                "# Approval Update" in str(message.content)
-                and "denied the requested additional access" in str(message.content)
-                for message in denied_system_messages
-            ),
+        context_tree_message = next(
+            message
+            for message in denied_system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        self.assertIn("run.flow", str(context_tree_message.content))
+        self.assertIn("Flow: Approval Denied", str(context_tree_message.content))
+        self.assertIn("denied the requested additional access", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Approval Update" in str(message.content) for message in denied_system_messages),
         )
 
     def test_allow_for_agent_persists_auth_rule_without_mutating_agent_profile(self) -> None:

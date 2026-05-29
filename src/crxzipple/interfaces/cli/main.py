@@ -16,6 +16,9 @@ from crxzipple.modules.channels.interfaces.cli import build_cli as build_channel
 from crxzipple.modules.authorization.interfaces.cli import (
     build_cli as build_authorization_cli,
 )
+from crxzipple.modules.context_workspace.interfaces.cli import (
+    build_cli as build_context_workspace_cli,
+)
 from crxzipple.modules.dispatch.interfaces.cli import build_cli as build_dispatch_cli
 from crxzipple.modules.daemon.interfaces.cli import build_cli as build_daemon_cli
 from crxzipple.modules.authorization.domain import AuthorizationDeniedError
@@ -77,6 +80,7 @@ app.add_typer(
 )
 app.add_typer(build_operations_observer_cli(), name="operations-observer", hidden=True)
 app.add_typer(build_session_cli(), name="session")
+app.add_typer(build_context_workspace_cli(), name="context")
 app.add_typer(build_llm_cli(), name="llm")
 app.add_typer(build_memory_cli(), name="memory")
 app.add_typer(build_agent_cli(), name="agent")

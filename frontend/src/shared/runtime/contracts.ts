@@ -6,6 +6,7 @@ export type RuntimeModuleId =
   | "access"
   | "channels"
   | "memory"
+  | "context_workspace"
   | "skills"
   | "events"
   | "daemon";

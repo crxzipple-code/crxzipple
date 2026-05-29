@@ -1,7 +1,7 @@
 from crxzipple.modules.orchestration.application.engine import (
     EngineAdvanceOutcome,
     OrchestrationEngine,
-    PromptPreview,
+    PromptSurfacePreview,
 )
 from crxzipple.modules.orchestration.application.engine_llm_invoker import (
     OrchestrationEngineLlmInvoker,
@@ -65,9 +65,9 @@ from crxzipple.modules.orchestration.application.event_contracts import (
     orchestration_event_surfaces,
     orchestration_event_topic_contracts,
 )
-from crxzipple.modules.orchestration.application.prompt_assembler import (
-    PromptAssembler,
-    PromptEnvelope,
+from crxzipple.modules.orchestration.application.prompt_surface import (
+    PromptSurfaceBuilder,
+    PromptSurface,
 )
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
@@ -228,9 +228,9 @@ __all__ = [
     "SubmitBoundOrchestrationTurnInput",
     "ResolvedLlmSelection",
     "SubmitOrchestrationTurnInput",
-    "PromptAssembler",
-    "PromptEnvelope",
-    "PromptPreview",
+    "PromptSurfaceBuilder",
+    "PromptSurface",
+    "PromptSurfacePreview",
     "ResolvedTool",
     "ResolvedToolSet",
     "ResumeOrchestrationRunInput",

@@ -52,7 +52,7 @@ src/crxzipple/modules/orchestration/
     engine_llm_invoker.py
     engine_session_recorder.py
     engine_tool_executor.py
-    prompt_assembler.py
+    prompt_surface.py
     llm_resolver.py
     tool_resolver.py
     # skill prompt readiness is delegated to modules/skills.application.prompt_resolver
@@ -101,9 +101,10 @@ Important cleanup state:
 - There is no old `application/services.py` facade.
 - There is no old `application/router.py` route center.
 - There is no old `application/session_resolver.py`; session resolution is provided by the session module and used through orchestration workflows.
-- Skill prompt readiness is not computed in orchestration. `PromptAssembler` passes run
-  context and resolved tool ids into `SkillCatalogPort.resolve_prompt_catalog(...)`;
-  Skills resolves tool/access/authorization/surface readiness and returns the catalog.
+- Skill prompt readiness is not computed in orchestration. Context Workspace and
+  `PromptSurfaceBuilder` pass run context and resolved tool ids into
+  `SkillCatalogPort.resolve_prompt_catalog(...)`; Skills resolves
+  tool/access/authorization/surface readiness and returns the catalog.
 - Public API/CLI/channel turn submission helpers live in `application/turn_submission.py`, not in a top-level interface helper.
 
 ## Core Runtime Roles

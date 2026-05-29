@@ -228,7 +228,7 @@ def orchestration_event_topic_contracts() -> tuple[EventTopicContract, ...]:
                 "and diagnostics."
             ),
             kinds=("observe",),
-            producers=("PromptAssembler._publish_llm_resolution_event",),
+            producers=("PromptSurfaceBuilder._publish_llm_resolution_event",),
             consumers=("operations observer", "diagnostics"),
             ordering="run_id",
             notes=(
@@ -380,7 +380,7 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
             event_name="orchestration.llm_resolved",
             description="Prompt assembly LLM routing decision observed for operations.",
             topics=(named_event_topic("orchestration.llm_resolved"),),
-            producers=("PromptAssembler._publish_llm_resolution_event",),
+            producers=("PromptSurfaceBuilder._publish_llm_resolution_event",),
             consumers=("operations observer", "diagnostics"),
             fields=(
                 EventDefinitionField("event_name", "Stable event name.", "string", True),

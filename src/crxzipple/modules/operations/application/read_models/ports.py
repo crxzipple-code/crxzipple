@@ -191,6 +191,28 @@ class OperationsMemoryWatchRegistryPort(Protocol):
     def snapshot_metrics(self) -> Any: ...
 
 
+class OperationsContextWorkspacePort(Protocol):
+    def list_workspaces(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[Any, ...]: ...
+
+
+class OperationsContextTreePort(Protocol):
+    def list_tree(self, session_key: str) -> Any: ...
+
+
+class OperationsContextRenderPort(Protocol):
+    def list_recent_snapshots(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[Any, ...]: ...
+
+
 class OperationsSkillCatalogPort(Protocol):
     def list_available(
         self,

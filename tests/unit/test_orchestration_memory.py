@@ -79,8 +79,8 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
         self.assertNotIn("inline_tool_run_ids", processed.result_payload or {})
 
-    def test_process_next_orchestration_assignment_injects_recalled_memory(self) -> None:
-        adapter = _StaticTextAdapter(text="approval answer from recalled memory")
+    def test_process_next_orchestration_assignment_exposes_memory_node_without_auto_recall(self) -> None:
+        adapter = _StaticTextAdapter(text="approval answer without implicit recall")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
@@ -133,52 +133,38 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        skills_catalog_message = next(
+        context_tree_message = next(
             message for message in system_messages
-            if "# Available Skills" in str(message.content)
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
         )
-        recalled_memory_message = next(
-            message for message in system_messages
-            if "# Recalled Memory" in str(message.content)
+        self.assertIn("skills.available", str(context_tree_message.content))
+        self.assertIn("memory.visible", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Available Skills" in str(message.content) for message in system_messages),
         )
-        workspace_context_message = next(
-            message for message in system_messages
-            if "# Workspace Context" in str(message.content)
+        self.assertFalse(
+            any("# Recalled Memory" in str(message.content) for message in system_messages),
         )
-        self.assertIn("memory-recall", str(skills_catalog_message.content))
-        self.assertIn("# Recalled Memory", str(recalled_memory_message.content))
-        self.assertIn("MEMORY.md", str(recalled_memory_message.content))
-        self.assertNotIn("## MEMORY.md", str(workspace_context_message.content))
-        self.assertIn(
-            "effect-based approvals",
-            str(recalled_memory_message.content).lower(),
+        self.assertFalse(
+            any("# Workspace Context" in str(message.content) for message in system_messages),
         )
         system_block_kinds = [
-            block["kind"] for block in processed.metadata["prompt_report"]["system_blocks"]
+            block["kind"] for block in processed.metadata["prompt_report"]["context_blocks"]
         ]
         self.assertEqual(
             system_block_kinds,
             [
                 "agent_instruction",
                 "runtime_context",
-                "flow_prompt",
-                "available_tools",
-                "session_tools",
-                "project_context",
-                "recalled_memory",
-                "skills_catalog",
             ],
         )
-        context = self.memory_context_resolver.resolve("assistant")
-        self.assertIsNotNone(context)
-        assert context is not None
-        db_path = self.file_memory_service.index_manager.index_db_path(
-            context.storage_root,
-            context.space_id,
+        context_workspace = self.container.require(
+            AppKey.CONTEXT_WORKSPACE_SERVICE,
+        ).get_by_session("agent:assistant:main")
+        self.assertEqual(
+            context_workspace.metadata["available_skill_names"],
+            ["memory-recall"],
         )
-        with sqlite3.connect(db_path) as connection:
-            indexed_files = int(connection.execute("SELECT count(*) FROM files").fetchone()[0])
-        self.assertGreater(indexed_files, 0)
 
     def test_process_next_orchestration_assignment_includes_memory_recall_skill_without_auto_recall_on_normal_turn(
         self,
@@ -252,14 +238,10 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         assert processed is not None
         self.assertEqual(processed.metadata["prompt_mode"], "normal_turn")
         self.assertEqual(
-            [block["kind"] for block in processed.metadata["prompt_report"]["system_blocks"]],
+            [block["kind"] for block in processed.metadata["prompt_report"]["context_blocks"]],
             [
                 "agent_instruction",
                 "runtime_context",
-                "available_tools",
-                "session_tools",
-                "project_context",
-                "skills_catalog",
             ],
         )
 
@@ -366,7 +348,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(memory_results[0].metadata["tool_name"], "memory_search")
         self.assertEqual(memory_results[1].metadata["tool_name"], "memory_read")
 
-    def test_process_next_orchestration_assignment_includes_session_start_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_session_start_flow_node(self) -> None:
         adapter = _StaticTextAdapter(text="hello from new session")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -407,15 +389,19 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        self.assertTrue(
-            any(
-                "# Session Start" in str(message.content)
-                and "new active session" in str(message.content)
-                for message in session_start_system_messages
-            ),
+        context_tree_message = next(
+            message
+            for message in session_start_system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        self.assertIn("run.flow", str(context_tree_message.content))
+        self.assertIn("Flow: Session Start", str(context_tree_message.content))
+        self.assertIn("new active session", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Session Start" in str(message.content) for message in session_start_system_messages),
         )
 
-    def test_process_next_orchestration_assignment_includes_compaction_flow_prompt(self) -> None:
+    def test_process_next_orchestration_assignment_includes_compaction_flow_node(self) -> None:
         adapter = _StaticTextAdapter(text="compacted summary")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -469,17 +455,23 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[0].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        self.assertTrue(
-            any(
-                "# Compaction" in str(message.content)
-                and "compacting the current session context" in str(message.content)
-                and "Preserve explicitly: open tasks, approvals, and user preferences"
-                in str(message.content)
-                for message in compaction_system_messages
-            ),
+        context_tree_message = next(
+            message
+            for message in compaction_system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        self.assertIn("run.flow", str(context_tree_message.content))
+        self.assertIn("Flow: Compaction", str(context_tree_message.content))
+        self.assertIn("compacting the current session context", str(context_tree_message.content))
+        self.assertIn(
+            "Preserve explicitly: open tasks, approvals, and user preferences",
+            str(context_tree_message.content),
+        )
+        self.assertFalse(
+            any("# Compaction" in str(message.content) for message in compaction_system_messages),
         )
 
-    def test_request_heartbeat_processes_with_heartbeat_flow_prompt(self) -> None:
+    def test_request_heartbeat_processes_with_heartbeat_flow_node(self) -> None:
         adapter = _SequentialTextAdapter("initial answer", "HEARTBEAT_OK")
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -531,13 +523,17 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
-        self.assertTrue(
-            any(
-                "# Heartbeat" in str(message.content)
-                and "lightweight heartbeat check" in str(message.content)
-                and "Default idle reply: HEARTBEAT_OK" in str(message.content)
-                for message in heartbeat_system_messages
-            ),
+        context_tree_message = next(
+            message
+            for message in heartbeat_system_messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        self.assertIn("run.flow", str(context_tree_message.content))
+        self.assertIn("Flow: Heartbeat", str(context_tree_message.content))
+        self.assertIn("lightweight heartbeat check", str(context_tree_message.content))
+        self.assertIn("Default idle reply: HEARTBEAT_OK", str(context_tree_message.content))
+        self.assertFalse(
+            any("# Heartbeat" in str(message.content) for message in heartbeat_system_messages),
         )
         self.assertEqual(
             [schema.name for schema in adapter.requests[-1].tool_schemas],

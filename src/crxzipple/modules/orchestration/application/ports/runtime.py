@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.engine import PromptPreview
+    from crxzipple.modules.orchestration.application.engine import PromptSurfacePreview
     from crxzipple.modules.orchestration.application.commands import (
         RequestCompactionInput,
         RequestDueHeartbeatsInput,
@@ -138,7 +138,7 @@ class OrchestrationExecutorLeaseQueryPort(Protocol):
 
 
 class OrchestrationInspectionPort(Protocol):
-    def preview_prompt(self, run_id: str) -> "PromptPreview":
+    def preview_prompt(self, run_id: str) -> "PromptSurfacePreview":
         ...
 
     def resolve_tools(self, run: "OrchestrationRun") -> "ResolvedToolSet":

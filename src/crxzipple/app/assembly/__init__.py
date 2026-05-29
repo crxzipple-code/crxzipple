@@ -23,6 +23,10 @@ from crxzipple.app.assembly.channel_runtime import (
     channel_runtime_activation_tasks,
     channel_runtime_factories,
 )
+from crxzipple.app.assembly.context_workspace import (
+    context_workspace_factories,
+    context_workspace_integration_factories,
+)
 from crxzipple.app.assembly.daemon import (
     build_daemon_manager,
     daemon_factories,
@@ -180,6 +184,8 @@ __all__ = [
     "channel_factories",
     "channel_runtime_activation_tasks",
     "channel_runtime_factories",
+    "context_workspace_factories",
+    "context_workspace_integration_factories",
     "daemon_factories",
     "daemon_manager_factories",
     "database_factories",

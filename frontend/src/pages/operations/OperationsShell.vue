@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Brain,
+  Braces,
   ChevronRight,
   Database,
   Globe2,
@@ -56,6 +57,7 @@ const moduleNav: ModuleNavItem[] = [
   { id: "access", labelKey: "operations.module.access", tone: "success", healthy: 0, warning: 0, error: 0, icon: Shield },
   { id: "channels", labelKey: "operations.module.channels", tone: "success", healthy: 0, warning: 0, error: 0, icon: MessageCircle },
   { id: "memory", labelKey: "operations.module.memory", tone: "success", healthy: 0, warning: 0, error: 0, icon: Database },
+  { id: "context_workspace", labelKey: "operations.module.contextWorkspace", tone: "success", healthy: 0, warning: 0, error: 0, icon: Braces },
   { id: "skills", labelKey: "operations.module.skills", tone: "success", healthy: 0, warning: 0, error: 0, icon: Puzzle },
   { id: "events", labelKey: "operations.module.events", tone: "success", healthy: 0, warning: 0, error: 0, icon: Radio },
   { id: "daemon", labelKey: "operations.module.daemon", tone: "success", healthy: 0, warning: 0, error: 0, icon: Settings },
@@ -69,6 +71,7 @@ const moduleComponents = {
   access: defineAsyncComponent(() => import("./modules/AccessOperationsPage.vue")),
   channels: defineAsyncComponent(() => import("./modules/ChannelsOperationsPage.vue")),
   memory: defineAsyncComponent(() => import("./modules/MemoryOperationsPage.vue")),
+  context_workspace: defineAsyncComponent(() => import("./modules/ContextWorkspaceOperationsPage.vue")),
   skills: defineAsyncComponent(() => import("./modules/SkillsOperationsPage.vue")),
   events: defineAsyncComponent(() => import("./modules/EventsOperationsPage.vue")),
   daemon: defineAsyncComponent(() => import("./modules/DaemonOperationsPage.vue")),

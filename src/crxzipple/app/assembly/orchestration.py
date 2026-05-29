@@ -9,6 +9,9 @@ from typing import Any
 from crxzipple.app.assembly.runtime_defaults import (
     RuntimeSettingsBootstrapConfig,
 )
+from crxzipple.app.integration.context_workspace_orchestration import (
+    ContextWorkspacePromptSnapshotAdapter,
+)
 from crxzipple.app.keys import AppKey
 from crxzipple.app.plan import ApplicationFactory, AssemblyTarget
 from crxzipple.modules.orchestration.application import (
@@ -20,7 +23,7 @@ from crxzipple.modules.orchestration.application import (
     OrchestrationRunQueryService,
     OrchestrationSchedulerService,
     OrchestrationSessionRecorder,
-    PromptAssembler,
+    PromptSurfaceBuilder,
     ToolResolver,
 )
 from crxzipple.modules.orchestration.application.cancellation import (
@@ -157,6 +160,8 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.SKILL_MANAGER,
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
+                AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_admin_runtime_factory,
             targets=ORCHESTRATION_ADMIN_RUNTIME_TARGETS,
@@ -190,6 +195,8 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.SKILL_MANAGER,
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
+                AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_test_runtime_factory,
             targets=ORCHESTRATION_TEST_RUNTIME_TARGETS,
@@ -212,6 +219,8 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.SKILL_MANAGER,
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
+                AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_scheduler_factory,
             targets=ORCHESTRATION_SCHEDULER_TARGETS,
@@ -234,6 +243,8 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.SKILL_MANAGER,
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
+                AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_executor_factory,
             targets=ORCHESTRATION_EXECUTOR_TARGETS,
@@ -342,6 +353,8 @@ def _build_orchestration_runtime(ctx) -> OrchestrationRuntimeAssembly:
         skill_manager=ctx.require(AppKey.SKILL_MANAGER),
         artifact_service=ctx.require(AppKey.ARTIFACT_SERVICE),
         access_service=ctx.require(AppKey.ACCESS_SERVICE),
+        context_workspace_service=ctx.require(AppKey.CONTEXT_WORKSPACE_SERVICE),
+        context_render_service=ctx.require(AppKey.CONTEXT_RENDER_SERVICE),
         events_service=(
             ctx.require(AppKey.EVENTS_SERVICE) if ctx.has(AppKey.EVENTS_SERVICE) else None
         ),
@@ -378,24 +391,25 @@ def build_orchestration_runtime(
     skill_manager: Any,
     artifact_service: Any,
     access_service: Any,
+    context_workspace_service: Any,
+    context_render_service: Any,
     events_service: Any | None,
 ) -> OrchestrationRuntimeAssembly:
     authorization_port = AuthorizationServiceAdapter(authorization_service)
     llm_port = LlmServiceAdapter(llm_service)
     tool_port = ToolServiceAdapter(tool_service)
     run_query_service = OrchestrationRunQueryService(uow_factory)
-    prompt_assembler = PromptAssembler(
+    prompt_surface = PromptSurfaceBuilder(
         agent_service=agent_service,
         llm_port=llm_port,
-        memory_port=memory_port,
         skill_catalog_port=skill_manager,
         session_service=session_service,
         artifact_service=artifact_service,
         access_port=access_service,
         events_service=events_service,
-        system_prompt_max_chars=settings.prompt_system_max_chars,
-        system_prompt_max_tokens=settings.prompt_system_max_tokens,
-        system_prompt_context_window_ratio=(
+        context_block_max_chars=settings.prompt_system_max_chars,
+        context_block_max_tokens=settings.prompt_system_max_tokens,
+        context_block_context_window_ratio=(
             settings.prompt_system_context_window_ratio
         ),
         llm_image_max_bytes=settings.artifact_image_llm_max_bytes,
@@ -412,8 +426,13 @@ def build_orchestration_runtime(
             memory_port=memory_port,
         ),
     )
+    context_snapshot_port = ContextWorkspacePromptSnapshotAdapter(
+        workspace_service=context_workspace_service,
+        render_service=context_render_service,
+        artifact_service=artifact_service,
+    )
     orchestration_engine = OrchestrationEngine(
-        prompt_assembler=prompt_assembler,
+        prompt_surface=prompt_surface,
         session_recorder=OrchestrationSessionRecorder(
             session_service=session_service,
         ),
@@ -421,6 +440,7 @@ def build_orchestration_runtime(
         tool_resolver=tool_resolver,
         tool_execution_port=tool_port,
         memory_port=memory_port,
+        context_snapshot_port=context_snapshot_port,
         detailed_phase_metrics_enabled=(
             settings.orchestration_detailed_engine_metrics_enabled
         ),

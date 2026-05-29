@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
 import threading
 import tempfile
+import time
 from dataclasses import replace
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -243,7 +245,22 @@ class SqliteTestHarness:
         while self._runtime_containers:
             container = self._runtime_containers.pop()
             container.close()
-        self._tempdir.cleanup()
+        _cleanup_tempdir_with_retry(self._tempdir)
+
+
+def _cleanup_tempdir_with_retry(tempdir: tempfile.TemporaryDirectory) -> None:
+    last_error: OSError | None = None
+    for _attempt in range(3):
+        try:
+            tempdir.cleanup()
+            return
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise
+            last_error = exc
+            time.sleep(0.05)
+    if last_error is not None:
+        raise last_error
 
 
 def seed_browser_state_root(

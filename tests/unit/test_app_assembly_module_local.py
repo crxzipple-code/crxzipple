@@ -16,6 +16,7 @@ from crxzipple.app.assembly.channels import (
     channel_control_factories,
     channel_factories,
 )
+from crxzipple.app.assembly.context_workspace import context_workspace_factories
 from crxzipple.app.assembly.daemon import daemon_factories, daemon_manager_factories
 from crxzipple.app.assembly.database import database_factories
 from crxzipple.app.assembly.dispatch import dispatch_factories
@@ -48,6 +49,13 @@ from crxzipple.modules.daemon import (
     DaemonApplicationService,
     DaemonManager,
     DaemonServiceSpec,
+)
+from crxzipple.modules.context_workspace import (
+    ContextTreeService,
+    ContextWorkspaceService,
+)
+from crxzipple.modules.context_workspace.application import (
+    EnsureContextWorkspaceInput,
 )
 from crxzipple.modules.dispatch.application import (
     CreateDispatchTaskInput,
@@ -198,6 +206,36 @@ def test_session_factory_builds_session_lifecycle_services() -> None:
         )
         assert session.id == "session:test"
         assert session.agent_id == "assistant"
+
+
+def test_context_workspace_factory_builds_tree_services() -> None:
+    with _assembly_harness(create_full_schema=True) as harness:
+        container = build_app_container(
+            _module_local_plan(context_workspace_factories()),
+            target=AssemblyTarget.TEST,
+            overrides=harness.base_overrides,
+        )
+
+        workspace_service = container.require(AppKey.CONTEXT_WORKSPACE_SERVICE)
+        tree_service = container.require(AppKey.CONTEXT_TREE_SERVICE)
+
+        assert isinstance(workspace_service, ContextWorkspaceService)
+        assert isinstance(tree_service, ContextTreeService)
+        workspace = workspace_service.ensure_workspace(
+            EnsureContextWorkspaceInput(
+                session_key="session:context",
+                agent_id="assistant",
+            ),
+        )
+        tree = tree_service.list_tree("session:context")
+
+        assert tree.workspace.id == workspace.id
+        assert {node.id for node in tree.nodes} >= {
+            "agent.identity",
+            "session.current",
+            "tools.available",
+            "memory.visible",
+        }
 
 
 def test_dispatch_factory_builds_task_queue_service() -> None:
@@ -603,6 +641,13 @@ def test_runtime_plan_builds_executable_orchestration_and_tool_runtime() -> None
             assert container.has(AppKey.OPERATIONS_PROJECTION_MATERIALIZER)
             assert container.has(AppKey.LARK_CHANNEL_RUNTIME_SERVICE)
             assert container.has(AppKey.SESSION_RUNTIME_CONTROL)
+            assert container.has(AppKey.CONTEXT_TREE_SERVICE)
+            assert container.has(AppKey.CONTEXT_SESSION_NODE_PROVIDER)
+            assert container.has(AppKey.CONTEXT_SKILL_NODE_PROVIDER)
+            assert container.has(AppKey.CONTEXT_TOOL_NODE_PROVIDER)
+            assert container.has(AppKey.CONTEXT_MEMORY_NODE_PROVIDER)
+            assert container.has(AppKey.CONTEXT_ARTIFACT_NODE_PROVIDER)
+            assert container.has(AppKey.CONTEXT_WORKSPACE_NODE_PROVIDER)
             assert container.has(AppKey.MEMORY_RUNTIME_SERVICE)
             assert tool_service.submission_service.runtime_readiness is not None
             assert (

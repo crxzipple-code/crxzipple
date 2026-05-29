@@ -4,18 +4,19 @@
 
 ## 当前目标
 
-`agent.runtime_preferences.workspace` 会参与 orchestration prompt construction：
+`agent.runtime_preferences.workspace` 会参与 Context Workspace 的 prompt tree construction：
 
 1. `agent` 保存 workspace 偏好，但不读取文件。
-2. `orchestration` 在 prompt assembly 中解析 workspace。
-3. `workspace_context.py` 从 workspace 根目录加载受信任 bootstrap 文件。
-4. `PromptAssembler` 把这些文件作为 system context block 注入。
-5. session transcript、memory recall、skills catalog、tool schema 仍走各自 owner 模块。
+2. assembly/integration 层把 workspace 偏好接入 `context_workspace`。
+3. workspace adapter 从 workspace 根目录加载受信任 bootstrap 文件。
+4. Context Workspace 将这些文件建成 workspace/bootstrap 节点。
+5. `PromptSurfaceBuilder` 渲染 Context Tree 快照；session transcript、memory recall、skills catalog、tool schema 仍由各自 owner 模块通过 port/application 提供。
 
 ## 代码入口
 
-- `src/crxzipple/modules/orchestration/application/workspace_context.py`
-- `src/crxzipple/modules/orchestration/application/prompt_assembler.py`
+- `src/crxzipple/modules/context_workspace/`
+- `src/crxzipple/app/integration/context_workspace_workspace.py`
+- `src/crxzipple/modules/orchestration/application/prompt_surface.py`
 - `src/crxzipple/modules/orchestration/application/prompting/producers.py`
 - `src/crxzipple/modules/orchestration/application/engine.py`
 - `src/crxzipple/modules/agent/domain/value_objects.py`
@@ -51,14 +52,14 @@ loader 当前约束：
 
 ## Prompt 注入位置
 
-`PromptAssembler` 会在 system blocks 中加入 workspace context block。它和以下 block 一起接受统一 system prompt budget：
+Context Workspace 会把 workspace bootstrap 建成可折叠、可估算的 Context Tree 节点。`PromptSurfaceBuilder` 只读取树的 rendered body 和 provider attachments；workspace 内容和以下节点一起接受统一 context budget：
 
 - agent instruction
 - runtime context
 - flow prompt
 - available tools
 - session tools
-- workspace context
+- workspace bootstrap
 - recalled memory
 - skills catalog
 
@@ -67,7 +68,8 @@ loader 当前约束：
 ## 边界
 
 - `agent` 只拥有 profile/home/workspace preference。
-- `orchestration` 拥有 runtime prompt building。
+- `context_workspace` 拥有 prompt tree 和 render snapshot。
+- `orchestration` 拥有 run execution、routing 和 provider invocation。
 - `session` 只拥有 transcript truth。
 - `memory` 仍是 durable knowledge owner。
 - `skills` 仍是 instruction asset/catalog owner。
