@@ -337,7 +337,7 @@ memory_runtime.remember(MemoryRememberRequest(actor=...))
 - `src/crxzipple/modules/memory/application/spaces.py`
 - `src/crxzipple/modules/memory/infrastructure/engines/file_markdown.py`
 - `src/crxzipple/modules/memory/interfaces/http.py`
-- `src/crxzipple/modules/orchestration/application/memory_context.py`
+- `src/crxzipple/app/integration/context_workspace_memory.py`
 - `tools/*memory*` 或当前 memory tool source
 - `frontend/src/pages/settings/modules/MemoryConfigSettingsPage.vue`
 - `frontend/src/pages/settings/ownerApis/memory.ts`
