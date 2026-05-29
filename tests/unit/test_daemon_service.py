@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from crxzipple.core.config import load_settings
+from crxzipple.core.config import BrowserProfileSettings, load_settings
 from crxzipple.modules.daemon import (
     DaemonApplicationService,
     DaemonInstance,
@@ -15,8 +15,10 @@ from crxzipple.modules.daemon import (
     FileBackedDaemonLeaseEventLog,
     FileBackedDaemonLeaseStore,
     FileBackedDaemonServiceSpecStore,
+    apply_daemon_state_migrations,
     bootstrap_daemon_state_root,
 )
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
 
@@ -119,7 +121,17 @@ class DaemonServiceTestCase(unittest.TestCase):
                 service.get_service_set("operations-runtime").service_keys,
                 ("worker:operations-observer",),
             )
-            self.assertEqual(service.get_service_set("workers").service_roles, ("worker",))
+            self.assertEqual(
+                service.get_service_set("workers").service_keys,
+                (
+                    "worker:orchestration-scheduler",
+                    "worker:orchestration",
+                    "worker:event-relay",
+                    "worker:operations-observer",
+                    "worker:tool-scheduler",
+                    "worker:tool",
+                ),
+            )
             self.assertEqual(
                 service.get_service_set("orchestration-runtime").service_keys,
                 (
@@ -131,10 +143,11 @@ class DaemonServiceTestCase(unittest.TestCase):
     def test_real_orchestration_specs_declare_service_owned_entrypoints(self) -> None:
         harness = SqliteTestHarness()
         try:
-            container = harness.build_container()
+            container = harness.build_runtime_container()
+            daemon_service = container.require(AppKey.DAEMON_SERVICE)
             specs = {
                 spec.key: spec
-                for spec in container.daemon_service.list_service_specs(role="worker")
+                for spec in daemon_service.list_service_specs(role="worker")
             }
 
             scheduler_spec = specs["worker:orchestration-scheduler"]
@@ -219,8 +232,9 @@ class DaemonServiceTestCase(unittest.TestCase):
                 load_settings(),
                 tool_worker_max_in_flight=6,
             )
-            container = harness.build_container(settings=settings)
-            worker_spec = container.daemon_service.get_service_spec("worker:tool")
+            container = harness.build_runtime_container(settings=settings)
+            daemon_service = container.require(AppKey.DAEMON_SERVICE)
+            worker_spec = daemon_service.get_service_spec("worker:tool")
 
             self.assertEqual(
                 worker_spec.metadata["cli_args"],
@@ -236,8 +250,9 @@ class DaemonServiceTestCase(unittest.TestCase):
                 load_settings(),
                 orchestration_executor_max_concurrent_assignments=3,
             )
-            container = harness.build_container(settings=settings)
-            executor_spec = container.daemon_service.get_service_spec(
+            container = harness.build_runtime_container(settings=settings)
+            daemon_service = container.require(AppKey.DAEMON_SERVICE)
+            executor_spec = daemon_service.get_service_spec(
                 "worker:orchestration",
             )
 
@@ -256,9 +271,10 @@ class DaemonServiceTestCase(unittest.TestCase):
     def test_real_eager_reconcile_keys_include_split_orchestration_runtimes(self) -> None:
         harness = SqliteTestHarness()
         try:
-            container = harness.build_container()
+            container = harness.build_runtime_container()
+            daemon_manager = container.require(AppKey.DAEMON_MANAGER)
 
-            keys = container.daemon_manager.resolve_reconcile_service_keys(include_eager=True)
+            keys = daemon_manager.resolve_reconcile_service_keys(include_eager=True)
 
             self.assertIn("worker:orchestration-scheduler", keys)
             self.assertIn("worker:orchestration", keys)
@@ -554,6 +570,192 @@ class DaemonServiceTestCase(unittest.TestCase):
                 (),
             )
 
+    def test_daemon_state_migration_retires_legacy_browser_mcp_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
+            legacy_spec = DaemonServiceSpec(
+                key="mcp:browser:user",
+                role="capability",
+                service_group="browser",
+                managed_by="internal",
+                transport="process",
+                start_policy="lazy",
+                restart_policy="on-failure",
+                metadata={"mcp_endpoint": "http://127.0.0.1:19801/mcp"},
+            )
+            active_spec = DaemonServiceSpec(
+                key="host:browser:user",
+                role="host",
+                service_group="browser",
+                managed_by="external",
+                transport="endpoint",
+                start_policy="attach-only",
+                restart_policy="manual",
+            )
+            FileBackedDaemonServiceSpecStore(
+                state_root.config_dir,
+                bootstrap_specs=(legacy_spec, active_spec),
+            ).load()
+            instance_store = FileBackedDaemonInstanceStore(state_root.instances_dir)
+            legacy_instance = DaemonInstance.create(service_key=legacy_spec.key)
+            legacy_instance.mark_ready(pid=1234)
+            active_instance = DaemonInstance.create(service_key=active_spec.key)
+            active_instance.mark_ready(pid=5678)
+            instance_store.save((legacy_instance, active_instance))
+            service = DaemonApplicationService(
+                service_spec_store=FileBackedDaemonServiceSpecStore(
+                    state_root.config_dir,
+                ),
+                instance_store=instance_store,
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+            )
+            legacy_lease = service.acquire_lease(
+                service_key=legacy_spec.key,
+                owner_kind="browser_profile",
+                owner_id="user",
+                ttl_seconds=15,
+            )
+            active_lease = service.acquire_lease(
+                service_key=active_spec.key,
+                owner_kind="browser_profile",
+                owner_id="user",
+                ttl_seconds=15,
+            )
+            FileBackedDaemonLeaseStore(state_root.leases_dir).save(
+                (legacy_lease, active_lease),
+            )
+
+            result = apply_daemon_state_migrations(state_root)
+
+            self.assertEqual(len(result), 1)
+            self.assertEqual(
+                result[0].migration_id,
+                "0062_drop_retired_browser_mcp_services",
+            )
+            self.assertEqual(result[0].removed_service_keys, ("mcp:browser:user",))
+            service = DaemonApplicationService(
+                service_spec_store=FileBackedDaemonServiceSpecStore(
+                    state_root.config_dir,
+                ),
+                instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+            )
+            self.assertEqual(
+                tuple(spec.key for spec in service.list_service_specs()),
+                ("host:browser:user",),
+            )
+            self.assertEqual(service.list_instances(service_key="mcp:browser:user"), ())
+            self.assertEqual(service.list_leases(service_key="mcp:browser:user"), ())
+            self.assertEqual(
+                tuple(instance.service_key for instance in service.list_instances()),
+                ("host:browser:user",),
+            )
+            self.assertEqual(
+                tuple(lease.service_key for lease in service.list_leases()),
+                ("host:browser:user",),
+            )
+
+            skipped = apply_daemon_state_migrations(state_root)
+
+            self.assertTrue(skipped[0].skipped)
+
+    def test_runtime_assembly_retires_legacy_browser_mcp_specs(self) -> None:
+        harness = SqliteTestHarness()
+        try:
+            state_root = bootstrap_daemon_state_root(
+                str(Path(harness._tempdir.name) / "daemon"),
+            )
+            legacy_spec = DaemonServiceSpec(
+                key="mcp:browser:user",
+                role="capability",
+                service_group="browser",
+                managed_by="internal",
+                transport="process",
+                start_policy="lazy",
+                restart_policy="on-failure",
+                metadata={"mcp_endpoint": "http://127.0.0.1:19801/mcp"},
+            )
+            FileBackedDaemonServiceSpecStore(
+                state_root.config_dir,
+                bootstrap_specs=(legacy_spec,),
+            ).load()
+            instance_store = FileBackedDaemonInstanceStore(state_root.instances_dir)
+            legacy_instance = DaemonInstance.create(service_key=legacy_spec.key)
+            legacy_instance.mark_ready(pid=1234)
+            instance_store.save((legacy_instance,))
+            FileBackedDaemonLeaseStore(state_root.leases_dir).save(
+                (
+                    DaemonApplicationService(
+                        service_spec_store=FileBackedDaemonServiceSpecStore(
+                            state_root.config_dir,
+                        ),
+                        instance_store=instance_store,
+                        lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+                    ).acquire_lease(
+                        service_key=legacy_spec.key,
+                        owner_kind="browser_profile",
+                        owner_id="user",
+                        ttl_seconds=15,
+                    ),
+                ),
+            )
+
+            container = harness.build_runtime_container()
+            service = container.require(AppKey.DAEMON_SERVICE)
+
+            self.assertNotIn(
+                "mcp:browser:user",
+                {spec.key for spec in service.list_service_specs()},
+            )
+            self.assertEqual(service.list_instances(service_key="mcp:browser:user"), ())
+            self.assertEqual(service.list_leases(service_key="mcp:browser:user"), ())
+        finally:
+            harness.close()
+
+    def test_runtime_assembly_retires_removed_browser_host_specs(self) -> None:
+        harness = SqliteTestHarness()
+        try:
+            daemon_state_dir = str(Path(harness._tempdir.name) / "daemon")
+            state_root = bootstrap_daemon_state_root(daemon_state_dir)
+            removed_spec = DaemonServiceSpec(
+                key="host:browser:remote",
+                role="host",
+                service_group="browser",
+                managed_by="external",
+                transport="endpoint",
+                start_policy="attach-only",
+                restart_policy="manual",
+                healthcheck_policy="cdp-version",
+                metadata={"server_url": "http://198.18.0.1:51641"},
+            )
+            FileBackedDaemonServiceSpecStore(
+                state_root.config_dir,
+                bootstrap_specs=(removed_spec,),
+            ).load()
+            instance_store = FileBackedDaemonInstanceStore(state_root.instances_dir)
+            removed_instance = DaemonInstance.create(service_key=removed_spec.key)
+            removed_instance.mark_failed("old remote endpoint failed")
+            instance_store.save((removed_instance,))
+            settings = replace(
+                load_settings(),
+                daemon_state_dir=daemon_state_dir,
+                browser_profiles=(
+                    BrowserProfileSettings(name="crxzipple"),
+                    BrowserProfileSettings(name="user", driver="existing-session"),
+                ),
+            )
+
+            container = harness.build_runtime_container(settings=settings)
+            service = container.require(AppKey.DAEMON_SERVICE)
+
+            self.assertNotIn(
+                "host:browser:remote",
+                {spec.key for spec in service.list_service_specs()},
+            )
+            self.assertEqual(service.list_instances(service_key="host:browser:remote"), ())
+        finally:
+            harness.close()
+
     def test_bootstrap_specs_refresh_existing_service_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
@@ -601,6 +803,47 @@ class DaemonServiceTestCase(unittest.TestCase):
                 specs[0].metadata,
                 {"cli_args": ["orchestration-executor", "run-executor"]},
             )
+
+    def test_register_endpoint_spec_without_server_url_clears_stale_instance_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
+            spec_store = FileBackedDaemonServiceSpecStore(state_root.config_dir)
+            instance_store = FileBackedDaemonInstanceStore(state_root.instances_dir)
+            service = DaemonApplicationService(
+                service_spec_store=spec_store,
+                instance_store=instance_store,
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+            )
+            stale_spec = DaemonServiceSpec(
+                key="host:browser:user",
+                role="host",
+                service_group="browser",
+                managed_by="external",
+                transport="endpoint",
+                start_policy="attach-only",
+                restart_policy="manual",
+                healthcheck_policy="cdp-version",
+                metadata={"server_url": "http://127.0.0.1:18801"},
+            )
+            refreshed_spec = replace(stale_spec, metadata={"server_url": None})
+            service.register_service_spec(stale_spec)
+            failed = service.report_service_failed(
+                service_key=stale_spec.key,
+                reason="Endpoint healthcheck failed.",
+                metadata={"cdp_url": "http://127.0.0.1:18801"},
+            )
+
+            self.assertEqual(failed.endpoint, "http://127.0.0.1:18801")
+
+            service.register_service_spec(refreshed_spec)
+            instances = service.list_instances(service_key=stale_spec.key)
+
+            self.assertEqual(len(instances), 1)
+            self.assertEqual(instances[0].status, "stopped")
+            self.assertIsNone(instances[0].endpoint)
+            self.assertIsNone(instances[0].last_error)
+            self.assertNotIn("server_url", instances[0].metadata)
+            self.assertNotIn("cdp_url", instances[0].metadata)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 import typer
 
 from crxzipple.interfaces.authorization import authorize_llm_action
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.llm.application import InvokeLlmInput, RegisterLlmProfileInput
 from crxzipple.modules.llm.application.services import (
@@ -99,7 +99,7 @@ def _profile_input_from_cli_args(
     max_output_tokens: int | None,
     reasoning_effort: str | None,
     base_url: str | None,
-    credential_binding: str | None,
+    credential_binding_id: str | None,
     timeout_seconds: int,
     max_concurrency: int | None,
     concurrency_key: str | None,
@@ -120,7 +120,7 @@ def _profile_input_from_cli_args(
             reasoning_effort=reasoning_effort,
         ),
         base_url=base_url,
-        credential_binding=credential_binding,
+        credential_binding_id=credential_binding_id,
         timeout_seconds=timeout_seconds,
         max_concurrency=max_concurrency,
         concurrency_key=concurrency_key,
@@ -142,7 +142,7 @@ def _profile_config_id(config: object) -> str:
 
 
 def _configured_profiles_from_settings(container: object) -> tuple[object, ...]:
-    return tuple(getattr(container.settings, "llm_profiles", ()))
+    return tuple(getattr(container.require(AppKey.CORE_SETTINGS), "llm_profiles", ()))
 
 
 def build_cli() -> typer.Typer:
@@ -179,9 +179,10 @@ def build_cli() -> typer.Typer:
             help="Reasoning effort hint.",
         ),
         base_url: str | None = typer.Option(None, help="Optional adapter base URL."),
-        credential_binding: str | None = typer.Option(
+        credential_binding_id: str | None = typer.Option(
             None,
-            help="Credential binding reference.",
+            "--credential-binding-id",
+            help="Access credential binding id.",
         ),
         timeout_seconds: int = typer.Option(60, help="Invocation timeout in seconds."),
         max_concurrency: int | None = typer.Option(
@@ -200,7 +201,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         del reason
-        profile = container.llm_service.register_profile(
+        profile = container.require(AppKey.LLM_SERVICE).register_profile(
             _profile_input_from_cli_args(
                 llm_id=llm_id,
                 provider=provider,
@@ -214,7 +215,7 @@ def build_cli() -> typer.Typer:
                 max_output_tokens=max_output_tokens,
                 reasoning_effort=reasoning_effort,
                 base_url=base_url,
-                credential_binding=credential_binding,
+                credential_binding_id=credential_binding_id,
                 timeout_seconds=timeout_seconds,
                 max_concurrency=max_concurrency,
                 concurrency_key=concurrency_key,
@@ -254,9 +255,10 @@ def build_cli() -> typer.Typer:
             help="Reasoning effort hint.",
         ),
         base_url: str | None = typer.Option(None, help="Optional adapter base URL."),
-        credential_binding: str | None = typer.Option(
+        credential_binding_id: str | None = typer.Option(
             None,
-            help="Credential binding reference.",
+            "--credential-binding-id",
+            help="Access credential binding id.",
         ),
         timeout_seconds: int = typer.Option(60, help="Invocation timeout in seconds."),
         max_concurrency: int | None = typer.Option(
@@ -275,7 +277,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         del reason
-        profile = container.llm_service.update_profile(
+        profile = container.require(AppKey.LLM_SERVICE).update_profile(
             _profile_input_from_cli_args(
                 llm_id=llm_id,
                 provider=provider,
@@ -289,7 +291,7 @@ def build_cli() -> typer.Typer:
                 max_output_tokens=max_output_tokens,
                 reasoning_effort=reasoning_effort,
                 base_url=base_url,
-                credential_binding=credential_binding,
+                credential_binding_id=credential_binding_id,
                 timeout_seconds=timeout_seconds,
                 max_concurrency=max_concurrency,
                 concurrency_key=concurrency_key,
@@ -304,7 +306,7 @@ def build_cli() -> typer.Typer:
         llm_id: str = typer.Argument(..., help="LLM identifier."),
     ) -> None:
         container = ensure_container(ctx)
-        profile = container.llm_service.set_profile_enabled(llm_id, enabled=True)
+        profile = container.require(AppKey.LLM_SERVICE).set_profile_enabled(llm_id, enabled=True)
         echo_data(LlmProfileDTO.from_entity(profile))
 
     @app.command("disable")
@@ -313,7 +315,7 @@ def build_cli() -> typer.Typer:
         llm_id: str = typer.Argument(..., help="LLM identifier."),
     ) -> None:
         container = ensure_container(ctx)
-        profile = container.llm_service.set_profile_enabled(llm_id, enabled=False)
+        profile = container.require(AppKey.LLM_SERVICE).set_profile_enabled(llm_id, enabled=False)
         echo_data(LlmProfileDTO.from_entity(profile))
 
     @app.command("delete")
@@ -322,7 +324,7 @@ def build_cli() -> typer.Typer:
         llm_id: str = typer.Argument(..., help="LLM identifier."),
     ) -> None:
         container = ensure_container(ctx)
-        container.llm_service.delete_profile(llm_id)
+        container.require(AppKey.LLM_SERVICE).delete_profile(llm_id)
         echo_data({"id": llm_id, "deleted": True})
 
     @app.command("list")
@@ -330,7 +332,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         items = [
             LlmProfileDTO.from_entity(profile)
-            for profile in container.llm_service.list_profiles()
+            for profile in container.require(AppKey.LLM_SERVICE).list_profiles()
         ]
         echo_data(items)
 
@@ -350,7 +352,7 @@ def build_cli() -> typer.Typer:
             for item in _configured_profiles_from_settings(container)
             if not selected_ids or _profile_config_id(item) in selected_ids
         )
-        synced = container.llm_service.sync_profiles(
+        synced = container.require(AppKey.LLM_SERVICE).sync_profiles(
             tuple(
                 register_llm_profile_input_from_config(item)
                 for item in configured_profiles
@@ -364,7 +366,7 @@ def build_cli() -> typer.Typer:
         llm_id: str = typer.Argument(..., help="LLM identifier."),
     ) -> None:
         container = ensure_container(ctx)
-        echo_data(LlmProfileDTO.from_entity(container.llm_service.get_profile(llm_id)))
+        echo_data(LlmProfileDTO.from_entity(container.require(AppKey.LLM_SERVICE).get_profile(llm_id)))
 
     @app.command("invoke")
     def invoke_llm(
@@ -393,7 +395,7 @@ def build_cli() -> typer.Typer:
         )
         response_format_payload = _load_json(response_format, "--response-format")
         overrides_payload = _load_json(overrides, "--overrides")
-        invocation = container.llm_service.invoke(
+        invocation = container.require(AppKey.LLM_SERVICE).invoke(
             InvokeLlmInput(
                 llm_id=llm_id,
                 messages=_parse_messages(messages),
@@ -420,7 +422,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         items = [
             LlmInvocationDTO.from_entity(invocation)
-            for invocation in container.llm_service.list_invocations(llm_id=llm_id)
+            for invocation in container.require(AppKey.LLM_SERVICE).list_invocations(llm_id=llm_id)
         ]
         echo_data(items)
 
@@ -430,7 +432,7 @@ def build_cli() -> typer.Typer:
         invocation_id: str = typer.Argument(..., help="Invocation identifier."),
     ) -> None:
         container = ensure_container(ctx)
-        invocation = container.llm_service.get_invocation(invocation_id)
+        invocation = container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id)
         echo_data(LlmInvocationDTO.from_entity(invocation))
 
     return app

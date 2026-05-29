@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from crxzipple.modules.agent.domain import AgentLlmRoutingPolicy
 from crxzipple.modules.access import AccessApplicationService
+from crxzipple.modules.access.application.repositories import AccessCredentialBindingRecord
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
@@ -32,7 +33,7 @@ def _profile(
     profile_id: str,
     *,
     capabilities: tuple[LlmCapability, ...] = (),
-    credential_binding: str | None = None,
+    credential_binding_id: str | None = None,
     enabled: bool = True,
 ) -> LlmProfile:
     return LlmProfile(
@@ -46,9 +47,25 @@ def _profile(
             else LlmModelFamily.GENERAL
         ),
         capabilities=capabilities,
-        credential_binding=credential_binding,
+        credential_binding_id=credential_binding_id,
         enabled=enabled,
     )
+
+
+class _StaticAccessConfigView:
+    def get_credential_binding(
+        self,
+        binding_id: str,
+    ) -> AccessCredentialBindingRecord | None:
+        if binding_id != "ready-token":
+            return None
+        return AccessCredentialBindingRecord(
+            asset_id=None,
+            binding_id="ready-token",
+            binding_kind="api_key",
+            source_kind="env",
+            source_ref="READY_LLM_TOKEN",
+        )
 
 
 class LlmResolverTestCase(unittest.TestCase):
@@ -232,10 +249,10 @@ class LlmResolverTestCase(unittest.TestCase):
     def test_auto_skips_models_without_ready_access(self) -> None:
         resolver = LlmResolver(
             _FakeLlmPort(
-                _profile("missing-access", credential_binding="env:MISSING_LLM_TOKEN"),
-                _profile("ready-fallback", credential_binding="env:READY_LLM_TOKEN"),
+                _profile("missing-access", credential_binding_id="missing-token"),
+                _profile("ready-fallback", credential_binding_id="ready-token"),
             ),
-            access_port=AccessApplicationService(),
+            access_port=AccessApplicationService(config_view=_StaticAccessConfigView()),
         )
         routing_policy = AgentLlmRoutingPolicy(
             default_llm_id="missing-access",
@@ -255,9 +272,9 @@ class LlmResolverTestCase(unittest.TestCase):
     def test_explicit_model_with_missing_access_is_rejected(self) -> None:
         resolver = LlmResolver(
             _FakeLlmPort(
-                _profile("missing-access", credential_binding="env:MISSING_LLM_TOKEN"),
+                _profile("missing-access", credential_binding_id="missing-token"),
             ),
-            access_port=AccessApplicationService(),
+            access_port=AccessApplicationService(config_view=_StaticAccessConfigView()),
         )
         routing_policy = AgentLlmRoutingPolicy(default_llm_id="missing-access")
 
@@ -272,12 +289,12 @@ class LlmResolverTestCase(unittest.TestCase):
         access = caught.exception.details["access"]
         self.assertIsInstance(access, dict)
         assert isinstance(access, dict)
-        self.assertEqual(access["requirement"], "env:MISSING_LLM_TOKEN")
-        self.assertEqual(access["status"], "setup_needed")
+        self.assertEqual(access["requirement"], "missing-token")
+        self.assertEqual(access["status"], "unsupported")
         setup_flow = access["setup_flow"]
         self.assertIsInstance(setup_flow, dict)
         assert isinstance(setup_flow, dict)
-        self.assertEqual(setup_flow["kind"], "env")
+        self.assertEqual(setup_flow["kind"], "unsupported")
 
 
 if __name__ == "__main__":

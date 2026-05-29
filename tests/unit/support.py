@@ -3,20 +3,67 @@ from __future__ import annotations
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import shutil
 import threading
 import tempfile
 from dataclasses import replace
 from urllib.parse import parse_qs, unquote, urlparse
 
-from crxzipple.bootstrap import AppContainer, build_container
+from sqlalchemy.engine import make_url
+
 from crxzipple.core.config import Settings, load_settings
 from crxzipple.core.db import create_schema
+from crxzipple.interfaces.runtime_container import (
+    AppContainer as RuntimeAppContainer,
+    AssemblyTarget,
+    build_runtime_container as build_runtime_app_container,
+)
 from crxzipple.modules.browser.domain import (
     BrowserProfileConfig,
     BrowserSystemConfig,
-    BrowserTab,
 )
 from crxzipple.modules.browser.infrastructure.state_root import initialize_browser_state_root
+
+
+_SCHEMA_TEMPLATE_LOCK = threading.Lock()
+_SCHEMA_TEMPLATE_TEMP_DIR = tempfile.TemporaryDirectory()
+_SCHEMA_TEMPLATE_PATH = Path(_SCHEMA_TEMPLATE_TEMP_DIR.name) / "schema.db"
+_SCHEMA_TEMPLATE_READY = False
+
+
+def _sqlite_database_path(database_url: str) -> Path | None:
+    try:
+        url = make_url(database_url)
+    except Exception:
+        return None
+    if not url.drivername.startswith("sqlite"):
+        return None
+    database = url.database
+    if not database or database == ":memory:":
+        return None
+    return Path(database)
+
+
+def _ensure_schema_template() -> Path:
+    global _SCHEMA_TEMPLATE_READY
+    with _SCHEMA_TEMPLATE_LOCK:
+        if _SCHEMA_TEMPLATE_READY and _SCHEMA_TEMPLATE_PATH.exists():
+            return _SCHEMA_TEMPLATE_PATH
+        from crxzipple.core.db import build_engine
+
+        if _SCHEMA_TEMPLATE_PATH.exists():
+            _SCHEMA_TEMPLATE_PATH.unlink()
+        template_settings = replace(
+            load_settings(),
+            database_url=f"sqlite:///{_SCHEMA_TEMPLATE_PATH}",
+        )
+        engine = build_engine(template_settings)
+        try:
+            create_schema(engine)
+        finally:
+            engine.dispose()
+        _SCHEMA_TEMPLATE_READY = True
+        return _SCHEMA_TEMPLATE_PATH
 
 
 def _matches_fake_item_selector(item: dict[str, object], item_selector: str | None) -> bool:
@@ -138,7 +185,7 @@ class SqliteTestHarness:
             Path(self._tempdir.name) / "authorization_runtime.yaml",
         )
         self.database_url = f"sqlite:///{database_path}"
-        self._containers: list[AppContainer] = []
+        self._runtime_containers: list[RuntimeAppContainer] = []
 
     def initialize_schema(
         self,
@@ -146,31 +193,40 @@ class SqliteTestHarness:
         settings: Settings | None = None,
     ) -> None:
         resolved_settings = self._resolved_settings(settings)
-        container = build_container(
-            settings=resolved_settings,
-            database_url=self.database_url,
-        )
-        create_schema(container.engine)
-        container.close()
+        self._initialize_schema_for_settings(resolved_settings)
 
-    def build_container(
+    def _initialize_schema_for_settings(self, settings: Settings) -> None:
+        database_path = _sqlite_database_path(settings.database_url)
+        if database_path is not None:
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            if not database_path.exists() or database_path.stat().st_size == 0:
+                shutil.copy2(_ensure_schema_template(), database_path)
+                return
+        from crxzipple.core.db import build_engine
+
+        engine = build_engine(settings)
+        try:
+            create_schema(engine)
+        finally:
+            engine.dispose()
+
+    def build_runtime_container(
         self,
         *,
         settings: Settings | None = None,
-    ) -> AppContainer:
+        target: AssemblyTarget = AssemblyTarget.TEST,
+    ) -> RuntimeAppContainer:
         resolved_settings = self._resolved_settings(settings)
-        container = build_container(
-            settings=resolved_settings,
-            database_url=self.database_url,
-        )
-        create_schema(container.engine)
-        self._containers.append(container)
+        self._initialize_schema_for_settings(resolved_settings)
+        container = build_runtime_app_container(resolved_settings, target=target)
+        self._runtime_containers.append(container)
         return container
 
     def _resolved_settings(self, settings: Settings | None) -> Settings:
         resolved = settings or load_settings()
         return replace(
             resolved,
+            database_url=self.database_url,
             authorization_runtime_policy_path=self.authorization_runtime_policy_path,
             browser_state_dir=str(Path(self._tempdir.name) / "browser"),
             channel_profiles=resolved.channel_profiles if settings is not None else (),
@@ -179,11 +235,13 @@ class SqliteTestHarness:
             events_state_dir=str(Path(self._tempdir.name) / "events"),
             operations_state_dir=str(Path(self._tempdir.name) / "operations"),
             channels_state_dir=str(Path(self._tempdir.name) / "channels"),
+            access_state_dir=str(Path(self._tempdir.name) / "access"),
+            memory_storage_root=str(Path(self._tempdir.name) / "memory"),
         )
 
     def close(self) -> None:
-        while self._containers:
-            container = self._containers.pop()
+        while self._runtime_containers:
+            container = self._runtime_containers.pop()
             container.close()
         self._tempdir.cleanup()
 
@@ -220,7 +278,32 @@ def seed_browser_state_root(
                         if item.get("user_data_dir") is not None
                         else None
                     ),
+                    profile_directory=(
+                        str(item["profile_directory"])
+                        if item.get("profile_directory") is not None
+                        else None
+                    ),
                     attach_only=bool(item.get("attach_only", False)),
+                    autostart=bool(item.get("autostart", True)),
+                    proxy_mode=str(item.get("proxy_mode") or "none"),  # type: ignore[arg-type]
+                    proxy_server=(
+                        str(item["proxy_server"])
+                        if item.get("proxy_server") is not None
+                        else None
+                    ),
+                    proxy_bypass_list=tuple(
+                        str(entry)
+                        for entry in item.get("proxy_bypass_list", ())
+                        if str(entry).strip()
+                    ),
+                    proxy_binding_id=(
+                        str(item["proxy_binding_id"])
+                        if item.get("proxy_binding_id") is not None
+                        else None
+                    ),
+                    proxy_credential_kind=str(
+                        item.get("proxy_credential_kind") or "basic",
+                    ),
                 )
                 for item in profiles
             ),
@@ -250,7 +333,7 @@ class SampleApiServer:
             _build_sample_api_handler(),
         )
         self._thread = threading.Thread(
-            target=self._server.serve_forever,
+            target=lambda: self._server.serve_forever(poll_interval=0.01),
             name="sample-api-server",
             daemon=True,
         )
@@ -277,7 +360,7 @@ class FakeCdpServer:
         server.active_target_id = None  # type: ignore[attr-defined]
         self._server = server
         self._thread = threading.Thread(
-            target=self._server.serve_forever,
+            target=lambda: self._server.serve_forever(poll_interval=0.01),
             name="fake-cdp-server",
             daemon=True,
         )
@@ -613,6 +696,103 @@ class FakePlaywrightLocator:
                 "checked": bool(item.get("checked", False)),
                 "value": item.get("value"),
             }
+        if "__crxzipple_dom_inspect__" in expression:
+            item = self._resolved_item() or {}
+            box = item.get("box")
+            if not isinstance(box, dict):
+                box = {
+                    "x": 10,
+                    "y": 20,
+                    "width": 120,
+                    "height": 32,
+                    "top": 20,
+                    "right": 130,
+                    "bottom": 52,
+                    "left": 10,
+                }
+            disabled = bool(item.get("disabled", False))
+            visible = bool(item.get("visible", True))
+            blocked_by = item.get("blocked_by")
+            clickable = bool(item.get("clickable", visible and not disabled and blocked_by is None))
+            reasons: list[str] = []
+            if not visible:
+                reasons.append("not_visible")
+            if disabled:
+                reasons.append("disabled")
+            if blocked_by is not None:
+                reasons.append("blocked_by_overlay")
+            if not clickable and not reasons:
+                reasons.append("not_interactive")
+            computed_style = item.get("computed_style")
+            if not isinstance(computed_style, dict):
+                computed_style = {
+                    "display": "block",
+                    "visibility": "visible" if visible else "hidden",
+                    "pointer-events": "auto",
+                    "cursor": "pointer" if clickable else "default",
+                }
+            return {
+                "tag": str(item.get("tag") or "").strip().lower() or None,
+                "role": str(item.get("role") or "").strip().lower() or None,
+                "label": str(item.get("label") or "").strip() or None,
+                "text": str(item.get("text") or item.get("label") or "").strip(),
+                "value": item.get("value"),
+                "attributes": dict(item.get("attributes")) if isinstance(item.get("attributes"), dict) else {},
+                "box": dict(box),
+                "viewport": {"width": 1280, "height": 720},
+                "visible": visible,
+                "in_viewport": bool(item.get("in_viewport", True)),
+                "disabled": disabled,
+                "read_only": bool(item.get("readonly", False)),
+                "editable": bool(item.get("editable", False)),
+                "clickable": clickable,
+                "click_point": {
+                    "x": float(box["x"]) + float(box["width"]) / 2,
+                    "y": float(box["y"]) + float(box["height"]) / 2,
+                },
+                "blocked_by": blocked_by,
+                "computed_style": dict(computed_style),
+                "reasons": reasons,
+            }
+        if "__crxzipple_dom_highlight__" in expression:
+            item = self._resolved_item() or {}
+            box = item.get("box")
+            if not isinstance(box, dict):
+                box = {
+                    "x": 10,
+                    "y": 20,
+                    "width": 120,
+                    "height": 32,
+                    "top": 20,
+                    "right": 130,
+                    "bottom": 52,
+                    "left": 10,
+                }
+            payload = arg if isinstance(arg, dict) else {}
+            return {
+                "highlighted": True,
+                "duration_ms": int(payload.get("duration_ms") or 1200),
+                "color": str(payload.get("color") or "#3b82f6"),
+                "label": payload.get("label"),
+                "box": dict(box),
+            }
+        if "__crxzipple_dom_mutation_wait__" in expression:
+            item = self._resolved_item() or {}
+            mutation_wait = item.get("mutation_wait")
+            if not isinstance(mutation_wait, dict):
+                mutation_wait = {}
+            payload = arg if isinstance(arg, dict) else {}
+            return {
+                "changed": bool(mutation_wait.get("changed", False)),
+                "reason": str(mutation_wait.get("reason") or "timeout"),
+                "mutation_count": int(mutation_wait.get("mutation_count") or 0),
+                "elapsed_ms": int(mutation_wait.get("elapsed_ms") or 0),
+                "timeout_ms": int(payload.get("timeout_ms") or 5000),
+                "quiet_ms": int(payload.get("quiet_ms") or 100),
+                "options": dict(mutation_wait.get("options"))
+                if isinstance(mutation_wait.get("options"), dict)
+                else {},
+            }
         if "__crxzipple_collect_bulk_selection_candidates__" in expression:
             item_selector = None
             if isinstance(arg, dict):
@@ -828,6 +1008,19 @@ class FakePlaywrightConsoleMessage:
         self.type = message_type
         self.text = text
         self.location = dict(location or {})
+
+
+class FakePlaywrightPageError:
+    def __init__(
+        self,
+        *,
+        message: str = "page error",
+        name: str = "Error",
+        stack: str | None = None,
+    ) -> None:
+        self.message = message
+        self.name = name
+        self.stack = stack
 
 
 class _FakeDownloadContextManager:
@@ -1047,10 +1240,21 @@ class _FakeKeyboard:
         self.page.operations.append(("keyboard.press", key, dict(kwargs)))
 
 
+class _FakeMouse:
+    def __init__(self, page: "FakePlaywrightPage") -> None:
+        self.page = page
+
+    def click(self, x: float, y: float, **kwargs) -> None:  # noqa: ANN003
+        self.page.operations.append(("mouse.click", x, y, dict(kwargs)))
+
+
 class _FakeBrowserContext:
     def __init__(self, page: "FakePlaywrightPage") -> None:
         self.page = page
         self.cookie_store: list[dict[str, object]] = []
+        self.cdp_sessions: list[_FakeBrowserCdpSession] = []
+        self.permission_grants: list[dict[str, object]] = []
+        self.tracing = _FakeBrowserTracing(page)
 
     def cookies(self) -> list[dict[str, object]]:
         self.page.operations.append(("context.cookies",))
@@ -1063,6 +1267,212 @@ class _FakeBrowserContext:
     def clear_cookies(self) -> None:
         self.page.operations.append(("context.clear_cookies",))
         self.cookie_store.clear()
+
+    def grant_permissions(
+        self,
+        permissions: list[str],
+        *,
+        origin: str | None = None,
+    ) -> None:
+        grant = {
+            "permissions": list(permissions),
+            "origin": origin,
+        }
+        self.page.operations.append(("context.grant_permissions", grant))
+        self.permission_grants.append(grant)
+
+    def clear_permissions(self) -> None:
+        self.page.operations.append(("context.clear_permissions",))
+        self.permission_grants.clear()
+
+    def new_cdp_session(self, page: "FakePlaywrightPage") -> "_FakeBrowserCdpSession":
+        self.page.operations.append(("context.new_cdp_session", page.target_id))
+        session = _FakeBrowserCdpSession(page)
+        self.cdp_sessions.append(session)
+        return session
+
+
+class _FakeBrowserCdpSession:
+    def __init__(self, page: "FakePlaywrightPage") -> None:
+        self.page = page
+        self.detached = False
+        self.listeners: dict[str, list[object]] = {}
+
+    def send(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        payload = dict(params or {})
+        self.page.operations.append(("cdp.send", method, payload))
+        if method == "Network.enable":
+            return {}
+        if method == "Network.getResponseBody":
+            request_id = str(payload.get("requestId") or "")
+            raw_body = self.page.network_response_bodies.get(request_id)
+            if raw_body is None:
+                return {}
+            return dict(raw_body)
+        if method == "Performance.enable":
+            return {}
+        if method == "Performance.getMetrics":
+            return {
+                "metrics": [
+                    {"name": "Timestamp", "value": 1.0},
+                    {"name": "TaskDuration", "value": 0.25},
+                ],
+            }
+        if method == "Browser.getVersion":
+            return {
+                "protocolVersion": "1.3",
+                "product": "FakeChrome/126",
+                "userAgent": "FakeChrome/126 Test",
+            }
+        if method == "Page.getNavigationHistory":
+            return {
+                "currentIndex": 0,
+                "entries": [
+                    {
+                        "id": 1,
+                        "url": self.page.url,
+                        "title": "Fake Page",
+                        "transitionType": "typed",
+                    }
+                ],
+            }
+        if method == "Page.getResourceTree":
+            return {
+                "frameTree": {
+                    "frame": {
+                        "id": f"frame-{self.page.target_id}",
+                        "url": self.page.url,
+                    },
+                    "resources": [
+                        {
+                            "url": f"{self.page.url.rstrip('/')}/app.js",
+                            "type": "Script",
+                            "mimeType": "application/javascript",
+                        }
+                    ],
+                },
+            }
+        if method == "IndexedDB.requestDatabaseNames":
+            return {
+                "databaseNames": sorted(self.page.indexeddb_databases.keys()),
+            }
+        if method == "IndexedDB.requestDatabase":
+            database_name = str(payload.get("databaseName") or "")
+            database = self.page.indexeddb_databases.get(database_name)
+            if not isinstance(database, dict):
+                return {"databaseWithObjectStores": {"name": database_name, "objectStores": []}}
+            object_stores = database.get("objectStores")
+            if not isinstance(object_stores, list):
+                object_stores = []
+            return {
+                "databaseWithObjectStores": {
+                    "name": database_name,
+                    "version": database.get("version", 1),
+                    "objectStores": [dict(store) for store in object_stores if isinstance(store, dict)],
+                }
+            }
+        if method == "IndexedDB.requestData":
+            database_name = str(payload.get("databaseName") or "")
+            store_name = str(payload.get("objectStoreName") or "")
+            skip = int(payload.get("skipCount") or 0)
+            page_size = int(payload.get("pageSize") or 50)
+            database = self.page.indexeddb_databases.get(database_name)
+            entries: list[dict[str, object]] = []
+            if isinstance(database, dict):
+                all_entries = database.get("entries")
+                if isinstance(all_entries, dict):
+                    raw_entries = all_entries.get(store_name)
+                    if isinstance(raw_entries, list):
+                        entries = [
+                            dict(entry)
+                            for entry in raw_entries
+                            if isinstance(entry, dict)
+                        ]
+            return {
+                "objectStoreDataEntries": entries[skip:skip + page_size],
+                "hasMore": len(entries) > skip + page_size,
+            }
+        if method == "CacheStorage.requestCacheNames":
+            return {
+                "caches": [
+                    dict(cache)
+                    for cache in self.page.cache_storage_caches
+                    if isinstance(cache, dict)
+                ]
+            }
+        if method == "CacheStorage.requestEntries":
+            cache_id = str(payload.get("cacheId") or "")
+            path_filter = str(payload.get("pathFilter") or "")
+            skip = int(payload.get("skipCount") or 0)
+            page_size = int(payload.get("pageSize") or 50)
+            entries = [
+                dict(entry)
+                for entry in self.page.cache_storage_entries.get(cache_id, [])
+                if isinstance(entry, dict)
+                and (not path_filter or path_filter in str(entry.get("requestURL") or ""))
+            ]
+            return {
+                "cacheDataEntries": entries[skip:skip + page_size],
+                "returnCount": len(entries),
+            }
+        if method == "CacheStorage.requestCachedResponse":
+            cache_id = str(payload.get("cacheId") or "")
+            request_url = str(payload.get("requestURL") or "")
+            response = self.page.cache_storage_responses.get((cache_id, request_url))
+            return {"response": dict(response or {})}
+        return {
+            "method": method,
+            "params": payload,
+            "targetId": self.page.target_id,
+        }
+
+    def detach(self) -> None:
+        self.detached = True
+        self.page.operations.append(("cdp.detach",))
+
+    def on(self, event_name: str, callback) -> None:  # noqa: ANN001
+        self.listeners.setdefault(event_name, []).append(callback)
+        self.page.operations.append(("cdp.on", event_name))
+
+    def off(self, event_name: str, callback) -> None:  # noqa: ANN001
+        listeners = self.listeners.get(event_name)
+        if listeners is None:
+            return
+        self.listeners[event_name] = [
+            listener for listener in listeners
+            if listener is not callback
+        ]
+        self.page.operations.append(("cdp.off", event_name))
+
+    def remove_listener(self, event_name: str, callback) -> None:  # noqa: ANN001
+        self.off(event_name, callback)
+
+    def removeListener(self, event_name: str, callback) -> None:  # noqa: N802, ANN001
+        self.off(event_name, callback)
+
+    def emit(self, event_name: str, payload: dict[str, object]) -> None:
+        self.page.operations.append(("cdp.emit", event_name, dict(payload)))
+        if self.detached:
+            return
+        for callback in list(self.listeners.get(event_name, [])):
+            callback(payload)
+
+
+class _FakeBrowserTracing:
+    def __init__(self, page: "FakePlaywrightPage") -> None:
+        self.page = page
+        self.active = False
+        self.start_kwargs: dict[str, object] = {}
+
+    def start(self, **kwargs) -> None:  # noqa: ANN003
+        self.active = True
+        self.start_kwargs = dict(kwargs)
+        self.page.operations.append(("tracing.start", dict(kwargs)))
+
+    def stop(self, *, path: str) -> None:
+        self.active = False
+        self.page.operations.append(("tracing.stop", path))
+        Path(path).write_bytes(b"fake-trace")
 
 
 class FakePlaywrightFrame:
@@ -1334,16 +1744,25 @@ class FakePlaywrightPage:
         ]
         self.local_storage: dict[str, str] = {}
         self.session_storage: dict[str, str] = {}
+        self.indexeddb_databases: dict[str, dict[str, object]] = {}
+        self.cache_storage_caches: list[dict[str, object]] = []
+        self.cache_storage_entries: dict[str, list[dict[str, object]]] = {}
+        self.cache_storage_responses: dict[tuple[str, str], dict[str, object]] = {}
+        self.service_worker_registrations: list[dict[str, object]] = []
+        self.network_response_bodies: dict[str, dict[str, object]] = {}
+        self.network_fetch_responses: dict[str, dict[str, object]] = {}
         self.browser_context = _FakeBrowserContext(self)
         self.operations: list[tuple[object, ...]] = []
         self.click_failures: dict[str, list[Exception]] = {}
         self.evaluate_failures: list[Exception] = []
         self.wait_for_function_failures: dict[str, list[Exception]] = {}
         self.keyboard = _FakeKeyboard(self)
+        self.mouse = _FakeMouse(self)
         self.viewport = {"width": 1280, "height": 720}
         self.queued_downloads: list[FakePlaywrightDownload] = []
         self.queued_dialogs: list[FakePlaywrightDialog] = []
         self.console_messages: list[FakePlaywrightConsoleMessage] = []
+        self.page_errors: list[FakePlaywrightPageError] = []
         self._event_listeners: dict[str, list[object]] = {}
         self.active_overlay_selector: str | None = None
         self.overlay_candidates: list[dict[str, object]] = []
@@ -1403,6 +1822,99 @@ class FakePlaywrightPage:
         self.operations.append(("evaluate", expression, arg))
         if self.evaluate_failures:
             raise self.evaluate_failures.pop(0)
+        if "__crxzipple_browser_network_page_fetch__" in expression:
+            payload = json.loads(str(arg or "{}"))
+            url = str(payload.get("url") or self.url)
+            response = dict(
+                self.network_fetch_responses.get(
+                    url,
+                    {
+                        "ok": True,
+                        "url": url,
+                        "status": 200,
+                        "status_text": "OK",
+                        "redirected": False,
+                        "headers": {"content-type": "application/json"},
+                        "body": '{"ok":true}',
+                        "size_bytes": 11,
+                        "stored_size_bytes": 11,
+                        "truncated": False,
+                    },
+                )
+            )
+            response.setdefault("url", url)
+            response.setdefault("ok", True)
+            response.setdefault("status", 200)
+            response.setdefault("status_text", "OK")
+            response.setdefault("redirected", False)
+            response.setdefault("headers", {})
+            response.setdefault("body", "")
+            response.setdefault("size_bytes", len(str(response.get("body") or "").encode("utf-8")))
+            response.setdefault("stored_size_bytes", response["size_bytes"])
+            response.setdefault("truncated", False)
+            return response
+        if "document.readyState" in expression and "document.visibilityState" in expression:
+            return {
+                "url": self.url,
+                "title": "Fake Page",
+                "ready_state": "complete",
+                "visibility_state": "visible",
+                "focused": True,
+                "history_length": 1,
+                "online": True,
+            }
+        if (
+            "__crxzipple_network_performance_entries__" in expression
+            or "__crxzipple_browser_performance_entries__" in expression
+        ):
+            limit = 50
+            include_navigation = True
+            include_resources = True
+            if isinstance(arg, dict):
+                raw_limit = arg.get("limit")
+                if isinstance(raw_limit, int | float) and not isinstance(raw_limit, bool):
+                    limit = max(int(raw_limit), 1)
+                if isinstance(arg.get("include_navigation"), bool):
+                    include_navigation = bool(arg["include_navigation"])
+                if isinstance(arg.get("include_resources"), bool):
+                    include_resources = bool(arg["include_resources"])
+            entries: list[dict[str, object]] = []
+            if include_navigation:
+                entries.append(
+                    {
+                        "name": self.url,
+                        "entry_type": "navigation",
+                        "initiator_type": "navigation",
+                        "start_time": 0.0,
+                        "duration": 42.0,
+                        "transfer_size": 1024,
+                        "encoded_body_size": 768,
+                        "decoded_body_size": 1536,
+                        "next_hop_protocol": "h2",
+                        "response_status": 200,
+                    }
+                )
+            if include_resources:
+                entries.append(
+                    {
+                        "name": f"{self.url.rstrip('/')}/app.js",
+                        "entry_type": "resource",
+                        "initiator_type": "script",
+                        "start_time": 5.0,
+                        "duration": 12.0,
+                        "transfer_size": 512,
+                        "encoded_body_size": 256,
+                        "decoded_body_size": 768,
+                        "next_hop_protocol": "h2",
+                        "response_status": 200,
+                    }
+                )
+            return {
+                "url": self.url,
+                "entries": entries[:limit],
+                "entry_count": min(len(entries), limit),
+                "limit": limit,
+            }
         if "__crxzipple_storage_access__" in expression:
             kind = "local"
             operation = "get"
@@ -1434,6 +1946,35 @@ class FakePlaywrightPage:
                 store.clear()
                 return {}
             raise RuntimeError(f"Unsupported storage operation: {operation}")
+        if "__crxzipple_service_worker_inspect__" in expression:
+            scope_url = None
+            script_url = None
+            if isinstance(arg, dict):
+                if isinstance(arg.get("scope_url"), str) and arg["scope_url"].strip():
+                    scope_url = arg["scope_url"].strip()
+                if isinstance(arg.get("script_url"), str) and arg["script_url"].strip():
+                    script_url = arg["script_url"].strip()
+            registrations = []
+            for registration in self.service_worker_registrations:
+                if not isinstance(registration, dict):
+                    continue
+                scope = str(registration.get("scope_url") or "")
+                active = registration.get("active")
+                active_script = (
+                    str(active.get("script_url") or "")
+                    if isinstance(active, dict)
+                    else ""
+                )
+                if scope_url is not None and scope_url not in scope:
+                    continue
+                if script_url is not None and script_url not in active_script:
+                    continue
+                registrations.append(dict(registration))
+            return {
+                "supported": True,
+                "registrations": registrations,
+                "count": len(registrations),
+            }
         if "__crxzipple_collect_interactive_refs__" in expression:
             return [dict(item) for item in self.interactive_items]
         if "__crxzipple_find_active_overlay__" in expression:
@@ -1570,6 +2111,18 @@ class FakePlaywrightPage:
         self.console_messages.append(message)
         for callback in list(self._event_listeners.get("console", ())):
             callback(message)
+
+    def emit_page_error(
+        self,
+        *,
+        message: str = "page error",
+        name: str = "Error",
+        stack: str | None = None,
+    ) -> None:
+        error = FakePlaywrightPageError(message=message, name=name, stack=stack)
+        self.page_errors.append(error)
+        for callback in list(self._event_listeners.get("pageerror", ())):
+            callback(error)
 
     def _pop_download(self) -> FakePlaywrightDownload:
         if self.queued_downloads:
@@ -1948,6 +2501,32 @@ class FakePlaywrightCdpSessionPool:
             page.console_messages.clear()
         return filtered
 
+    def get_page_errors(
+        self,
+        *,
+        page,
+        limit: int | None = None,
+        clear: bool = False,
+    ) -> list[dict[str, object]]:  # noqa: ANN001
+        errors: list[dict[str, object]] = []
+        for error in list(page.page_errors):
+            errors.append(
+                {
+                    "target_id": getattr(page, "target_id", None),
+                    "level": "error",
+                    "source": "pageerror",
+                    "text": str(error.message),
+                    "name": str(error.name),
+                    "stack": error.stack,
+                    "captured_at_ms": 0,
+                }
+            )
+        if limit is not None and limit > 0 and len(errors) > limit:
+            errors = errors[-limit:]
+        if clear:
+            page.page_errors.clear()
+        return errors
+
     def close(self) -> None:
         self.pages.clear()
 
@@ -1961,419 +2540,6 @@ class FakePlaywrightCdpSessionPool:
             return "https://" + browser_ref[len("wss://") :].split("/", 1)[0]
         return None
 
-
-class FakeChromeMcpClientPool:
-    def __init__(self, *, daemon_service=None) -> None:  # noqa: ANN001
-        self.daemon_service = daemon_service
-        self.operations: list[tuple[object, ...]] = []
-        self._tabs: dict[str, list[BrowserTab]] = {}
-        self._next_ids: dict[str, int] = {}
-        self._snapshots: dict[tuple[str, str], dict[str, object]] = {}
-        self._evaluate_overrides: dict[tuple[str, str, str], object] = {}
-        self._console_messages: dict[tuple[str, str], list[dict[str, object]]] = {}
-        self._local_storage: dict[tuple[str, str], dict[str, str]] = {}
-        self._session_storage: dict[tuple[str, str], dict[str, str]] = {}
-        self._cookies: dict[tuple[str, str], list[dict[str, object]]] = {}
-        self._pids: dict[str, int | None] = {}
-
-    def ensure_available(self, *, profile_name: str, system, user_data_dir: str | None = None) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(("ensure_available", profile_name, user_data_dir))
-
-    def get_pid(self, *, profile_name: str, system, user_data_dir: str | None = None) -> int | None:  # noqa: ANN001
-        del system, user_data_dir
-        return self._pids.get(profile_name, 4321)
-
-    def close_profile(self, *, profile_name: str) -> None:
-        self.operations.append(("close_profile", profile_name))
-
-    def close(self) -> None:
-        self.operations.append(("close",))
-
-    def list_tabs(self, *, profile_name: str, system, user_data_dir: str | None = None) -> tuple[BrowserTab, ...]:  # noqa: ANN001
-        del system
-        self.operations.append(("list_tabs", profile_name, user_data_dir))
-        return tuple(self._tabs.get(profile_name, ()))
-
-    def open_tab(self, *, profile_name: str, system, url: str, user_data_dir: str | None = None) -> BrowserTab:  # noqa: ANN001
-        del system
-        next_id = self._next_ids.get(profile_name, 1)
-        self._next_ids[profile_name] = next_id + 1
-        tab = BrowserTab(target_id=str(next_id), url=url, title="", type="page")
-        self._tabs.setdefault(profile_name, []).append(tab)
-        self.operations.append(("open_tab", profile_name, url, user_data_dir))
-        return tab
-
-    def focus_tab(self, *, profile_name: str, system, target_id: str, user_data_dir: str | None = None) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(("focus_tab", profile_name, target_id, user_data_dir))
-
-    def close_tab(self, *, profile_name: str, system, target_id: str, user_data_dir: str | None = None) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(("close_tab", profile_name, target_id, user_data_dir))
-        self._tabs[profile_name] = [
-            tab for tab in self._tabs.get(profile_name, []) if tab.target_id != target_id
-        ]
-
-    def navigate_tab(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        url: str,
-        user_data_dir: str | None = None,
-        timeout_ms: int | None = None,
-    ) -> BrowserTab:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("navigate_tab", profile_name, target_id, url, user_data_dir, timeout_ms)
-        )
-        updated_tabs: list[BrowserTab] = []
-        resolved: BrowserTab | None = None
-        for tab in self._tabs.get(profile_name, []):
-            if tab.target_id == target_id:
-                resolved = BrowserTab(target_id=tab.target_id, url=url, title="", type=tab.type)
-                updated_tabs.append(resolved)
-            else:
-                updated_tabs.append(tab)
-        self._tabs[profile_name] = updated_tabs
-        if resolved is None:
-            resolved = BrowserTab(target_id=target_id, url=url, title="", type="page")
-        return resolved
-
-    def take_snapshot(self, *, profile_name: str, system, target_id: str, user_data_dir: str | None = None) -> dict[str, object]:  # noqa: ANN001
-        del system
-        self.operations.append(("take_snapshot", profile_name, target_id, user_data_dir))
-        return dict(
-            self._snapshots.get(
-                (profile_name, target_id),
-                {
-                    "role": "document",
-                    "children": [
-                        {
-                            "id": "e1",
-                            "role": "button",
-                            "name": "Submit",
-                        },
-                        {
-                            "id": "e2",
-                            "role": "textbox",
-                            "name": "Search",
-                        },
-                    ],
-                },
-            )
-        )
-
-    def take_screenshot(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        user_data_dir: str | None = None,
-        uid: str | None = None,
-        full_page: bool = False,
-        image_format: str = "png",
-    ) -> bytes:  # noqa: ANN001
-        del system
-        self.operations.append(
-            (
-                "take_screenshot",
-                profile_name,
-                target_id,
-                uid,
-                user_data_dir,
-                full_page,
-                image_format,
-            )
-        )
-        return b"fake-mcp-image"
-
-    def click_element(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        uid: str,
-        user_data_dir: str | None = None,
-        double_click: bool = False,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("click", profile_name, target_id, uid, user_data_dir, double_click)
-        )
-
-    def fill_element(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        uid: str,
-        value: str,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(("fill", profile_name, target_id, uid, value, user_data_dir))
-
-    def upload_file(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        uid: str,
-        file_path: str,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("upload_file", profile_name, target_id, uid, file_path, user_data_dir)
-        )
-
-    def hover_element(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        uid: str,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(("hover", profile_name, target_id, uid, user_data_dir))
-
-    def drag_element(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        from_uid: str,
-        to_uid: str,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("drag", profile_name, target_id, from_uid, to_uid, user_data_dir)
-        )
-
-    def resize_page(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        width: int,
-        height: int,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("resize_page", profile_name, target_id, width, height, user_data_dir)
-        )
-
-    def press_key(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        key: str,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(("press_key", profile_name, target_id, key, user_data_dir))
-
-    def handle_dialog(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        action: str,
-        prompt_text: str | None = None,
-        user_data_dir: str | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("handle_dialog", profile_name, target_id, action, prompt_text, user_data_dir)
-        )
-
-    def evaluate_script(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        fn: str,
-        user_data_dir: str | None = None,
-        args: list[str] | None = None,
-    ):  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("evaluate_script", profile_name, target_id, fn, user_data_dir, tuple(args or ()))
-        )
-        override_key = (profile_name, target_id, fn)
-        if override_key in self._evaluate_overrides:
-            return self._evaluate_overrides[override_key]
-        if "__crxzipple_mcp_console_access__" in fn:
-            input_payload: dict[str, object] = {}
-            if args:
-                try:
-                    parsed = json.loads(args[0])
-                except Exception:  # noqa: BLE001
-                    parsed = {}
-                if isinstance(parsed, dict):
-                    input_payload = parsed
-            requested_level = str(input_payload.get("level") or "").strip().lower() or None
-            if requested_level == "warning":
-                requested_level = "warn"
-            raw_limit = input_payload.get("limit")
-            limit = int(raw_limit) if isinstance(raw_limit, (int, float)) and int(raw_limit) > 0 else None
-            clear = bool(input_payload.get("clear"))
-            messages = [
-                dict(item)
-                for item in self._console_messages.get((profile_name, target_id), [])
-                if requested_level is None
-                or str(item.get("level") or "").strip().lower() == requested_level
-            ]
-            if limit is not None and len(messages) > limit:
-                messages = messages[-limit:]
-            if clear:
-                self._console_messages[(profile_name, target_id)] = []
-            return messages
-        if "scrollIntoView" in fn and args:
-            return True
-        if "__crxzipple_mcp_storage_access__" in fn:
-            input_payload: dict[str, object] = {}
-            if args:
-                try:
-                    parsed = json.loads(args[0])
-                except Exception:  # noqa: BLE001
-                    parsed = {}
-                if isinstance(parsed, dict):
-                    input_payload = parsed
-            kind = str(input_payload.get("kind") or "local").strip().lower()
-            operation = str(input_payload.get("operation") or "get").strip().lower()
-            key = input_payload.get("key")
-            resolved_key = str(key).strip() if isinstance(key, str) and str(key).strip() else None
-            raw_value = input_payload.get("value")
-            value = None if raw_value is None else str(raw_value)
-            storage_key = (profile_name, target_id)
-            store = (
-                self._session_storage.setdefault(storage_key, {})
-                if kind == "session"
-                else self._local_storage.setdefault(storage_key, {})
-            )
-            if operation == "get":
-                if resolved_key is not None:
-                    return {} if resolved_key not in store else {resolved_key: store[resolved_key]}
-                return dict(store)
-            if operation == "set":
-                if resolved_key is None:
-                    raise RuntimeError("storage set requires key")
-                store[resolved_key] = "" if value is None else value
-                return {resolved_key: store[resolved_key]}
-            if operation == "clear":
-                store.clear()
-                return {}
-            raise RuntimeError(f"Unsupported storage operation: {operation}")
-        if "__crxzipple_mcp_cookies_access__" in fn:
-            input_payload: dict[str, object] = {}
-            if args:
-                try:
-                    parsed = json.loads(args[0])
-                except Exception:  # noqa: BLE001
-                    parsed = {}
-                if isinstance(parsed, dict):
-                    input_payload = parsed
-            operation = str(input_payload.get("operation") or "get").strip().lower()
-            cookie_store = self._cookies.setdefault((profile_name, target_id), [])
-            if operation == "get":
-                return [dict(item) for item in cookie_store]
-            if operation == "clear":
-                cookie_store.clear()
-                return []
-            if operation == "set":
-                raw_cookie = input_payload.get("cookie")
-                if not isinstance(raw_cookie, dict):
-                    raise RuntimeError("cookie set requires payload")
-                cookie_name = str(raw_cookie.get("name") or "").strip()
-                if not cookie_name:
-                    raise RuntimeError("cookie set requires name")
-                cookie_store[:] = [
-                    existing for existing in cookie_store
-                    if str(existing.get("name") or "").strip() != cookie_name
-                ]
-                cookie_record = {str(key): raw_cookie[key] for key in raw_cookie}
-                cookie_store.append(cookie_record)
-                return [dict(cookie_record)]
-            raise RuntimeError(f"Unsupported cookie operation: {operation}")
-        if "document.title" in fn:
-            return f"title:{target_id}"
-        if "window.location.href" in fn or "location.href" in fn:
-            for tab in self._tabs.get(profile_name, []):
-                if tab.target_id == target_id:
-                    return tab.url
-            return ""
-        if "document.readystate" in fn.lower():
-            return "complete"
-        if "document.queryselector" in fn.lower():
-            return True
-        if "outerHTML" in fn:
-            return f"<html><body>{target_id}</body></html>"
-        if "innerText" in fn:
-            return f"body:{target_id}"
-        return {"fn": fn, "args": list(args or ())}
-
-    def wait_for_text(
-        self,
-        *,
-        profile_name: str,
-        system,
-        target_id: str,
-        text: list[str],
-        user_data_dir: str | None = None,
-        timeout_ms: int | None = None,
-    ) -> None:  # noqa: ANN001
-        del system
-        self.operations.append(
-            ("wait_for_text", profile_name, target_id, tuple(text), user_data_dir, timeout_ms)
-        )
-
-    def set_snapshot(
-        self,
-        *,
-        profile_name: str,
-        target_id: str,
-        snapshot: dict[str, object],
-    ) -> None:
-        self._snapshots[(profile_name, target_id)] = dict(snapshot)
-
-    def set_evaluate_result(
-        self,
-        *,
-        profile_name: str,
-        target_id: str,
-        fn: str,
-        value: object,
-    ) -> None:
-        self._evaluate_overrides[(profile_name, target_id, fn)] = value
-
-    def set_console_messages(
-        self,
-        *,
-        profile_name: str,
-        target_id: str,
-        messages: list[dict[str, object]],
-    ) -> None:
-        self._console_messages[(profile_name, target_id)] = [dict(item) for item in messages]
-
-
 class SampleLlmApiServer:
     def __init__(self, *, tool_calls_on_tools: bool = False) -> None:
         self._server = ThreadingHTTPServer(
@@ -2381,7 +2547,7 @@ class SampleLlmApiServer:
             _build_sample_llm_api_handler(tool_calls_on_tools=tool_calls_on_tools),
         )
         self._thread = threading.Thread(
-            target=self._server.serve_forever,
+            target=lambda: self._server.serve_forever(poll_interval=0.01),
             name="sample-llm-api-server",
             daemon=True,
         )
@@ -2407,7 +2573,7 @@ class SampleEmbeddingApiServer:
             _build_sample_embedding_api_handler(),
         )
         self._thread = threading.Thread(
-            target=self._server.serve_forever,
+            target=lambda: self._server.serve_forever(poll_interval=0.01),
             name="sample-embedding-api-server",
             daemon=True,
         )

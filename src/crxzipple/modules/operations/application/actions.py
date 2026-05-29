@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from crxzipple.modules.events.domain import EventCursor
+from crxzipple.modules.memory.application import (
+    MemoryActorContext,
+    MemoryRememberRequest,
+)
 from crxzipple.shared.time import coerce_utc_datetime
 
 _DEFAULT_STUCK_SUBSCRIPTION_AFTER_SECONDS = 15.0
@@ -62,8 +66,7 @@ class OperationsActionService:
     access_service: Any | None = None
     access_inventory_collector: Any | None = None
     webhook_channel_runtime_service: Any | None = None
-    memory_context_resolver: Any | None = None
-    file_memory_service: Any | None = None
+    memory_runtime_service: Any | None = None
     orchestration_resume_service: Any | None = None
     orchestration_cancellation_service: Any | None = None
 
@@ -222,14 +225,15 @@ class OperationsActionService:
         raise ValueError(f"Unsupported daemon service action: {action}")
 
     def cancel_tool_run(self, *, run_id: str, reason: str | None = None) -> Any:
-        return _required_dependency(self.tool_service, "tool service").cancel_tool_run(
-            run_id,
-        )
+        return _required_dependency(
+            self.tool_service,
+            "tool run control service",
+        ).cancel_tool_run(run_id)
 
     async def retry_tool_run(self, *, run_id: str, reason: str | None = None) -> Any:
         return await _required_dependency(
             self.tool_service,
-            "tool service",
+            "tool run control service",
         ).retry_tool_run(run_id)
 
     def prune_expired_tool_workers(
@@ -241,7 +245,7 @@ class OperationsActionService:
         return dict(
             _required_dependency(
                 self.tool_service,
-                "tool service",
+                "tool run control service",
             ).prune_expired_workers(retention_seconds=retention_seconds),
         )
 
@@ -280,6 +284,20 @@ class OperationsActionService:
             source_dir=source_dir,
             scope=SkillInstallScope.GLOBAL,
             workspace_dir=None,
+        )
+
+    def sync_skills(
+        self,
+        *,
+        workspace_dir: str | None = None,
+        source_id: str | None = None,
+        surface: str = "interactive",
+        reason: str | None = None,
+    ) -> Any:
+        return _required_dependency(self.skill_manager, "skill manager").sync(
+            workspace_dir=workspace_dir,
+            source_id=source_id,
+            surface=surface,
         )
 
     def collect_access_inventory(
@@ -341,17 +359,18 @@ class OperationsActionService:
         content: str,
         reason: str | None = None,
     ) -> Any:
-        resolver = _required_dependency(
-            self.memory_context_resolver,
-            "memory context resolver",
-        )
-        context = resolver.resolve(agent_id)
-        if context is None:
-            raise LookupError("No file-backed memory context is available for this agent.")
         return _required_dependency(
-            self.file_memory_service,
-            "file memory service",
-        ).write_long_term(context=context, content=content)
+            self.memory_runtime_service,
+            "memory runtime service",
+        ).remember(
+            MemoryRememberRequest(
+                actor=MemoryActorContext(agent_id=agent_id),
+                content=content,
+                intent="freeform",
+                retention="durable",
+                metadata={"source": "operations", "reason": reason},
+            ),
+        )
 
     def cancel_orchestration_run(
         self,

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-# Compatibility helpers for importing Settings materializations into Agent truth.
-
 from collections.abc import Mapping
-import json
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from crxzipple.modules.agent.application.services import RegisterAgentProfileInput
@@ -12,15 +10,13 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 
 
-_MEMORY_BINDING_SIDECAR_PATH = ".state/memory-binding.json"
-
-
 def agent_profile_input_from_settings(
-    config: Mapping[str, Any],
+    config: object,
 ) -> RegisterAgentProfileInput:
     payload = _coerce_agent_profile_payload(config)
     profile_id = _required_text(
@@ -35,7 +31,6 @@ def agent_profile_input_from_settings(
     return RegisterAgentProfileInput(
         id=profile_id,
         name=name,
-        description=str(payload.get("description") or "").strip(),
         enabled=_bool_value(payload.get("enabled"), default=True),
         identity=AgentIdentity.from_payload(identity_payload),
         instruction_policy=AgentInstructionPolicy.from_payload(
@@ -46,20 +41,23 @@ def agent_profile_input_from_settings(
             _mapping_payload(payload.get("execution_policy")),
         ),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
-        home_sidecar_files=_memory_sidecar_files(_memory_space(payload)),
+        memory=AgentMemoryBinding.from_payload(_memory_payload(payload)),
     )
 
 
 def agent_profile_inputs_from_settings(
-    configs: tuple[Mapping[str, Any], ...],
+    configs: tuple[object, ...],
 ) -> tuple[RegisterAgentProfileInput, ...]:
     return tuple(agent_profile_input_from_settings(config) for config in configs)
 
 
-def _coerce_agent_profile_payload(config: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(config, Mapping):
-        raise TypeError("Agent settings import config must be a mapping.")
-    payload = dict(config)
+def _coerce_agent_profile_payload(config: object) -> dict[str, Any]:
+    if isinstance(config, Mapping):
+        payload = dict(config)
+    elif is_dataclass(config) and not isinstance(config, type):
+        payload = asdict(config)
+    else:
+        raise TypeError("Agent settings import config must be a mapping or dataclass.")
     payload.setdefault("profile_id", payload.get("id"))
     return payload
 
@@ -92,16 +90,6 @@ def _runtime_preferences_payload(config: Mapping[str, Any]) -> dict[str, Any]:
         attrs, "instructions_path", _optional_text(config.get("instructions_path"))
     )
     _set_attr(attrs, "model_profile_id", _optional_text(config.get("model_profile_id")))
-    tool_ids = _text_tuple(config.get("tool_ids"))
-    skill_ids = _text_tuple(config.get("skill_ids"))
-    if tool_ids:
-        attrs["tool_ids"] = list(tool_ids)
-    if skill_ids:
-        attrs["skill_ids"] = list(skill_ids)
-    memory_space = _memory_space(config)
-    _set_attr(attrs, "memory_space", memory_space)
-    if memory_space is not None and payload.get("memory_space_id") is None:
-        payload["memory_space_id"] = memory_space
     payload["attrs"] = attrs
     return payload
 
@@ -111,32 +99,12 @@ def _set_attr(attrs: dict[str, Any], key: str, value: str | None) -> None:
         attrs[key] = value
 
 
-def _memory_sidecar_files(memory_space: str | None) -> dict[str, str]:
-    if memory_space is None:
-        return {}
-    payload = {"space_id": memory_space}
-    content = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
-    return {_MEMORY_BINDING_SIDECAR_PATH: content}
-
-
 def _mapping_payload(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _text_tuple(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, str):
-        values = (value,)
-    elif isinstance(value, tuple | list):
-        values = tuple(str(item) for item in value)
-    else:
-        values = ()
-    return tuple(dict.fromkeys(item.strip() for item in values if item.strip()))
-
-
-def _memory_space(config: Mapping[str, Any]) -> str | None:
-    return _optional_text(config.get("memory_space") or config.get("memory_space_id"))
+def _memory_payload(config: Mapping[str, Any]) -> dict[str, Any]:
+    return _mapping_payload(config.get("memory"))
 
 
 def _required_text(value: object, field_name: str) -> str:

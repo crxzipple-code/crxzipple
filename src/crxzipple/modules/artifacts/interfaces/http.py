@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.artifacts.domain.exceptions import (
@@ -65,7 +65,7 @@ async def upload_artifact(
         or "application/octet-stream"
     )
     try:
-        artifact = container.artifact_service.create_artifact(
+        artifact = container.require(AppKey.ARTIFACT_SERVICE).create_artifact(
             data=raw,
             mime_type=resolved_mime_type,
             name=resolved_name,
@@ -81,7 +81,7 @@ def get_artifact(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ArtifactResponse:
     try:
-        artifact = container.artifact_service.get_artifact(artifact_id)
+        artifact = container.require(AppKey.ARTIFACT_SERVICE).get_artifact(artifact_id)
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     return _to_response(artifact)
@@ -134,7 +134,7 @@ def _variant_response(
     as_attachment: bool,
 ) -> FileResponse:
     try:
-        resolved = container.artifact_service.resolve_variant(
+        resolved = container.require(AppKey.ARTIFACT_SERVICE).resolve_variant(
             artifact_id,
             variant=variant,
         )

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import json as _json
+import json
+from pathlib import Path
 
-from tests.unit.cli_test_support import *
+from crxzipple.interfaces.cli.main import app
+from tests.unit.cli_test_support import CliModuleTestCase
+from tests.unit.support import FakeCdpServer, seed_browser_state_root
 
 
 class BrowserToolCliTestCase(CliModuleTestCase):
@@ -24,7 +27,7 @@ class BrowserToolCliTestCase(CliModuleTestCase):
                 },
             ],
         )
-        self.env["APP_BROWSER_PROFILE_SPECS"] = _json.dumps(
+        self.env["APP_BROWSER_PROFILE_SPECS"] = json.dumps(
             [
                 {
                     "name": "crxzipple",
@@ -41,31 +44,33 @@ class BrowserToolCliTestCase(CliModuleTestCase):
         self._fake_cdp_server.close()
         super().tearDown()
 
-    def test_browser_tool_is_listed_and_can_open_tab(self) -> None:
+    def test_browser_function_catalog_is_listed_and_can_open_tab(self) -> None:
         list_result = self.runner.invoke(app, ["tool", "list"], env=self.env)
 
         self.assertEqual(list_result.exit_code, 0)
-        self.assertIn('"id": "browser_profile"', list_result.stdout)
-        self.assertIn('"id": "browser_control"', list_result.stdout)
-        self.assertIn('"id": "browser_script"', list_result.stdout)
-        self.assertIn('"id": "browser_snapshot"', list_result.stdout)
-        self.assertIn('"id": "browser_action"', list_result.stdout)
+        self.assertIn('"id": "browser.navigate"', list_result.stdout)
+        self.assertIn('"id": "browser.snapshot"', list_result.stdout)
+        self.assertIn('"id": "browser.click"', list_result.stdout)
+        self.assertNotIn('"id": "browser_profile"', list_result.stdout)
+        self.assertNotIn('"id": "browser_control"', list_result.stdout)
+        self.assertNotIn('"id": "browser_snapshot"', list_result.stdout)
+        self.assertNotIn('"id": "browser_action"', list_result.stdout)
 
         run_result = self.runner.invoke(
             app,
             [
                 "tool",
                 "run",
-                "browser_control",
+                "browser.navigate",
                 "--input",
-                '{"kind":"open-tab","url":"https://example.com"}',
+                '{"url":"https://example.com"}',
             ],
             env=self.env,
         )
 
         self.assertEqual(run_result.exit_code, 0)
         payload = json.loads(run_result.stdout)
-        self.assertEqual(payload["tool_id"], "browser_control")
+        self.assertEqual(payload["tool_id"], "browser.navigate")
         self.assertEqual(payload["status"], "succeeded")
         self.assertEqual(payload["output_payload"]["command"]["kind"], "open-tab")
         self.assertTrue(

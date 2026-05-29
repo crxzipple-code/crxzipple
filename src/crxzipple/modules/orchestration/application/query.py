@@ -10,6 +10,7 @@ from crxzipple.modules.orchestration.application.unit_of_work import (
 )
 from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
 from crxzipple.modules.orchestration.domain.entities import (
+    OrchestrationExecutorLease,
     OrchestrationIngressRequest,
     OrchestrationSchedulerSignal,
 )
@@ -17,6 +18,7 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
 )
 from crxzipple.modules.orchestration.domain.value_objects import (
+    OrchestrationExecutorLeaseStatus,
     OrchestrationIngressStatus,
     OrchestrationRunStatus,
     OrchestrationSchedulerSignalStatus,
@@ -59,3 +61,11 @@ class OrchestrationRunQueryService:
     ) -> list[OrchestrationSchedulerSignal]:
         with self.uow_factory() as uow:
             return uow.orchestration_scheduler_signals.list(status=status)
+
+    def list_executor_leases(
+        self,
+        *,
+        status: OrchestrationExecutorLeaseStatus | None = None,
+    ) -> list[OrchestrationExecutorLease]:
+        with self.uow_factory() as uow:
+            return uow.orchestration_executor_leases.list(status=status)

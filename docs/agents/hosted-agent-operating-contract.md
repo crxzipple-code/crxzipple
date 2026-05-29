@@ -21,7 +21,7 @@
 
 ```text
 src/crxzipple/
-  bootstrap/        # composition root
+  app/              # app assembly factories, runtime targets, AppKey registry
   core/             # settings, db, logger
   interfaces/       # http / cli entrypoints
   modules/          # bounded contexts
@@ -38,7 +38,12 @@ tests/              # module-first tests
 - `infrastructure`：SQLAlchemy repository、file/redis store、外部 API、runtime adapter。
 - `interfaces`：HTTP/CLI DTO、router、serializer。保持薄，不写业务决策。
 
-`bootstrap/container.py` 是装配点。新增服务、repository、adapter 时要在这里接线，但不要把业务逻辑塞进 container。
+`src/crxzipple/app/assembly/*` 是装配层，`src/crxzipple/app/container.py` 只保留薄运行时查找句柄。新增 service、repository、adapter 时优先放在 owner module 内部；跨模块组合写入对应 app assembly factory / activation task，不要把业务逻辑塞进 container。
+
+Assembly factory 的 `provides` 必须是可被运行目标消费的 application
+surface，例如 query service、control service、runtime event service 或窄
+port。`ServiceGraph` 这类模块内部 composer 可以存在，但不能作为 `AppKey`
+公开、不能成为其他 factory 的 `requires`，也不能作为跨模块 API。
 
 ## 3. 模块职责边界
 
@@ -53,7 +58,8 @@ tests/              # module-first tests
 | `channels` | channel profile、binding、runtime、delivery/dead letter、transport interaction | 直接写 orchestration 内部状态；绕过 channel runtime 提交流量 |
 | `memory` | memory files/store/index/retrieval/write facts | 由 orchestration 或 operations 直接修改文件/index 内部结构 |
 | `skills` | skill package/catalog/resolution requirement | 把实际 run usage 当 catalog truth；跳过 access/tool requirement |
-| `access` / `authorization` | readiness、credential/access inventory、policy、temporary grant | 被工具、LLM、前端自行推断权限 |
+| `access` | external provider/account/credential、credential requirement、readiness、setup、lease、audit | 持有内部 ABAC policy 或 run/session/agent authorization grant；被工具、LLM、前端自行推断外部凭证状态 |
+| `authorization` | 内部 ABAC policy、subject/resource/action/effect、approval 后的 run/session/agent grant、authorization audit | 持有外部 provider/account/credential 真相或 secret resolution |
 | `session` | conversation/session/message persistence and mutation | 路由 agent、tool、channel、queue policy |
 | `agent` | agent profile、home/workspace config | 直接执行 run 或修改 runtime queue |
 | `browser` / `mobile` / `ocr` | capability runtime、profile、device/host adapter | 绕过 daemon 维护长生命周期能力进程 |
@@ -95,7 +101,7 @@ owner module runtime fact
 - 如果某个卡片是假数据，要补事实来源：事件、query service、runtime metrics、projection 字段或 worker 上报。
 - 不要复活已退场的旧 orchestration observation worker。运行时观察归 `operations-observer`。
 - observer 可以读取通用 query service 来重建 projection，但页面请求不应该每次扫全库/扫全 topic。
-- `.crxzipple/operations/observer_observation.json` 只保存轻量观察状态；页面 projection 在 Postgres。
+- Operations observed events、observer heartbeat、projection 都在 Postgres；`.crxzipple/operations/observer_observation.json` 仅可作为显式轻量 fallback 或测试状态。
 
 ### Operations 页面布局约束
 
@@ -156,15 +162,25 @@ owner module entity store / backbone / registry
 - Settings-owned access config 只能包括外部访问治理声明，例如 access asset、credential binding、
   consumer binding、provider/account/scope enablement、rotation/export/redaction policy 等。
   不得把内部 ABAC policy 或内部 authorization grant 放进 Access。
+- Access 当前稳定化施工入口是
+  `docs/reports/access-module-stabilization-checklist-20260512.md`。新增 LLM、Tool、
+  Channel、OAuth、app credential 或 UI 接入时，必须先按该清单确认 owner、truth source、
+  binding kind、setup flow 和验收命令。
 - Access 模块不得 import `crxzipple.modules.authorization`；Authorization runtime 不得使用
   `AccessBackedAuthorization*` repository。历史阶段性判断以
   `docs/reports/authorization-access-boundary-remediation-checklist-20260508.md` 为准。
 - Access readiness 可以作为 Settings 页面的辅助状态合入，但不能反向成为配置
   真相。
-- Skill Catalog 当前只能治理 skill enablement；技能包发现、安装、manifest 和
-  catalog runtime 仍属于 Skills。
+- Skill Catalog 的 owner 是 Skills。Settings 页面可以作为治理入口，但创建、安装、
+  manifest/frontmatter、启停、readiness、source、read 和 package catalog 都必须走
+  Skills application/API；不得恢复 Settings-owned skill enablement overlay 或
+  `SkillEnablementManagerAdapter`。
 - Tool Catalog 在 Settings 中只表示 provider/root/enablement 配置治理；运行时
   tool run、worker、discovered runtime 状态在 Operations/Tool。
+- Runtime Defaults 是 Settings-owned runtime control config，只治理 lease、
+  heartbeat、concurrency、retry、compaction 等运行控制默认值。env 只能作为首次
+  seed 或显式 import/reseed 来源；orchestration、tool、daemon 只能消费 assembly
+  注入的 typed config，不能直接解析 runtime defaults JSON 或读取对应 env。
 - Event Registry 和 Backup Restore 当前不是完整 Settings-backed 配置面；没有
   后台 workflow 前不要展示可编辑假页面。
 - 写操作必须走 Settings action service，提供 reason，并记录 Settings audit。
@@ -172,9 +188,8 @@ owner module entity store / backbone / registry
   不要复制完整模块 domain entity。
 - UI 不能显示假数据、假用户、假日期、假 provider health、假 backup size；无资源
   时展示真实空态。
-- 参考接入清单：
-  `docs/reports/settings-module-boundary-complexity-review-20260508.md` 和
-  `docs/reports/settings-ui-backend-alignment-checklist-20260507.md`。
+- Settings 过渡接入清单已经归档。当前施工以 owner module API、Settings governance
+  action metadata 和对应主清单为准，不再按旧 Settings overlay 路径补功能。
 
 ## 5. Orchestration 约束
 
@@ -212,9 +227,36 @@ Tool runtime 已经拆成 catalog、submission、scheduler、worker。
 - `ToolWorkerService` 执行 assignment、heartbeat、cancel、recovery、terminal update。
 - 一个 worker 可以通过 `max_in_flight` 并发处理 IO-heavy async 工具；不要因为某个工具耗时就把 worker 改回全局串行。
 - per-capability concurrency 是 runtime 策略：image tools 可并发，browser/mobile/session/shared-state 工具默认更保守。
+- CLI source 是受控 exec 能力，不是 help-to-tool 自动生成器。不要从任意 CLI help 文本自动发布
+  `ToolFunction`；稳定 CLI function 必须来自显式 promoted contract 或后续治理流程。
 - 工具实现必须返回 `ToolRunResult`，不要返回裸 dict。
 - 模型可见内容放 `ToolRunResult.content`；业务结构放 `details`；执行诊断放 `metadata`。
 - image/file block 会外部化为 artifact ref，长期历史里应保存轻量 attachment ref。
+
+### Tool / Channel 外部凭证约束
+
+外部 provider/account/credential 的治理归 Access。Tool 和 Channel 只能声明 credential
+requirement，并通过 Access port 在运行时解析 credential slot。
+
+规则：
+
+- 新增 Tool / Channel 时必须声明结构化 credential requirements，而不是在实现代码里读取
+  `env:`、`file:`、raw token、`~/.codex/auth.json` 或第三方 SDK 的本地凭证缓存。
+- OpenAPI tool 以 `securitySchemes`、operation/global `security` 和 provider credential binding
+  生成 requirement；native/local tool 用 manifest 中的 credential requirement contract。
+- Channel profile/account 用 named slots 描述外部凭证，例如 `lark_app_id`、`lark_app_secret`、
+  `lark_verification_token`、`webhook_secret` 或 OAuth account slot。不要新增单个万能 `auth_ref`
+  字段来塞所有情况。
+- API key、bearer、basic、app secret、webhook secret、OAuth2 / OpenID Connect 等外部访问都走
+  Access binding / OAuth account。业务模块不保存 secret 原值，也不把 source ref 当真相。
+- OAuth 官方授权由 Access 提供 setup session、token refresh、revoke/disable、scope diff 和 audit。
+  Tool / Channel 只声明 provider、scopes 和 setup flow hint。
+- 前端设置页只能选择 Access-owned credential binding / OAuth account，并按 expected credential kind
+  过滤；不能让用户在 Tool / Channel 表单里粘贴 secret。
+- 运维面要从 Access requirement catalog 展示 missing/degraded/ready 状态，不从 Tool / Channel
+  运行错误里临时猜测。
+- 施工入口文档：
+  `docs/reports/access-module-stabilization-checklist-20260512.md`。
 
 ## 7. LLM 约束
 
@@ -252,7 +294,7 @@ Events 是跨进程协调和观察基座。
 - `worker:tool-scheduler`
 - `worker:tool`
 - channel runtime services
-- capability daemons such as Chrome MCP / OCR host
+- capability daemons such as browser MCP services / OCR host
 
 本地完整启动：
 
@@ -267,7 +309,7 @@ make dev-status
 source scripts/dev/infra-env.sh
 python -m crxzipple.main db upgrade head
 python -m crxzipple.main serve
-python -m crxzipple.main daemon run --service-set workers --service-set channels-stack
+python -m crxzipple.main daemon run --service-set workers --service-set channels-stack --service-set browser-stack
 ```
 
 不要把 `process` CLI 当应用常驻入口；它是 daemon 下面的诊断 primitive。
@@ -390,7 +432,7 @@ python -m crxzipple.main db upgrade head
 
 1. 判断是否真需要长运行进程。
 2. 在业务模块实现 runtime service 和 hidden CLI。
-3. 在 `bootstrap/container.py` 注册 daemon service spec。
+3. 在 `app/assembly/daemon.py` 的 runtime daemon specs 或对应 app activation task 中注册 daemon service spec。
 4. 在 daemon service set 中归类。
 5. 让 worker 产生日志、心跳、事件或 runtime metrics。
 6. Operations/Daemon 页面能看到它。

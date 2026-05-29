@@ -18,7 +18,6 @@ from crxzipple.modules.access.application.repositories import (
 )
 from crxzipple.modules.access.application.services import (
     canonical_credential_binding,
-    is_codex_auth_json_binding,
     is_credential_binding,
 )
 from crxzipple.modules.access.domain.resources import AccessResourceKind
@@ -110,26 +109,20 @@ class _AccessMigrationPlanBuilder:
 
     def add_llm_profile(self, profile: object) -> None:
         profile_id = _string_value(profile, "id")
-        binding = _optional_string(_get_value(profile, "credential_binding"))
-        if not profile_id or not binding:
+        binding_id = _optional_string(_get_value(profile, "credential_binding_id"))
+        if not profile_id or not binding_id:
             return
-        credential = self._ensure_credential_binding(
-            binding,
-            consumer_module="llm",
-            source_path="llm_profiles.credential_binding",
-        )
         self._ensure_consumer_binding(
             consumer_module="llm",
             consumer_kind="llm_profile",
             consumer_id=profile_id,
             display_name=_optional_string(_get_value(profile, "model_name")) or profile_id,
             enabled=_bool_value(profile, "enabled", default=True),
-            credential_binding_id=credential.binding_id,
+            credential_binding_id=binding_id,
             requirement_sets=(),
-            asset_id=credential.asset_id,
             metadata={
                 "source": self._source,
-                "source_path": "llm_profiles[*].credential_binding",
+                "source_path": "llm_profiles[*].credential_binding_id",
                 "provider": _safe_public_string(_get_value(profile, "provider")),
                 "api_family": _safe_public_string(_get_value(profile, "api_family")),
             },
@@ -506,20 +499,6 @@ def _credential_source(binding: str) -> _CredentialSource:
                 canonical_ref=canonical,
                 masked_preview="file:***",
                 display_name="File credential",
-            )
-        if is_codex_auth_json_binding(canonical):
-            source_ref = canonical.removeprefix("codex_auth_json:").strip()
-            identity = f"codex_auth_json:{_digest(canonical)}"
-            return _CredentialSource(
-                identity=identity,
-                binding_kind="credential_binding",
-                source_kind="codex_auth_json",
-                source_ref=source_ref,
-                canonical_ref=canonical,
-                masked_preview=(
-                    "codex_auth_json:***" if source_ref else "codex_auth_json"
-                ),
-                display_name="Codex auth json credential",
             )
     literal_hash = _digest(normalized, length=16)
     return _CredentialSource(

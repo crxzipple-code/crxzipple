@@ -1,36 +1,94 @@
-# Tools Root
+# Tool Source Authoring Contract
 
-`tools/` is the single governance root for bundled tool assets.
+`tools/` contains bundled Tool sources. Each direct child directory is one
+namespace and must include `tool.yaml`.
 
-## Namespace Contract
+The runtime treats these manifests as source declarations:
 
-- Each direct child under `tools/` is one tool namespace.
-- Each namespace must include `tool.yaml`.
-- The tool runtime scans `tools/*/tool.yaml` only.
-- Python code, OpenAPI specs, and other tool assets live beside that manifest.
+```text
+tools/<namespace>/tool.yaml
+  -> bundled ToolSource
+  -> discovery candidate
+  -> ToolFunction catalog row
+  -> runtime handler registration
+```
 
-## Supported Namespace Kinds
+`tool.yaml` is not a side-effect loader and it is not the whole catalog truth.
+Tool source/function rows own effective enablement, policy overrides, credential
+bindings, stale/deprecated state, and discovery history. Local runtime registries
+only map active function `handler_ref` values to handlers.
 
-### `kind: local_package`
+## Namespace Rules
 
-Use for bundled Python-backed tools and runtime handlers.
+- Directory name and `namespace` must match.
+- `kind` must be `local_package` or `openapi` for bundled sources.
+- Tool ids and runtime keys must be unique across the bundled package set.
+- Required dependencies must be declared in `dependencies` at package or tool
+  level; missing required services fail app activation.
+- Capabilities must be declared with `capabilities` and must exist in the Tool
+  capability catalog.
+- External credentials must be declared as Access credential requirements or
+  OpenAPI credential bindings. Do not declare `env:`, `file:`, raw tokens, or
+  inline secret source references in tool manifests.
 
-Expected manifest sections:
+## Local Package
 
+Use `kind: local_package` for Python-backed tools.
+
+Required top-level fields:
+
+- `kind: local_package`
 - `namespace`
 - `local_tools`
+
+Optional top-level fields:
+
+- `capabilities`
+- `dependencies`
 - `remote_runtimes`
 - `sandbox_runtimes`
 
-Local tool entries declare the full tool metadata plus an explicit Python
-entrypoint such as `tools.workspace.local:read`.
+Each `local_tools` entry declares user-facing function metadata and the handler
+entrypoint. Example:
 
-### `kind: openapi`
+```yaml
+kind: local_package
+namespace: example
+capabilities:
+  - workspace.read
+dependencies:
+  - id: session_workspace_lookup
+    kind: service_dependency
+local_tools:
+  - id: example_read
+    name: Example Read
+    description: Read an example resource.
+    provider_name: local_system
+    entrypoint: tools.example.local:example_read
+    tool_kind: function
+    parameters:
+      - name: path
+        data_type: string
+        description: Relative path.
+        required: true
+    supported_modes: [inline]
+    supported_strategies: [async]
+    supported_environments: [local]
+    runtime_key: example_read
+```
 
-Use for bundled OpenAPI-backed remote tools.
+Handler factories receive typed dependency objects built from declared
+dependencies. They must not look up a container, resolver, registry, or owner
+module service at execution time.
 
-Expected manifest fields:
+## OpenAPI Source
 
+Use `kind: openapi` for bundled remote HTTP tools. The namespace becomes the
+source namespace; operations become ToolFunction candidates during source sync.
+
+Expected fields:
+
+- `kind: openapi`
 - `namespace`
 - `spec`
 - `description`
@@ -38,26 +96,24 @@ Expected manifest fields:
 - `default_effect_ids`
 - `credentials`
 
-The namespace name is used as the provider name.
+Credential bindings reference Access binding ids, not secret source locations.
 
-## Runtime Notes
+## Runtime Behavior
 
-- Bundled OpenAPI namespaces are loaded by default.
-- Setting `APP_TOOL_OPENAPI_PROVIDER_PATHS` switches provider loading to the
-  explicit config/env path flow and disables bundled OpenAPI namespace loading.
+- App assembly first syncs bundled sources into the ToolSource repository.
+- Discovery reconciles candidates into ToolFunction rows.
+- Package activation registers only active local function `handler_ref` values.
+- Disabled, stale, deprecated, deleted, or missing function/source rows do not
+  become runtime handlers.
+- Recursive filesystem `tool.json` discovery is retired. New local tools must
+  enter as `local_package` sources with `tool.yaml`; source sync then materializes
+  `ToolFunction` rows before any runtime handler can be used.
 
 ## Bundled Namespace Notes
 
-- `command`: local command-execution tools bound to the current session workspace.
-  See [command/README.md](/Users/crxzy/Documents/crxzipple/tools/command/README.md).
-- `openai_image`: OpenAI image generation and editing tools backed by the Images API.
-  These tools are background-only because image generation/editing can be slow;
-  orchestration waits for tool completion and resumes the run instead of blocking
-  the inline agent worker. Requires `OPENAI_API_KEY`. Defaults to `gpt-image-2`; set
-  `OPENAI_IMAGE_MODEL` to override the default model for this namespace. If
-  OpenAI returns an organization-verification 403 for a GPT Image model, verify
-  the API organization in Platform settings or retry with a model the
-  organization can access. Long image runs default to a 300 second timeout; set
-  `OPENAI_IMAGE_TIMEOUT_SECONDS` to tune it.
+- `command`: local command-execution tools bound to the current session
+  workspace.
+- `openai_image`: OpenAI image generation and editing tools backed by the Images
+  API. Requires the `openai-api-key` Access credential binding and runs through
+  background tool execution.
 - `workspace`: local filesystem tools bound to the current session workspace.
-  See [workspace/README.md](/Users/crxzy/Documents/crxzipple/tools/workspace/README.md).

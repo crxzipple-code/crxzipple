@@ -120,7 +120,7 @@ class DispatchHttpTestCase(HttpModuleTestCase):
                 },
             )
 
-            with self.client.app.state.container.uow_factory() as uow:
+            with self.client.app.state.container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
                 tool_task = uow.dispatch_tasks.get("dispatch-http-tool")
                 orch_task = uow.dispatch_tasks.get("dispatch-http-orch")
                 assert tool_task is not None

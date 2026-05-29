@@ -4,13 +4,13 @@ from typing import Any
 
 from crxzipple.modules.tool.domain import ToolRunResult
 from crxzipple.modules.tool.infrastructure.discovery.mcp import McpToolDefinition
-from crxzipple.modules.tool.infrastructure.mcp_client import McpStdioClient
+from crxzipple.modules.tool.infrastructure.mcp_client import McpClient
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 
 
 class McpRemoteInvoker:
-    def __init__(self, client: McpStdioClient) -> None:
+    def __init__(self, client: McpClient) -> None:
         self.client = client
 
     async def execute(
@@ -37,8 +37,9 @@ def register_mcp_remote_handlers(
     registry: ToolRuntimeRegistry,
     definitions: list[McpToolDefinition] | tuple[McpToolDefinition, ...],
     *,
-    client: McpStdioClient,
+    client: McpClient,
     max_concurrency: int | None = None,
+    replace: bool = False,
 ) -> None:
     invoker = McpRemoteInvoker(client)
     for definition in definitions:
@@ -56,4 +57,5 @@ def register_mcp_remote_handlers(
             handler,
             concurrency_key=f"mcp:{definition.provider_name}",
             max_concurrency=max_concurrency,
+            replace=replace,
         )

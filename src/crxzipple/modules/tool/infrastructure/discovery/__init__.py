@@ -1,9 +1,5 @@
-from crxzipple.modules.tool.infrastructure.discovery.filesystem import (
-    FilesystemLocalToolDiscoveryProvider,
-    FilesystemLocalToolHandler,
-)
-from crxzipple.modules.tool.infrastructure.discovery.local_catalog import (
-    LocalToolCatalog,
+from crxzipple.modules.tool.infrastructure.discovery.local_runtime_registry import (
+    LocalToolRuntimeRegistry,
     LocalToolHandler,
 )
 from crxzipple.modules.tool.infrastructure.discovery.mcp import (
@@ -15,16 +11,12 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
     OpenApiOperation,
 )
 from crxzipple.modules.tool.infrastructure.discovery.providers import (
-    LocalCatalogDiscoveryProvider,
     ToolDiscoveryProvider,
     ToolDiscoveryRegistry,
 )
 
 __all__ = [
-    "FilesystemLocalToolDiscoveryProvider",
-    "FilesystemLocalToolHandler",
-    "LocalCatalogDiscoveryProvider",
-    "LocalToolCatalog",
+    "LocalToolRuntimeRegistry",
     "LocalToolHandler",
     "McpDiscoveryProvider",
     "McpToolDefinition",

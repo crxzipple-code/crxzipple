@@ -173,7 +173,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 max_output_tokens=512,
                 reasoning_effort="medium",
             ),
-            credential_binding="env:OPENAI_API_KEY",
+            credential_binding_id="openai-api-key",
         )
         request = _adapter_request(
             messages=(
@@ -254,7 +254,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -313,7 +313,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="env:MISSING_OPENAI_API_KEY",
+            credential_binding_id="missing-openai-api-key",
         )
         request = _adapter_request(
             messages=(
@@ -356,7 +356,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="env:OPENAI_API_KEY",
+            credential_binding_id="openai-api-key",
         )
         request = LlmAdapterRequest(
             messages=(
@@ -376,7 +376,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -432,7 +432,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -494,7 +494,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
             capabilities=(LlmCapability.VISION_INPUT,),
         )
         request = _adapter_request(
@@ -552,7 +552,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -611,7 +611,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -637,7 +637,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
             capabilities=(LlmCapability.VISION_INPUT,),
         )
         request = _adapter_request(
@@ -645,7 +645,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 LlmMessage(
                     role=LlmMessageRole.TOOL,
                     tool_call_id="call_browser_1",
-                    name="browser_action",
+                    name="browser.screenshot",
                     content=[
                         {
                             "type": "text",
@@ -658,7 +658,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                         },
                     ],
                     metadata={
-                        "tool_name": "browser_action",
+                        "tool_name": "browser.screenshot",
                         "tool_details": {
                             "ok": True,
                             "value": {
@@ -725,14 +725,14 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
                 LlmMessage(
                     role=LlmMessageRole.TOOL,
                     tool_call_id="call_pdf_1",
-                    name="browser_action",
+                    name="browser.screenshot",
                     content=[
                         {"type": "text", "text": "Exported PDF."},
                         {
@@ -743,7 +743,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                         },
                     ],
                     metadata={
-                        "tool_name": "browser_action",
+                        "tool_name": "browser.screenshot",
                         "tool_details": {
                             "ok": True,
                             "value": {
@@ -807,7 +807,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -887,7 +887,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -970,7 +970,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="inline-openai-token",
+            credential_binding_id="inline-openai-token",
         )
         request = _adapter_request(
             messages=(
@@ -1045,7 +1045,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="llama3.2",
             base_url="http://localhost:11434/v1",
-            credential_binding="env:OLLAMA_TOKEN",
+            credential_binding_id="ollama-token",
             default_params=LlmDefaults(top_p=0.9, max_output_tokens=256),
         )
         request = _adapter_request(
@@ -1124,7 +1124,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen3.5-35b",
             base_url="http://localhost:8010/v1",
-            credential_binding="inline-vllm-token",
+            credential_binding_id="inline-vllm-token",
         )
         request = _adapter_request(
             messages=(
@@ -1210,7 +1210,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen3.5-35b",
             base_url="http://localhost:8010/v1",
-            credential_binding="inline-vllm-token",
+            credential_binding_id="inline-vllm-token",
         )
         request = _adapter_request(
             messages=(
@@ -1280,7 +1280,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen",
             base_url="http://localhost:8010/v1",
-            credential_binding="inline-vllm-token",
+            credential_binding_id="inline-vllm-token",
         )
         request = _adapter_request(
             messages=(
@@ -1306,7 +1306,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen3.5-35b",
             base_url="http://localhost:8010/v1",
-            credential_binding="EMPTY",
+            credential_binding_id="empty-token",
             default_params=LlmDefaults(
                 temperature=0.7,
                 extra_body={
@@ -1366,7 +1366,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="llama3.2",
-            credential_binding="compat-inline-token",
+            credential_binding_id="compat-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1450,7 +1450,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen3.5-35b",
-            credential_binding="compat-inline-token",
+            credential_binding_id="compat-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1509,7 +1509,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen3.5-35b",
-            credential_binding="compat-inline-token",
+            credential_binding_id="compat-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1550,7 +1550,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="qwen3.5-35b",
-            credential_binding="compat-inline-token",
+            credential_binding_id="compat-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1590,7 +1590,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="gpt-4.1",
-            credential_binding="inline-chat-token",
+            credential_binding_id="inline-chat-token",
         )
         request = _adapter_request(
             messages=(
@@ -1646,7 +1646,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.OPENAI_COMPATIBLE,
             api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
             model_name="llama3.2",
-            credential_binding="compat-inline-token",
+            credential_binding_id="compat-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1722,7 +1722,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
                 model_name="gpt-5-codex",
                 model_family=LlmModelFamily.CODEX,
-                credential_binding=f"codex_auth_json:{auth_path}",
+                credential_binding_id="codex-auth-json",
                 default_params=LlmDefaults(reasoning_effort="medium"),
             )
             request = _adapter_request(
@@ -1823,7 +1823,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
             model_name="gpt-5-codex",
             model_family=LlmModelFamily.CODEX,
-            credential_binding="codex-inline-token",
+            credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1883,7 +1883,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
             model_name="gpt-5-codex",
             model_family=LlmModelFamily.CODEX,
-            credential_binding="codex-inline-token",
+            credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -1952,7 +1952,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
             model_name="gpt-5-codex",
             model_family=LlmModelFamily.CODEX,
-            credential_binding="codex-inline-token",
+            credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2028,7 +2028,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
             model_name="gpt-5.4",
             model_family=LlmModelFamily.CODEX,
-            credential_binding="codex-inline-token",
+            credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2110,7 +2110,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
             model_name="gpt-5-codex",
             model_family=LlmModelFamily.CODEX,
-            credential_binding="codex-inline-token",
+            credential_binding_id="codex-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2190,7 +2190,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.ANTHROPIC,
             api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
             model_name="claude-sonnet-4-5",
-            credential_binding="env:ANTHROPIC_API_KEY",
+            credential_binding_id="anthropic-api-key",
             default_params=LlmDefaults(temperature=0.3, top_p=0.8),
         )
         request = _adapter_request(
@@ -2257,7 +2257,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.ANTHROPIC,
             api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
             model_name="claude-sonnet-4-5",
-            credential_binding="env:ANTHROPIC_API_KEY",
+            credential_binding_id="anthropic-api-key",
         )
         request = _adapter_request(
             messages=(
@@ -2298,7 +2298,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.ANTHROPIC,
             api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
             model_name="claude-sonnet-4-5",
-            credential_binding="anthropic-inline-token",
+            credential_binding_id="anthropic-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2406,7 +2406,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.ANTHROPIC,
             api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
             model_name="claude-sonnet-4-5",
-            credential_binding="anthropic-inline-token",
+            credential_binding_id="anthropic-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2466,7 +2466,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.ANTHROPIC,
             api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
             model_name="claude-sonnet-4-5",
-            credential_binding="anthropic-inline-token",
+            credential_binding_id="anthropic-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2496,7 +2496,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.ANTHROPIC,
             api_family=LlmApiFamily.ANTHROPIC_MESSAGES,
             model_name="claude-sonnet-4-5",
-            credential_binding="anthropic-inline-token",
+            credential_binding_id="anthropic-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2549,7 +2549,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.GOOGLE,
             api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
             model_name="gemini-2.5-pro",
-            credential_binding="env:GEMINI_API_KEY",
+            credential_binding_id="gemini-api-key",
             default_params=LlmDefaults(
                 temperature=0.1,
                 max_output_tokens=300,
@@ -2632,7 +2632,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.GOOGLE,
             api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
             model_name="gemini-2.5-pro",
-            credential_binding="env:GEMINI_API_KEY",
+            credential_binding_id="gemini-api-key",
         )
         request = _adapter_request(
             messages=(
@@ -2682,7 +2682,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.GOOGLE,
             api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
             model_name="gemini-2.5-pro",
-            credential_binding="gemini-inline-token",
+            credential_binding_id="gemini-inline-token",
         )
         request = _adapter_request(
             messages=(
@@ -2783,7 +2783,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             provider=LlmProviderKind.GOOGLE,
             api_family=LlmApiFamily.GEMINI_GENERATE_CONTENT,
             model_name="gemini-2.5-pro",
-            credential_binding="gemini-inline-token",
+            credential_binding_id="gemini-inline-token",
         )
         request = _adapter_request(
             messages=(

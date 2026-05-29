@@ -22,22 +22,16 @@ from ..application.ports import (
 @dataclass(frozen=True, slots=True)
 class StaticBrowserEngineRegistry(BrowserEngineRegistry):
     cdp_control: BrowserControlEngine
-    mcp_control: BrowserControlEngine
     cdp_backed_playwright: BrowserActionEngine
-    mcp_backed: BrowserActionEngine
 
     def control_engine(self, *, family: BrowserControlFamily) -> BrowserControlEngine:
         if family == "cdp-control":
             return self.cdp_control
-        if family == "mcp-control":
-            return self.mcp_control
         raise ValueError(f"Unsupported browser control family '{family}'.")
 
     def action_engine(self, *, family: BrowserActionFamily) -> BrowserActionEngine:
         if family == "cdp-backed-playwright":
             return self.cdp_backed_playwright
-        if family == "mcp-backed":
-            return self.mcp_backed
         raise ValueError(f"Unsupported browser action family '{family}'.")
 
     def resolve(
@@ -51,16 +45,6 @@ class StaticBrowserEngineRegistry(BrowserEngineRegistry):
         if not isinstance(command, BrowserControlCommand) and not action_engine.supports(
             command=command,
         ):
-            if plan.action_family == "mcp-backed" and command.kind in {
-                "download",
-                "wait-download",
-                "pdf",
-            }:
-                raise BrowserValidationError(
-                    f"Action engine '{plan.action_family}' does not support '{command.kind}'. "
-                    "Existing-session profiles via Chrome MCP currently lack a native primitive for this action; "
-                    "use a managed browser profile instead.",
-                )
             raise BrowserValidationError(
                 f"Action engine '{plan.action_family}' does not support '{command.kind}'.",
             )

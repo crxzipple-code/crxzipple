@@ -12,6 +12,10 @@ import unittest
 from unittest.mock import patch
 
 from crxzipple.core.config import load_settings
+from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.access.application.repositories import (
+    AccessCredentialBindingRecord,
+)
 from crxzipple.modules.agent.application import (
     RegisterAgentProfileInput,
     UpdateAgentProfileInput,
@@ -25,6 +29,7 @@ from crxzipple.modules.dispatch.application import (
 from crxzipple.modules.agent.domain import (
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 from crxzipple.modules.dispatch.domain import DispatchPolicy, DispatchTaskStatus
@@ -78,7 +83,7 @@ from crxzipple.modules.session.domain import (
     SessionMessageKind,
     SessionRouteContext,
 )
-from crxzipple.modules.tool.application import ExecuteToolInput, RegisterToolInput
+from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolEnvironment,
@@ -91,6 +96,7 @@ from crxzipple.modules.tool.domain import (
 )
 from tests.unit.support import SqliteTestHarness
 from tests.unit.skill_test_support import write_skill_package as _write_skill_package
+from tests.unit.tool_catalog_seed import seed_catalog_tool
 
 
 class _StaticTextAdapter:
@@ -587,17 +593,44 @@ class _SlowStaticTextAdapter:
         return LlmAdapterResponse(result=LlmResult(text=self.text))
 
 
+class _OverlayAccessConfigView:
+    def __init__(
+        self,
+        records: dict[str, AccessCredentialBindingRecord],
+        *,
+        fallback: object | None,
+    ) -> None:
+        self.records = records
+        self.fallback = fallback
+
+    def get_credential_binding(
+        self,
+        binding_id: str,
+    ) -> AccessCredentialBindingRecord | object | None:
+        normalized = binding_id.strip()
+        if normalized in self.records:
+            return self.records[normalized]
+        get_binding = getattr(self.fallback, "get_credential_binding", None)
+        if callable(get_binding):
+            return get_binding(normalized)
+        return None
+
+
 def assign_next_orchestration_assignment(
     container,
     *,
     worker_id: str,
     max_inflight_assignments: int = 1,
 ):
-    container.orchestration_executor_service.heartbeat_executor(
+    executor_service = container.require(AppKey.ORCHESTRATION_EXECUTOR_CONTROL_SERVICE)
+    scheduler_service = container.require(
+        AppKey.ORCHESTRATION_SCHEDULER_MAINTENANCE_SERVICE,
+    )
+    executor_service.heartbeat_executor(
         worker_id=worker_id,
         max_inflight_assignments=max_inflight_assignments,
     )
-    return container.orchestration_scheduler_service.assign_next_assignment()
+    return scheduler_service.assign_next_assignment()
 
 
 def process_next_orchestration_assignment(
@@ -606,16 +639,20 @@ def process_next_orchestration_assignment(
     worker_id: str,
     max_inflight_assignments: int = 1,
 ):
-    container.orchestration_executor_service.heartbeat_executor(
+    executor_service = container.require(AppKey.ORCHESTRATION_EXECUTOR_CONTROL_SERVICE)
+    scheduler_service = container.require(
+        AppKey.ORCHESTRATION_SCHEDULER_MAINTENANCE_SERVICE,
+    )
+    executor_service.heartbeat_executor(
         worker_id=worker_id,
         max_inflight_assignments=max_inflight_assignments,
     )
-    assigned = container.orchestration_scheduler_service.assign_next_assignment()
+    assigned = scheduler_service.assign_next_assignment()
     if assigned is None:
-        return container.orchestration_executor_service.process_next_assigned_assignment(
+        return executor_service.process_next_assigned_assignment(
             worker_id=worker_id,
         )
-    return container.orchestration_executor_service.process_assigned_assignment(
+    return executor_service.process_assigned_assignment(
         run_id=assigned.id,
         worker_id=worker_id,
     )
@@ -623,14 +660,23 @@ def process_next_orchestration_assignment(
 
 
 class OrchestrationTestCaseBase(unittest.TestCase):
+    default_llm_credential_binding_id = "openai-api-key"
+    default_llm_credential_env_name = "CRXZIPPLE_TEST_OPENAI_API_KEY"
+
     def setUp(self) -> None:
         self._previous_openapi_provider_paths = os.environ.get(
             "APP_TOOL_OPENAPI_PROVIDER_PATHS",
         )
+        self._previous_default_llm_credential = os.environ.get(
+            self.default_llm_credential_env_name,
+        )
+        self._previous_memory_storage_root = os.environ.get("APP_MEMORY_STORAGE_ROOT")
         os.environ["APP_TOOL_OPENAPI_PROVIDER_PATHS"] = os.pathsep
-        self.harness = SqliteTestHarness()
-        self.harness.initialize_schema()
-        self.container = self.harness.build_container()
+        os.environ[self.default_llm_credential_env_name] = "test-openai-api-key"
+        self._memory_tempdir = tempfile.TemporaryDirectory()
+        os.environ["APP_MEMORY_STORAGE_ROOT"] = str(
+            Path(self._memory_tempdir.name) / "memory",
+        )
         self._skills_tempdir = tempfile.TemporaryDirectory()
         skills_root = Path(self._skills_tempdir.name)
         self._global_skills_patcher = patch(
@@ -643,6 +689,10 @@ class OrchestrationTestCaseBase(unittest.TestCase):
         )
         self._global_skills_patcher.start()
         self._system_skills_patcher.start()
+        self.harness = SqliteTestHarness()
+        self.harness.initialize_schema()
+        self.container = self.harness.build_runtime_container()
+        self._bind_runtime_services()
         system_skill_dir = skills_root / "system" / "memory-recall"
         _write_skill_package(
             system_skill_dir,
@@ -659,10 +709,76 @@ class OrchestrationTestCaseBase(unittest.TestCase):
             allowed_tools=("memory_search", "memory_read", "memory_write_daily"),
         )
 
+    def _bind_runtime_services(self) -> None:
+        self.access_service = self.container.require(AppKey.ACCESS_SERVICE)
+        self.agent_service = self.container.require(AppKey.AGENT_SERVICE)
+        self.artifact_service = self.container.require(AppKey.ARTIFACT_SERVICE)
+        self.authorization_service = self.container.require(
+            AppKey.AUTHORIZATION_SERVICE,
+        )
+        channel_infrastructure = self.container.require(AppKey.CHANNEL_INFRASTRUCTURE)
+        self.channel_interaction_service = channel_infrastructure.interaction_service
+        self.channel_runtime_manager = self.container.require(
+            AppKey.CHANNEL_RUNTIME_MANAGER,
+        )
+        self.dispatch_service = self.container.require(AppKey.DISPATCH_SERVICE)
+        self.event_bus = self.container.require(AppKey.EVENTS_BUS)
+        self.events_service = self.container.require(AppKey.EVENTS_SERVICE)
+        self.file_memory_service = self.container.require(AppKey.FILE_MEMORY_SERVICE)
+        self.llm_adapter_registry = self.container.require(
+            AppKey.LLM_ADAPTER_REGISTRY,
+        )
+        self.llm_service = self.container.require(AppKey.LLM_SERVICE)
+        self.local_runtime_registry = self.container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY)
+        self.memory_context_resolver = self.container.require(
+            AppKey.MEMORY_CONTEXT_RESOLVER,
+        )
+        self.operations_observer_runtime_event_service = self.container.require(
+            AppKey.OPERATIONS_OBSERVER_RUNTIME_EVENT_SERVICE,
+        )
+        self.orchestration_approval_control_service = self.container.require(
+            AppKey.ORCHESTRATION_APPROVAL_CONTROL_SERVICE,
+        )
+        self.orchestration_cancellation_service = self.container.require(
+            AppKey.ORCHESTRATION_CANCELLATION_SERVICE,
+        )
+        self.orchestration_executor_service = self.container.require(
+            AppKey.ORCHESTRATION_EXECUTOR_SERVICE,
+        )
+        self.orchestration_inspection_service = self.container.require(
+            AppKey.ORCHESTRATION_INSPECTION_SERVICE,
+        )
+        self.orchestration_intake_service = self.container.require(
+            AppKey.ORCHESTRATION_INTAKE_SERVICE,
+        )
+        self.orchestration_run_query_service = self.container.require(
+            AppKey.ORCHESTRATION_RUN_QUERY_SERVICE,
+        )
+        self.orchestration_scheduler_runtime_event_service = self.container.require(
+            AppKey.ORCHESTRATION_SCHEDULER_RUNTIME_EVENT_SERVICE,
+        )
+        self.orchestration_scheduler_service = self.container.require(
+            AppKey.ORCHESTRATION_SCHEDULER_SERVICE,
+        )
+        self.session_resolution_service = self.container.require(
+            AppKey.SESSION_RESOLUTION_SERVICE,
+        )
+        self.session_service = self.container.require(AppKey.SESSION_SERVICE)
+        self.settings_action_service = self.container.require(
+            AppKey.SETTINGS_ACTION_SERVICE,
+        )
+        self.skill_manager = self.container.require(AppKey.SKILL_MANAGER)
+        self.tool_service = self.container.require(AppKey.TOOL_SERVICE)
+        self.uow_factory = self.container.require(AppKey.UNIT_OF_WORK_FACTORY)
+
+    def seed_tool(self, **kwargs):
+        return seed_catalog_tool(self.container, **kwargs)
+
     def tearDown(self) -> None:
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
         self._skills_tempdir.cleanup()
+        self._memory_tempdir.cleanup()
         self.harness.close()
         if self._previous_openapi_provider_paths is None:
             os.environ.pop("APP_TOOL_OPENAPI_PROVIDER_PATHS", None)
@@ -670,6 +786,35 @@ class OrchestrationTestCaseBase(unittest.TestCase):
             os.environ["APP_TOOL_OPENAPI_PROVIDER_PATHS"] = (
                 self._previous_openapi_provider_paths
             )
+        if self._previous_default_llm_credential is None:
+            os.environ.pop(self.default_llm_credential_env_name, None)
+        else:
+            os.environ[self.default_llm_credential_env_name] = (
+                self._previous_default_llm_credential
+            )
+        if self._previous_memory_storage_root is None:
+            os.environ.pop("APP_MEMORY_STORAGE_ROOT", None)
+        else:
+            os.environ["APP_MEMORY_STORAGE_ROOT"] = self._previous_memory_storage_root
+
+    def _install_default_llm_access_binding(self, container) -> str:
+        access_service = container.require(AppKey.ACCESS_SERVICE)
+        existing_view = getattr(access_service, "config_view", None)
+        access_service.config_view = _OverlayAccessConfigView(
+            {
+                self.default_llm_credential_binding_id: AccessCredentialBindingRecord(
+                    binding_id=self.default_llm_credential_binding_id,
+                    asset_id=None,
+                    binding_kind="api_key",
+                    source_kind="env",
+                    source_ref=self.default_llm_credential_env_name,
+                    masked_preview=f"env:{self.default_llm_credential_env_name}",
+                    metadata={"test_fixture": "orchestration"},
+                ),
+            },
+            fallback=existing_view,
+        )
+        return self.default_llm_credential_binding_id
 
     def _register_agent_and_llm(
         self,
@@ -677,8 +822,10 @@ class OrchestrationTestCaseBase(unittest.TestCase):
         llm_id: str = "openai.gpt-5.4-mini",
         context_window_tokens: int | None = None,
         runtime_preferences: AgentRuntimePreferences | None = None,
+        memory: AgentMemoryBinding | None = None,
     ) -> None:
-        self.container.llm_service.sync_profiles(
+        credential_binding_id = self._install_default_llm_access_binding(self.container)
+        self.llm_service.sync_profiles(
             (
                 RegisterLlmProfileInput(
                     id=llm_id,
@@ -686,10 +833,11 @@ class OrchestrationTestCaseBase(unittest.TestCase):
                     api_family=LlmApiFamily.OPENAI_RESPONSES,
                     model_name="gpt-5.4-mini",
                     context_window_tokens=context_window_tokens,
+                    credential_binding_id=credential_binding_id,
                 ),
             ),
         )
-        self.container.agent_service.sync_profiles(
+        self.agent_service.sync_profiles(
             (
                 RegisterAgentProfileInput(
                     id="assistant",
@@ -700,6 +848,7 @@ class OrchestrationTestCaseBase(unittest.TestCase):
                     llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id=llm_id),
                     runtime_preferences=runtime_preferences
                     or AgentRuntimePreferences(),
+                    memory=memory or AgentMemoryBinding(),
                 ),
             ),
         )

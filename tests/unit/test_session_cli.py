@@ -1,58 +1,11 @@
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-import tempfile
-import unittest
-from unittest.mock import patch
-
-from typer.testing import CliRunner
-
-from crxzipple.interfaces.cli.main import app
-from tests.unit.skill_test_support import write_skill_package
-from tests.unit.support import SqliteTestHarness
+from tests.unit.cli_test_support import *
 
 
-class SessionCliTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.runner = CliRunner()
-        self._skills_tempdir = tempfile.TemporaryDirectory()
-        skills_root = Path(self._skills_tempdir.name)
-        self._global_skills_patcher = patch(
-            "crxzipple.modules.skills.infrastructure.filesystem.repository.DEFAULT_GLOBAL_SKILLS_DIR",
-            skills_root / "global",
-        )
-        self._system_skills_patcher = patch(
-            "crxzipple.modules.skills.infrastructure.filesystem.repository.DEFAULT_SYSTEM_SKILLS_DIR",
-            skills_root / "system",
-        )
-        self._global_skills_patcher.start()
-        self._system_skills_patcher.start()
-        write_skill_package(
-            skills_root / "system" / "memory-recall",
-            name="memory-recall",
-            description="Recall durable memory before answering.",
-            instructions="# Memory Recall\n\nUse durable memory before answering.\n",
-            allowed_tools=("memory_search", "memory_read", "memory_write_daily"),
-        )
-        self.harness = SqliteTestHarness()
-        self.harness.initialize_schema()
-        self.env = {
-            "APP_DATABASE_URL": self.harness.database_url,
-            "APP_TOOL_OPENAPI_PROVIDER_PATHS": os.pathsep,
-            "APP_AUTHORIZATION_ENABLED": "false",
-        }
-
-    def tearDown(self) -> None:
-        self.harness.close()
-        self._system_skills_patcher.stop()
-        self._global_skills_patcher.stop()
-        self._skills_tempdir.cleanup()
-
+class SessionCliTestCase(CliModuleTestCase):
     def _register_llm_and_agent(self) -> None:
-        llm_result = self.runner.invoke(
-            app,
+        llm_result = self.invoke_cli(
             [
                 "llm",
                 "register-profile",
@@ -60,12 +13,12 @@ class SessionCliTestCase(unittest.TestCase):
                 "openai",
                 "openai_responses",
                 "gpt-5.4-mini",
+                "--credential-binding-id",
+                "openai-api-key",
             ],
-            env=self.env,
         )
         self.assertEqual(llm_result.exit_code, 0)
-        agent_result = self.runner.invoke(
-            app,
+        agent_result = self.invoke_cli(
             [
                 "agent",
                 "register-profile",
@@ -73,15 +26,13 @@ class SessionCliTestCase(unittest.TestCase):
                 "Assistant",
                 "openai.gpt-5.4-mini",
             ],
-            env=self.env,
         )
         self.assertEqual(agent_result.exit_code, 0)
 
     def test_session_commands_manage_history_and_reset_instances(self) -> None:
         self._register_llm_and_agent()
 
-        start_result = self.runner.invoke(
-            app,
+        start_result = self.invoke_cli(
             [
                 "session",
                 "start",
@@ -95,7 +46,6 @@ class SessionCliTestCase(unittest.TestCase):
                 "--metadata",
                 '{"scope":"main"}',
             ],
-            env=self.env,
         )
 
         self.assertEqual(start_result.exit_code, 0)
@@ -105,8 +55,7 @@ class SessionCliTestCase(unittest.TestCase):
         self.assertTrue(start_payload["runtime_binding"]["workspace"])
         first_active_session_id = start_payload["active_session_id"]
 
-        append_user_result = self.runner.invoke(
-            app,
+        append_user_result = self.invoke_cli(
             [
                 "session",
                 "append-message",
@@ -115,10 +64,8 @@ class SessionCliTestCase(unittest.TestCase):
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"hello"}]}',
             ],
-            env=self.env,
         )
-        append_assistant_result = self.runner.invoke(
-            app,
+        append_assistant_result = self.invoke_cli(
             [
                 "session",
                 "append-message",
@@ -127,7 +74,6 @@ class SessionCliTestCase(unittest.TestCase):
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"hi there"}]}',
             ],
-            env=self.env,
         )
 
         self.assertEqual(append_user_result.exit_code, 0)
@@ -143,10 +89,8 @@ class SessionCliTestCase(unittest.TestCase):
         )
         self.assertEqual(append_assistant_payload["sequence_no"], 2)
 
-        history_result = self.runner.invoke(
-            app,
+        history_result = self.invoke_cli(
             ["session", "history", "agent:assistant:main"],
-            env=self.env,
         )
 
         self.assertEqual(history_result.exit_code, 0)
@@ -159,20 +103,16 @@ class SessionCliTestCase(unittest.TestCase):
             ],
         )
 
-        reset_result = self.runner.invoke(
-            app,
+        reset_result = self.invoke_cli(
             ["session", "reset", "agent:assistant:main"],
-            env=self.env,
         )
 
         self.assertEqual(reset_result.exit_code, 0)
         reset_payload = json.loads(reset_result.stdout)
         self.assertNotEqual(reset_payload["active_session_id"], first_active_session_id)
 
-        instances_result = self.runner.invoke(
-            app,
+        instances_result = self.invoke_cli(
             ["session", "instances", "agent:assistant:main"],
-            env=self.env,
         )
         self.assertEqual(instances_result.exit_code, 0)
         instances_payload = json.loads(instances_result.stdout)
@@ -189,16 +129,13 @@ class SessionCliTestCase(unittest.TestCase):
         self.assertEqual(instances_payload[1]["id"], reset_payload["active_session_id"])
         self.assertEqual(instances_payload[1]["status"], "active")
 
-        active_history_result = self.runner.invoke(
-            app,
+        active_history_result = self.invoke_cli(
             ["session", "history", "agent:assistant:main", "--active-only"],
-            env=self.env,
         )
         self.assertEqual(active_history_result.exit_code, 0)
         self.assertEqual(json.loads(active_history_result.stdout), [])
 
-        append_fresh_result = self.runner.invoke(
-            app,
+        append_fresh_result = self.invoke_cli(
             [
                 "session",
                 "append-message",
@@ -207,12 +144,9 @@ class SessionCliTestCase(unittest.TestCase):
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"fresh start"}]}',
             ],
-            env=self.env,
         )
-        get_result = self.runner.invoke(
-            app,
+        get_result = self.invoke_cli(
             ["session", "get", "agent:assistant:main"],
-            env=self.env,
         )
 
         self.assertEqual(append_fresh_result.exit_code, 0)
@@ -229,8 +163,7 @@ class SessionCliTestCase(unittest.TestCase):
     def test_session_append_message_command_supports_structured_payloads(self) -> None:
         self._register_llm_and_agent()
 
-        start_result = self.runner.invoke(
-            app,
+        start_result = self.invoke_cli(
             [
                 "session",
                 "start",
@@ -238,12 +171,10 @@ class SessionCliTestCase(unittest.TestCase):
                 "--agent-id",
                 "assistant",
             ],
-            env=self.env,
         )
         self.assertEqual(start_result.exit_code, 0)
 
-        append_result = self.runner.invoke(
-            app,
+        append_result = self.invoke_cli(
             [
                 "session",
                 "append-message",
@@ -260,7 +191,6 @@ class SessionCliTestCase(unittest.TestCase):
                 "--visibility",
                 "internal",
             ],
-            env=self.env,
         )
 
         self.assertEqual(append_result.exit_code, 0)
@@ -275,8 +205,7 @@ class SessionCliTestCase(unittest.TestCase):
     def test_session_start_command_accepts_reply_payload(self) -> None:
         self._register_llm_and_agent()
 
-        start_result = self.runner.invoke(
-            app,
+        start_result = self.invoke_cli(
             [
                 "session",
                 "start",
@@ -286,7 +215,6 @@ class SessionCliTestCase(unittest.TestCase):
                 "--reply",
                 '{"channel":"webchat","to":"user:1"}',
             ],
-            env=self.env,
         )
 
         self.assertEqual(start_result.exit_code, 0)
@@ -297,8 +225,7 @@ class SessionCliTestCase(unittest.TestCase):
     def test_session_resolve_key_command_routes_and_ensures_main_session(self) -> None:
         self._register_llm_and_agent()
 
-        resolve_result = self.runner.invoke(
-            app,
+        resolve_result = self.invoke_cli(
             [
                 "session",
                 "resolve-key",
@@ -313,7 +240,6 @@ class SessionCliTestCase(unittest.TestCase):
                 '{"scope":"main"}',
                 "--ensure",
             ],
-            env=self.env,
         )
 
         self.assertEqual(resolve_result.exit_code, 0)
@@ -337,10 +263,8 @@ class SessionCliTestCase(unittest.TestCase):
         )
         self.assertEqual(resolve_payload["active_instance"]["kind"], "main")
 
-        instances_result = self.runner.invoke(
-            app,
+        instances_result = self.invoke_cli(
             ["session", "instances", "agent:assistant:main"],
-            env=self.env,
         )
         self.assertEqual(instances_result.exit_code, 0)
         instances_payload = json.loads(instances_result.stdout)

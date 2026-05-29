@@ -1,35 +1,56 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from time import perf_counter
+from dataclasses import dataclass, field
 
-from crxzipple.modules.skills.application.catalog import (
-    build_skill_catalog_prompt,
-)
+from crxzipple.modules.skills.application.catalog_service import SkillCatalogService
+from crxzipple.modules.skills.application.authoring_service import SkillAuthoringService
 from crxzipple.modules.skills.application.events import (
-    SKILL_INSTALL_FAILED_EVENT,
-    SKILL_INSTALL_SUCCEEDED_EVENT,
-    SKILL_READ_FAILED_EVENT,
-    SKILL_READ_SUCCEEDED_EVENT,
-    SKILL_VALIDATE_FAILED_EVENT,
-    SKILL_VALIDATE_SUCCEEDED_EVENT,
     SkillEventEmitter,
-    emit_skill_event,
 )
+from crxzipple.modules.skills.application.governance_service import SkillGovernanceService
 from crxzipple.modules.skills.application.models import (
     InstalledSkill,
     SkillCatalogPrompt,
+    SkillCreateRequest,
+    SkillDraft,
+    SkillDraftAuditRecord,
+    SkillDraftCreateRequest,
+    SkillDraftUpdateRequest,
+    SkillMutationResult,
     SkillPackage,
     SkillReadResult,
+    SkillReadiness,
+    SkillSource,
+    SkillSourceCreateRequest,
+    SkillSourceMutationResult,
+    SkillSourceUpdateRequest,
+    SkillSyncResult,
+    SkillUpdateRequest,
 )
 from crxzipple.modules.skills.application.ports import (
     SkillCatalogPort,
+    SkillGovernancePort,
+    SkillAuthoringDraftRepositoryPort,
     SkillInspectionPort,
     SkillInstallationPort,
     SkillReadPort,
+    SkillOwnerCatalogRepositoryPort,
     SkillRepositoryPort,
 )
-from crxzipple.modules.skills.domain import SkillError, SkillInstallScope, SkillNotFoundError
+from crxzipple.modules.skills.application.owner_state import (
+    SkillOwnerStateService,
+)
+from crxzipple.modules.skills.application.package_service import SkillPackageService
+from crxzipple.modules.skills.application.prompt_resolver import (
+    SkillPromptResolution,
+    SkillPromptResolver,
+    SkillToolReadinessPort,
+)
+from crxzipple.modules.skills.application.readiness_service import SkillReadinessService
+from crxzipple.modules.skills.application.source_service import SkillSourceService
+from crxzipple.modules.skills.domain import (
+    SkillInstallScope,
+)
 
 
 @dataclass(slots=True)
@@ -38,9 +59,140 @@ class SkillManager(
     SkillReadPort,
     SkillInspectionPort,
     SkillInstallationPort,
+    SkillGovernancePort,
 ):
     repository: SkillRepositoryPort
+    owner_catalog_repository: SkillOwnerCatalogRepositoryPort | None = None
     event_emitter: SkillEventEmitter | None = None
+    prompt_resolver: SkillPromptResolver = field(default_factory=SkillPromptResolver)
+    tool_readiness_port: SkillToolReadinessPort | None = None
+    owner_state: SkillOwnerStateService | None = None
+    catalog_service: SkillCatalogService | None = None
+    source_service: SkillSourceService | None = None
+    package_service: SkillPackageService | None = None
+    governance_service: SkillGovernanceService | None = None
+    readiness_service: SkillReadinessService | None = None
+    authoring_service: SkillAuthoringService | None = None
+
+    def __post_init__(self) -> None:
+        if self.owner_state is None:
+            self.owner_state = SkillOwnerStateService(
+                owner_catalog_repository=self.owner_catalog_repository,
+                event_emitter=self.event_emitter,
+            )
+        assert self.owner_state is not None
+        if self.catalog_service is None:
+            self.catalog_service = SkillCatalogService(
+                repository=self.repository,
+                owner_state=self.owner_state,
+                prompt_resolver=self.prompt_resolver,
+            )
+        assert self.catalog_service is not None
+        if self.source_service is None:
+            self.source_service = SkillSourceService(
+                catalog_service=self.catalog_service,
+                owner_state=self.owner_state,
+                owner_catalog_repository=self.owner_catalog_repository,
+                event_emitter=self.event_emitter,
+            )
+        assert self.source_service is not None
+        if self.package_service is None:
+            self.package_service = SkillPackageService(
+                repository=self.repository,
+                catalog_service=self.catalog_service,
+                source_service=self.source_service,
+                owner_state=self.owner_state,
+                event_emitter=self.event_emitter,
+            )
+        if self.governance_service is None:
+            self.governance_service = SkillGovernanceService(
+                catalog_service=self.catalog_service,
+                owner_state=self.owner_state,
+                owner_catalog_repository=self.owner_catalog_repository,
+                event_emitter=self.event_emitter,
+            )
+        if self.readiness_service is None:
+            self.readiness_service = SkillReadinessService(
+                catalog_service=self.catalog_service,
+                owner_state=self.owner_state,
+                prompt_resolver=self.prompt_resolver,
+                tool_readiness_port=self.tool_readiness_port,
+            )
+        if self.authoring_service is None:
+            self.authoring_service = SkillAuthoringService(
+                draft_repository=(
+                    self.owner_catalog_repository
+                    if _supports_authoring_drafts(self.owner_catalog_repository)
+                    else None
+                ),
+                package_service=self.package_service,
+                prompt_resolver=self.prompt_resolver,
+                tool_readiness_port=self.tool_readiness_port,
+                event_emitter=self.event_emitter,
+            )
+
+    def configure_runtime_readiness(
+        self,
+        *,
+        tool_readiness_port: SkillToolReadinessPort,
+    ) -> None:
+        self.tool_readiness_port = tool_readiness_port
+        if self.readiness_service is not None:
+            self.readiness_service.tool_readiness_port = tool_readiness_port
+        if self.authoring_service is not None:
+            self.authoring_service.tool_readiness_port = tool_readiness_port
+
+    def create(self, request: SkillCreateRequest) -> SkillMutationResult:
+        assert self.package_service is not None
+        return self.package_service.create(request)
+
+    def update(self, request: SkillUpdateRequest) -> SkillMutationResult:
+        assert self.package_service is not None
+        return self.package_service.update(request)
+
+    def write_instructions(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        content: str,
+    ) -> SkillMutationResult:
+        assert self.package_service is not None
+        return self.package_service.write_instructions(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            content=content,
+        )
+
+    def write_file(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        path: str,
+        content: str,
+    ) -> SkillMutationResult:
+        assert self.package_service is not None
+        return self.package_service.write_file(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            path=path,
+            content=content,
+        )
+
+    def delete_file(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        path: str,
+    ) -> SkillMutationResult:
+        assert self.package_service is not None
+        return self.package_service.delete_file(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            path=path,
+        )
 
     def build_prompt_catalog(
         self,
@@ -48,11 +200,34 @@ class SkillManager(
         workspace_dir: str | None,
         surface: str,
     ) -> SkillCatalogPrompt | None:
-        return build_skill_catalog_prompt(
-            self.list_available(
-                workspace_dir=workspace_dir,
-                surface=surface,
-            ),
+        assert self.catalog_service is not None
+        return self.catalog_service.build_prompt_catalog(
+            workspace_dir=workspace_dir,
+            surface=surface,
+        )
+
+    def resolve_prompt_catalog(
+        self,
+        *,
+        workspace_dir: str | None,
+        surface: str,
+        available_tool_ids: tuple[str, ...],
+        interface: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
+        active_session_id: str | None = None,
+    ) -> SkillPromptResolution:
+        assert self.catalog_service is not None
+        return self.catalog_service.resolve_prompt_catalog(
+            workspace_dir=workspace_dir,
+            surface=surface,
+            available_tool_ids=available_tool_ids,
+            interface=interface,
+            agent_id=agent_id,
+            run_id=run_id,
+            session_key=session_key,
+            active_session_id=active_session_id,
         )
 
     def list_available(
@@ -60,16 +235,25 @@ class SkillManager(
         *,
         workspace_dir: str | None,
         surface: str,
+        include_disabled: bool = False,
     ) -> tuple[SkillPackage, ...]:
-        packages = self.repository.list_available(workspace_dir=workspace_dir)
-        normalized_surface = surface.strip() if surface else ""
-        if not normalized_surface:
-            return packages
-        return tuple(
-            package
-            for package in packages
-            if not package.manifest.surfaces
-            or normalized_surface in package.manifest.surfaces
+        assert self.catalog_service is not None
+        return self.catalog_service.list_available(
+            workspace_dir=workspace_dir,
+            surface=surface,
+            include_disabled=include_disabled,
+        )
+
+    def _discover_packages(
+        self,
+        *,
+        workspace_dir: str | None,
+        surface: str,
+    ) -> tuple[SkillPackage, ...]:
+        assert self.catalog_service is not None
+        return self.catalog_service.discover_packages(
+            workspace_dir=workspace_dir,
+            surface=surface,
         )
 
     def get(
@@ -78,12 +262,15 @@ class SkillManager(
         workspace_dir: str | None,
         skill_name: str,
         surface: str,
+        include_disabled: bool = False,
     ) -> SkillPackage:
-        normalized_name = skill_name.strip()
-        for package in self.list_available(workspace_dir=workspace_dir, surface=surface):
-            if package.name == normalized_name:
-                return package
-        raise SkillNotFoundError(f"Skill '{normalized_name}' is not available.")
+        assert self.catalog_service is not None
+        return self.catalog_service.get(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            surface=surface,
+            include_disabled=include_disabled,
+        )
 
     def read(
         self,
@@ -93,88 +280,148 @@ class SkillManager(
         path: str | None,
         surface: str,
     ) -> SkillReadResult:
-        started_at = perf_counter()
-        try:
-            self.get(
-                workspace_dir=workspace_dir,
-                skill_name=skill_name,
-                surface=surface,
-            )
-            result = self.repository.read(
-                workspace_dir=workspace_dir,
-                skill_name=skill_name,
-                path=path,
-            )
-        except SkillError as exc:
-            emit_skill_event(
-                self.event_emitter,
-                SKILL_READ_FAILED_EVENT,
-                status="failed",
-                level="error",
-                payload={
-                    "skill": skill_name,
-                    "skill_name": skill_name,
-                    "surface": surface,
-                    "workspace_dir": workspace_dir or "",
-                    "path": path or "",
-                    "duration_ms": _duration_ms(started_at),
-                    "error_message": str(exc),
-                },
-            )
-            raise
-        emit_skill_event(
-            self.event_emitter,
-            SKILL_READ_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.package.name,
-                "skill_name": result.package.name,
-                "surface": surface,
-                "workspace_dir": workspace_dir or "",
-                "path": result.requested_path,
-                "resolved_path": result.resolved_path,
-                "source": result.package.source,
-                "duration_ms": _duration_ms(started_at),
-            },
+        assert self.package_service is not None
+        return self.package_service.read(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            path=path,
+            surface=surface,
         )
-        return result
+
+    def list_sources(
+        self,
+        *,
+        workspace_dir: str | None,
+        surface: str,
+    ) -> tuple[SkillSource, ...]:
+        assert self.source_service is not None
+        return self.source_service.list_sources(
+            workspace_dir=workspace_dir,
+            surface=surface,
+        )
+
+    def create_source(
+        self,
+        request: SkillSourceCreateRequest,
+    ) -> SkillSourceMutationResult:
+        assert self.source_service is not None
+        return self.source_service.create_source(request)
+
+    def update_source(
+        self,
+        request: SkillSourceUpdateRequest,
+    ) -> SkillSourceMutationResult:
+        assert self.source_service is not None
+        return self.source_service.update_source(request)
+
+    def delete_source(
+        self,
+        *,
+        source_id: str,
+    ) -> SkillSourceMutationResult:
+        assert self.source_service is not None
+        return self.source_service.delete_source(source_id=source_id)
+
+    def sync(
+        self,
+        *,
+        workspace_dir: str | None,
+        source_id: str | None,
+        surface: str,
+    ) -> SkillSyncResult:
+        assert self.source_service is not None
+        return self.source_service.sync(
+            workspace_dir=workspace_dir,
+            source_id=source_id,
+            surface=surface,
+        )
+
+    def list_installations(
+        self,
+        *,
+        skill_name: str | None = None,
+        source_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[object, ...]:
+        if self.owner_catalog_repository is None:
+            return ()
+        return self.owner_catalog_repository.list_installations(
+            skill_id=skill_name,
+            source_id=source_id,
+            limit=limit,
+        )
+
+    def readiness(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str | None,
+        surface: str,
+    ) -> dict[str, SkillReadiness]:
+        assert self.readiness_service is not None
+        return self.readiness_service.readiness(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            surface=surface,
+        )
+
+    def enable(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        reason: str | None,
+        surface: str,
+    ) -> SkillMutationResult:
+        assert self.governance_service is not None
+        return self.governance_service.enable(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            reason=reason,
+            surface=surface,
+        )
+
+    def disable(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        reason: str | None,
+        surface: str,
+    ) -> SkillMutationResult:
+        assert self.governance_service is not None
+        return self.governance_service.disable(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            reason=reason,
+            surface=surface,
+        )
+
+    def uninstall(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        surface: str,
+    ) -> SkillMutationResult:
+        assert self.package_service is not None
+        return self.package_service.uninstall(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+            surface=surface,
+        )
+
+    def package_enabled(self, package: SkillPackage) -> bool:
+        assert self.readiness_service is not None
+        return self.readiness_service.package_enabled(package)
 
     def validate(
         self,
         *,
         path: str,
     ) -> SkillPackage:
-        started_at = perf_counter()
-        try:
-            package = self.repository.validate(path=path)
-        except SkillError as exc:
-            emit_skill_event(
-                self.event_emitter,
-                SKILL_VALIDATE_FAILED_EVENT,
-                status="failed",
-                level="error",
-                payload={
-                    "path": path,
-                    "duration_ms": _duration_ms(started_at),
-                    "error_message": str(exc),
-                },
-            )
-            raise
-        emit_skill_event(
-            self.event_emitter,
-            SKILL_VALIDATE_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": package.name,
-                "skill_name": package.name,
-                "path": path,
-                "source": package.source,
-                "root_path": package.root_path,
-                "required_tools": list(package.requirements.required_tools),
-                "duration_ms": _duration_ms(started_at),
-            },
-        )
-        return package
+        assert self.package_service is not None
+        return self.package_service.validate(path=path)
 
     def install(
         self,
@@ -183,47 +430,110 @@ class SkillManager(
         scope: SkillInstallScope,
         workspace_dir: str | None,
     ) -> InstalledSkill:
-        started_at = perf_counter()
-        try:
-            result = self.repository.install(
-                source_dir=source_dir,
-                scope=scope,
-                workspace_dir=workspace_dir,
-            )
-        except SkillError as exc:
-            emit_skill_event(
-                self.event_emitter,
-                SKILL_INSTALL_FAILED_EVENT,
-                status="failed",
-                level="error",
-                payload={
-                    "source_dir": source_dir,
-                    "scope": scope.value,
-                    "workspace_dir": workspace_dir or "",
-                    "duration_ms": _duration_ms(started_at),
-                    "error_message": str(exc),
-                },
-            )
-            raise
-        emit_skill_event(
-            self.event_emitter,
-            SKILL_INSTALL_SUCCEEDED_EVENT,
-            status="succeeded",
-            payload={
-                "skill": result.package.name,
-                "skill_name": result.package.name,
-                "source": result.package.source,
-                "source_dir": source_dir,
-                "scope": result.scope.value,
-                "workspace_dir": workspace_dir or "",
-                "target_root": result.target_root,
-                "target_path": result.target_path,
-                "required_tools": list(result.package.requirements.required_tools),
-                "duration_ms": _duration_ms(started_at),
-            },
+        assert self.package_service is not None
+        return self.package_service.install(
+            source_dir=source_dir,
+            scope=scope,
+            workspace_dir=workspace_dir,
         )
-        return result
+
+    def create_draft(self, request: SkillDraftCreateRequest) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.create_draft(request)
+
+    def update_draft(
+        self,
+        *,
+        draft_id: str,
+        request: SkillDraftUpdateRequest,
+    ) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.update_draft(
+            draft_id=draft_id,
+            request=request,
+        )
+
+    def list_drafts(
+        self,
+        *,
+        status: str | None = None,
+        skill_name: str | None = None,
+        run_id: str | None = None,
+        workspace_dir: str | None = None,
+        limit: int = 100,
+    ) -> tuple[SkillDraft, ...]:
+        assert self.authoring_service is not None
+        return self.authoring_service.list_drafts(
+            status=status,
+            skill_name=skill_name,
+            run_id=run_id,
+            workspace_dir=workspace_dir,
+            limit=limit,
+        )
+
+    def get_draft(self, draft_id: str) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.get_draft(draft_id)
+
+    def validate_draft(self, draft_id: str) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.validate_draft(draft_id)
+
+    def build_draft_diff(self, draft_id: str) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.build_diff(draft_id)
+
+    def apply_draft(
+        self,
+        *,
+        draft_id: str,
+        reason: str | None = None,
+    ) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.apply_draft(draft_id=draft_id, reason=reason)
+
+    def reject_draft(
+        self,
+        *,
+        draft_id: str,
+        reason: str | None = None,
+    ) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.reject_draft(
+            draft_id=draft_id,
+            reason=reason,
+        )
+
+    def delete_draft(self, draft_id: str) -> SkillDraft:
+        assert self.authoring_service is not None
+        return self.authoring_service.delete_draft(draft_id)
+
+    def list_draft_audit(
+        self,
+        *,
+        draft_id: str,
+        limit: int = 100,
+    ) -> tuple[SkillDraftAuditRecord, ...]:
+        assert self.authoring_service is not None
+        return self.authoring_service.list_draft_audit(
+            draft_id=draft_id,
+            limit=limit,
+        )
 
 
-def _duration_ms(started_at: float) -> int:
-    return max(0, round((perf_counter() - started_at) * 1000))
+def _supports_authoring_drafts(
+    repository: object | None,
+) -> SkillAuthoringDraftRepositoryPort | None:
+    if repository is None:
+        return None
+    required = (
+        "save_draft",
+        "get_draft",
+        "list_drafts",
+        "delete_draft",
+        "append_draft_audit",
+        "list_draft_audit",
+    )
+    if all(hasattr(repository, name) for name in required):
+        return repository  # type: ignore[return-value]
+    return None

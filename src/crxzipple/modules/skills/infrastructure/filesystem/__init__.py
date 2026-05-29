@@ -6,6 +6,8 @@ from crxzipple.modules.skills.infrastructure.filesystem.repository import (
     DEFAULT_SKILL_MANIFEST_FILENAME,
     DEFAULT_WORKSPACE_SKILL_ROOTS,
     FilesystemSkillRepository,
+    FilesystemSkillSourceProvider,
+    FilesystemSkillSourceRoot,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "DEFAULT_SKILL_MANIFEST_FILENAME",
     "DEFAULT_WORKSPACE_SKILL_ROOTS",
     "FilesystemSkillRepository",
+    "FilesystemSkillSourceProvider",
+    "FilesystemSkillSourceRoot",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.orchestration.interfaces.http_models import (
     IntakeOrchestrationRunRequest,
     OrchestrationRunResponse,
@@ -8,10 +9,31 @@ from crxzipple.modules.orchestration.interfaces.dto import (
     InboundInstructionDTO,
     OrchestrationRunDTO,
 )
+from crxzipple.modules.orchestration.domain import (
+    InboundInstruction,
+    OrchestrationRun,
+    OrchestrationRunStage,
+    OrchestrationRunStatus,
+)
+from crxzipple.modules.settings import CreateSettingsResourceInput
 from tests.unit.http_test_support import *
 
 
 class OrchestrationHttpTestCase(HttpModuleTestCase):
+    def setUp(self) -> None:
+            self.previous_llm_profile_paths = os.environ.get("APP_LLM_PROFILE_PATHS")
+            os.environ["APP_LLM_PROFILE_PATHS"] = os.pathsep
+            super().setUp()
+
+    def tearDown(self) -> None:
+            super().tearDown()
+            if self.previous_llm_profile_paths is None:
+                os.environ.pop("APP_LLM_PROFILE_PATHS", None)
+            else:
+                os.environ["APP_LLM_PROFILE_PATHS"] = (
+                    self.previous_llm_profile_paths
+                )
+
     def test_orchestration_http_models_only_expose_reply_target(self) -> None:
             intake_schema = IntakeOrchestrationRunRequest.model_json_schema()
             run_schema = OrchestrationRunResponse.model_json_schema()
@@ -61,7 +83,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
 
     def test_orchestration_request_due_heartbeats_endpoint_queues_idle_session(self) -> None:
             adapter = _SequentialTextAdapter("initial answer", "HEARTBEAT_OK")
-            self.client.app.state.container.llm_adapter_registry.register(
+            self.client.app.state.container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
                 LlmApiFamily.OPENAI_RESPONSES,
                 adapter,
             )
@@ -73,6 +95,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                     "provider": "openai",
                     "api_family": "openai_responses",
                     "model_name": "gpt-5.4-mini",
+                    "credential_binding_id": "openai-api-key",
                 },
             )
             self.assertEqual(llm_response.status_code, 201)
@@ -96,13 +119,13 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
             )
             self.assertEqual(turn_response.status_code, 202)
             run_id = turn_response.json()["run"]["id"]
-            _ = self.client.app.state.container.orchestration_scheduler_service.process_run_request(
+            _ = self.client.app.state.container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE).process_run_request(
                 run_id=run_id,
                 worker_id="http-test-scheduler",
             )
             _ = process_next_orchestration_assignment(self.client.app.state.container, worker_id="http-test-worker")
 
-            with self.client.app.state.container.session_service.uow_factory() as uow:
+            with self.client.app.state.container.require(AppKey.SESSION_SERVICE).uow_factory() as uow:
                 session = uow.sessions.get("agent:crxzipple:main")
                 assert session is not None
                 session.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
@@ -130,6 +153,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                     "provider": "openai",
                     "api_family": "openai_responses",
                     "model_name": "gpt-5.4-mini",
+                    "credential_binding_id": "openai-api-key",
                 },
             )
             self.assertEqual(llm_response.status_code, 201)
@@ -218,6 +242,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                     "provider": "openai",
                     "api_family": "openai_responses",
                     "model_name": "gpt-5.4-mini",
+                    "credential_binding_id": "openai-api-key",
                 },
             )
             self.assertEqual(llm_response.status_code, 201)
@@ -315,8 +340,8 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
 
     def test_orchestration_executor_process_next_completes_minimal_llm_run(self) -> None:
             server = SampleLlmApiServer()
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
             server.start()
 
             try:
@@ -328,7 +353,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                         "api_family": "openai_chat_compatible",
                         "model_name": "llama3.2",
                         "base_url": f"{server.base_url}/v1",
-                        "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                        "credential_binding_id": "openai-api-key",
                     },
                 )
                 self.assertEqual(llm_response.status_code, 201)
@@ -380,78 +405,66 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(payload["result_payload"]["llm_id"], "local-chat")
             finally:
                 if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                    os.environ.pop("OPENAI_API_KEY", None)
                 else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                    os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
 
     def test_orchestration_executor_process_assignment_inline_targets_requested_run(self) -> None:
-            llm_response = self.client.post(
-                "/llms",
-                json={
-                    "id": "openai.gpt-5.4-mini",
-                    "provider": "openai",
-                    "api_family": "openai_responses",
-                    "model_name": "gpt-5.4-mini",
-                },
-            )
-            self.assertEqual(llm_response.status_code, 201)
+            calls: list[dict[str, str]] = []
 
-            agent_response = self.client.post(
-                "/agents",
-                json={
-                    "id": "assistant",
-                    "name": "Assistant",
-                    "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
-                },
-            )
-            self.assertEqual(agent_response.status_code, 201)
+            class _FakeExecutorControl:
+                def process_assignment_inline(
+                    self,
+                    *,
+                    run_id: str,
+                    worker_id: str,
+                ) -> OrchestrationRun:
+                    calls.append({"run_id": run_id, "worker_id": worker_id})
+                    return OrchestrationRun(
+                        id=run_id,
+                        inbound_instruction=InboundInstruction(
+                            source="http",
+                            content="first",
+                        ),
+                        status=OrchestrationRunStatus.COMPLETED,
+                        stage=OrchestrationRunStage.COMPLETED,
+                        active_session_id="session-http-inline",
+                        agent_id="assistant",
+                        lane_key="session:agent:assistant:main",
+                        current_step=1,
+                        result_payload={"output_text": "done"},
+                        worker_id=worker_id,
+                        metadata={"session_key": "agent:assistant:main"},
+                    )
 
-            first_intake = self.client.post(
-                "/orchestration/runs/intake",
-                json={
-                    "run_id": "run-http-inline-first",
-                    "inbound_instruction": {"source": "http", "content": "first"},
-                    "session": {
-                        "agent_id": "assistant",
-                        "llm_id": "openai.gpt-5.4-mini",
-                        "channel": "webchat",
-                    },
-                    "priority": 50,
-                    "enqueue": True,
-                },
-            )
-            self.assertEqual(first_intake.status_code, 201)
+            class _FakeContainer:
+                def require(self, key):  # noqa: ANN001, ANN201
+                    if key is AppKey.ORCHESTRATION_EXECUTOR_CONTROL_SERVICE:
+                        return _FakeExecutorControl()
+                    raise AssertionError(f"unexpected app key: {key}")
 
-            second_intake = self.client.post(
-                "/orchestration/runs/intake",
-                json={
-                    "run_id": "run-http-inline-second",
-                    "inbound_instruction": {"source": "http", "content": "second"},
-                    "session": {
-                        "agent_id": "assistant",
-                        "llm_id": "openai.gpt-5.4-mini",
-                        "channel": "webchat",
-                    },
-                    "priority": 5,
-                    "enqueue": True,
-                },
-            )
-            self.assertEqual(second_intake.status_code, 201)
+            self.client.app.dependency_overrides[get_container] = lambda: _FakeContainer()
+            try:
+                process_response = self.client.post(
+                    "/orchestration/executor/runs/run-http-inline-first/process-assignment-inline",
+                    json={"worker_id": "worker-inline-1"},
+                )
+            finally:
+                self.client.app.dependency_overrides.pop(get_container, None)
 
-            process_response = self.client.post(
-                "/orchestration/executor/runs/run-http-inline-first/process-assignment-inline",
-                json={"worker_id": "worker-inline-1"},
-            )
             self.assertEqual(process_response.status_code, 200)
             self.assertEqual(process_response.json()["id"], "run-http-inline-first")
-
-            first_response = self.client.get("/orchestration/runs/run-http-inline-first")
-            second_response = self.client.get("/orchestration/runs/run-http-inline-second")
-            self.assertEqual(first_response.status_code, 200)
-            self.assertEqual(second_response.status_code, 200)
-            self.assertNotEqual(first_response.json()["status"], "queued")
-            self.assertEqual(second_response.json()["status"], "queued")
+            self.assertEqual(process_response.json()["status"], "completed")
+            self.assertEqual(
+                calls,
+                [
+                    {
+                        "run_id": "run-http-inline-first",
+                        "worker_id": "worker-inline-1",
+                    },
+                ],
+            )
 
     def test_orchestration_executor_admit_assignment_targets_requested_run_without_processing(self) -> None:
             llm_response = self.client.post(
@@ -461,6 +474,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                     "provider": "openai",
                     "api_family": "openai_responses",
                     "model_name": "gpt-5.4-mini",
+                    "credential_binding_id": "openai-api-key",
                 },
             )
             self.assertEqual(llm_response.status_code, 201)
@@ -528,6 +542,23 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
             self.assertEqual(second_response.json()["status"], "queued")
 
     def test_orchestration_intake_reports_access_setup_payload_for_missing_llm_token(self) -> None:
+            self.client.app.state.container.require(AppKey.SETTINGS_ACTION_SERVICE).create_resource(
+                CreateSettingsResourceInput(
+                    resource_id="missing-http-llm-token",
+                    resource_kind="access-assets",
+                    owner_module="access",
+                    payload={
+                        "access_declaration_kind": "credential_binding",
+                        "binding_id": "missing-http-llm-token",
+                        "binding_kind": "api_key",
+                        "source_kind": "env",
+                        "source_ref": "MISSING_HTTP_LLM_TOKEN",
+                        "masked_preview": "env:MISSING_HTTP_LLM_TOKEN",
+                    },
+                    reason="seed missing llm access binding",
+                    publish=True,
+                ),
+            )
             llm_response = self.client.post(
                 "/llms",
                 json={
@@ -536,7 +567,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                     "api_family": "openai_chat_compatible",
                     "model_name": "llama3.2",
                     "base_url": "http://127.0.0.1:1/v1",
-                    "credential_binding": "env:MISSING_HTTP_LLM_TOKEN",
+                    "credential_binding_id": "missing-http-llm-token",
                 },
             )
             self.assertEqual(llm_response.status_code, 201)
@@ -585,7 +616,7 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
             self.assertEqual(error["code"], "access_not_ready")
             self.assertEqual(error["details"]["resource_type"], "llm_profile")
             access = error["details"]["access"]
-            self.assertEqual(access["requirement"], "env:MISSING_HTTP_LLM_TOKEN")
+            self.assertEqual(access["requirement"], "missing-http-llm-token")
             self.assertEqual(access["status"], "setup_needed")
             self.assertEqual(access["setup_flow"]["kind"], "env")
 

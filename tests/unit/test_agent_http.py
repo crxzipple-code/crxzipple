@@ -14,7 +14,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     json={
                         "id": "writer",
                         "name": "Writer",
-                        "description": "Writes concise summaries.",
                         "identity": {"display_name": "Writer Agent", "emoji": ":memo:"},
                         "instruction_policy": {
                             "system_prompt": "Be concise.",
@@ -52,12 +51,12 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertTrue((home_dir / "SOUL.md").is_file())
                 self.assertTrue((home_dir / "USER.md").is_file())
                 self.assertTrue((home_dir / "IDENTITY.md").is_file())
-                self.assertTrue((home_dir / "MEMORY.md").is_file())
-                self.assertTrue((home_dir / "memory").is_dir())
+                self.assertFalse((home_dir / "MEMORY.md").exists())
+                self.assertFalse((home_dir / "memory").exists())
                 self.assertTrue((home_dir / "skills").is_dir())
                 self.assertTrue((home_dir / ".state").is_dir())
                 with self.assertRaises(SettingsNotFoundError):
-                    self.client.app.state.container.settings_query_service.get_resource(
+                    self.client.app.state.container.require(AppKey.SETTINGS_QUERY_SERVICE).get_resource(
                         "writer",
                     )
 
@@ -128,7 +127,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(disable_without_body_response.status_code, 200)
                 self.assertFalse(disable_without_body_response.json()["enabled"])
                 with self.assertRaises(SettingsNotFoundError):
-                    self.client.app.state.container.settings_query_service.get_resource(
+                    self.client.app.state.container.require(AppKey.SETTINGS_QUERY_SERVICE).get_resource(
                         "writer",
                     )
 
@@ -143,17 +142,17 @@ class AgentHttpTestCase(HttpModuleTestCase):
                         "api_family": "openai_responses",
                         "model_name": "gpt-5",
                         "capabilities": ["tool_calling"],
-                        "credential_binding": "env:AGENT_TEST_OPENAI_TOKEN",
+                        "credential_binding_id": "openai-api-key",
                     },
                 )
                 self.assertEqual(llm_response.status_code, 201)
-                self.client.app.state.container.tool_service.register(
-                    RegisterToolInput(
-                        id="agent-search",
-                        name="Agent Search",
-                        description="Search for agent test data.",
-                        access_requirements=("env:AGENT_TEST_TOOL_TOKEN",),
-                    ),
+                seed_catalog_tool(
+                    self.client.app.state.container,
+                    tool_id="agent-search",
+                    name="Agent Search",
+                    description="Search for agent test data.",
+                    access_requirements=("env:AGENT_TEST_TOOL_TOKEN",),
+                    required_effect_ids=("weather_data",),
                 )
                 create_response = self.client.post(
                     "/agents",
@@ -171,7 +170,15 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     },
                 )
                 self.assertEqual(create_response.status_code, 201)
-                self.client.app.state.container.authorization_service.grant_agent_effect_authorization(
+                self.assertNotIn(
+                    "skill_ids",
+                    create_response.json()["runtime_preferences"]["attrs"],
+                )
+                self.assertNotIn(
+                    "tool_ids",
+                    create_response.json()["runtime_preferences"]["attrs"],
+                )
+                self.client.app.state.container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_effect_authorization(
                     agent_id="writer",
                     effect_id="weather_data",
                 )
@@ -183,21 +190,20 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(payload["profile_id"], "writer")
                 self.assertEqual(payload["summary"]["llm_routes"], 1)
                 self.assertEqual(payload["summary"]["tools"], 1)
-                self.assertEqual(payload["summary"]["skills"], 1)
                 self.assertEqual(payload["summary"]["authorization_grants"], 1)
+                self.assertNotIn("skills", payload["summary"])
+                self.assertNotIn("skills", payload)
                 self.assertEqual(payload["llm_routes"][0]["llm_id"], "writer-llm")
                 self.assertTrue(payload["llm_routes"][0]["resolved"])
                 self.assertEqual(payload["llm_routes"][0]["model_name"], "gpt-5")
                 self.assertEqual(payload["tools"][0]["tool_id"], "agent-search")
                 self.assertTrue(payload["tools"][0]["resolved"])
-                self.assertEqual(payload["skills"][0]["skill_id"], "memory-recall")
-                self.assertTrue(payload["skills"][0]["resolved"])
                 self.assertIn(
                     "env:AGENT_TEST_TOOL_TOKEN",
                     [item["requirement"] for item in payload["access_grants"]],
                 )
                 self.assertIn(
-                    "env:AGENT_TEST_OPENAI_TOKEN",
+                    "openai-api-key",
                     [item["requirement"] for item in payload["access_grants"]],
                 )
                 self.assertEqual(
@@ -212,7 +218,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     any(item["source"] == "agent" for item in payload["trace"]),
                 )
                 with self.assertRaises(SettingsNotFoundError):
-                    self.client.app.state.container.settings_query_service.get_resource(
+                    self.client.app.state.container.require(AppKey.SETTINGS_QUERY_SERVICE).get_resource(
                         "writer",
                     )
 
@@ -229,7 +235,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     json={
                         "id": "writer",
                         "name": "Writer",
-                        "description": "Initial profile.",
                         "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
                         "runtime_preferences": {"home_dir": str(home_dir)},
                     },
@@ -240,7 +245,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     "/agents/writer",
                     json={
                         "name": "Writer Updated",
-                        "description": "Updated profile.",
                         "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4"},
                         "reason": "refresh profile",
                         "actor": "unit-test",
@@ -271,7 +275,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertFalse((home_dir / "agent.json").exists())
                 self.assertTrue((home_dir / "AGENT.md").exists())
                 with self.assertRaises(SettingsNotFoundError):
-                    self.client.app.state.container.settings_query_service.get_resource(
+                    self.client.app.state.container.require(AppKey.SETTINGS_QUERY_SERVICE).get_resource(
                         "writer",
                     )
 
@@ -286,7 +290,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     AgentProfileSettings(
                         id="writer",
                         name="Writer",
-                        description="Default writer profile.",
                         identity={"display_name": "Writer Agent"},
                         instruction_policy={
                             "system_prompt": "Be concise.",
@@ -377,7 +380,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     str(workspace),
                 )
                 self.assertIn("AGENTS.md -> AGENT.md", payload["copied_paths"])
-                self.assertIn("memory/preferences.md", payload["copied_paths"])
+                self.assertNotIn("memory/preferences.md", payload["copied_paths"])
                 self.assertIn("skills/weather/SKILL.md", payload["copied_paths"])
                 self.assertTrue((home_dir / "agent.json").is_file())
                 self.assertEqual(
@@ -388,10 +391,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     (home_dir / "SOUL.md").read_text(encoding="utf-8"),
                     "calm voice",
                 )
-                self.assertEqual(
-                    (home_dir / "memory" / "preferences.md").read_text(encoding="utf-8"),
-                    "prefers concise replies",
-                )
+                self.assertFalse((home_dir / "memory" / "preferences.md").exists())
                 self.assertTrue((home_dir / "skills" / "weather" / "SKILL.md").is_file())
                 self.assertTrue((workspace / "AGENTS.md").is_file())
 
@@ -524,7 +524,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                         {
                             "id": "writer",
                             "name": "Legacy Writer",
-                            "description": "Legacy home config.",
                             "default_llm_id": "openai.gpt-5.4",
                             "workdir": str(root / "legacy-workdir"),
                             "sandbox_mode": "sandbox",
@@ -542,7 +541,7 @@ class AgentHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(sync_response.status_code, 200)
                 synced = sync_response.json()["profile"]
                 self.assertEqual(synced["name"], "Legacy Writer")
-                self.assertEqual(synced["description"], "Legacy home config.")
+                self.assertNotIn("description", synced)
                 self.assertEqual(
                     synced["llm_routing_policy"]["default_llm_id"],
                     "openai.gpt-5.4",
@@ -612,7 +611,6 @@ class AgentHttpTestCase(HttpModuleTestCase):
                     {
                         "id": "file-only-writer",
                         "name": "File Only Writer",
-                        "description": "Loaded directly from agent_home.",
                         "enabled": True,
                         "instruction_policy": {
                             "system_prompt": "You only exist in files.",

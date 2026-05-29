@@ -108,8 +108,23 @@ export interface TurnStepView {
   badges: Array<{ label: string; tone: "neutral" | "info" | "success" | "warning" | "danger" }>;
   linked_entities?: UiLinkedEntity[];
   actions?: UiRuntimeAction[];
+  approval?: ApprovalRequestDetail | null;
   details_available: boolean;
   trace: TraceContext;
+}
+
+export interface ApprovalRequestDetail {
+  request_id: string;
+  effect_id: string;
+  label: string;
+  reason: string;
+  tool_name?: string | null;
+  tool_ids: string[];
+  tool_arguments: Record<string, string | number | boolean | null>;
+  execution_mode?: string | null;
+  execution_strategy?: string | null;
+  execution_environment?: string | null;
+  draft_id?: string | null;
 }
 
 export interface WorkbenchInspectorView {

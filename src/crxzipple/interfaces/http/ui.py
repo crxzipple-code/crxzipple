@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.interfaces.http.ui_models import (
     ConsoleSectionResponse,
@@ -28,20 +28,20 @@ router = APIRouter()
 
 def _workbench_provider(container: AppContainer) -> WorkbenchReadModelProvider:
     return WorkbenchReadModelProvider(
-        run_query=container.orchestration_run_query_service,
-        tool_query=container.tool_service,
-        artifact_query=container.artifact_service,
-        llm_query=container.llm_service,
-        agent_query=container.agent_service,
+        run_query=container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
+        tool_query=container.require(AppKey.TOOL_QUERY_SERVICE),
+        artifact_query=container.require(AppKey.ARTIFACT_SERVICE),
+        llm_query=container.require(AppKey.LLM_SERVICE),
+        agent_query=container.require(AppKey.AGENT_SERVICE),
     )
 
 
 def _trace_provider(container: AppContainer) -> EventTraceReadModelProvider:
-    if container.events_service is None:
+    if container.require(AppKey.EVENTS_SERVICE) is None:
         raise HTTPException(status_code=503, detail="Event service is not available.")
     return EventTraceReadModelProvider(
-        events_service=container.events_service,
-        definition_registry=container.event_definition_registry,
+        events_service=container.require(AppKey.EVENTS_SERVICE),
+        definition_registry=container.require(AppKey.EVENT_DEFINITION_REGISTRY),
     )
 
 
@@ -64,15 +64,15 @@ def bootstrap(
         ConsoleSection(
             id="events",
             owner="events",
-            status="ready" if container.events_service is not None else "degraded",
+            status="ready" if container.require(AppKey.EVENTS_SERVICE) is not None else "degraded",
             updated_at=None,
-            data={"stream_available": container.events_service is not None},
+            data={"stream_available": container.require(AppKey.EVENTS_SERVICE) is not None},
         ),
     ]
     return UiBootstrapResponse(
         version=1,
-        app_name=container.settings.app_name,
-        environment=container.settings.environment,
+        app_name=container.require(AppKey.CORE_SETTINGS).app_name,
+        environment=container.require(AppKey.CORE_SETTINGS).environment,
         routes=[
             "/ui/bootstrap",
             "/ui/access",
@@ -80,7 +80,6 @@ def bootstrap(
             "/ui/access/assets/{asset_id}",
             "/ui/access/policies",
             "/ui/access/consumers",
-            "/ui/access/audits",
             "/authorization/policies",
             "/authorization/policies/{policy_id}",
             "/authorization/policies/{policy_id}/enable",
@@ -95,6 +94,7 @@ def bootstrap(
             "/ui/workbench/runs/{run_id}/steps",
             "/operations/orchestration",
             "/operations/tool",
+            "/operations/browser",
             "/operations/llm",
             "/operations/access",
             "/operations/channels",
@@ -105,6 +105,7 @@ def bootstrap(
             "/operations/runtime",
             "/operations/orchestration/overview",
             "/operations/tool/overview",
+            "/operations/browser/overview",
             "/operations/llm/overview",
             "/operations/access/overview",
             "/operations/channels/overview",
@@ -133,6 +134,7 @@ def bootstrap(
             "/operations/daemon/services/{service_key}/reconcile",
             "/operations/daemon/services/{service_key}/stop",
             "/operations/skills/validate",
+            "/operations/skills/sync",
             "/operations/skills/install",
             "/turns",
             "/turns/{run_id}",
@@ -220,7 +222,7 @@ def _trace_aliases(container: AppContainer, trace_id: str) -> set[str]:
     aliases = {normalized} if normalized else set()
     if not normalized:
         return aliases
-    for run in container.orchestration_run_query_service.list_runs():
+    for run in container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).list_runs():
         metadata_trace_id = run.metadata.get("trace_id")
         metadata_correlation_id = run.metadata.get("correlation_id")
         if normalized in {

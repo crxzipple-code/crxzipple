@@ -33,6 +33,10 @@ class DbCliTestCase(CliModuleTestCase):
                         row[1]
                         for row in connection.execute("PRAGMA table_info(orchestration_runs)")
                     }
+                    tool_run_columns = {
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(tool_runs)")
+                    }
                     orchestration_run_indexes = {
                         row[1]
                         for row in connection.execute("PRAGMA index_list(orchestration_runs)")
@@ -42,9 +46,22 @@ class DbCliTestCase(CliModuleTestCase):
                     ).fetchone()
 
                 self.assertNotIn("tools", tables)
+                self.assertIn("tool_sources", tables)
+                self.assertIn("tool_functions", tables)
+                self.assertIn("tool_provider_backends", tables)
                 self.assertIn("tool_runs", tables)
                 self.assertIn("tool_run_assignments", tables)
                 self.assertIn("tool_workers", tables)
+                self.assertIn("metadata_payload", tool_run_columns)
+                self.assertTrue(
+                    {
+                        "function_id",
+                        "function_revision",
+                        "source_id",
+                        "source_revision",
+                        "schema_hash",
+                    }.issubset(tool_run_columns),
+                )
                 self.assertIn("sessions", tables)
                 self.assertIn("session_messages", tables)
                 self.assertIn("session_instances", tables)
@@ -108,6 +125,9 @@ class DbCliTestCase(CliModuleTestCase):
                     ).fetchone()
 
                 self.assertNotIn("tools", tables)
+                self.assertNotIn("tool_sources", tables)
+                self.assertNotIn("tool_functions", tables)
+                self.assertNotIn("tool_provider_backends", tables)
                 self.assertNotIn("tool_runs", tables)
                 self.assertNotIn("tool_run_assignments", tables)
                 self.assertNotIn("tool_workers", tables)

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 from typing import Any
+from typing import Callable
 
 from crxzipple.modules.browser.domain import (
     BrowserControlCommand,
@@ -14,41 +14,8 @@ from crxzipple.modules.browser.domain import (
     ResolvedBrowserProfile,
 )
 
-from .chrome_mcp import ChromeMcpClientPool
 from .engines import CdpControlEngine
-
-
-def _normalize_probe_message(value: object) -> str:
-    return str(value or "").strip()
-
-
-def _classify_mcp_failure(message: str) -> tuple[str, str]:
-    normalized = message.lower()
-    if "could not start command" in normalized:
-        return (
-            "mcp-command-unavailable",
-            "Chrome MCP could not start. Install Node.js/NPX and make sure the configured MCP command is available.",
-        )
-    if "did not expose list_pages" in normalized or "invalid tools/list payload" in normalized:
-        return (
-            "mcp-incompatible",
-            "Chrome MCP started, but the configured command did not expose the expected browser tools.",
-        )
-    if (
-        "timed out while waiting" in normalized
-        or "terminated while waiting" in normalized
-        or "terminated unexpectedly" in normalized
-        or "session for profile" in normalized
-        or "returned an error for method" in normalized
-    ):
-        return (
-            "awaiting-existing-browser",
-            "Chrome MCP is available, but it could not attach to a running signed-in Chromium browser session yet.",
-        )
-    return (
-        "mcp-unavailable",
-        message or "Chrome MCP is not available for this profile.",
-    )
+from .engines import _has_expected_remote_allow_origins
 
 
 def _probe_launch_policy(
@@ -83,7 +50,6 @@ def _probe_plan(
 @dataclass(frozen=True, slots=True)
 class BrowserProfileProbeService:
     cdp_control: CdpControlEngine
-    mcp_pool: ChromeMcpClientPool
     playwright_probe: Callable[..., None] | None = None
 
     def probe(
@@ -94,51 +60,12 @@ class BrowserProfileProbeService:
         capabilities: BrowserProfileCapabilities,
         runtime_state: BrowserProfileRuntimeState | None = None,
     ) -> dict[str, Any]:
-        if capabilities.control_family == "mcp-control":
-            return self._probe_mcp(
-                system=system,
-                profile=profile,
-            )
         return self._probe_cdp(
             system=system,
             profile=profile,
             capabilities=capabilities,
             runtime_state=runtime_state,
         )
-
-    def _probe_mcp(
-        self,
-        *,
-        system: BrowserSystemConfig,
-        profile: ResolvedBrowserProfile,
-    ) -> dict[str, Any]:
-        try:
-            tabs = self.mcp_pool.list_tabs(
-                profile_name=profile.name,
-                system=system,
-                user_data_dir=profile.user_data_dir,
-            )
-            return {
-                "attempted": True,
-                "ok": True,
-                "status": "mcp-connected",
-                "message": "Chrome MCP can attach to the existing browser session.",
-                "pid": self.mcp_pool.get_pid(
-                    profile_name=profile.name,
-                    system=system,
-                    user_data_dir=profile.user_data_dir,
-                ),
-                "tab_count": len(tabs),
-            }
-        except BrowserValidationError as exc:
-            status, friendly_message = _classify_mcp_failure(_normalize_probe_message(exc))
-            return {
-                "attempted": True,
-                "ok": False,
-                "status": status,
-                "message": friendly_message,
-                "raw_message": _normalize_probe_message(exc),
-            }
 
     def _probe_cdp(
         self,
@@ -160,6 +87,21 @@ class BrowserProfileProbeService:
             if isinstance(payload, dict):
                 raw_browser_ref = payload.get("webSocketDebuggerUrl")
                 browser_ref = str(raw_browser_ref).strip() if raw_browser_ref else None
+            profile_mismatch = self._local_managed_profile_mismatch(plan=plan)
+            if profile_mismatch is not None:
+                return {
+                    "attempted": True,
+                    "ok": False,
+                    "status": "cdp-profile-mismatch",
+                    "message": (
+                        "CDP endpoint responded, but the process on that port does not "
+                        "match this managed browser profile. Stop or restart the profile."
+                    ),
+                    "cdp_base_url": base_url,
+                    "browser_ref": browser_ref,
+                    "tab_count": len(tabs),
+                    **profile_mismatch,
+                }
             if (
                 callable(self.playwright_probe)
                 and capabilities.action_family == "cdp-backed-playwright"
@@ -194,12 +136,17 @@ class BrowserProfileProbeService:
                 "tab_count": len(tabs),
             }
         except BrowserValidationError as exc:
+            message = str(exc)
             if capabilities.mode != "local-managed":
                 return {
                     "attempted": True,
                     "ok": False,
-                    "status": "cdp-unreachable",
-                    "message": str(exc),
+                    "status": (
+                        "cdp-not-configured"
+                        if "requires a configured CDP URL or port" in message
+                        else "cdp-unreachable"
+                    ),
+                    "message": message,
                 }
 
         executable_path = None
@@ -230,4 +177,51 @@ class BrowserProfileProbeService:
             "user_data_dir": user_data_dir,
             "matching_process": matching_process,
             "port_process": port_process,
+        }
+
+    def _local_managed_profile_mismatch(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+    ) -> dict[str, Any] | None:
+        if plan.capabilities.mode != "local-managed" or plan.profile.cdp_port is None:
+            return None
+        matching_process = self.cdp_control._find_matching_managed_process(plan=plan)  # noqa: SLF001
+        if matching_process is not None:
+            if bool(matching_process.get("headless")) == bool(plan.system.headless):
+                return None
+            return {
+                "mismatch_reason": "headless-mode",
+                "conflict_pid": matching_process.get("pid"),
+            }
+        port_process = self.cdp_control._find_process_for_cdp_port(plan=plan)  # noqa: SLF001
+        if port_process is None:
+            return None
+        expected_user_data_dir = self.cdp_control._try_resolve_user_data_dir(plan=plan)  # noqa: SLF001
+        port_command = str(port_process.get("command", "")).strip()
+        expected_headless = bool(plan.system.headless)
+        actual_headless = "--headless" in port_command
+        matches_remote_allow_origins = _has_expected_remote_allow_origins(
+            command=port_command,
+            host=plan.system.cdp_host,
+            port=int(plan.profile.cdp_port),
+        )
+        matches_user_data_dir = (
+            expected_user_data_dir is not None
+            and f"--user-data-dir={expected_user_data_dir}" in port_command
+        )
+        if matches_user_data_dir and actual_headless == expected_headless and matches_remote_allow_origins:
+            return None
+        mismatch_fields: list[str] = []
+        if not matches_user_data_dir:
+            mismatch_fields.append("user_data_dir")
+        if actual_headless != expected_headless:
+            mismatch_fields.append("headless")
+        if not matches_remote_allow_origins:
+            mismatch_fields.append("remote_allow_origins")
+        return {
+            "mismatch_reason": "port-process",
+            "mismatch_fields": mismatch_fields,
+            "conflict_pid": port_process.get("pid"),
+            "expected_user_data_dir": expected_user_data_dir,
         }

@@ -15,6 +15,7 @@ from crxzipple.modules.access.domain import (
 from crxzipple.shared.access import (
     AccessAssetRef,
     AccessConsumerRef,
+    AccessCredentialKind,
     AccessDecision,
     AccessDecisionEffect,
     AccessReadiness,
@@ -25,6 +26,21 @@ from crxzipple.shared.access import (
 
 
 class AccessGovernanceContractsTestCase(unittest.TestCase):
+    def test_credential_kind_contract_excludes_legacy_direct_sources(self) -> None:
+        self.assertEqual(
+            {kind.value for kind in AccessCredentialKind},
+            {
+                "api_key",
+                "bearer_token",
+                "basic",
+                "oauth2_account",
+                "openid_connect",
+                "app_secret",
+                "webhook_secret",
+                "certificate",
+            },
+        )
+
     def test_resource_registry_indexes_governed_resources(self) -> None:
         credential = AccessResourceDefinition(
             resource_id="credential:openai",

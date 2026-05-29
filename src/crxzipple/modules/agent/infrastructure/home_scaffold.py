@@ -15,7 +15,7 @@ def ensure_agent_home_scaffold(profile: AgentProfile) -> None:
     root = Path(home_dir).expanduser()
     root.mkdir(parents=True, exist_ok=True)
 
-    for relative_dir in ("memory", "skills", ".state"):
+    for relative_dir in ("skills", ".state"):
         (root / relative_dir).mkdir(parents=True, exist_ok=True)
 
     _write_if_missing(root / "agent.json", render_agent_home_config(profile, root=root))
@@ -27,12 +27,6 @@ def ensure_agent_home_scaffold(profile: AgentProfile) -> None:
     _write_if_missing(root / "SOUL.md", _build_soul_markdown())
     _write_if_missing(root / "USER.md", _build_user_markdown())
     _write_if_missing(root / "IDENTITY.md", _build_identity_markdown(profile))
-    _write_if_missing(
-        root / "MEMORY.md",
-        _build_memory_markdown(profile),
-        alias_paths=(root / "memory.md",),
-    )
-    _write_if_missing(root / ".state" / "memory-binding.json", "{}\n")
 
 
 def _write_if_missing(
@@ -53,18 +47,15 @@ def _build_agent_markdown(profile: AgentProfile) -> str:
         "## Role",
         f"- Agent ID: {profile.id}",
         f"- Name: {profile.name}",
+        "- Purpose: Define this agent's ongoing responsibilities here.",
     ]
-    if profile.description:
-        lines.append(f"- Purpose: {profile.description}")
-    else:
-        lines.append("- Purpose: Define this agent's ongoing responsibilities here.")
     lines.extend(
         [
             "",
             "## Working Rules",
             "- Follow the current user request and the runtime context.",
             "- Use tools when they are necessary and available.",
-            "- Keep durable long-term facts in MEMORY.md or memory/ entries.",
+            "- Use Memory tools for durable facts instead of editing memory files directly.",
             "",
         ],
     )
@@ -109,8 +100,3 @@ def _build_identity_markdown(profile: AgentProfile) -> str:
         "",
     ]
     return "\n".join(lines)
-
-
-def _build_memory_markdown(profile: AgentProfile) -> str:
-    del profile
-    return ""

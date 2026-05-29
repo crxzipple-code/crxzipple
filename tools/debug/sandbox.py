@@ -27,5 +27,5 @@ async def _sandbox_echo_handler(
     )
 
 
-def sandbox_echo(_container: Any):
+def sandbox_echo(_deps: Any):
     return _sandbox_echo_handler

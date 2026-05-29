@@ -187,6 +187,9 @@ def seed_core_settings_resources(
             if existing.resource_kind != seed.ref.resource_kind:
                 skipped += 1
                 continue
+            if seed.ref.resource_kind == "runtime-defaults":
+                skipped += 1
+                continue
             if _effective_payload_matches_seed(
                 services.queries,
                 existing.id,
@@ -283,6 +286,7 @@ def collect_core_settings_resources(settings: object) -> tuple[BootstrapSettings
     seeds.extend(_memory_config_resources(settings))
     seeds.extend(_runtime_default_resources(settings))
     seeds.extend(_environment_resources(settings))
+    seeds.extend(_access_config_resources(settings))
     return tuple(seeds)
 
 
@@ -340,13 +344,14 @@ def _tool_catalog_resources(settings: object) -> tuple[BootstrapSettingsResource
 def _memory_config_resources(settings: object) -> tuple[BootstrapSettingsResource, ...]:
     payload = {
         "id": "default",
+        "storage_root": getattr(settings, "memory_storage_root", None),
         "retrieval_backend": getattr(settings, "memory_retrieval_backend", "keyword"),
         "vector_provider": getattr(settings, "memory_vector_provider", "local"),
         "vector_model": getattr(settings, "memory_vector_model", None),
         "vector_base_url": getattr(settings, "memory_vector_base_url", None),
-        "vector_credential_binding": getattr(
+        "vector_credential_binding_id": getattr(
             settings,
-            "memory_vector_credential_binding",
+            "memory_vector_credential_binding_id",
             None,
         ),
         "vector_timeout_seconds": getattr(settings, "memory_vector_timeout_seconds", 30),
@@ -367,62 +372,71 @@ def _memory_config_resources(settings: object) -> tuple[BootstrapSettingsResourc
 
 def _runtime_default_resources(settings: object) -> tuple[BootstrapSettingsResource, ...]:
     payload = {
-        "id": "defaults",
-        "orchestration_run_lease_seconds": getattr(
-            settings,
-            "orchestration_run_lease_seconds",
-            30,
-        ),
-        "orchestration_run_heartbeat_seconds": getattr(
-            settings,
-            "orchestration_run_heartbeat_seconds",
-            5.0,
-        ),
-        "orchestration_executor_max_concurrent_assignments": getattr(
-            settings,
-            "orchestration_executor_max_concurrent_assignments",
-            4,
-        ),
-        "orchestration_auto_compaction_enabled": getattr(
-            settings,
-            "orchestration_auto_compaction_enabled",
-            True,
-        ),
-        "orchestration_auto_compaction_reserve_tokens": getattr(
-            settings,
-            "orchestration_auto_compaction_reserve_tokens",
-            20_000,
-        ),
-        "orchestration_auto_compaction_soft_threshold_tokens": getattr(
-            settings,
-            "orchestration_auto_compaction_soft_threshold_tokens",
-            4_000,
-        ),
-        "tool_run_max_attempts": getattr(settings, "tool_run_max_attempts", 3),
-        "tool_run_lease_seconds": getattr(settings, "tool_run_lease_seconds", 30),
-        "tool_run_heartbeat_seconds": getattr(settings, "tool_run_heartbeat_seconds", 5.0),
-        "tool_worker_max_in_flight": getattr(settings, "tool_worker_max_in_flight", 4),
-        "tool_worker_default_run_concurrency": getattr(
-            settings,
-            "tool_worker_default_run_concurrency",
-            4,
-        ),
-        "tool_worker_image_run_concurrency": getattr(
-            settings,
-            "tool_worker_image_run_concurrency",
-            4,
-        ),
-        "tool_worker_shared_state_run_concurrency": getattr(
-            settings,
-            "tool_worker_shared_state_run_concurrency",
-            1,
-        ),
-        "tool_remote_default_max_concurrency": getattr(
-            settings,
-            "tool_remote_default_max_concurrency",
-            16,
-        ),
+        "config_id": "defaults",
         "enabled": True,
+        "orchestration": {
+            "run_lease_seconds": getattr(
+                settings,
+                "orchestration_run_lease_seconds",
+                30,
+            ),
+            "run_heartbeat_seconds": getattr(
+                settings,
+                "orchestration_run_heartbeat_seconds",
+                5.0,
+            ),
+            "executor_max_concurrent_assignments": getattr(
+                settings,
+                "orchestration_executor_max_concurrent_assignments",
+                4,
+            ),
+            "auto_compaction_enabled": getattr(
+                settings,
+                "orchestration_auto_compaction_enabled",
+                True,
+            ),
+            "auto_compaction_reserve_tokens": getattr(
+                settings,
+                "orchestration_auto_compaction_reserve_tokens",
+                20_000,
+            ),
+            "auto_compaction_soft_threshold_tokens": getattr(
+                settings,
+                "orchestration_auto_compaction_soft_threshold_tokens",
+                4_000,
+            ),
+        },
+        "tool_worker": {
+            "run_max_attempts": getattr(settings, "tool_run_max_attempts", 3),
+            "run_lease_seconds": getattr(settings, "tool_run_lease_seconds", 30),
+            "run_heartbeat_seconds": getattr(
+                settings,
+                "tool_run_heartbeat_seconds",
+                5.0,
+            ),
+            "max_in_flight": getattr(settings, "tool_worker_max_in_flight", 4),
+            "default_run_concurrency": getattr(
+                settings,
+                "tool_worker_default_run_concurrency",
+                4,
+            ),
+            "image_run_concurrency": getattr(
+                settings,
+                "tool_worker_image_run_concurrency",
+                4,
+            ),
+            "shared_state_run_concurrency": getattr(
+                settings,
+                "tool_worker_shared_state_run_concurrency",
+                1,
+            ),
+            "remote_default_max_concurrency": getattr(
+                settings,
+                "tool_remote_default_max_concurrency",
+                16,
+            ),
+        },
+        "metadata": {"schema_version": 1},
     }
     return (
         _resource(
@@ -466,6 +480,205 @@ def _environment_resources(settings: object) -> tuple[BootstrapSettingsResource,
             display_name=f"Environment: {environment}",
             payload=payload,
             source="bootstrap:environment",
+        ),
+    )
+
+
+def _access_config_resources(settings: object) -> tuple[BootstrapSettingsResource, ...]:
+    del settings
+    return (
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="openai-api-key",
+            display_name="OpenAI API Key",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "openai-api-key",
+                "binding_kind": "api_key",
+                "source_kind": "env",
+                "source_ref": "OPENAI_API_KEY",
+                "masked_preview": "env:OPENAI_API_KEY",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="codex-oauth-default",
+            display_name="Codex OAuth Account",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "codex-oauth-default",
+                "binding_kind": "oauth2_account",
+                "source_kind": "oauth_account",
+                "source_ref": "openai-codex:default",
+                "masked_preview": "oauth_account",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {
+                    "settings_owner": "access_config",
+                    "provider_id": "openai-codex",
+                },
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="brave-search-api-key",
+            display_name="Brave Search API Key",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "brave-search-api-key",
+                "binding_kind": "api_key",
+                "source_kind": "env",
+                "source_ref": "BRAVE_SEARCH_API_KEY",
+                "masked_preview": "env:BRAVE_SEARCH_API_KEY",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="itick-api-token",
+            display_name="iTick API Token",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "itick-api-token",
+                "binding_kind": "bearer_token",
+                "source_kind": "env",
+                "source_ref": "ITICK_API_TOKEN",
+                "masked_preview": "env:ITICK_API_TOKEN",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="access-binding:lark-app-id",
+            display_name="Lark App ID",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "access-binding:lark-app-id",
+                "binding_kind": "api_key",
+                "source_kind": "env",
+                "source_ref": "LARK_APP_ID",
+                "masked_preview": "env:LARK_APP_ID",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="access-binding:lark-app-secret",
+            display_name="Lark App Secret",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "access-binding:lark-app-secret",
+                "binding_kind": "app_secret",
+                "source_kind": "env",
+                "source_ref": "LARK_APP_SECRET",
+                "masked_preview": "env:LARK_APP_SECRET",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="access-binding:lark-verification-token",
+            display_name="Lark Verification Token",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "access-binding:lark-verification-token",
+                "binding_kind": "webhook_secret",
+                "source_kind": "env",
+                "source_ref": "LARK_VERIFICATION_TOKEN",
+                "masked_preview": "env:LARK_VERIFICATION_TOKEN",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="access-binding:lark-encrypt-key",
+            display_name="Lark Encrypt Key",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "access-binding:lark-encrypt-key",
+                "binding_kind": "webhook_secret",
+                "source_kind": "env",
+                "source_ref": "LARK_ENCRYPT_KEY",
+                "masked_preview": "env:LARK_ENCRYPT_KEY",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="access-binding:lark-bot-open-id",
+            display_name="Lark Bot Open ID",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "access-binding:lark-bot-open-id",
+                "binding_kind": "api_key",
+                "source_kind": "env",
+                "source_ref": "LARK_BOT_OPEN_ID",
+                "masked_preview": "env:LARK_BOT_OPEN_ID",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
+        ),
+        _resource(
+            kind="access-assets",
+            owner="access",
+            resource_id="access-binding:webhook-secret",
+            display_name="Webhook Secret",
+            payload={
+                "access_declaration_kind": "credential_binding",
+                "binding_id": "access-binding:webhook-secret",
+                "binding_kind": "webhook_secret",
+                "source_kind": "env",
+                "source_ref": "WEBHOOK_SECRET",
+                "masked_preview": "env:WEBHOOK_SECRET",
+                "status": "active",
+                "redaction_policy": {"mode": "metadata_only"},
+                "metadata": {"settings_owner": "access_config"},
+                "enabled": True,
+            },
+            source="bootstrap:access",
         ),
     )
 

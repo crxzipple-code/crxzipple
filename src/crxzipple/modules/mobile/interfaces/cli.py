@@ -5,7 +5,7 @@ from typing import Any
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.mobile.domain import MobileExecutionError, MobileValidationError
 
@@ -25,7 +25,7 @@ def _load_payload(raw: str | None) -> dict[str, Any]:
 
 
 def _default_device(container) -> str | None:  # noqa: ANN001
-    return container.mobile_system_config_store.load().default_device
+    return container.require(AppKey.MOBILE_SYSTEM_CONFIG_STORE).load().default_device
 
 
 def build_cli() -> typer.Typer:
@@ -41,7 +41,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            result = container.mobile_facade.execute(
+            result = container.require(AppKey.MOBILE_FACADE).execute(
                 MobileControlRequest(
                     device_name=device or _default_device(container),
                     kind=kind,
@@ -51,7 +51,7 @@ def build_cli() -> typer.Typer:
             )
         except (MobileValidationError, MobileExecutionError) as exc:
             raise typer.BadParameter(str(exc)) from exc
-        echo_data(container.mobile_result_serializer.serialize(result))
+        echo_data(container.require(AppKey.MOBILE_RESULT_SERIALIZER).serialize(result))
 
     @app.command("act")
     def execute_action(
@@ -65,7 +65,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            result = container.mobile_facade.execute(
+            result = container.require(AppKey.MOBILE_FACADE).execute(
                 MobileActionRequest(
                     device_name=device or _default_device(container),
                     kind=kind,
@@ -77,6 +77,6 @@ def build_cli() -> typer.Typer:
             )
         except (MobileValidationError, MobileExecutionError) as exc:
             raise typer.BadParameter(str(exc)) from exc
-        echo_data(container.mobile_result_serializer.serialize(result))
+        echo_data(container.require(AppKey.MOBILE_RESULT_SERIALIZER).serialize(result))
 
     return app

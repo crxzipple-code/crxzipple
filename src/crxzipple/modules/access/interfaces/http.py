@@ -6,12 +6,13 @@ from fastapi import APIRouter, Depends, Query
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.access.application.actions import (
     AccessActionRequest as AccessActionCommand,
     AccessActionService,
 )
+from crxzipple.modules.access.application.oauth import AccessOAuthService
 from crxzipple.modules.access.application.setup import AccessSetupSessionService
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsActionAdapter,
@@ -177,8 +178,8 @@ def execute_access_action(
     payload: AccessActionRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AccessActionResultResponse:
-    governance_repository = container.access_governance_repository
-    audit_repository = container.access_action_audit_repository
+    governance_repository = container.require(AppKey.ACCESS_GOVERNANCE_REPOSITORY)
+    audit_repository = container.require(AppKey.ACCESS_ACTION_AUDIT_REPOSITORY)
     service = AccessActionService(
         binding_repository=governance_repository,
         audit_repository=audit_repository,
@@ -186,11 +187,17 @@ def execute_access_action(
             repository=governance_repository,
             audit_repository=audit_repository,
         ),
-        settings_action_adapter=AccessSettingsActionAdapter(
-            action_service=container.settings_action_service,
-            query_service=container.settings_query_service,
-            environment=container.settings.environment,
+        settings_action_adapter=(settings_action_adapter := AccessSettingsActionAdapter(
+            action_service=container.require(AppKey.SETTINGS_ACTION_SERVICE),
+            query_service=container.require(AppKey.SETTINGS_QUERY_SERVICE),
+            environment=container.require(AppKey.CORE_SETTINGS).environment,
+        )),
+        oauth_service=AccessOAuthService(
+            repository=governance_repository,
+            token_store=container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE),
+            settings_action_adapter=settings_action_adapter,
         ),
+        event_publisher=container.require(AppKey.EVENTS_SERVICE),
     )
     try:
         result = service.execute(
@@ -259,9 +266,9 @@ def get_access_setup(
 
 
 def _access_service(container: AppContainer):
-    service = container.access_service
+    service = container.require(AppKey.ACCESS_SERVICE)
     service.config_view = AccessSettingsConfigProvider(
-        getattr(container, "settings_query_service", None),
-        environment=getattr(getattr(container, "settings", None), "environment", None),
+        container.require(AppKey.SETTINGS_QUERY_SERVICE),
+        environment=container.require(AppKey.CORE_SETTINGS).environment,
     )
     return service

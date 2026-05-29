@@ -6,7 +6,7 @@ import shutil
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.process import ProcessNotFoundError, ProcessValidationError
 
@@ -124,7 +124,7 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         container = ensure_container(ctx)
-        session = container.process_service.start_command(
+        session = container.require(AppKey.PROCESS_SERVICE).start_command(
             command=_normalize_command(command),
             shell=_resolve_shell_executable(),
             working_directory=_resolve_working_directory(working_directory),
@@ -154,7 +154,7 @@ def build_cli() -> typer.Typer:
         )
         sessions = [
             _session_to_payload(session)
-            for session in container.process_service.list_sessions()
+            for session in container.require(AppKey.PROCESS_SERVICE).list_sessions()
             if _matches_filters(
                 session,
                 session_key=session_key,
@@ -170,7 +170,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            session = container.process_service.get_session(process_id=process_id)
+            session = container.require(AppKey.PROCESS_SERVICE).get_session(process_id=process_id)
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
         echo_data(_session_to_payload(session))
@@ -185,10 +185,10 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            container.process_service.get_session(process_id=process_id)
+            container.require(AppKey.PROCESS_SERVICE).get_session(process_id=process_id)
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
-        output = container.process_service.read_output(
+        output = container.require(AppKey.PROCESS_SERVICE).read_output(
             process_id=process_id,
             stdout_offset=stdout_offset,
             stderr_offset=stderr_offset,
@@ -203,10 +203,10 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            container.process_service.get_session(process_id=process_id)
+            container.require(AppKey.PROCESS_SERVICE).get_session(process_id=process_id)
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
-        session = container.process_service.terminate_session(process_id=process_id)
+        session = container.require(AppKey.PROCESS_SERVICE).terminate_session(process_id=process_id)
         echo_data(_session_to_payload(session))
 
     @app.command("remove")
@@ -216,11 +216,11 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            session = container.process_service.get_session(process_id=process_id)
+            session = container.require(AppKey.PROCESS_SERVICE).get_session(process_id=process_id)
         except ProcessNotFoundError as exc:
             _exit_not_found(str(exc))
         try:
-            container.process_service.remove_session(process_id=process_id)
+            container.require(AppKey.PROCESS_SERVICE).remove_session(process_id=process_id)
         except ProcessValidationError as exc:
             raise typer.BadParameter(str(exc)) from exc
         echo_data(

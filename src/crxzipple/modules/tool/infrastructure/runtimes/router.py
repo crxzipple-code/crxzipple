@@ -26,8 +26,8 @@ class ToolRuntimeRouter:
         self.sandbox_executor = sandbox_executor
         self.remote_executor = remote_executor
 
-    def list_local_tools(self) -> list[Tool]:
-        return self.local_executor.list_local_tools()
+    def list_registered_tools(self) -> list[Tool]:
+        return self.local_executor.list_registered_tools()
 
     async def execute(
         self,

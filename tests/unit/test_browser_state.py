@@ -35,14 +35,21 @@ class BrowserStateTestCase(unittest.TestCase):
 
             self.assertTrue((root.root_dir / "layout.json").is_file())
             self.assertTrue((root.config_dir / "system.json").is_file())
+            self.assertTrue(root.pools_dir.is_dir())
+            self.assertTrue(root.allocations_dir.is_dir())
             self.assertTrue((root.profiles_dir / "crxzipple" / "profile.json").is_file())
             self.assertTrue((root.profiles_dir / "crxzipple" / "userdata").is_dir())
             self.assertTrue((root.profiles_dir / "user" / "profile.json").is_file())
             payload = json.loads((root.config_dir / "system.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["default_profile"], "crxzipple")
             self.assertEqual([item["name"] for item in payload["profiles"]], ["crxzipple", "user"])
-            self.assertIn("mcp_command", payload)
-            self.assertGreaterEqual(payload["mcp_timeout_seconds"], 1)
+            crxzipple_profile = payload["profiles"][0]
+            self.assertIsNone(crxzipple_profile["profile_directory"])
+            self.assertTrue(crxzipple_profile["autostart"])
+            self.assertEqual(crxzipple_profile["proxy_mode"], "none")
+            self.assertEqual(crxzipple_profile["proxy_bypass_list"], [])
+            self.assertNotIn("mcp_command", payload)
+            self.assertNotIn("mcp_timeout_seconds", payload)
             self.assertIsNone(payload["managed_tab_limit"])
 
     def test_file_backed_runtime_state_store_persists_state(self) -> None:
@@ -92,7 +99,13 @@ class BrowserStateTestCase(unittest.TestCase):
                     "cdp_url": "http://browser.example:9555",
                     "cdp_port": 9555,
                     "user_data_dir": None,
+                    "profile_directory": "Profile 1",
                     "attach_only": False,
+                    "autostart": True,
+                    "proxy_mode": "static",
+                    "proxy_server": "socks5://127.0.0.1:7890",
+                    "proxy_bypass_list": ["127.0.0.1", "localhost"],
+                    "proxy_binding_id": None,
                 }
             )
             (root.config_dir / "system.json").write_text(
@@ -109,9 +122,14 @@ class BrowserStateTestCase(unittest.TestCase):
                 ["crxzipple", "user", "work"],
             )
             self.assertEqual(loaded.profiles[-1].cdp_url, "http://browser.example:9555")
+            self.assertEqual(loaded.profiles[-1].profile_directory, "Profile 1")
+            self.assertEqual(loaded.profiles[-1].proxy_mode, "static")
+            self.assertEqual(loaded.profiles[-1].proxy_server, "socks5://127.0.0.1:7890")
+            self.assertEqual(
+                loaded.profiles[-1].proxy_bypass_list,
+                ("127.0.0.1", "localhost"),
+            )
             self.assertEqual(loaded.managed_tab_limit, 3)
-            self.assertTrue(loaded.mcp_command)
-            self.assertGreaterEqual(loaded.mcp_timeout_seconds, 1)
             self.assertTrue((root.profiles_dir / "work" / "profile.json").is_file())
             self.assertTrue((root.profiles_dir / "work" / "userdata").is_dir())
 

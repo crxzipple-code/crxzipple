@@ -25,5 +25,5 @@ async def _remote_echo_handler(
     )
 
 
-def remote_echo(_container: Any):
+def remote_echo(_deps: Any):
     return _remote_echo_handler

@@ -40,6 +40,19 @@ class BrowserCdpUrlHelpersTestCase(unittest.TestCase):
             ),
         )
 
+    def test_candidate_cdp_http_bases_allows_runtime_only_endpoint_candidates(self) -> None:
+        self.assertEqual(
+            candidate_cdp_http_bases(
+                None,
+                cached_base_url="http://127.0.0.1:18800",
+                browser_ref="ws://localhost:18801/devtools/browser/abc",
+            ),
+            (
+                "http://127.0.0.1:18800",
+                "http://localhost:18801",
+            ),
+        )
+
     def test_normalize_cdp_ws_url_uses_cdp_base_host(self) -> None:
         self.assertEqual(
             normalize_cdp_ws_url(

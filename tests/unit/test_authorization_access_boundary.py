@@ -55,6 +55,72 @@ def test_authorization_runtime_is_not_access_backed() -> None:
     assert offenders == []
 
 
+def test_authorization_module_does_not_depend_on_access_credentials() -> None:
+    sources = {
+        **_read_files(SRC_ROOT / "modules" / "authorization"),
+        SRC_ROOT / "interfaces" / "authorization.py": (
+            SRC_ROOT / "interfaces" / "authorization.py"
+        ).read_text(encoding="utf-8"),
+    }
+    forbidden = (
+        "crxzipple.modules.access",
+        "crxzipple.shared.access",
+        "AccessCredential",
+        "AccessReadiness",
+        "CredentialBinding",
+    )
+
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {needle}"
+        for path, text in sources.items()
+        for needle in forbidden
+        if needle in text
+    ]
+
+    assert offenders == []
+
+
+def test_llm_tool_channel_runtime_do_not_read_business_credentials_from_env() -> None:
+    sources = {
+        **_read_files(SRC_ROOT / "modules" / "llm"),
+        **_read_files(SRC_ROOT / "modules" / "tool"),
+        **_read_files(SRC_ROOT / "modules" / "channels"),
+    }
+    forbidden_runtime_reads = (
+        "os.environ[",
+        "os.environ.get(",
+        "os.getenv(",
+        "getenv(",
+    )
+
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {needle}"
+        for path, text in sources.items()
+        for needle in forbidden_runtime_reads
+        if needle in text
+    ]
+
+    assert offenders == []
+
+
+def test_llm_profile_config_uses_access_binding_ids() -> None:
+    config_root = REPO_ROOT / "config" / "llm_profiles"
+    forbidden = ("env:", "file:", "codex_auth_json", "auth_ref")
+    offenders: list[str] = []
+
+    for path in sorted(config_root.rglob("*")):
+        if path.suffix not in {".json", ".yaml", ".yml"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if any(marker in line for marker in forbidden):
+                offenders.append(
+                    f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}",
+                )
+
+    assert offenders == []
+
+
 def test_orchestration_internal_authorization_names_do_not_use_access() -> None:
     sources = _read_files(SRC_ROOT / "modules" / "orchestration")
     forbidden = (

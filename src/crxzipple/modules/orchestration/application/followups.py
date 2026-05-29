@@ -12,9 +12,9 @@ from crxzipple.modules.orchestration.application.commands import (
 from crxzipple.modules.orchestration.application.intake_commands import (
     AcceptOrchestrationRunInput,
 )
+from crxzipple.modules.orchestration.application.ports import SessionLookupPort
 from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
 from crxzipple.modules.orchestration.domain.value_objects import InboundInstruction
-from crxzipple.modules.session.application import SessionApplicationService
 
 logger = get_logger(__name__)
 
@@ -31,7 +31,7 @@ class SubmitBoundTurnPort(Protocol):
 
 @dataclass(slots=True)
 class SessionsSpawnFollowupService:
-    session_service: SessionApplicationService | None
+    session_service: SessionLookupPort | None
     get_run: Callable[[str], OrchestrationRun]
     submit_bound_turn: SubmitBoundTurnPort
     queue_followup_signal: Callable[[str], object]

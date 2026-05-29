@@ -46,7 +46,7 @@ class ArtifactsHttpTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
-        self.client.app.state.container.engine.dispose()
+        self.client.app.state.container.close()
         self.harness.close()
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()

@@ -10,6 +10,9 @@ from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
 )
+from crxzipple.modules.operations.application.read_models.event_buckets import (
+    recent_event_buckets,
+)
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
     OperationsChartSectionModel,
@@ -23,11 +26,32 @@ from crxzipple.modules.operations.application.read_models.models import (
     OperationsTableSectionModel,
     RuntimeActionModel,
 )
+from crxzipple.modules.skills.application.events import (
+    SKILL_DRAFT_APPLIED_EVENT,
+    SKILL_DRAFT_APPLY_FAILED_EVENT,
+    SKILL_DRAFT_DELETED_EVENT,
+    SKILL_DRAFT_REJECTED_EVENT,
+    SKILL_OPERATION_EVENT_NAMES,
+    SKILL_READ_FAILED_EVENT,
+    SKILL_READ_SUCCEEDED_EVENT,
+    SKILL_RESOLUTION_COMPLETED_EVENT,
+)
+from crxzipple.modules.skills.application.environment import unsupported_platforms
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
-_MAX_SKILL_EVENT_TOPICS = 160
+
 _MAX_RECENT_SKILL_EVENTS = 240
 _RECENT_SKILL_TOPIC_LIMIT = 80
+_SKILL_EVENT_TOPICS = tuple(
+    f"events.named.{event_name}" for event_name in SKILL_OPERATION_EVENT_NAMES
+)
+_AUTHORING_EVENT_PREFIX = "skills.authoring.draft."
+_AUTHORING_TERMINAL_EVENTS = {
+    SKILL_DRAFT_APPLIED_EVENT,
+    SKILL_DRAFT_REJECTED_EVENT,
+    SKILL_DRAFT_DELETED_EVENT,
+}
+_AUTHORING_TERMINAL_STATUSES = {"applied", "rejected", "expired"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +97,10 @@ class SkillsOperationsPage:
     access_requirements: OperationsTableSectionModel
     capability_requirements: OperationsTableSectionModel
     resolution_logs: OperationsTableSectionModel
+    skill_reads: OperationsTableSectionModel
     resolver_detail: OperationsTableSectionModel
+    authoring_backlog: OperationsTableSectionModel
+    authoring_failures: OperationsTableSectionModel
     import_normalize: tuple[RuntimeActionModel, ...]
     skill_package_sources: OperationsChartSectionModel
     conflicts_overrides: OperationsTableSectionModel
@@ -87,7 +114,12 @@ class _SkillRecord:
     status: str
     tone: str
     missing_tools: tuple[str, ...]
+    missing_access: tuple[str, ...]
+    missing_effects: tuple[str, ...]
+    unsupported_surfaces: tuple[str, ...]
+    unsupported_platforms: tuple[str, ...]
     access_checks: tuple[Any, ...]
+    readiness_event: OperationsObservedEvent | None = None
 
 
 @dataclass(slots=True)
@@ -129,11 +161,19 @@ class SkillsOperationsReadModelProvider:
             events_service=self.events_service,
             definition_registry=self.event_definition_registry,
         )
+        event_buckets = recent_event_buckets(
+            self.operations_observation,
+            module="skills",
+            hours=24,
+            limit=1000,
+        )
+        readiness_events = _latest_readiness_events_by_skill(events)
         records = tuple(
             _record_for_package(
                 package,
                 tool_ids=tool_ids,
                 access_service=self.access_service,
+                readiness_event=readiness_events.get(_skill_name(package)),
             )
             for package in packages
         )
@@ -143,7 +183,10 @@ class SkillsOperationsReadModelProvider:
         access_requirements = _access_requirements_table(records)
         capability_requirements = _capability_requirements_table(records, tool_ids)
         logs = _resolution_logs_table(events)
+        skill_reads = _skill_reads_table(events)
         resolver_detail = _resolver_detail_table(records, tool_ids)
+        authoring_backlog = _authoring_backlog_table(events)
+        authoring_failures = _authoring_failures_table(events)
         conflicts = _conflicts_table(packages)
         profile_usage = _profile_usage_table(
             self.agent_service,
@@ -157,7 +200,7 @@ class SkillsOperationsReadModelProvider:
             events=events,
         )
         installed = _skills_table(visible_records, total=len(filtered_records))
-        top_used = _requirement_footprint_table(records)
+        top_used = _skill_usage_table(events)
         sources = _source_chart(records)
 
         return SkillsOperationsPage(
@@ -178,6 +221,7 @@ class SkillsOperationsReadModelProvider:
                 missing=missing_capabilities,
                 access=access_requirements,
                 events=events,
+                event_buckets=event_buckets,
             ),
             tabs=_tabs(
                 installed=installed.total,
@@ -185,7 +229,10 @@ class SkillsOperationsReadModelProvider:
                 access=access_requirements.total,
                 capability=capability_requirements.total,
                 logs=logs.total,
+                reads=skill_reads.total,
                 resolver=resolver_detail.total,
+                authoring=authoring_backlog.total,
+                authoring_failures=authoring_failures.total,
                 conflicts=conflicts.total,
                 profile=profile_usage.total,
             ),
@@ -198,7 +245,10 @@ class SkillsOperationsReadModelProvider:
             access_requirements=access_requirements,
             capability_requirements=capability_requirements,
             resolution_logs=logs,
+            skill_reads=skill_reads,
             resolver_detail=resolver_detail,
+            authoring_backlog=authoring_backlog,
+            authoring_failures=authoring_failures,
             import_normalize=_import_actions(),
             skill_package_sources=sources,
             conflicts_overrides=conflicts,
@@ -247,10 +297,17 @@ def _record_for_package(
     *,
     tool_ids: set[str],
     access_service: Any | None,
+    readiness_event: OperationsObservedEvent | None = None,
 ) -> _SkillRecord:
     requirements = getattr(package, "requirements", None)
     required_tools = tuple(_items(getattr(requirements, "required_tools", ())))
     missing_tools = tuple(tool for tool in required_tools if tool not in tool_ids)
+    missing_access_values: tuple[str, ...] = ()
+    missing_effects: tuple[str, ...] = ()
+    unsupported_surfaces: tuple[str, ...] = ()
+    unsupported_platform_values = unsupported_platforms(
+        tuple(_items(getattr(requirements, "supported_platforms", ()))),
+    )
     access_values = _access_values(requirements)
     access_checks = tuple(
         _safe_access_check(access_service, requirement)
@@ -261,12 +318,52 @@ def _record_for_package(
         for check in access_checks
         if check is not None and not bool(getattr(check, "ready", False))
     )
-    if missing_tools or missing_access:
+    if readiness_event is not None:
+        payload = readiness_event.payload
+        missing_tools = _items(payload.get("missing_tools"))
+        missing_access_values = _items(payload.get("missing_access"))
+        missing_effects = _items(payload.get("missing_effects"))
+        unsupported_surfaces = _items(payload.get("unsupported_surfaces"))
+        unsupported_platform_values = _items(payload.get("unsupported_platforms"))
+        status = _status_label(payload.get("status") or readiness_event.status)
+        return _SkillRecord(
+            package=package,
+            status=status,
+            tone="success" if status == "Ready" else "warning",
+            missing_tools=missing_tools,
+            missing_access=missing_access_values,
+            missing_effects=missing_effects,
+            unsupported_surfaces=unsupported_surfaces,
+            unsupported_platforms=unsupported_platform_values,
+            access_checks=tuple(check for check in access_checks if check is not None),
+            readiness_event=readiness_event,
+        )
+    missing_access_values = tuple(
+        _text(getattr(getattr(check, "requirement", None), "raw", ""))
+        for check in missing_access
+    )
+    if unsupported_platform_values:
+        return _SkillRecord(
+            package=package,
+            status="Unsupported",
+            tone="warning",
+            missing_tools=missing_tools,
+            missing_access=missing_access_values,
+            missing_effects=(),
+            unsupported_surfaces=(),
+            unsupported_platforms=unsupported_platform_values,
+            access_checks=tuple(check for check in access_checks if check is not None),
+        )
+    if missing_tools or missing_access_values:
         return _SkillRecord(
             package=package,
             status="Setup Needed",
             tone="warning",
             missing_tools=missing_tools,
+            missing_access=missing_access_values,
+            missing_effects=(),
+            unsupported_surfaces=(),
+            unsupported_platforms=(),
             access_checks=tuple(check for check in access_checks if check is not None),
         )
     return _SkillRecord(
@@ -274,6 +371,10 @@ def _record_for_package(
         status="Ready",
         tone="success",
         missing_tools=(),
+        missing_access=(),
+        missing_effects=(),
+        unsupported_surfaces=(),
+        unsupported_platforms=(),
         access_checks=tuple(check for check in access_checks if check is not None),
     )
 
@@ -289,14 +390,7 @@ def _safe_access_check(access_service: Any | None, requirement: str) -> Any | No
 
 
 def _access_values(requirements: Any | None) -> tuple[str, ...]:
-    values: list[str] = []
-    for field in (
-        "compatibility_auth",
-        "compatibility_secrets",
-        "compatibility_credential_files",
-    ):
-        values.extend(_items(getattr(requirements, field, ())))
-    return tuple(dict.fromkeys(values))
+    return tuple(dict.fromkeys(_items(getattr(requirements, "required_access", ()))))
 
 
 def _recent_skill_events(
@@ -340,16 +434,11 @@ def _recent_skill_events_from_bus(
 ) -> tuple[OperationsObservedEvent, ...]:
     if events_service is None:
         return ()
-    topics = tuple(
-        topic
-        for topic in _safe_list_event_topics(events_service)
-        if _is_skill_event_topic(topic)
-    )[:_MAX_SKILL_EVENT_TOPICS]
     read_recent = getattr(events_service, "read_recent_event_topic", None)
     if not callable(read_recent):
         return ()
     events: list[OperationsObservedEvent] = []
-    for topic in topics:
+    for topic in _SKILL_EVENT_TOPICS:
         try:
             records = tuple(read_recent(topic, limit=_RECENT_SKILL_TOPIC_LIMIT) or ())
         except Exception:
@@ -366,26 +455,6 @@ def _recent_skill_events_from_bus(
                 events.append(observed)
     events.sort(key=lambda event: coerce_utc_datetime(event.occurred_at), reverse=True)
     return tuple(events[:_MAX_RECENT_SKILL_EVENTS])
-
-
-def _safe_list_event_topics(events_service: Any) -> tuple[str, ...]:
-    list_topics = getattr(events_service, "list_event_topics", None)
-    if not callable(list_topics):
-        return ()
-    try:
-        return tuple(str(topic) for topic in list_topics() or () if str(topic))
-    except Exception:
-        return ()
-
-
-def _is_skill_event_topic(topic: str) -> bool:
-    normalized = topic.strip().lower()
-    return (
-        normalized.startswith("skills.")
-        or normalized.startswith("skill.")
-        or normalized.startswith("events.named.skills.")
-        or normalized.startswith("events.named.skill.")
-    )
 
 
 def _is_skill_observed_event(event: OperationsObservedEvent) -> bool:
@@ -416,6 +485,29 @@ def _dedupe_skill_events(
         seen.add(key)
         result.append(event)
     return tuple(result[:_MAX_RECENT_SKILL_EVENTS])
+
+
+def _latest_readiness_events_by_skill(
+    events: tuple[OperationsObservedEvent, ...],
+) -> dict[str, OperationsObservedEvent]:
+    latest: dict[str, OperationsObservedEvent] = {}
+    for event in sorted(
+        events,
+        key=lambda item: coerce_utc_datetime(item.occurred_at),
+        reverse=True,
+    ):
+        if event.event_name != "skills.readiness.changed":
+            continue
+        skill = _text(
+            event.payload.get("skill")
+            or event.payload.get("skill_name")
+            or event.entity_id,
+            "",
+        )
+        if not skill or skill in latest:
+            continue
+        latest[skill] = event
+    return latest
 
 
 def _filter_records(
@@ -457,17 +549,33 @@ def _metrics(
     missing: OperationsTableSectionModel,
     access: OperationsTableSectionModel,
     events: tuple[OperationsObservedEvent, ...],
+    event_buckets: tuple[dict[str, Any], ...] = (),
 ) -> tuple[MetricCardModel, ...]:
     ready = sum(1 for record in records if record.status == "Ready")
     sources = {record.package.source for record in records}
-    event_failures = sum(1 for event in events if event.level == "error" or event.status in {"failed", "error"})
+    event_total = _bucket_event_count(event_buckets) or len(events)
+    event_failures = _bucket_failure_count(event_buckets) if event_buckets else sum(
+        1 for event in events if event.level == "error" or event.status in {"failed", "error"}
+    )
     return (
         MetricCardModel("health", "Overall Health", _health_label(health), _health_delta(health), _health_tone(health)),
         MetricCardModel("installed_skills", "Installed Skills", str(len(records)), f"{len(sources)} sources", "info" if records else "neutral"),
         MetricCardModel("ready_skills", "Ready Skills", str(ready), "requirements currently satisfied", "success" if ready == len(records) else "warning"),
         MetricCardModel("missing_capabilities", "Missing Capabilities", str(missing.total), "required tools or access not ready", "warning" if missing.total else "success"),
-        MetricCardModel("declared_access", "Declared Access", str(access.total), "auth, secrets, credential files", "info" if access.total else "neutral"),
-        MetricCardModel("resolution_events", "Resolution Events", str(len(events)), f"{event_failures} failed", "danger" if event_failures else "neutral"),
+        MetricCardModel("declared_access", "Declared Access", str(access.total), "required access declarations", "info" if access.total else "neutral"),
+        MetricCardModel("resolution_events", "Resolution Events", str(event_total), f"{event_failures} failed", "danger" if event_failures else "neutral"),
+    )
+
+
+def _bucket_event_count(event_buckets: tuple[dict[str, Any], ...]) -> int:
+    return sum(_int(bucket.get("count")) for bucket in event_buckets)
+
+
+def _bucket_failure_count(event_buckets: tuple[dict[str, Any], ...]) -> int:
+    return sum(
+        _int(bucket.get("count"))
+        for bucket in event_buckets
+        if bucket.get("level") == "error" or bucket.get("status") in {"failed", "error"}
     )
 
 
@@ -478,7 +586,10 @@ def _tabs(
     access: int,
     capability: int,
     logs: int,
+    reads: int,
     resolver: int,
+    authoring: int,
+    authoring_failures: int,
     conflicts: int,
     profile: int,
 ) -> tuple[OperationsTabModel, ...]:
@@ -488,7 +599,10 @@ def _tabs(
         OperationsTabModel("access", "Access Requirements", access),
         OperationsTabModel("missing", "Missing Capabilities", missing),
         OperationsTabModel("logs", "Resolution Logs", logs),
+        OperationsTabModel("reads", "Skill Reads", reads),
         OperationsTabModel("resolver", "Resolver Detail", resolver),
+        OperationsTabModel("authoring", "Authoring Backlog", authoring),
+        OperationsTabModel("authoring_failures", "Authoring Failures", authoring_failures),
         OperationsTabModel("conflicts", "Conflicts / Overrides", conflicts),
         OperationsTabModel("profiles", "Profile Usage", profile),
     )
@@ -526,6 +640,15 @@ def _import_actions() -> tuple[RuntimeActionModel, ...]:
             audit_event="skills.package.validate",
             method="POST",
             endpoint="/operations/skills/validate",
+        ),
+        RuntimeActionModel(
+            id="sync_skill_catalog",
+            label="Sync Skill Catalog",
+            owner="skills",
+            risk="controlled",
+            audit_event="skills.source.sync",
+            method="POST",
+            endpoint="/operations/skills/sync",
         ),
         RuntimeActionModel(
             id="install_global_skill",
@@ -591,6 +714,9 @@ def _readiness_chart(records: tuple[_SkillRecord, ...]) -> OperationsChartSectio
     segments = (
         OperationsChartSegmentModel("ready", "Ready", counts["Ready"], "success"),
         OperationsChartSegmentModel("setup_needed", "Setup Needed", counts["Setup Needed"], "warning"),
+        OperationsChartSegmentModel("unsupported", "Unsupported", counts["Unsupported"], "warning"),
+        OperationsChartSegmentModel("disabled", "Disabled", counts["Disabled"], "neutral"),
+        OperationsChartSegmentModel("invalid", "Invalid", counts["Invalid"], "danger"),
     )
     return OperationsChartSectionModel(
         "resolution_outcomes",
@@ -601,49 +727,98 @@ def _readiness_chart(records: tuple[_SkillRecord, ...]) -> OperationsChartSectio
     )
 
 
-def _requirement_footprint_table(
-    records: tuple[_SkillRecord, ...],
+def _skill_usage_table(
+    events: tuple[OperationsObservedEvent, ...],
 ) -> OperationsTableSectionModel:
+    usage: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "resolved": 0,
+            "reads": 0,
+            "failures": 0,
+            "last_seen": None,
+            "last_status": "observed",
+            "surfaces": set(),
+        },
+    )
+    for event in sorted(events, key=lambda item: coerce_utc_datetime(item.occurred_at)):
+        if event.event_name == SKILL_RESOLUTION_COMPLETED_EVENT:
+            for item in _dict_items(event.payload.get("skills")):
+                skill = _text(
+                    item.get("skill") or item.get("skill_name"),
+                    "",
+                )
+                if not skill:
+                    continue
+                entry = usage[skill]
+                entry["resolved"] += 1
+                entry["last_status"] = _text(item.get("status") or event.status, "observed")
+                surface = _text(event.payload.get("surface"), "")
+                if surface:
+                    entry["surfaces"].add(surface)
+                entry["last_seen"] = event.occurred_at
+        if event.event_name in {SKILL_READ_SUCCEEDED_EVENT, SKILL_READ_FAILED_EVENT}:
+            skill = _text(
+                event.payload.get("skill")
+                or event.payload.get("skill_name")
+                or event.entity_id,
+                "",
+            )
+            if not skill:
+                continue
+            entry = usage[skill]
+            entry["reads"] += 1
+            if event.event_name == SKILL_READ_FAILED_EVENT:
+                entry["failures"] += 1
+            entry["last_status"] = event.status
+            surface = _text(event.payload.get("surface"), "")
+            if surface:
+                entry["surfaces"].add(surface)
+            entry["last_seen"] = event.occurred_at
+
     ranked = sorted(
-        records,
-        key=lambda record: (
-            _requirement_count(record.package),
-            len(tuple(getattr(record.package, "resources", ()) or ())),
+        usage.items(),
+        key=lambda item: (
+            _int(item[1]["resolved"]) + _int(item[1]["reads"]),
+            coerce_utc_datetime(item[1]["last_seen"]),
         ),
         reverse=True,
     )
     rows = [
         OperationsTableRowModel(
-            id=f"footprint:{_skill_id(record.package)}",
+            id=f"skill-usage:{skill}",
             cells={
-                "skill": _skill_name(record.package),
-                "required_tools": str(len(_items(getattr(getattr(record.package, "requirements", None), "required_tools", ())))),
-                "suggested_tools": str(len(_items(getattr(getattr(record.package, "requirements", None), "suggested_tools", ())))),
-                "access": str(len(_access_values(getattr(record.package, "requirements", None)))),
-                "effects": str(len(_items(getattr(getattr(record.package, "requirements", None), "required_effects", ())))),
-                "resources": str(len(tuple(getattr(record.package, "resources", ()) or ()))),
-                "status": record.status,
+                "skill": skill,
+                "resolved": str(_int(values["resolved"])),
+                "reads": str(_int(values["reads"])),
+                "failures": str(_int(values["failures"])),
+                "surface": ", ".join(sorted(values["surfaces"])) or "-",
+                "last_seen": (
+                    format_datetime_utc(values["last_seen"])
+                    if values["last_seen"] is not None
+                    else "-"
+                ),
+                "status": _status_label(values["last_status"]),
             },
-            status=record.status,
-            tone=record.tone,
+            status=_status_label(values["last_status"]),
+            tone="danger" if _int(values["failures"]) else "success",
         )
-        for record in ranked[:12]
+        for skill, values in ranked[:12]
     ]
     return OperationsTableSectionModel(
         id="top_used_skills",
-        title="Requirement Footprint",
+        title="Runtime Skill Usage",
         columns=(
             OperationsTableColumnModel("skill", "Skill"),
-            OperationsTableColumnModel("required_tools", "Required Tools"),
-            OperationsTableColumnModel("suggested_tools", "Suggested Tools"),
-            OperationsTableColumnModel("access", "Access"),
-            OperationsTableColumnModel("effects", "Effects"),
-            OperationsTableColumnModel("resources", "Resources"),
+            OperationsTableColumnModel("resolved", "Resolved"),
+            OperationsTableColumnModel("reads", "Reads"),
+            OperationsTableColumnModel("failures", "Failures"),
+            OperationsTableColumnModel("surface", "Surface"),
+            OperationsTableColumnModel("last_seen", "Last Seen"),
             OperationsTableColumnModel("status", "Status"),
         ),
         rows=tuple(rows),
         total=len(ranked),
-        empty_state="No skill requirement footprint.",
+        empty_state="No runtime skill usage events.",
     )
 
 
@@ -672,6 +847,8 @@ def _missing_capabilities_table(
             if bool(getattr(check, "ready", False)):
                 continue
             requirement = _text(getattr(getattr(check, "requirement", None), "raw", ""))
+            if requirement in record.missing_access:
+                continue
             rows.append(
                 OperationsTableRowModel(
                     id=f"missing-access:{_skill_id(record.package)}:{requirement}",
@@ -684,6 +861,70 @@ def _missing_capabilities_table(
                         "status": _status_label(getattr(check, "status", "setup_needed")),
                     },
                     status=_status_label(getattr(check, "status", "setup_needed")),
+                    tone="warning",
+                )
+            )
+        for requirement in record.missing_access:
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"missing-access:{_skill_id(record.package)}:{requirement}",
+                    cells={
+                        "type": "Access",
+                        "required": requirement,
+                        "by": _skill_name(record.package),
+                        "impact": "Required",
+                        "resolved_by": "Access setup",
+                        "status": "Setup Needed",
+                    },
+                    status="Setup Needed",
+                    tone="warning",
+                )
+            )
+        for effect_id in record.missing_effects:
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"missing-effect:{_skill_id(record.package)}:{effect_id}",
+                    cells={
+                        "type": "Authorization Effect",
+                        "required": effect_id,
+                        "by": _skill_name(record.package),
+                        "impact": "Required",
+                        "resolved_by": "Grant effect authorization",
+                        "status": "Setup Needed",
+                    },
+                    status="Setup Needed",
+                    tone="warning",
+                )
+            )
+        for surface in record.unsupported_surfaces:
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"unsupported-surface:{_skill_id(record.package)}:{surface}",
+                    cells={
+                        "type": "Surface",
+                        "required": surface,
+                        "by": _skill_name(record.package),
+                        "impact": "Not available on this surface",
+                        "resolved_by": "Switch surface or update manifest",
+                        "status": "Unsupported",
+                    },
+                    status="Unsupported",
+                    tone="warning",
+                )
+            )
+        for platform in record.unsupported_platforms:
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"unsupported-platform:{_skill_id(record.package)}:{platform}",
+                    cells={
+                        "type": "Platform",
+                        "required": platform,
+                        "by": _skill_name(record.package),
+                        "impact": "Not available on this runtime platform",
+                        "resolved_by": "Switch runtime platform or update manifest",
+                        "status": "Unsupported",
+                    },
+                    status="Unsupported",
                     tone="warning",
                 )
             )
@@ -709,8 +950,10 @@ def _access_requirements_table(
 ) -> OperationsTableSectionModel:
     rows: list[OperationsTableRowModel] = []
     for record in records:
+        seen_requirements: set[str] = set()
         for check in record.access_checks:
             requirement = _text(getattr(getattr(check, "requirement", None), "raw", ""))
+            seen_requirements.add(requirement)
             status = "Ready" if bool(getattr(check, "ready", False)) else _status_label(getattr(check, "status", "setup_needed"))
             rows.append(
                 OperationsTableRowModel(
@@ -725,6 +968,24 @@ def _access_requirements_table(
                     },
                     status=status,
                     tone="success" if bool(getattr(check, "ready", False)) else "warning",
+                )
+            )
+        for requirement in record.missing_access:
+            if requirement in seen_requirements:
+                continue
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"access:{_skill_id(record.package)}:{requirement}",
+                    cells={
+                        "asset": requirement,
+                        "skill": _skill_name(record.package),
+                        "purpose": "Access",
+                        "status": "Setup Needed",
+                        "reason": "reported by skills readiness",
+                        "setup": "-",
+                    },
+                    status="Setup Needed",
+                    tone="warning",
                 )
             )
     return OperationsTableSectionModel(
@@ -756,11 +1017,18 @@ def _capability_requirements_table(
             ("suggested_tools", "Suggested Tool"),
             ("optional_tools", "Optional Tool"),
             ("required_effects", "Required Effect"),
+            ("supported_platforms", "Supported Platform"),
         ):
             for value in _items(getattr(requirements, field, ())):
-                is_tool = field.endswith("tools")
-                ready = not is_tool or value in tool_ids or field != "required_tools"
-                status = "Ready" if ready else "Setup Needed"
+                if field == "required_tools":
+                    ready = value in tool_ids and value not in record.missing_tools
+                elif field == "required_effects":
+                    ready = value not in record.missing_effects
+                elif field == "supported_platforms":
+                    ready = not record.unsupported_platforms
+                else:
+                    ready = True
+                status = "Ready" if ready else "Unsupported"
                 rows.append(
                     OperationsTableRowModel(
                         id=f"capability:{_skill_id(record.package)}:{field}:{value}",
@@ -829,6 +1097,163 @@ def _resolution_logs_table(
     )
 
 
+def _skill_reads_table(
+    events: tuple[OperationsObservedEvent, ...],
+) -> OperationsTableSectionModel:
+    read_events = tuple(
+        event
+        for event in events
+        if event.event_name in {SKILL_READ_SUCCEEDED_EVENT, SKILL_READ_FAILED_EVENT}
+    )
+    rows = [
+        OperationsTableRowModel(
+            id=_text(event.cursor or event.id, ""),
+            cells={
+                "time": format_datetime_utc(coerce_utc_datetime(event.occurred_at)),
+                "skill": _text(
+                    event.payload.get("skill")
+                    or event.payload.get("skill_name")
+                    or event.entity_id,
+                ),
+                "path": _short(
+                    event.payload.get("resolved_path")
+                    or event.payload.get("path")
+                    or "SKILL.md",
+                    72,
+                ),
+                "surface": _text(event.payload.get("surface"), "-"),
+                "result": _status_label(event.status),
+                "duration": _duration_label(event.payload.get("duration_ms")),
+                "reason": _read_event_details(event),
+            },
+            status=event.status,
+            tone=_event_tone(event),
+        )
+        for event in read_events[:80]
+    ]
+    return OperationsTableSectionModel(
+        id="skill_reads",
+        title="Skill Reads",
+        columns=(
+            OperationsTableColumnModel("time", "Time"),
+            OperationsTableColumnModel("skill", "Skill"),
+            OperationsTableColumnModel("path", "Path"),
+            OperationsTableColumnModel("surface", "Surface"),
+            OperationsTableColumnModel("result", "Result"),
+            OperationsTableColumnModel("duration", "Duration"),
+            OperationsTableColumnModel("reason", "Reason"),
+        ),
+        rows=tuple(rows),
+        total=len(read_events),
+        empty_state="No skill read events.",
+    )
+
+
+def _authoring_backlog_table(
+    events: tuple[OperationsObservedEvent, ...],
+) -> OperationsTableSectionModel:
+    latest_by_draft: dict[str, OperationsObservedEvent] = {}
+    for event in sorted(
+        (event for event in events if _is_authoring_event(event)),
+        key=lambda item: coerce_utc_datetime(item.occurred_at),
+        reverse=True,
+    ):
+        draft_id = _authoring_draft_id(event)
+        if not draft_id or draft_id in latest_by_draft:
+            continue
+        latest_by_draft[draft_id] = event
+
+    active_events = tuple(
+        event
+        for event in latest_by_draft.values()
+        if not _is_authoring_terminal_event(event)
+    )
+    rows = [
+        OperationsTableRowModel(
+            id=f"authoring:{_authoring_draft_id(event)}",
+            cells={
+                "updated": format_datetime_utc(coerce_utc_datetime(event.occurred_at)),
+                "draft": _short(_authoring_draft_id(event), 44),
+                "skill": _authoring_skill_name(event),
+                "intent": _status_label(event.payload.get("intent")),
+                "status": _authoring_status_label(event),
+                "readiness": _authoring_readiness_label(event),
+                "actor": _text(event.payload.get("actor"), "-"),
+                "next_step": _authoring_next_step(event),
+            },
+            status=_authoring_status_label(event),
+            tone=_authoring_tone(event),
+        )
+        for event in sorted(
+            active_events,
+            key=lambda item: coerce_utc_datetime(item.occurred_at),
+            reverse=True,
+        )[:80]
+    ]
+    return OperationsTableSectionModel(
+        id="authoring_backlog",
+        title="Authoring Backlog",
+        columns=(
+            OperationsTableColumnModel("updated", "Updated"),
+            OperationsTableColumnModel("draft", "Draft"),
+            OperationsTableColumnModel("skill", "Skill"),
+            OperationsTableColumnModel("intent", "Intent"),
+            OperationsTableColumnModel("status", "Status"),
+            OperationsTableColumnModel("readiness", "Readiness"),
+            OperationsTableColumnModel("actor", "Actor"),
+            OperationsTableColumnModel("next_step", "Next Step"),
+        ),
+        rows=tuple(rows),
+        total=len(active_events),
+        empty_state="No active skill authoring drafts.",
+    )
+
+
+def _authoring_failures_table(
+    events: tuple[OperationsObservedEvent, ...],
+) -> OperationsTableSectionModel:
+    failure_events = tuple(
+        event
+        for event in events
+        if _is_authoring_event(event) and _is_authoring_failure_event(event)
+    )
+    rows = [
+        OperationsTableRowModel(
+            id=f"authoring-failure:{_authoring_draft_id(event)}:{event.cursor or event.id}",
+            cells={
+                "time": format_datetime_utc(coerce_utc_datetime(event.occurred_at)),
+                "draft": _short(_authoring_draft_id(event), 44),
+                "skill": _authoring_skill_name(event),
+                "event": _short_event_name(event.event_name),
+                "status": _authoring_status_label(event),
+                "validation": _authoring_validation_summary(event),
+                "error": _authoring_error_details(event),
+                "actor": _text(event.payload.get("actor"), "-"),
+            },
+            status=_authoring_status_label(event),
+            tone="danger",
+        )
+        for event in failure_events[:80]
+    ]
+    return OperationsTableSectionModel(
+        id="authoring_failures",
+        title="Authoring Failures",
+        columns=(
+            OperationsTableColumnModel("time", "Time"),
+            OperationsTableColumnModel("draft", "Draft"),
+            OperationsTableColumnModel("skill", "Skill"),
+            OperationsTableColumnModel("event", "Event"),
+            OperationsTableColumnModel("status", "Status"),
+            OperationsTableColumnModel("validation", "Validation"),
+            OperationsTableColumnModel("error", "Error"),
+            OperationsTableColumnModel("actor", "Actor"),
+        ),
+        rows=tuple(rows),
+        total=len(failure_events),
+        empty_state="No skill authoring failures.",
+    )
+
+
 def _resolver_detail_table(
     records: tuple[_SkillRecord, ...],
     tool_ids: set[str],
@@ -840,9 +1265,16 @@ def _resolver_detail_table(
                 "skill": _skill_name(record.package),
                 "input": _joined(getattr(getattr(record.package, "requirements", None), "required_tools", ())),
                 "available": str(sum(1 for tool in _items(getattr(getattr(record.package, "requirements", None), "required_tools", ())) if tool in tool_ids)),
-                "missing": _joined(record.missing_tools),
+                "missing": _joined(
+                    (
+                        *record.missing_tools,
+                        *record.missing_access,
+                        *record.missing_effects,
+                        *record.unsupported_platforms,
+                    )
+                ),
                 "result": record.status,
-                "next_step": "Register or enable missing tools" if record.missing_tools else "-",
+                "next_step": _resolver_next_step(record),
             },
             status=record.status,
             tone=record.tone,
@@ -864,6 +1296,20 @@ def _resolver_detail_table(
         total=len(rows),
         empty_state="No resolver detail.",
     )
+
+
+def _resolver_next_step(record: _SkillRecord) -> str:
+    if record.missing_tools:
+        return "Register or enable missing tools"
+    if record.missing_access:
+        return "Complete Access setup"
+    if record.missing_effects:
+        return "Grant required authorization effects"
+    if record.unsupported_surfaces:
+        return "Switch surface or update skill manifest"
+    if record.unsupported_platforms:
+        return "Switch runtime platform or update skill manifest"
+    return "-"
 
 
 def _source_chart(records: tuple[_SkillRecord, ...]) -> OperationsChartSectionModel:
@@ -1037,13 +1483,24 @@ def _detail_requirements_table(record: _SkillRecord) -> OperationsTableSectionMo
         ("suggested_tools", "Suggested Tool"),
         ("optional_tools", "Optional Tool"),
         ("required_effects", "Required Effect"),
-        ("compatibility_auth", "Access"),
-        ("compatibility_secrets", "Secret"),
-        ("compatibility_credential_files", "Credential File"),
+        ("required_access", "Access"),
+        ("supported_platforms", "Supported Platform"),
         ("setup_hints", "Setup Hint"),
     ):
         for value in _items(getattr(requirements, field, ())):
-            status = "Setup Needed" if value in record.missing_tools else "Declared"
+            missing_values = (
+                *record.missing_tools,
+                *record.missing_access,
+                *record.missing_effects,
+                *record.unsupported_surfaces,
+                *record.unsupported_platforms,
+            )
+            if field == "supported_platforms" and record.unsupported_platforms:
+                status = "Unsupported"
+            elif value in missing_values:
+                status = "Setup Needed"
+            else:
+                status = "Declared"
             rows.append(
                 OperationsTableRowModel(
                     id=f"detail-requirement:{field}:{value}",
@@ -1053,7 +1510,7 @@ def _detail_requirements_table(record: _SkillRecord) -> OperationsTableSectionMo
                         "status": status,
                     },
                     status=status,
-                    tone="warning" if status == "Setup Needed" else "neutral",
+                    tone="warning" if status != "Declared" else "neutral",
                 )
             )
     return OperationsTableSectionModel(
@@ -1156,9 +1613,8 @@ def _skill_payload(package: Any) -> dict[str, Any]:
             "suggested_tools": list(_items(getattr(requirements, "suggested_tools", ()))),
             "required_effects": list(_items(getattr(requirements, "required_effects", ()))),
             "surfaces": list(_items(getattr(requirements, "surfaces", ()))),
-            "compatibility_auth": list(_items(getattr(requirements, "compatibility_auth", ()))),
-            "compatibility_secrets": list(_items(getattr(requirements, "compatibility_secrets", ()))),
-            "compatibility_credential_files": list(_items(getattr(requirements, "compatibility_credential_files", ()))),
+            "required_access": list(_items(getattr(requirements, "required_access", ()))),
+            "supported_platforms": list(_items(getattr(requirements, "supported_platforms", ()))),
             "setup_hints": list(_items(getattr(requirements, "setup_hints", ()))),
         },
         "manifest": {
@@ -1167,6 +1623,7 @@ def _skill_payload(package: Any) -> dict[str, Any]:
             "when_to_use": _text(getattr(manifest, "when_to_use", "")),
             "anti_patterns": list(_items(getattr(manifest, "anti_patterns", ()))),
             "surfaces": list(_items(getattr(manifest, "surfaces", ()))),
+            "supported_platforms": list(_items(getattr(manifest, "supported_platforms", ()))),
         },
     }
 
@@ -1188,17 +1645,6 @@ def _search_blob(record: _SkillRecord) -> str:
             record.status,
         )
     ).lower()
-
-
-def _requirement_count(package: Any) -> int:
-    requirements = getattr(package, "requirements", None)
-    return (
-        len(_items(getattr(requirements, "required_tools", ())))
-        + len(_items(getattr(requirements, "optional_tools", ())))
-        + len(_items(getattr(requirements, "suggested_tools", ())))
-        + len(_items(getattr(requirements, "required_effects", ())))
-        + len(_access_values(requirements))
-    )
 
 
 def _skill_name(package: Any) -> str:
@@ -1223,17 +1669,139 @@ def _items(values: Any) -> tuple[str, ...]:
     return (_text(values),)
 
 
+def _dict_items(values: Any) -> tuple[dict[str, Any], ...]:
+    if values is None:
+        return ()
+    if isinstance(values, dict):
+        return (dict(values),)
+    if isinstance(values, (list, tuple, set)):
+        return tuple(dict(item) for item in values if isinstance(item, dict))
+    return ()
+
+
 def _joined(values: Any) -> str:
     items = _items(values)
     return ", ".join(items) if items else "-"
 
 
+def _is_authoring_event(event: OperationsObservedEvent) -> bool:
+    return event.event_name.startswith(_AUTHORING_EVENT_PREFIX)
+
+
+def _authoring_draft_id(event: OperationsObservedEvent) -> str:
+    return _text(event.payload.get("draft_id") or event.entity_id or event.cursor or event.id)
+
+
+def _authoring_skill_name(event: OperationsObservedEvent) -> str:
+    return _text(
+        event.payload.get("skill")
+        or event.payload.get("skill_name")
+        or event.entity_id,
+        "-",
+    )
+
+
+def _authoring_status_label(event: OperationsObservedEvent) -> str:
+    return _status_label(event.payload.get("draft_status") or event.status)
+
+
+def _authoring_readiness_label(event: OperationsObservedEvent) -> str:
+    value = event.payload.get("readiness_status")
+    if value is None:
+        return "-"
+    return _status_label(value)
+
+
+def _is_authoring_terminal_event(event: OperationsObservedEvent) -> bool:
+    if event.event_name in _AUTHORING_TERMINAL_EVENTS:
+        return True
+    status = _normalized_filter(event.payload.get("draft_status") or event.status)
+    return status in _AUTHORING_TERMINAL_STATUSES
+
+
+def _is_authoring_failure_event(event: OperationsObservedEvent) -> bool:
+    if event.event_name == SKILL_DRAFT_APPLY_FAILED_EVENT:
+        return True
+    if event.level == "error" or event.status in {"failed", "error"}:
+        return True
+    return _int(event.payload.get("validation_error_count")) > 0
+
+
+def _authoring_tone(event: OperationsObservedEvent) -> str:
+    if _is_authoring_failure_event(event):
+        return "danger"
+    status = _normalized_filter(event.payload.get("draft_status") or event.status)
+    if status in {"invalid", "failed", "error"}:
+        return "danger"
+    readiness = _normalized_filter(event.payload.get("readiness_status"))
+    if readiness not in {"all", "ready", "valid", "ok", "success", "succeeded"}:
+        return "warning"
+    if status in {"validated", "applied"}:
+        return "success"
+    return "neutral"
+
+
+def _authoring_next_step(event: OperationsObservedEvent) -> str:
+    if event.event_name == SKILL_DRAFT_APPLY_FAILED_EVENT:
+        return "Review failure and revise draft"
+    if _int(event.payload.get("validation_error_count")) > 0:
+        return "Fix validation errors"
+    status = _normalized_filter(event.payload.get("draft_status") or event.status)
+    if status == "draft":
+        return "Validate draft"
+    if status == "invalid":
+        return "Revise draft"
+    if event.event_name.endswith(".diff_built"):
+        return "Apply owner write after approval"
+    if status == "validated":
+        return "Build diff or apply owner write"
+    return "Inspect draft"
+
+
+def _authoring_validation_summary(event: OperationsObservedEvent) -> str:
+    errors = _int(event.payload.get("validation_error_count"))
+    warnings = _int(event.payload.get("validation_warning_count"))
+    if errors or warnings:
+        return f"{errors} errors / {warnings} warnings"
+    readiness = _authoring_readiness_label(event)
+    return readiness if readiness != "-" else "-"
+
+
+def _authoring_error_details(event: OperationsObservedEvent) -> str:
+    validation_errors = _items(event.payload.get("validation_errors"))
+    if validation_errors:
+        return _short("; ".join(validation_errors), 140)
+    for key in ("error_message", "reason", "message"):
+        value = event.payload.get(key)
+        if value is not None and _text(value, ""):
+            return _short(value, 140)
+    return _event_details(event.payload)
+
+
 def _event_details(payload: dict[str, Any]) -> str:
+    missing = (
+        _items(payload.get("missing_tools"))
+        + _items(payload.get("missing_access"))
+        + _items(payload.get("missing_effects"))
+        + _items(payload.get("unsupported_platforms"))
+    )
+    if missing:
+        return _short(", ".join(missing), 120)
     for key in ("reason", "message", "summary", "error_message", "skill", "skill_name", "status"):
         value = payload.get(key)
         if value is not None and _text(value, ""):
             return _short(value, 120)
     return "-"
+
+
+def _read_event_details(event: OperationsObservedEvent) -> str:
+    payload = event.payload
+    if event.event_name == SKILL_READ_FAILED_EVENT:
+        return _short(
+            payload.get("error_message") or payload.get("reason") or payload.get("message") or "-",
+            120,
+        )
+    return _short(payload.get("source") or payload.get("resolved_path") or "read completed", 120)
 
 
 def _short_event_name(event_name: str) -> str:
@@ -1257,6 +1825,13 @@ def _status_label(status: Any) -> str:
 def _normalized_filter(value: Any) -> str:
     text = _text(value, "all").strip().lower().replace(" ", "_").replace("-", "_")
     return text or "all"
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _health_label(health: str) -> str:
@@ -1294,6 +1869,18 @@ def _format_bytes(size: int) -> str:
     if unit == "B":
         return f"{int(value)} B"
     return f"{value:.1f} {unit}"
+
+
+def _duration_label(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        duration_ms = float(value)
+    except (TypeError, ValueError):
+        return _text(value)
+    if duration_ms < 1000:
+        return f"{duration_ms:.0f} ms"
+    return f"{duration_ms / 1000:.2f} s"
 
 
 def _short(value: Any, size: int = 80) -> str:

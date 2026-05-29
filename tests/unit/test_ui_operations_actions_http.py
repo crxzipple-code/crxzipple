@@ -8,14 +8,14 @@ from crxzipple.modules.channels.domain import (
 )
 from crxzipple.modules.events import Event
 
-from tests.unit.http_test_support import HttpModuleTestCase
+from tests.unit.http_test_support import AppKey, HttpModuleTestCase
 
 
 class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
     def test_ui_operations_events_action_advances_subscription_cursor(self) -> None:
         container = self.client.app.state.container
         topic = "events.named.operations.events.action"
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="operations.events.action",
                 topic=topic,
@@ -23,7 +23,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
                 payload={"event_name": "operations.events.action"},
             ),
         )
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             "operations.events.action.consumer",
             source_topic=topic,
             cursor="0",
@@ -89,7 +89,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["advanced_count"], 1)
         self.assertEqual(payload["items"][0]["previous_cursor"], "0")
         self.assertEqual(payload["items"][0]["latest_cursor"], "1")
-        state = container.events_service.get_subscription_cursor(
+        state = container.require(AppKey.EVENTS_SERVICE).get_subscription_cursor(
             "operations.events.action.consumer",
             source_topic=topic,
         )
@@ -116,7 +116,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
     def test_ui_operations_events_action_advances_observer_cursor(self) -> None:
         container = self.client.app.state.container
         topic = "events.named.operations.events.observer.action"
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="operations.events.observer.action",
                 topic=topic,
@@ -124,7 +124,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
                 payload={"event_name": "operations.events.observer.action"},
             ),
         )
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             "operations.observer.events.action",
             source_topic=topic,
             cursor="0",
@@ -146,7 +146,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
         payload = response.json()
         self.assertEqual(payload["matched_count"], 1)
         self.assertEqual(payload["advanced_count"], 1)
-        state = container.events_service.get_subscription_cursor(
+        state = container.require(AppKey.EVENTS_SERVICE).get_subscription_cursor(
             "operations.observer.events.action",
             source_topic=topic,
         )
@@ -157,7 +157,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
     def test_ui_operations_channels_action_prunes_stale_runtimes(self) -> None:
         container = self.client.app.state.container
         stale_at = datetime.now(timezone.utc) - timedelta(minutes=12)
-        container.channel_runtime_manager.register_runtime(
+        container.require(AppKey.CHANNEL_RUNTIME_MANAGER).register_runtime(
             ChannelRuntimeRegistration(
                 runtime_id="web-runtime-stale-action",
                 channel_type="web",
@@ -166,7 +166,7 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
                 last_heartbeat_at=stale_at,
             ),
         )
-        container.channel_runtime_manager.bind_connection(
+        container.require(AppKey.CHANNEL_RUNTIME_MANAGER).bind_connection(
             ChannelConnectionBinding(
                 channel_type="web",
                 connection_id="web-connection-stale-action",
@@ -198,10 +198,10 @@ class UiOperationsActionsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["items"][0]["runtime_id"], "web-runtime-stale-action")
         self.assertEqual(payload["items"][0]["connection_bindings_removed"], 1)
         self.assertIsNone(
-            container.channel_runtime_manager.get_runtime("web-runtime-stale-action"),
+            container.require(AppKey.CHANNEL_RUNTIME_MANAGER).get_runtime("web-runtime-stale-action"),
         )
         self.assertEqual(
-            container.channel_runtime_manager.list_connection_bindings(
+            container.require(AppKey.CHANNEL_RUNTIME_MANAGER).list_connection_bindings(
                 runtime_id="web-runtime-stale-action",
             ),
             (),

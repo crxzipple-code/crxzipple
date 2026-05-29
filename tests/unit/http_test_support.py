@@ -25,6 +25,7 @@ from crxzipple.core.config import (
 )
 from crxzipple.interfaces.http.app import create_app
 from crxzipple.interfaces.http.conversations import _normalize_preview_text
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.agent.infrastructure import derive_agent_home_root
 from crxzipple.modules.llm.application import LlmStreamEvent
 from crxzipple.modules.llm.application.adapters import LlmAdapterResponse
@@ -36,12 +37,10 @@ from crxzipple.modules.llm.domain import (
     ToolCallIntent,
 )
 from crxzipple.modules.session.application import ListSessionMessagesInput
-from crxzipple.modules.tool.application import RegisterToolInput
 from crxzipple.modules.tool.domain import ToolEnvironment, ToolMode
 from tests.unit.skill_test_support import write_skill_package as _write_skill_package
 from tests.unit.support import (
     FakeCdpServer,
-    FakeChromeMcpClientPool,
     FakePlaywrightCdpSessionPool,
     SampleApiServer,
     SampleLlmApiServer,
@@ -53,6 +52,7 @@ from tests.unit.orchestration_test_support import (
     assign_next_orchestration_assignment,
     process_next_orchestration_assignment,
 )
+from tests.unit.tool_catalog_seed import seed_catalog_tool
 
 
 class _FakeStreamResponse:
@@ -188,6 +188,7 @@ class HttpModuleTestCase(unittest.TestCase):
         self.previous_channel_profile_paths = os.environ.get(
             "APP_CHANNEL_PROFILE_PATHS",
         )
+        self.previous_daemon_state_dir = os.environ.get("APP_DAEMON_STATE_DIR")
         self.previous_events_state_dir = os.environ.get("APP_EVENTS_STATE_DIR")
         self.previous_operations_state_dir = os.environ.get("APP_OPERATIONS_STATE_DIR")
         self.previous_events_backend = os.environ.get("APP_EVENTS_BACKEND")
@@ -232,6 +233,9 @@ class HttpModuleTestCase(unittest.TestCase):
             Path(self.harness._tempdir.name) / "channels",
         )
         os.environ["APP_CHANNEL_PROFILE_PATHS"] = os.pathsep
+        os.environ["APP_DAEMON_STATE_DIR"] = str(
+            Path(self.harness._tempdir.name) / "daemon",
+        )
         os.environ["APP_EVENTS_BACKEND"] = "file"
         os.environ.pop("APP_EVENTS_REDIS_URL", None)
         os.environ["APP_EVENTS_STATE_DIR"] = str(
@@ -240,11 +244,16 @@ class HttpModuleTestCase(unittest.TestCase):
         os.environ["APP_OPERATIONS_STATE_DIR"] = str(
             Path(self.harness._tempdir.name) / "operations",
         )
-        self.client = TestClient(create_app(database_url=self.harness.database_url))
+        self._client_context = TestClient(
+            create_app(
+                database_url=self.harness.database_url,
+                enable_memory_watchers=False,
+            ),
+        )
+        self.client = self._client_context.__enter__()
 
     def tearDown(self) -> None:
-        self.client.close()
-        self.client.app.state.container.engine.dispose()
+        self._client_context.__exit__(None, None, None)
         self.harness.close()
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
@@ -263,6 +272,10 @@ class HttpModuleTestCase(unittest.TestCase):
             os.environ["APP_CHANNEL_PROFILE_PATHS"] = (
                 self.previous_channel_profile_paths
             )
+        if self.previous_daemon_state_dir is None:
+            os.environ.pop("APP_DAEMON_STATE_DIR", None)
+        else:
+            os.environ["APP_DAEMON_STATE_DIR"] = self.previous_daemon_state_dir
         if self.previous_events_state_dir is None:
             os.environ.pop("APP_EVENTS_STATE_DIR", None)
         else:
@@ -291,9 +304,9 @@ class HttpModuleTestCase(unittest.TestCase):
 
 __all__ = [
     "AgentProfileSettings",
+    "AppKey",
     "assign_next_orchestration_assignment",
     "FakeCdpServer",
-    "FakeChromeMcpClientPool",
     "FakePlaywrightCdpSessionPool",
     "HttpModuleTestCase",
     "ListSessionMessagesInput",
@@ -308,7 +321,7 @@ __all__ = [
     "OpenApiCredentialBinding",
     "OpenApiProviderSettings",
     "Path",
-    "RegisterToolInput",
+    "seed_catalog_tool",
     "SampleApiServer",
     "SampleLlmApiServer",
     "SqliteTestHarness",

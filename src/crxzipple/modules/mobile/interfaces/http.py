@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.mobile.domain import MobileExecutionError, MobileValidationError
 
@@ -32,7 +32,7 @@ class MobileActionRequestBody(BaseModel):
 
 
 def _default_device(container: AppContainer) -> str | None:
-    return container.mobile_system_config_store.load().default_device
+    return container.require(AppKey.MOBILE_SYSTEM_CONFIG_STORE).load().default_device
 
 
 @router.post("/control")
@@ -41,7 +41,7 @@ def execute_control(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> dict[str, Any]:
     try:
-        result = container.mobile_facade.execute(
+        result = container.require(AppKey.MOBILE_FACADE).execute(
             MobileControlRequest(
                 device_name=payload.device_name or _default_device(container),
                 kind=payload.kind,
@@ -51,7 +51,7 @@ def execute_control(
         )
     except (MobileValidationError, MobileExecutionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return container.mobile_result_serializer.serialize(result)
+    return container.require(AppKey.MOBILE_RESULT_SERIALIZER).serialize(result)
 
 
 @router.post("/actions")
@@ -60,7 +60,7 @@ def execute_action(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> dict[str, Any]:
     try:
-        result = container.mobile_facade.execute(
+        result = container.require(AppKey.MOBILE_FACADE).execute(
             MobileActionRequest(
                 device_name=payload.device_name or _default_device(container),
                 kind=payload.kind,
@@ -72,4 +72,4 @@ def execute_action(
         )
     except (MobileValidationError, MobileExecutionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return container.mobile_result_serializer.serialize(result)
+    return container.require(AppKey.MOBILE_RESULT_SERIALIZER).serialize(result)

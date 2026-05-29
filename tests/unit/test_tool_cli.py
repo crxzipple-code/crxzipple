@@ -1,9 +1,57 @@
 from __future__ import annotations
 
-from tests.unit.cli_test_support import *
+from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.settings import CreateSettingsResourceInput
+from tests.unit.cli_test_support import (
+    CliModuleTestCase,
+    Path,
+    SampleApiServer,
+    app,
+    fixture_path,
+    json,
+    openapi_fixture_path,
+    os,
+    patch,
+    shutil,
+    sys,
+    tempfile,
+    time,
+    unittest,
+)
 
 
 class ToolCliTestCase(CliModuleTestCase):
+    def _seed_sample_openapi_access_bindings(self) -> None:
+        container = self.harness.build_runtime_container()
+        container.require(AppKey.SETTINGS_ACTION_SERVICE).create_resource(
+            CreateSettingsResourceInput(
+                resource_id="access_sample_openapi",
+                resource_kind="access-assets",
+                owner_module="settings",
+                display_name="Sample OpenAPI credentials",
+                payload={
+                    "credential_bindings": [
+                        {
+                            "binding_id": "binding.sample.query",
+                            "binding_kind": "api_key",
+                            "source_kind": "env",
+                            "source_ref": "SAMPLE_API_KEY",
+                        },
+                        {
+                            "binding_id": "binding.sample.bearer",
+                            "binding_kind": "bearer_token",
+                            "source_kind": "env",
+                            "source_ref": "SAMPLE_BEARER_TOKEN",
+                        },
+                    ],
+                    "metadata": {"source": "test_tool_cli"},
+                },
+                reason="seed sample OpenAPI Access bindings",
+                publish=True,
+                source="unit_test",
+            ),
+        )
+
     def test_tool_run_is_denied_by_cli_guard_when_abac_blocks_it(self) -> None:
         env = dict(self.env)
         env["APP_AUTHORIZATION_ENABLED"] = "true"
@@ -13,16 +61,6 @@ class ToolCliTestCase(CliModuleTestCase):
             / "authorization_policies"
             / "default.yaml"
         )
-        container = self.harness.build_container()
-        container.tool_service.register(
-            RegisterToolInput(
-                id="dangerous_write",
-                name="Dangerous Write",
-                description="Mutates external state.",
-                mutates_state=True,
-            ),
-        )
-
         run_result = self.runner.invoke(
             app,
             [
@@ -45,16 +83,7 @@ class ToolCliTestCase(CliModuleTestCase):
         self.assertEqual(roots_result.exit_code, 0)
         self.assertIn('/.crxzipple/tools', roots_result.stdout)
 
-    def test_tool_discover_local_and_run_commands_return_runtime_payload(self) -> None:
-        discover_result = self.runner.invoke(
-            app,
-            ["tool", "discover-local"],
-            env=self.env,
-        )
-
-        self.assertEqual(discover_result.exit_code, 0)
-        self.assertIn('"id": "echo"', discover_result.stdout)
-
+    def test_tool_run_commands_return_runtime_payload(self) -> None:
         run_result = self.runner.invoke(
             app,
             [
@@ -94,29 +123,202 @@ class ToolCliTestCase(CliModuleTestCase):
         fetched_run_payload = json.loads(get_run_result.stdout)
         self.assertEqual(fetched_run_payload["id"], run_payload["id"])
 
-    def test_tool_providers_and_generic_discover_commands_return_provider_payload(self) -> None:
-        providers_result = self.runner.invoke(
+    def test_tool_sources_and_functions_commands_return_catalog_payload(self) -> None:
+        sources_result = self.runner.invoke(
             app,
-            ["tool", "providers"],
+            ["tool", "sources"],
             env=self.env,
         )
 
-        self.assertEqual(providers_result.exit_code, 0)
-        providers_payload = json.loads(providers_result.stdout)
+        self.assertEqual(sources_result.exit_code, 0)
+        sources_payload = json.loads(sources_result.stdout)
+        self.assertIn("bundled.local_package.debug", {
+            item["source_id"] for item in sources_payload
+        })
+
+        functions_result = self.runner.invoke(
+            app,
+            ["tool", "functions"],
+            env=self.env,
+        )
+
+        self.assertEqual(functions_result.exit_code, 0)
+        functions_payload = json.loads(functions_result.stdout)
+        self.assertIn("echo", {item["function_id"] for item in functions_payload})
+
+    def test_tool_source_commands_manage_sources_and_discovery_history(self) -> None:
+        sources_result = self.runner.invoke(
+            app,
+            ["tool", "sources"],
+            env=self.env,
+        )
+
+        self.assertEqual(sources_result.exit_code, 0)
+        sources_payload = json.loads(sources_result.stdout)
+        source_ids = [item["source_id"] for item in sources_payload]
+        self.assertIn("bundled.local_package.debug", source_ids)
+
+        history_result = self.runner.invoke(
+            app,
+            ["tool", "source-history", "bundled.local_package.debug"],
+            env=self.env,
+        )
+
+        self.assertEqual(history_result.exit_code, 0)
+        history_payload = json.loads(history_result.stdout)
+        self.assertGreaterEqual(len(history_payload), 1)
+        self.assertEqual(history_payload[0]["status"], "completed")
+
+        refresh_result = self.runner.invoke(
+            app,
+            ["tool", "source-refresh", "bundled.local_package.debug"],
+            env=self.env,
+        )
+
+        self.assertEqual(refresh_result.exit_code, 0)
+        refresh_payload = json.loads(refresh_result.stdout)
+        self.assertEqual(refresh_payload["source"]["status"], "active")
+        self.assertEqual(refresh_payload["discovery"]["status"], "completed")
+
+        functions_result = self.runner.invoke(
+            app,
+            [
+                "tool",
+                "functions",
+                "--source-id",
+                "bundled.local_package.debug",
+            ],
+            env=self.env,
+        )
+        self.assertEqual(functions_result.exit_code, 0)
+        functions_payload = json.loads(functions_result.stdout)
+        self.assertTrue(functions_payload)
+        function_id = functions_payload[0]["function_id"]
+
+        disable_function_result = self.runner.invoke(
+            app,
+            ["tool", "function-disable", function_id],
+            env=self.env,
+        )
+        self.assertEqual(disable_function_result.exit_code, 0)
+        self.assertFalse(json.loads(disable_function_result.stdout)["function"]["enabled"])
+
+        enable_function_result = self.runner.invoke(
+            app,
+            ["tool", "function-enable", function_id],
+            env=self.env,
+        )
+        self.assertEqual(enable_function_result.exit_code, 0)
+        self.assertTrue(json.loads(enable_function_result.stdout)["function"]["enabled"])
+
+        policy_result = self.runner.invoke(
+            app,
+            [
+                "tool",
+                "function-policy",
+                function_id,
+                "--trust-policy",
+                '{"level":"trusted"}',
+                "--approval-policy",
+                '{"requires_approval":false}',
+                "--credential-binding-overrides",
+                '{"api_key":"cli-binding"}',
+                "--required-effect-overrides",
+                "cli.effect",
+            ],
+            env=self.env,
+        )
+        self.assertEqual(policy_result.exit_code, 0)
+        policy_payload = json.loads(policy_result.stdout)["function"]
+        self.assertEqual(policy_payload["trust_policy"], {"level": "trusted"})
         self.assertEqual(
-            [item["name"] for item in providers_payload],
-            ["local_builtin", "local_filesystem"],
+            policy_payload["approval_policy"],
+            {"requires_approval": False},
         )
+        self.assertEqual(
+            policy_payload["credential_binding_overrides"],
+            {"api_key": "cli-binding"},
+        )
+        self.assertEqual(policy_payload["required_effect_overrides"], ["cli.effect"])
 
-        discover_result = self.runner.invoke(
+        config_json = json.dumps(
+            {
+                "source": "configured_tool_provider",
+                "package_kind": "openapi",
+                "provider": {
+                    "name": "cli_sample",
+                    "spec_location": "https://example.test/openapi.json",
+                },
+            },
+        )
+        create_source_result = self.runner.invoke(
             app,
-            ["tool", "discover", "--provider", "local_builtin"],
+            [
+                "tool",
+                "source-create",
+                "configured.openapi.cli-sample",
+                "--kind",
+                "openapi",
+                "--display-name",
+                "CLI Sample",
+                "--config",
+                config_json,
+                "--runtime-requirements",
+                "bounded_network.http",
+            ],
             env=self.env,
         )
+        self.assertEqual(create_source_result.exit_code, 0)
+        create_payload = json.loads(create_source_result.stdout)
+        self.assertEqual(
+            create_payload["source"]["source_id"],
+            "configured.openapi.cli-sample",
+        )
+        self.assertEqual(create_payload["source"]["status"], "active")
 
-        self.assertEqual(discover_result.exit_code, 0)
-        discover_payload = json.loads(discover_result.stdout)
-        self.assertEqual([item["id"] for item in discover_payload], ["echo"])
+        update_config_json = json.dumps(
+            {
+                "source": "configured_tool_provider",
+                "package_kind": "openapi",
+                "provider": {
+                    "name": "cli_sample",
+                    "spec_location": "https://example.test/renamed-openapi.json",
+                },
+            },
+        )
+        update_source_result = self.runner.invoke(
+            app,
+            [
+                "tool",
+                "source-update",
+                "configured.openapi.cli-sample",
+                "--kind",
+                "openapi",
+                "--display-name",
+                "CLI Sample Renamed",
+                "--config",
+                update_config_json,
+            ],
+            env=self.env,
+        )
+        self.assertEqual(update_source_result.exit_code, 0)
+        update_payload = json.loads(update_source_result.stdout)
+        self.assertEqual(
+            update_payload["source"]["display_name"],
+            "CLI Sample Renamed",
+        )
+        self.assertEqual(
+            update_payload["source"]["config"]["provider"]["spec_location"],
+            "https://example.test/renamed-openapi.json",
+        )
+
+        created_history_result = self.runner.invoke(
+            app,
+            ["tool", "source-history", "configured.openapi.cli-sample"],
+            env=self.env,
+        )
+        self.assertEqual(created_history_result.exit_code, 0)
+        self.assertEqual(json.loads(created_history_result.stdout), [])
 
     def test_tool_openapi_provider_commands_discover_and_execute_remote_tools(self) -> None:
         server = SampleApiServer()
@@ -133,35 +335,28 @@ class ToolCliTestCase(CliModuleTestCase):
                     "description": "Sample OpenAPI provider",
                     "timeout_seconds": 5,
                     "credentials": {
-                        "ApiKeyQuery": "env:SAMPLE_API_KEY",
-                        "BearerAuth": "env:SAMPLE_BEARER_TOKEN",
+                        "ApiKeyQuery": "binding.sample.query",
+                        "BearerAuth": "binding.sample.bearer",
                     },
                 },
             ],
         )
+        self._seed_sample_openapi_access_bindings()
 
         try:
-            providers_result = self.runner.invoke(
+            list_result = self.runner.invoke(
                 app,
-                ["tool", "providers"],
+                ["tool", "list"],
                 env=env,
             )
-            self.assertEqual(providers_result.exit_code, 0)
-            providers_payload = json.loads(providers_result.stdout)
+            self.assertEqual(list_result.exit_code, 0)
+            discovered_payload = [
+                item
+                for item in json.loads(list_result.stdout)
+                if item["id"].startswith("sample_api.")
+            ]
             self.assertEqual(
-                [item["name"] for item in providers_payload],
-                ["local_builtin", "local_filesystem", "sample_api"],
-            )
-
-            discover_result = self.runner.invoke(
-                app,
-                ["tool", "discover", "--provider", "sample_api"],
-                env=env,
-            )
-            self.assertEqual(discover_result.exit_code, 0)
-            discover_payload = json.loads(discover_result.stdout)
-            self.assertEqual(
-                [item["id"] for item in discover_payload],
+                [item["id"] for item in discovered_payload],
                 ["sample_api.echo_message", "sample_api.search_docs"],
             )
 
@@ -237,37 +432,30 @@ class ToolCliTestCase(CliModuleTestCase):
                         "description: Sample OpenAPI provider loaded from YAML",
                         "timeout_seconds: 5",
                         "credentials:",
-                        "  ApiKeyQuery: env:SAMPLE_API_KEY",
-                        "  BearerAuth: env:SAMPLE_BEARER_TOKEN",
+                        "  ApiKeyQuery: binding.sample.query",
+                        "  BearerAuth: binding.sample.bearer",
                         "",
                     ],
                 ),
                 encoding="utf-8",
             )
             env["APP_TOOL_OPENAPI_PROVIDER_PATHS"] = str(providers_dir)
+            self._seed_sample_openapi_access_bindings()
 
             try:
-                providers_result = self.runner.invoke(
+                list_result = self.runner.invoke(
                     app,
-                    ["tool", "providers"],
+                    ["tool", "list"],
                     env=env,
                 )
-                self.assertEqual(providers_result.exit_code, 0)
-                providers_payload = json.loads(providers_result.stdout)
+                self.assertEqual(list_result.exit_code, 0)
+                discovered_payload = [
+                    item
+                    for item in json.loads(list_result.stdout)
+                    if item["id"].startswith("sample_api.")
+                ]
                 self.assertEqual(
-                    [item["name"] for item in providers_payload],
-                    ["local_builtin", "local_filesystem", "sample_api"],
-                )
-
-                discover_result = self.runner.invoke(
-                    app,
-                    ["tool", "discover", "--provider", "sample_api"],
-                    env=env,
-                )
-                self.assertEqual(discover_result.exit_code, 0)
-                discover_payload = json.loads(discover_result.stdout)
-                self.assertEqual(
-                    [item["id"] for item in discover_payload],
+                    [item["id"] for item in discovered_payload],
                     ["sample_api.echo_message", "sample_api.search_docs"],
                 )
 
@@ -309,27 +497,19 @@ class ToolCliTestCase(CliModuleTestCase):
             ],
         )
 
-        providers_result = self.runner.invoke(
+        list_result = self.runner.invoke(
             app,
-            ["tool", "providers"],
+            ["tool", "list"],
             env=env,
         )
-        self.assertEqual(providers_result.exit_code, 0)
-        providers_payload = json.loads(providers_result.stdout)
+        self.assertEqual(list_result.exit_code, 0)
+        discovered_payload = [
+            item
+            for item in json.loads(list_result.stdout)
+            if item["id"].startswith("sample_mcp.")
+        ]
         self.assertEqual(
-            [item["name"] for item in providers_payload],
-            ["local_builtin", "local_filesystem", "sample_mcp"],
-        )
-
-        discover_result = self.runner.invoke(
-            app,
-            ["tool", "discover", "--provider", "sample_mcp"],
-            env=env,
-        )
-        self.assertEqual(discover_result.exit_code, 0)
-        discover_payload = json.loads(discover_result.stdout)
-        self.assertEqual(
-            [item["id"] for item in discover_payload],
+            [item["id"] for item in discovered_payload],
             ["sample_mcp.echo", "sample_mcp.sum"],
         )
 
@@ -351,7 +531,7 @@ class ToolCliTestCase(CliModuleTestCase):
         self.assertEqual(run_payload["status"], "succeeded")
         self.assertEqual(run_payload["output_payload"]["content"]["message"], "MCP CLI")
 
-    def test_tool_filesystem_provider_commands_discover_and_execute_local_tools(self) -> None:
+    def test_tool_roots_do_not_discover_legacy_filesystem_tools(self) -> None:
         env = dict(self.env)
         with tempfile.TemporaryDirectory() as tempdir:
             tools_root = Path(tempdir)
@@ -366,27 +546,6 @@ class ToolCliTestCase(CliModuleTestCase):
                     tools_root / "tools",
                 ),
             ):
-                providers_result = self.runner.invoke(
-                    app,
-                    ["tool", "providers"],
-                    env=env,
-                )
-                self.assertEqual(providers_result.exit_code, 0)
-                providers_payload = json.loads(providers_result.stdout)
-                self.assertEqual(
-                    [item["name"] for item in providers_payload],
-                    ["local_builtin", "local_filesystem"],
-                )
-
-                discover_result = self.runner.invoke(
-                    app,
-                    ["tool", "discover", "--provider", "local_filesystem"],
-                    env=env,
-                )
-                self.assertEqual(discover_result.exit_code, 0)
-                discover_payload = json.loads(discover_result.stdout)
-                self.assertEqual([item["id"] for item in discover_payload], ["greeter"])
-
                 roots_result = self.runner.invoke(
                     app,
                     ["tool", "roots"],
@@ -398,34 +557,16 @@ class ToolCliTestCase(CliModuleTestCase):
                     roots_payload[1]["path"],
                     str((tools_root / "tools").resolve()),
                 )
-
-                run_result = self.runner.invoke(
+                list_result = self.runner.invoke(
                     app,
-                    [
-                        "tool",
-                        "run",
-                        "greeter",
-                        "--input",
-                        '{"name":"cli"}',
-                        "--strategy",
-                        "process",
-                    ],
+                    ["tool", "list"],
                     env=env,
                 )
-                self.assertEqual(run_result.exit_code, 0)
-                run_payload = json.loads(run_result.stdout)
-                self.assertEqual(run_payload["status"], "succeeded")
-                self.assertEqual(run_payload["output_payload"]["message"], "hello cli")
-                self.assertEqual(run_payload["result"]["metadata"]["environment"], "local")
+                self.assertEqual(list_result.exit_code, 0)
+                listed_ids = {item["id"] for item in json.loads(list_result.stdout)}
+                self.assertNotIn("greeter", listed_ids)
 
     def test_tool_inline_process_run_returns_process_context(self) -> None:
-        discover_result = self.runner.invoke(
-            app,
-            ["tool", "discover-local"],
-            env=self.env,
-        )
-        self.assertEqual(discover_result.exit_code, 0)
-
         run_result = self.runner.invoke(
             app,
             [
@@ -448,13 +589,6 @@ class ToolCliTestCase(CliModuleTestCase):
 
     def test_tool_background_run_eventually_succeeds(self) -> None:
         worker_id = "cli-background-worker"
-        discover_result = self.runner.invoke(
-            app,
-            ["tool", "discover-local"],
-            env=self.env,
-        )
-        self.assertEqual(discover_result.exit_code, 0)
-
         run_result = self.runner.invoke(
             app,
             [
@@ -560,8 +694,11 @@ class ToolCliTestCase(CliModuleTestCase):
         )
 
         self.assertEqual(result.exit_code, 0)
-        container = self.harness.build_container()
-        workers = {worker.id: worker for worker in container.tool_service.list_tool_workers()}
+        container = self.harness.build_runtime_container()
+        workers = {
+            worker.id: worker
+            for worker in container.require(AppKey.TOOL_SERVICE).list_tool_workers()
+        }
         self.assertEqual(workers["cli-config-worker"].max_in_flight, 6)
 
     def test_tool_worker_run_rejects_sqlite_without_explicit_runtime_fallback(self) -> None:
@@ -584,13 +721,6 @@ class ToolCliTestCase(CliModuleTestCase):
 
     def test_tool_background_process_run_eventually_succeeds(self) -> None:
         worker_id = "cli-process-worker"
-        discover_result = self.runner.invoke(
-            app,
-            ["tool", "discover-local"],
-            env=self.env,
-        )
-        self.assertEqual(discover_result.exit_code, 0)
-
         run_result = self.runner.invoke(
             app,
             [
@@ -652,13 +782,6 @@ class ToolCliTestCase(CliModuleTestCase):
         )
 
     def test_tool_cancel_run_command_returns_cancelled_payload(self) -> None:
-        discover_result = self.runner.invoke(
-            app,
-            ["tool", "discover-local"],
-            env=self.env,
-        )
-        self.assertEqual(discover_result.exit_code, 0)
-
         run_result = self.runner.invoke(
             app,
             [

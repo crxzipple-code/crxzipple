@@ -24,6 +24,9 @@ from crxzipple.modules.orchestration.application.prompting import (
     resolve_run_surface_policy,
 )
 from crxzipple.modules.orchestration.domain import OrchestrationRun
+from crxzipple.modules.tool.application.authorization_context import (
+    tool_invocation_authorization_context_attrs,
+)
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolEnvironment,
@@ -130,11 +133,13 @@ class ToolResolver:
     )
 
     def resolve(self, run: OrchestrationRun) -> ResolvedToolSet:
-        self.tool_catalog.ensure_local_system_tools_registered()
         context_attrs = self._context_attrs(run)
+        runtime_context = self._runtime_pool_context(run, context_attrs=context_attrs)
         resolved: list[ResolvedTool] = []
         blocked_access: list[BlockedToolAccess] = []
-        for tool in self.tool_catalog.list_enabled_tools():
+        for tool in self.tool_catalog.list_enabled_tools(
+            runtime_context=runtime_context,
+        ):
             target = self._preferred_target(tool)
             resource_attrs = self._resource_attrs(tool, target=target)
             if self._surface_is_blocked(
@@ -188,6 +193,7 @@ class ToolResolver:
         target: ToolExecutionTarget,
         context_attrs: dict[str, Any] | None = None,
         resource_attrs: dict[str, Any] | None = None,
+        arguments: dict[str, Any] | None = None,
     ) -> ToolExecutionDecision:
         resolved_resource_attrs = (
             resource_attrs
@@ -201,6 +207,11 @@ class ToolResolver:
                 run,
                 session_key=str(run.metadata.get("session_key", "")).strip(),
             )
+        )
+        resolved_context_attrs = tool_invocation_authorization_context_attrs(
+            tool,
+            base_attrs=resolved_context_attrs,
+            arguments=arguments,
         )
         authorization_effect_ids = self._authorization_effect_ids(tool, target=target)
         decision = self.authorization_port.check_tool_execution(
@@ -505,6 +516,25 @@ class ToolResolver:
             attrs.update(self.run_context_provider(run))
         return attrs
 
+    @staticmethod
+    def _runtime_pool_context(
+        run: OrchestrationRun,
+        *,
+        context_attrs: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_context: dict[str, Any] = {
+            "caller": "orchestration",
+            "agent_id": run.agent_id,
+            "run_id": run.id,
+        }
+        session_key = str(run.metadata.get("session_key", "")).strip()
+        if session_key:
+            runtime_context["session_key"] = session_key
+        workspace_dir = context_attrs.get("workspace_dir")
+        if isinstance(workspace_dir, str) and workspace_dir.strip():
+            runtime_context["workspace_dir"] = workspace_dir.strip()
+        return runtime_context
+
     def _resource_attrs(
         self,
         tool: Tool,
@@ -513,7 +543,7 @@ class ToolResolver:
     ) -> dict[str, Any]:
         attrs: dict[str, Any] = {
             "tool_kind": tool.kind.value,
-            "source_kind": tool.source_kind.value,
+            "definition_origin": tool.definition_origin.value,
             "runtime_key": tool.runtime_key,
             "enabled": tool.enabled,
             "requires_confirmation": tool.execution_policy.requires_confirmation,
@@ -535,6 +565,8 @@ class ToolResolver:
             "strategy": target.strategy.value,
             "environment": target.environment.value,
             "tags": list(tool.tags),
+            "source_id": tool.source_id,
+            "capability_ids": list(tool.capability_ids),
         }
         scope_required = self._tag_value(tool.tags, "scope:")
         surface_modes = self._tag_values(tool.tags, "surface:")

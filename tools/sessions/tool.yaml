@@ -1,5 +1,19 @@
 kind: local_package
 namespace: sessions
+capabilities:
+  - session.read
+  - session.write
+  - session.tree_read
+  - session.route_enqueue
+  - session.tree_cancel
+  - run_control.yield
+dependencies:
+  - id: session_service
+    kind: service_dependency
+    description: Session application service used for exact session state and transcript operations.
+  - id: session_runtime_control
+    kind: service_dependency
+    description: Session runtime control port used for run summaries, follow-up enqueue and session-tree cancellation.
 local_tools:
   - id: session_status
     name: Session Status

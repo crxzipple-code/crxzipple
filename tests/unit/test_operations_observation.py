@@ -10,26 +10,58 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from crxzipple.core.db import Base, import_models
+from crxzipple.app.assembly.events import build_event_definition_registry
 from crxzipple.modules.events import EventsApplicationService, InMemoryEventsBackend
 from crxzipple.modules.events.domain import EventTopicRecord
+from crxzipple.modules.browser.application.events import BROWSER_OPERATION_EVENT_NAMES
+from crxzipple.modules.memory.application.events import MEMORY_OPERATION_EVENT_NAMES
+from crxzipple.app.assembly.event_runtime import OPERATIONS_STATE_PROJECTION_MODULES
 from crxzipple.modules.operations.application.observation import (
     OperationsModuleObservation,
+    OperationsObserverHeartbeat,
+    OperationsObservedEvent,
+    OperationsObservationSnapshot,
     OperationsProjection,
     observed_event_from_record,
 )
 from crxzipple.modules.operations.application.projections import (
+    OPERATIONS_PROJECTION_MODULES,
     OPERATIONS_PROJECTION_INVALIDATED_EVENT,
     OperationsProjectionMaterializer,
 )
 from crxzipple.modules.operations.application.read_models.orchestration import (
     OrchestrationOperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.access import (
+    AccessOperationsReadModelProvider,
+)
+from crxzipple.modules.operations.application.read_models.memory import (
+    MemoryOperationsReadModelProvider,
+)
+from crxzipple.modules.operations.application.read_models.skills import (
+    SkillsOperationsReadModelProvider,
+)
 from crxzipple.modules.operations.application.read_models.events import (
+    EventsOperationsReadModelProvider,
     _health as events_operations_health,
 )
 from crxzipple.modules.operations.application.runtime import (
     OperationsObserverRuntimeService,
     operations_observer_event_names,
+)
+from crxzipple.modules.skills.application.events import (
+    SKILL_DRAFT_APPLIED_EVENT,
+    SKILL_DRAFT_APPLY_FAILED_EVENT,
+    SKILL_DRAFT_CREATED_EVENT,
+    SKILL_DRAFT_VALIDATED_EVENT,
+    SKILL_OPERATION_EVENT_NAMES,
+    SKILL_READ_SUCCEEDED_EVENT,
+    SKILL_RESOLUTION_COMPLETED_EVENT,
+)
+from crxzipple.modules.access.application.events import (
+    ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
+    ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+    ACCESS_OPERATION_EVENT_NAMES,
 )
 from crxzipple.modules.operations.infrastructure import (
     FileBackedOperationsObservationStore,
@@ -41,7 +73,10 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRunStage,
     OrchestrationRunStatus,
 )
+from crxzipple.modules.skills.application import SkillPackage
+from crxzipple.modules.skills.domain import SkillManifest
 from crxzipple.modules.operations.infrastructure.persistence import (
+    SqlAlchemyOperationsObservationStore,
     SqlAlchemyOperationsActionAuditStore,
     SqlAlchemyOperationsProjectionStore,
 )
@@ -208,6 +243,91 @@ class OperationsObservationTestCase(unittest.TestCase):
             self.assertEqual(restored_observation.event_count, 9)
             self.assertEqual(restored_observation.last_cursor, "9")
 
+    def test_sqlalchemy_store_persists_observations_and_time_buckets(self) -> None:
+        timestamp = datetime(2026, 5, 23, 10, 15, tzinfo=timezone.utc)
+        engine = create_engine("sqlite:///:memory:")
+        import_models()
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(
+            bind=engine,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+        store = SqlAlchemyOperationsObservationStore(session_factory)
+        succeeded = observed_event_from_record(
+            EventTopicRecord(
+                cursor="access-1",
+                envelope=Event(
+                    name=ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                    payload={
+                        "target_id": "openai-api-key",
+                        "status": "succeeded",
+                    },
+                    occurred_at=timestamp,
+                ),
+            ),
+        )
+        failed = observed_event_from_record(
+            EventTopicRecord(
+                cursor="access-2",
+                envelope=Event(
+                    name=ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
+                    payload={
+                        "target_id": "missing-api-key",
+                        "status": "failed",
+                        "reason": "missing",
+                    },
+                    occurred_at=timestamp + timedelta(minutes=12),
+                ),
+            ),
+        )
+
+        store.record_observed_events((succeeded, failed))
+        store.record_observed_event(succeeded)
+        store.record_observer_heartbeat(
+            OperationsObserverHeartbeat(
+                runtime_name="operations.observer",
+                worker_id="observer-1",
+                status="running",
+                started_at=timestamp,
+                last_seen_at=timestamp + timedelta(minutes=13),
+                processed_events=2,
+                idle_cycles=0,
+                subscription_count=12,
+                poll_interval_seconds=0.5,
+                limit_per_subscription=100,
+            ),
+        )
+
+        restored = SqlAlchemyOperationsObservationStore(session_factory)
+        observation = restored.get_module_observation("access")
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(observation.event_count, 2)
+        self.assertEqual(observation.status_counts["succeeded"], 1)
+        self.assertEqual(observation.status_counts["failed"], 1)
+        self.assertEqual(observation.recent_events[0].event_name, ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT)
+        self.assertEqual(observation.recent_events[1].event_name, ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT)
+
+        buckets = restored.list_event_buckets(module="access")
+        bucket_counts = {
+            (bucket["event_name"], bucket["status"]): bucket["count"]
+            for bucket in buckets
+        }
+        self.assertEqual(
+            bucket_counts[
+                (ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT, "succeeded")
+            ],
+            1,
+        )
+        self.assertEqual(
+            bucket_counts[(ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT, "failed")],
+            1,
+        )
+        snapshot = restored.snapshot()
+        self.assertEqual(len(snapshot.observer_heartbeats), 1)
+        self.assertEqual(snapshot.observer_heartbeats[0].worker_id, "observer-1")
+
     def test_operations_observer_subscribes_raw_orchestration_events(self) -> None:
         names = set(operations_observer_event_names())
 
@@ -217,6 +337,11 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertIn("orchestration.executor.assignment.requested", names)
         self.assertIn("tool.run.created", names)
         self.assertIn("tool.assignment.created", names)
+
+    def test_operations_observer_does_not_subscribe_projection_invalidation(self) -> None:
+        names = set(operations_observer_event_names(build_event_definition_registry()))
+
+        self.assertNotIn(OPERATIONS_PROJECTION_INVALIDATED_EVENT, names)
 
     def test_operations_observer_runs_maintenance_after_processing_events(self) -> None:
         events = EventsApplicationService(InMemoryEventsBackend())
@@ -250,6 +375,48 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(processed, 1)
         self.assertEqual(len(handled), 1)
         self.assertGreaterEqual(len(maintenance_calls), 1)
+
+    def test_operations_observer_can_start_new_subscription_at_topic_tail(self) -> None:
+        events = EventsApplicationService(InMemoryEventsBackend())
+        topic = named_event_topic("operations.tail.test")
+        events.publish(
+            Event(
+                name="operations.tail.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.tail.test", "value": "old"},
+            ),
+        )
+        handled: list[str] = []
+        runtime = OperationsObserverRuntimeService(
+            events_service=events,
+            start_at_tail_when_no_cursor=True,
+        )
+        runtime.subscribe_topic(
+            topic,
+            subscription_id="operations.tail.test",
+            handler=lambda record: handled.append(record.envelope.payload["value"]),
+        )
+
+        self.assertEqual(runtime.process_available_events(), 0)
+        events.publish(
+            Event(
+                name="operations.tail.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.tail.test", "value": "new"},
+            ),
+        )
+
+        self.assertEqual(runtime.process_available_events(), 1)
+        self.assertEqual(handled, ["new"])
+
+    def test_operations_state_projection_maintenance_covers_all_modules(self) -> None:
+        self.assertEqual(
+            OPERATIONS_STATE_PROJECTION_MODULES,
+            OPERATIONS_PROJECTION_MODULES,
+        )
+        self.assertIn("browser", OPERATIONS_STATE_PROJECTION_MODULES)
 
     def test_events_operations_health_treats_stuck_consumers_as_warning(self) -> None:
         health = events_operations_health(
@@ -443,6 +610,66 @@ class OperationsObservationTestCase(unittest.TestCase):
             ),
         )
 
+    def test_memory_materializer_stores_file_details_outside_page_projection(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        store.record_projection(
+            module="memory",
+            kind="memory_file_detail",
+            query_key="stale-memory-file",
+            payload={"file_id": "stale-memory-file", "excerpt": "old"},
+        )
+        store.record_projection(
+            module="memory",
+            kind="memory_space_detail",
+            query_key="stale-memory-space",
+            payload={"space_id": "stale-memory-space"},
+        )
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_modules(("memory",))
+
+        self.assertEqual(materialized, 1)
+        page_projection = store.get_projection(module="memory", kind="page")
+        self.assertIsNotNone(page_projection)
+        assert page_projection is not None
+        self.assertEqual(page_projection.payload["file_details"], [])
+        detail = store.get_projection(
+            module="memory",
+            kind="memory_file_detail",
+            query_key="assistant:MEMORY.md",
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.payload["excerpt"], "hello")
+        self.assertIsNone(
+            store.get_projection(
+                module="memory",
+                kind="memory_file_detail",
+                query_key="stale-memory-file",
+            ),
+        )
+        space_detail = store.get_projection(
+            module="memory",
+            kind="memory_space_detail",
+            query_key="assistant",
+        )
+        self.assertIsNotNone(space_detail)
+        assert space_detail is not None
+        self.assertEqual(space_detail.payload["space_id"], "assistant")
+        self.assertEqual(space_detail.payload["agents"], ["assistant"])
+        self.assertIsNone(
+            store.get_projection(
+                module="memory",
+                kind="memory_space_detail",
+                query_key="stale-memory-space",
+            ),
+        )
+
     def test_orchestration_page_uses_module_observation_without_rich_snapshot(self) -> None:
         timestamp = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
         observed_event = observed_event_from_record(
@@ -479,7 +706,7 @@ class OperationsObservationTestCase(unittest.TestCase):
                     ),
                 ],
             ),
-            executor_control=_FakeOrchestrationExecutorControl(
+            executor_lease_query=_FakeOrchestrationExecutorControl(
                 leases=[
                     OrchestrationExecutorLease(
                         id="worker-owner-query",
@@ -661,6 +888,52 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(payload["kinds"], ["page", "overview"])
         self.assertEqual(payload["source"], "operations-observer")
 
+    def test_materializer_maps_skill_events_to_skills_and_events_projections(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_observed_modules(("skills",))
+
+        self.assertEqual(materialized, 2)
+        skills_page = store.get_projection(module="skills", kind="page")
+        events_page = store.get_projection(module="events", kind="page")
+        self.assertIsNotNone(skills_page)
+        self.assertIsNotNone(events_page)
+        assert skills_page is not None
+        assert events_page is not None
+        self.assertEqual(skills_page.payload["module"], "skills")
+        self.assertEqual(events_page.payload["module"], "events")
+
+    def test_materializer_maps_browser_events_to_browser_daemon_and_events(
+        self,
+    ) -> None:
+        store = self._projection_store()
+        materializer = OperationsProjectionMaterializer(
+            source_provider=_FakeOperationsSourceProvider(),
+            projection_store=store,
+        )
+
+        materialized = materializer.materialize_observed_modules(("browser",))
+
+        self.assertEqual(materialized, 3)
+        browser_page = store.get_projection(module="browser", kind="page")
+        daemon_page = store.get_projection(module="daemon", kind="page")
+        events_page = store.get_projection(module="events", kind="page")
+        self.assertIsNotNone(browser_page)
+        self.assertIsNotNone(daemon_page)
+        self.assertIsNotNone(events_page)
+        assert browser_page is not None
+        assert daemon_page is not None
+        assert events_page is not None
+        self.assertEqual(browser_page.payload["module"], "browser")
+        self.assertEqual(daemon_page.payload["module"], "daemon")
+        self.assertEqual(events_page.payload["module"], "events")
+
     def test_observer_runtime_runs_maintenance_before_idle_wait(self) -> None:
         events_service = EventsApplicationService(InMemoryEventsBackend())
         maintenance_calls: list[str] = []
@@ -696,6 +969,29 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(first_processed, 1)
         self.assertEqual(second_processed, 1)
         self.assertEqual(len(observed), 2)
+
+    def test_observer_runtime_event_driven_wakeup_does_not_scan_all_topics(self) -> None:
+        events_service = EventsApplicationService(InMemoryEventsBackend())
+        observed: list[str] = []
+        runtime = OperationsObserverRuntimeService(events_service=events_service)
+        runtime.subscribe_event_name(
+            "tool.run.succeeded",
+            subscription_id="operations.observer.tool.run.succeeded.test",
+            handler=lambda record: observed.append(record.envelope.event_name),
+        )
+        runtime.subscribe_event_name(
+            "llm.invocation_succeeded",
+            subscription_id="operations.observer.llm.invocation_succeeded.test",
+            handler=lambda record: observed.append(record.envelope.event_name),
+        )
+        events_service.publish(Event(name="tool.run.succeeded", payload={"run_id": "tool-1"}))
+        events_service.publish(Event(name="llm.invocation_succeeded", payload={"id": "llm-1"}))
+        runtime._wakeup_topics.add(named_event_topic("tool.run.succeeded"))
+
+        processed = runtime.process_available_events(event_driven=True)
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(observed, ["tool.run.succeeded"])
 
     def test_operations_action_request_accepts_audit_payload(self) -> None:
         request = OperationsActionReasonRequest(
@@ -769,6 +1065,300 @@ class OperationsObservationTestCase(unittest.TestCase):
 
         self.assertEqual(reason, "Operations tool run retry")
 
+    def test_operations_observer_static_events_include_skill_events(self) -> None:
+        event_names = operations_observer_event_names()
+
+        self.assertIn("skills.readiness.changed", event_names)
+        for event_name in SKILL_OPERATION_EVENT_NAMES:
+            self.assertIn(event_name, event_names)
+
+    def test_operations_observer_static_events_include_access_events(self) -> None:
+        event_names = operations_observer_event_names()
+
+        for event_name in ACCESS_OPERATION_EVENT_NAMES:
+            self.assertIn(event_name, event_names)
+
+    def test_operations_observer_static_events_include_memory_events(self) -> None:
+        event_names = operations_observer_event_names()
+
+        for event_name in MEMORY_OPERATION_EVENT_NAMES:
+            self.assertIn(event_name, event_names)
+
+    def test_operations_observer_static_events_include_browser_events(self) -> None:
+        event_names = operations_observer_event_names()
+
+        self.assertIn("browser.network.fetch.executed", event_names)
+        self.assertIn("browser.network.replay.executed", event_names)
+        for event_name in BROWSER_OPERATION_EVENT_NAMES:
+            self.assertIn(event_name, event_names)
+
+    def test_memory_operations_write_flush_uses_remember_events(self) -> None:
+        event = OperationsObservedEvent(
+            id="event-memory-remember-1",
+            cursor="1",
+            topic="events.named.memory.remember.succeeded",
+            event_name="memory.remember.succeeded",
+            module="memory",
+            owner="memory",
+            kind="observe",
+            level="info",
+            status="succeeded",
+            entity_id="memory/2026-05-22.md",
+            run_id="run-1",
+            trace_id="trace-1",
+            source_event_name=None,
+            occurred_at=datetime(2026, 5, 22, 8, 0, tzinfo=timezone.utc),
+            payload={
+                "space_id": "assistant",
+                "path": "memory/2026-05-22.md",
+                "operation": "append_daily",
+            },
+        )
+        observation = OperationsModuleObservation(
+            module="memory",
+            owner="memory",
+            recent_events=(event,),
+        )
+        provider = MemoryOperationsReadModelProvider(
+            agent_service=None,
+            memory_query_service=None,
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="memory",
+            ),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.write_flush.total, 1)
+        self.assertEqual(page.write_flush.rows[0].cells["operation"], "remember.succeeded")
+
+    def test_access_operations_auth_success_rate_uses_resolution_events(self) -> None:
+        timestamp = datetime(2026, 5, 21, 8, 7, tzinfo=timezone.utc)
+        observation = OperationsModuleObservation(
+            module="access",
+            owner="access",
+            recent_events=(
+                OperationsObservedEvent(
+                    id="access-success-1",
+                    cursor="access-success-1",
+                    topic=f"events.named.{ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT}",
+                    event_name=ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                    module="access",
+                    owner="access",
+                    kind="fact",
+                    level="info",
+                    status="succeeded",
+                    entity_id="openai-api-key",
+                    run_id="run-access-1",
+                    trace_id="trace-access-1",
+                    source_event_name=None,
+                    occurred_at=timestamp,
+                    payload={"target_id": "openai-api-key"},
+                ),
+                OperationsObservedEvent(
+                    id="access-success-2",
+                    cursor="access-success-2",
+                    topic=f"events.named.{ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT}",
+                    event_name=ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                    module="access",
+                    owner="access",
+                    kind="fact",
+                    level="info",
+                    status="succeeded",
+                    entity_id="openai-api-key",
+                    run_id="run-access-2",
+                    trace_id="trace-access-2",
+                    source_event_name=None,
+                    occurred_at=timestamp + timedelta(seconds=1),
+                    payload={"target_id": "openai-api-key"},
+                ),
+                OperationsObservedEvent(
+                    id="access-failed-1",
+                    cursor="access-failed-1",
+                    topic=f"events.named.{ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT}",
+                    event_name=ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
+                    module="access",
+                    owner="access",
+                    kind="fact",
+                    level="error",
+                    status="failed",
+                    entity_id="missing-api-key",
+                    run_id="run-access-3",
+                    trace_id="trace-access-3",
+                    source_event_name=None,
+                    occurred_at=timestamp + timedelta(seconds=2),
+                    payload={"target_id": "missing-api-key", "reason": "missing"},
+                ),
+            ),
+        )
+        provider = AccessOperationsReadModelProvider(
+            access_service=None,
+            access_governance_repository=None,
+            llm_service=None,
+            tool_service=None,
+            channel_profile_service=None,
+            lark_channel_runtime_service=None,
+            web_channel_runtime_service=None,
+            webhook_channel_runtime_service=None,
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="access",
+            ),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.auth_success_rate.title, "Credential Resolve Success")
+        self.assertEqual(page.auth_success_rate.total, 3)
+        segments = {segment.id: segment.value for segment in page.auth_success_rate.segments}
+        self.assertEqual(segments, {"succeeded": 2, "failed": 1})
+        self.assertEqual(page.access_audit_summary.total, 3)
+
+    def test_access_operations_prefers_persisted_event_buckets_for_24h_counts(
+        self,
+    ) -> None:
+        timestamp = datetime.now(timezone.utc)
+        observation = OperationsModuleObservation(
+            module="access",
+            owner="access",
+            recent_events=(
+                OperationsObservedEvent(
+                    id="access-success-recent",
+                    cursor="access-success-recent",
+                    topic=f"events.named.{ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT}",
+                    event_name=ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                    module="access",
+                    owner="access",
+                    kind="fact",
+                    level="info",
+                    status="succeeded",
+                    entity_id="openai-api-key",
+                    run_id=None,
+                    trace_id=None,
+                    source_event_name=None,
+                    occurred_at=timestamp,
+                    payload={"target_id": "openai-api-key"},
+                ),
+            ),
+        )
+        buckets: tuple[dict[str, object], ...] = (
+            {
+                "module": "access",
+                "owner": "access",
+                "event_name": ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                "status": "succeeded",
+                "level": "info",
+                "bucket_start": timestamp.replace(minute=0, second=0, microsecond=0),
+                "count": 5,
+                "updated_at": timestamp,
+            },
+            {
+                "module": "access",
+                "owner": "access",
+                "event_name": ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
+                "status": "failed",
+                "level": "error",
+                "bucket_start": timestamp.replace(minute=0, second=0, microsecond=0),
+                "count": 2,
+                "updated_at": timestamp,
+            },
+        )
+        provider = AccessOperationsReadModelProvider(
+            access_service=None,
+            access_governance_repository=None,
+            llm_service=None,
+            tool_service=None,
+            channel_profile_service=None,
+            lark_channel_runtime_service=None,
+            web_channel_runtime_service=None,
+            webhook_channel_runtime_service=None,
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="access",
+                event_buckets=buckets,
+            ),
+        )
+
+        page = provider.page()
+
+        segments = {segment.id: segment.value for segment in page.auth_success_rate.segments}
+        metrics = {metric.id: metric for metric in page.metrics}
+        self.assertEqual(page.auth_success_rate.total, 7)
+        self.assertEqual(segments, {"succeeded": 5, "failed": 2})
+        self.assertEqual(metrics["failed_auth"].value, "2")
+
+    def test_events_operations_uses_observation_snapshot_and_buckets(
+        self,
+    ) -> None:
+        timestamp = datetime.now(timezone.utc)
+        observed = OperationsObservedEvent(
+            id="tool-failed-1",
+            cursor="tool-failed-1",
+            topic="events.named.tool.run.failed",
+            event_name="tool.run.failed",
+            module="tool",
+            owner="tool",
+            kind="fact",
+            level="error",
+            status="failed",
+            entity_id="tool-run-1",
+            run_id="run-1",
+            trace_id="trace-1",
+            source_event_name=None,
+            occurred_at=timestamp,
+            payload={"tool_id": "openai_image_generate"},
+        )
+        observation = OperationsModuleObservation(
+            module="tool",
+            owner="tool",
+            recent_events=(observed,),
+        )
+        buckets: tuple[dict[str, object], ...] = (
+            {
+                "module": "tool",
+                "owner": "tool",
+                "event_name": "tool.run.failed",
+                "status": "failed",
+                "level": "error",
+                "bucket_start": timestamp.replace(minute=0, second=0, microsecond=0),
+                "count": 3,
+                "updated_at": timestamp,
+            },
+            {
+                "module": "access",
+                "owner": "access",
+                "event_name": ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+                "status": "succeeded",
+                "level": "info",
+                "bucket_start": timestamp.replace(minute=0, second=0, microsecond=0),
+                "count": 4,
+                "updated_at": timestamp,
+            },
+        )
+        provider = EventsOperationsReadModelProvider(
+            events_service=None,
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="tool",
+                event_buckets=buckets,
+            ),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.recent_events.total, 1)
+        self.assertEqual(page.events_over_time.title, "Events by Status (24h)")
+        self.assertEqual(page.events_over_time.total, 7)
+        status_segments = {
+            segment.id: segment.value for segment in page.events_over_time.segments
+        }
+        self.assertEqual(status_segments, {"succeeded": 4, "failed": 3})
+        owner_segments = {
+            segment.id: segment.value for segment in page.events_by_surface.segments
+        }
+        self.assertEqual(owner_segments, {"access": 4, "tool": 3})
+
     def test_operations_action_audit_payload_preserves_controlled_risk(self) -> None:
         payload = _operations_action_audit_payload(
             OperationsActionReasonRequest(
@@ -784,6 +1374,359 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertFalse(payload["dangerous"])
         self.assertTrue(payload["confirmation"])
         self.assertEqual(payload["metadata"], {"ticket": "OPS-2"})
+
+    def test_skills_operations_uses_readiness_changed_events(self) -> None:
+        package = SkillPackage(
+            manifest=SkillManifest(
+                api_version="skills.crxzipple/v1alpha1",
+                kind="Skill",
+                name="repo-review",
+                description="Review repository changes.",
+                required_tools=("git_diff",),
+                required_effects=("network",),
+            ),
+            root_path="/skills/repo-review",
+            manifest_path="/skills/repo-review/SKILL.md",
+            instructions_path="/skills/repo-review/SKILL.md",
+            source="system",
+        )
+
+        class _SkillManager:
+            def list_available(self, *, workspace_dir, surface):
+                del workspace_dir, surface
+                return (package,)
+
+        event = OperationsObservedEvent(
+            id="event-skill-ready-1",
+            cursor="1",
+            topic="events.named.skills.readiness.changed",
+            event_name="skills.readiness.changed",
+            module="skills",
+            owner="skills",
+            kind="observe",
+            level="warning",
+            status="setup_needed",
+            entity_id="repo-review",
+            run_id="run-1",
+            trace_id=None,
+            source_event_name=None,
+            occurred_at=datetime(2026, 5, 21, 8, 0, tzinfo=timezone.utc),
+            payload={
+                "skill": "repo-review",
+                "status": "setup_needed",
+                "missing_tools": ["git_diff"],
+                "missing_effects": ["network"],
+            },
+        )
+        observation = OperationsModuleObservation(
+            module="skills",
+            owner="skills",
+            recent_events=(event,),
+        )
+        provider = SkillsOperationsReadModelProvider(
+            skill_manager=_SkillManager(),
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="skills",
+            ),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.recently_resolved_skills.rows[0].status, "Setup Needed")
+        missing_rows = {
+            row.cells["required"]: row.cells["type"]
+            for row in page.missing_capabilities.rows
+        }
+        self.assertEqual(missing_rows["git_diff"], "Tool")
+        self.assertEqual(missing_rows["network"], "Authorization Effect")
+
+    def test_skills_operations_reads_declared_skill_topics_without_bus_scan(self) -> None:
+        package = SkillPackage(
+            manifest=SkillManifest(
+                api_version="skills.crxzipple/v1alpha1",
+                kind="Skill",
+                name="repo-review",
+                description="Review repository changes.",
+            ),
+            root_path="/skills/repo-review",
+            manifest_path="/skills/repo-review/SKILL.md",
+            instructions_path="/skills/repo-review/SKILL.md",
+            source="system",
+        )
+        timestamp = datetime(2026, 5, 21, 8, 5, tzinfo=timezone.utc)
+        read_topic = named_event_topic("skills.read.succeeded")
+
+        class _SkillManager:
+            def list_available(self, *, workspace_dir, surface):
+                del workspace_dir, surface
+                return (package,)
+
+        class _EventsService:
+            def __init__(self) -> None:
+                self.read_topics: list[str] = []
+
+            def list_event_topics(self):
+                raise AssertionError("Skills operations should not scan the event bus.")
+
+            def read_recent_event_topic(self, topic, *, limit):
+                self.read_topics.append(topic)
+                if topic != read_topic:
+                    return ()
+                return (
+                    EventTopicRecord(
+                        cursor="skill-read-1",
+                        envelope=Event(
+                            name="skills.read.succeeded",
+                            payload={
+                                "skill": "repo-review",
+                                "status": "succeeded",
+                                "path": "SKILL.md",
+                                "duration_ms": 37.5,
+                            },
+                            occurred_at=timestamp,
+                        ),
+                    ),
+                )
+
+        events_service = _EventsService()
+        provider = SkillsOperationsReadModelProvider(
+            skill_manager=_SkillManager(),
+            events_service=events_service,
+        )
+
+        page = provider.page()
+
+        self.assertIn(
+            read_topic,
+            events_service.read_topics,
+        )
+        self.assertEqual(
+            set(events_service.read_topics),
+            {named_event_topic(event_name) for event_name in SKILL_OPERATION_EVENT_NAMES},
+        )
+        self.assertEqual(page.resolution_logs.total, 1)
+        self.assertEqual(page.resolution_logs.rows[0].cells["event"], "read.succeeded")
+        self.assertEqual(page.skill_reads.total, 1)
+        self.assertEqual(page.skill_reads.rows[0].cells["skill"], "repo-review")
+        self.assertEqual(page.skill_reads.rows[0].cells["duration"], "38 ms")
+        self.assertEqual(page.top_used_skills.total, 1)
+        self.assertEqual(page.top_used_skills.rows[0].cells["skill"], "repo-review")
+        self.assertEqual(page.top_used_skills.rows[0].cells["reads"], "1")
+
+    def test_skills_operations_top_used_is_runtime_usage_from_events(self) -> None:
+        timestamp = datetime(2026, 5, 21, 8, 8, tzinfo=timezone.utc)
+        package = SkillPackage(
+            manifest=SkillManifest(
+                api_version="skills.crxzipple/v1alpha1",
+                kind="Skill",
+                name="repo-review",
+                description="Review repository changes.",
+            ),
+            root_path="/skills/repo-review",
+            manifest_path="/skills/repo-review/SKILL.md",
+            instructions_path="/skills/repo-review/SKILL.md",
+            source="system",
+        )
+
+        class _SkillManager:
+            def list_available(self, *, workspace_dir, surface):
+                del workspace_dir, surface
+                return (package,)
+
+        observation = OperationsModuleObservation(
+            module="skills",
+            owner="skills",
+            recent_events=(
+                OperationsObservedEvent(
+                    id="skill-resolution-1",
+                    cursor="skill-resolution-1",
+                    topic=f"events.named.{SKILL_RESOLUTION_COMPLETED_EVENT}",
+                    event_name=SKILL_RESOLUTION_COMPLETED_EVENT,
+                    module="skills",
+                    owner="skills",
+                    kind="observe",
+                    level="info",
+                    status="ready",
+                    entity_id="run-usage-1",
+                    run_id="run-usage-1",
+                    trace_id=None,
+                    source_event_name=None,
+                    occurred_at=timestamp,
+                    payload={
+                        "run_id": "run-usage-1",
+                        "surface": "interactive",
+                        "skills": [{"skill": "repo-review", "status": "ready"}],
+                    },
+                ),
+                OperationsObservedEvent(
+                    id="skill-read-1",
+                    cursor="skill-read-1",
+                    topic=f"events.named.{SKILL_READ_SUCCEEDED_EVENT}",
+                    event_name=SKILL_READ_SUCCEEDED_EVENT,
+                    module="skills",
+                    owner="skills",
+                    kind="observe",
+                    level="info",
+                    status="succeeded",
+                    entity_id="repo-review",
+                    run_id="run-usage-1",
+                    trace_id=None,
+                    source_event_name=None,
+                    occurred_at=timestamp + timedelta(seconds=1),
+                    payload={
+                        "skill": "repo-review",
+                        "surface": "interactive",
+                        "duration_ms": 12,
+                    },
+                ),
+            ),
+        )
+        provider = SkillsOperationsReadModelProvider(
+            skill_manager=_SkillManager(),
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="skills",
+            ),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.top_used_skills.title, "Runtime Skill Usage")
+        self.assertEqual(page.top_used_skills.total, 1)
+        row = page.top_used_skills.rows[0]
+        self.assertEqual(row.cells["skill"], "repo-review")
+        self.assertEqual(row.cells["resolved"], "1")
+        self.assertEqual(row.cells["reads"], "1")
+        self.assertEqual(row.cells["surface"], "interactive")
+
+    def test_skills_operations_projects_authoring_backlog_and_failures(self) -> None:
+        timestamp = datetime(2026, 5, 21, 8, 10, tzinfo=timezone.utc)
+        failed_event = OperationsObservedEvent(
+            id="skill-draft-failed-1",
+            cursor="draft-3",
+            topic=f"events.named.{SKILL_DRAFT_APPLY_FAILED_EVENT}",
+            event_name=SKILL_DRAFT_APPLY_FAILED_EVENT,
+            module="skills",
+            owner="skills",
+            kind="observe",
+            level="error",
+            status="failed",
+            entity_id="skill-draft:repo-review",
+            run_id="run-authoring-1",
+            trace_id=None,
+            source_event_name=None,
+            occurred_at=timestamp + timedelta(seconds=2),
+            payload={
+                "draft_id": "skill-draft:repo-review",
+                "draft_status": "invalid",
+                "intent": "create",
+                "skill": "repo-review",
+                "actor": "assistant",
+                "validation_error_count": 1,
+                "validation_warning_count": 0,
+                "validation_errors": ["required tool git_diff is unavailable"],
+                "error_message": "Skill draft is invalid.",
+            },
+        )
+        applied_event = OperationsObservedEvent(
+            id="skill-draft-applied-1",
+            cursor="draft-4",
+            topic=f"events.named.{SKILL_DRAFT_APPLIED_EVENT}",
+            event_name=SKILL_DRAFT_APPLIED_EVENT,
+            module="skills",
+            owner="skills",
+            kind="observe",
+            level="info",
+            status="applied",
+            entity_id="skill-draft:done",
+            run_id="run-authoring-2",
+            trace_id=None,
+            source_event_name=None,
+            occurred_at=timestamp + timedelta(seconds=3),
+            payload={
+                "draft_id": "skill-draft:done",
+                "draft_status": "applied",
+                "intent": "create",
+                "skill": "done-skill",
+                "actor": "assistant",
+            },
+        )
+        observation = OperationsModuleObservation(
+            module="skills",
+            owner="skills",
+            recent_events=(
+                OperationsObservedEvent(
+                    id="skill-draft-created-1",
+                    cursor="draft-1",
+                    topic=f"events.named.{SKILL_DRAFT_CREATED_EVENT}",
+                    event_name=SKILL_DRAFT_CREATED_EVENT,
+                    module="skills",
+                    owner="skills",
+                    kind="observe",
+                    level="info",
+                    status="draft",
+                    entity_id="skill-draft:repo-review",
+                    run_id="run-authoring-1",
+                    trace_id=None,
+                    source_event_name=None,
+                    occurred_at=timestamp,
+                    payload={
+                        "draft_id": "skill-draft:repo-review",
+                        "draft_status": "draft",
+                        "intent": "create",
+                        "skill": "repo-review",
+                        "actor": "assistant",
+                    },
+                ),
+                OperationsObservedEvent(
+                    id="skill-draft-validated-1",
+                    cursor="draft-2",
+                    topic=f"events.named.{SKILL_DRAFT_VALIDATED_EVENT}",
+                    event_name=SKILL_DRAFT_VALIDATED_EVENT,
+                    module="skills",
+                    owner="skills",
+                    kind="observe",
+                    level="info",
+                    status="validated",
+                    entity_id="skill-draft:repo-review",
+                    run_id="run-authoring-1",
+                    trace_id=None,
+                    source_event_name=None,
+                    occurred_at=timestamp + timedelta(seconds=1),
+                    payload={
+                        "draft_id": "skill-draft:repo-review",
+                        "draft_status": "validated",
+                        "intent": "create",
+                        "skill": "repo-review",
+                        "actor": "assistant",
+                        "readiness_status": "ready",
+                    },
+                ),
+                failed_event,
+                applied_event,
+            ),
+        )
+        provider = SkillsOperationsReadModelProvider(
+            skill_manager=None,
+            operations_observation=_ModuleOnlyOperationsObservation(
+                observation,
+                module="skills",
+            ),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.authoring_backlog.total, 1)
+        self.assertEqual(page.authoring_backlog.rows[0].cells["draft"], "skill-draft:repo-review")
+        self.assertEqual(page.authoring_backlog.rows[0].cells["status"], "Invalid")
+        self.assertEqual(page.authoring_backlog.rows[0].cells["next_step"], "Review failure and revise draft")
+        self.assertEqual(page.authoring_failures.total, 1)
+        self.assertEqual(page.authoring_failures.rows[0].cells["skill"], "repo-review")
+        self.assertIn(
+            "required tool git_diff",
+            page.authoring_failures.rows[0].cells["error"],
+        )
 
     def test_file_backed_store_observes_tool_module_events(self) -> None:
         timestamp = datetime(2026, 5, 1, 11, 0, tzinfo=timezone.utc)
@@ -892,14 +1835,46 @@ class _FakeOrchestrationExecutorControl:
 
 
 class _ModuleOnlyOperationsObservation:
-    def __init__(self, module_observation: OperationsModuleObservation) -> None:
+    def __init__(
+        self,
+        module_observation: OperationsModuleObservation,
+        *,
+        module: str = "orchestration",
+        event_buckets: tuple[dict[str, object], ...] = (),
+    ) -> None:
         self._module_observation = module_observation
+        self._module = module
+        self._event_buckets = event_buckets
 
     def get_module_observation(
         self,
         module: str,
     ) -> OperationsModuleObservation | None:
-        return self._module_observation if module == "orchestration" else None
+        return self._module_observation if module == self._module else None
+
+    def snapshot(self) -> OperationsObservationSnapshot:
+        return OperationsObservationSnapshot(
+            version=4,
+            updated_at=self._module_observation.updated_at,
+            modules=(self._module_observation,),
+        )
+
+    def list_event_buckets(
+        self,
+        *,
+        module: str | None = None,
+        event_name: str | None = None,
+        since: datetime | None = None,
+        limit: int = 500,
+    ) -> tuple[dict[str, object], ...]:
+        del since
+        rows = tuple(
+            bucket
+            for bucket in self._event_buckets
+            if (module is None or bucket.get("module") == module)
+            and (event_name is None or bucket.get("event_name") == event_name)
+        )
+        return rows[:limit]
 
 
 class _FakeOperationsSourceProvider:
@@ -934,6 +1909,89 @@ class _FakeOperationsSourceProvider:
             ],
         }
 
+    def memory_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {
+            "module": "memory",
+            "title": "Memory",
+            "source_files": {
+                "id": "source_files",
+                "title": "Source Files",
+                "columns": [],
+                "rows": [
+                    {
+                        "id": "assistant:MEMORY.md",
+                        "cells": {"file": "MEMORY.md"},
+                    }
+                ],
+                "total": 1,
+            },
+            "memory_stores": {
+                "id": "memory_stores",
+                "title": "Memory Stores",
+                "columns": [],
+                "rows": [
+                    {
+                        "id": "assistant",
+                        "cells": {
+                            "agent": "assistant",
+                            "space_id": "assistant",
+                            "status": "Ready",
+                            "files": "1",
+                            "indexed_files": "1",
+                        },
+                        "status": "Ready",
+                        "tone": "success",
+                    }
+                ],
+                "total": 1,
+            },
+            "file_details": [
+                {
+                    "file_id": "assistant:MEMORY.md",
+                    "title": "MEMORY.md",
+                    "status": "Indexed",
+                    "tone": "success",
+                    "summary": [],
+                    "excerpt": "hello",
+                    "related": {
+                        "id": "related",
+                        "title": "Related",
+                        "columns": [],
+                        "rows": [],
+                        "total": 0,
+                    },
+                    "raw_payload": {"file": {"path": "MEMORY.md"}},
+                }
+            ],
+        }
+
+    def skills_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {"module": "skills", "title": "Skills Runtime"}
+
+    def browser_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {
+            "module": "browser",
+            "title": "Browser Runtime",
+            "profiles": {"id": "profiles", "rows": [], "total": 0},
+            "profile_pools": {"id": "profile_pools", "rows": [], "total": 0},
+            "profile_allocations": {
+                "id": "profile_allocations",
+                "rows": [],
+                "total": 0,
+            },
+        }
+
+    def events_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {"module": "events", "title": "Events Runtime"}
+
+    def daemon_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {"module": "daemon", "title": "Daemon Runtime"}
+
     def module_overview(self, module: str) -> dict[str, object]:
         return {"module": module, "title": module.title()}
 
@@ -953,6 +2011,21 @@ class _EmptyDetailOperationsSourceProvider(_FakeOperationsSourceProvider):
             "module": "llm",
             "title": "LLM Runtime",
             "invocation_details": [],
+        }
+
+    def memory_page(self, query: object | None = None) -> dict[str, object]:
+        del query
+        return {
+            "module": "memory",
+            "title": "Memory",
+            "source_files": {
+                "id": "source_files",
+                "title": "Source Files",
+                "columns": [],
+                "rows": [],
+                "total": 0,
+            },
+            "file_details": [],
         }
 
 

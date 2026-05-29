@@ -4,32 +4,24 @@ from __future__ import annotations
 
 from typing import Callable
 
-from crxzipple.core.logger import get_logger
-from crxzipple.modules.agent.application import AgentApplicationService
-from crxzipple.modules.events import EventsApplicationService
+from crxzipple.modules.memory.application import MemoryRuntimePort
 from crxzipple.modules.orchestration.application.approval import (
     ApprovalControlService,
     ApprovalResolutionService,
+)
+from crxzipple.modules.orchestration.application.assignment_lifecycle import (
+    RunAssignmentLifecycleService,
 )
 from crxzipple.modules.orchestration.application.cancellation import (
     RunCancellationService,
 )
 from crxzipple.modules.orchestration.application.commands import (
-    AdvanceAssignmentInput,
-    CompleteAssignmentInput,
-    FailAssignmentInput,
-    RequestCompactionInput,
-    RequestDueHeartbeatsInput,
     RequestHeartbeatInput,
-    RequestMemoryFlushInput,
     ResolveApprovalRequestInput,
     ResumeOrchestrationRunInput,
-    WaitAssignmentOnToolInput,
-    WaitForConfirmationInput,
 )
 from crxzipple.modules.orchestration.application.coordinators import (
     RunIngressCoordinator,
-    RunIntakeCoordinator,
     RunProgressCoordinator,
     RunRecoveryCoordinator,
     RunRequestCoordinator,
@@ -51,7 +43,7 @@ from crxzipple.modules.orchestration.application.intake_service import (
     OrchestrationIntakeService,
 )
 from crxzipple.modules.orchestration.application.intake_workflows import (
-    SessionRunPreparationWorkflow,
+    build_run_intake_coordinator,
 )
 from crxzipple.modules.orchestration.application.lease_manager import (
     OrchestrationLeaseManager,
@@ -60,10 +52,13 @@ from crxzipple.modules.orchestration.application.maintenance import (
     OrchestrationMaintenanceService,
 )
 from crxzipple.modules.orchestration.application.ports import (
+    AgentProfileCatalogPort,
     AuthorizationPort,
+    EventBusPort,
     LlmPort,
-    MemoryPort,
+    OrchestrationSessionPort,
     RunDispatchPort,
+    SessionResolutionPort,
 )
 from crxzipple.modules.orchestration.application.query import (
     OrchestrationRunQueryService,
@@ -85,29 +80,15 @@ from crxzipple.modules.orchestration.application.unit_of_work import (
 from crxzipple.modules.orchestration.application.worker import (
     OrchestrationExecutorService,
 )
-from crxzipple.modules.orchestration.domain.entities import (
-    OrchestrationExecutorLease,
-    OrchestrationRun,
-)
-from crxzipple.modules.orchestration.domain.exceptions import (
-    OrchestrationRunNotFoundError,
-)
+from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
 from crxzipple.modules.orchestration.domain.value_objects import (
     OrchestrationRunStatus,
-)
-from crxzipple.modules.session.application import (
-    ResolveSessionInput,
-    ResolvedSessionBundle,
-    SessionApplicationService,
-    SessionResolutionService,
 )
 from crxzipple.modules.tool.domain import Tool, ToolExecutionTarget
 from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
     get_runtime_metrics_registry,
 )
-
-logger = get_logger(__name__)
 
 
 class OrchestrationServiceGraph:
@@ -119,79 +100,54 @@ class OrchestrationServiceGraph:
         *,
         scheduler: OrchestrationScheduler | None = None,
         dispatch_port: RunDispatchPort | None = None,
-        agent_service: AgentApplicationService | None = None,
+        agent_service: AgentProfileCatalogPort | None = None,
         authorization_port: AuthorizationPort | None = None,
         llm_port: LlmPort | None = None,
-        memory_port: MemoryPort | None = None,
-        session_service: SessionApplicationService | None = None,
-        session_resolution_service: SessionResolutionService | None = None,
+        memory_port: MemoryRuntimePort | None = None,
+        session_service: OrchestrationSessionPort | None = None,
+        session_resolution_service: SessionResolutionPort | None = None,
         engine: OrchestrationEngine | None = None,
         worker_lease_seconds: int = 30,
         worker_heartbeat_seconds: float = 5.0,
         auto_compaction_enabled: bool = True,
         auto_compaction_reserve_tokens: int = 20_000,
         auto_compaction_soft_threshold_tokens: int = 4_000,
-        events_service: EventsApplicationService | None = None,
+        events_service: EventBusPort | None = None,
         runtime_metrics: RuntimeMetricsRegistry | None = None,
         run_query_service: OrchestrationRunQueryService | None = None,
     ) -> None:
         if dispatch_port is None:
             raise RuntimeError("Orchestration dispatch port is not configured.")
-        self.uow_factory = uow_factory
         self.run_query_service = run_query_service or OrchestrationRunQueryService(
             uow_factory,
         )
-        self.scheduler = scheduler or OrchestrationScheduler()
-        self.dispatch_port = dispatch_port
-        self.agent_service = agent_service
-        self.authorization_port = authorization_port
-        self.llm_port = llm_port
-        self.memory_port = memory_port
-        self.session_service = session_service
+        scheduler_instance = scheduler or OrchestrationScheduler()
         if session_resolution_service is None:
-            if session_service is None:
-                raise RuntimeError(
-                    "Session resolution service is not configured.",
-                )
-            session_resolution_service = SessionResolutionService(session_service)
-        self.session_resolution_service = session_resolution_service
-        self.engine = engine
+            raise RuntimeError("Session resolution service is not configured.")
+        dispatch = dispatch_port
+        metrics = runtime_metrics or get_runtime_metrics_registry()
         self.inspection_service = OrchestrationInspectionService(
             engine=engine,
             get_run=self.run_query_service.get_run,
         )
-        self.worker_lease_seconds = worker_lease_seconds
-        self.worker_heartbeat_seconds = worker_heartbeat_seconds
-        self.auto_compaction_enabled = auto_compaction_enabled
-        self.auto_compaction_reserve_tokens = auto_compaction_reserve_tokens
-        self.auto_compaction_soft_threshold_tokens = auto_compaction_soft_threshold_tokens
-        self.events_service = events_service
-        self.metrics = runtime_metrics or get_runtime_metrics_registry()
 
         self.ingress_coordinator = RunIngressCoordinator(uow_factory=uow_factory)
         self.scheduler_signal_coordinator = RunSchedulerSignalCoordinator(
             uow_factory=uow_factory,
         )
-        self.session_run_preparation_workflow = SessionRunPreparationWorkflow(
-            resolve_session_bundle=self.session_resolution_service.resolve,
-            resolve_session_input_factory=lambda **kwargs: ResolveSessionInput(
-                **kwargs,
-            ),
-            session_start_prompt_flow_hint=self._session_start_prompt_flow_hint,
-        )
-        self.intake_coordinator = RunIntakeCoordinator(
+        self.intake_coordinator = build_run_intake_coordinator(
             uow_factory=uow_factory,
-            scheduler=self.scheduler,
-            dispatch_port=self.dispatch_port,
-            plan_prepared_session_run=self.session_run_preparation_workflow.plan,
+            scheduler=scheduler_instance,
+            dispatch_port=dispatch,
+            resolve_session_bundle=session_resolution_service.resolve,
         )
         self.intake_service = OrchestrationIntakeService(
             coordinator=self.intake_coordinator,
         )
         self.request_coordinator = RunRequestCoordinator(
             uow_factory=uow_factory,
-            scheduler=self.scheduler,
-            dispatch_port=self.dispatch_port,
+            scheduler=scheduler_instance,
+            dispatch_port=dispatch,
             session_service=session_service,
             request_heartbeat_input_factory=lambda **kwargs: RequestHeartbeatInput(
                 **kwargs,
@@ -199,9 +155,21 @@ class OrchestrationServiceGraph:
         )
         self.lease_manager = OrchestrationLeaseManager(
             uow_factory=uow_factory,
-            dispatch_port=self.dispatch_port,
+            dispatch_port=dispatch,
             worker_lease_seconds=worker_lease_seconds,
             worker_heartbeat_seconds=worker_heartbeat_seconds,
+        )
+        self.assignment_lifecycle = RunAssignmentLifecycleService(
+            uow_factory=uow_factory,
+            lease_manager=self.lease_manager,
+            get_run=self.run_query_service.get_run,
+            progress_coordinator=lambda: self.progress_coordinator,
+            wait_coordinator=lambda: self.wait_coordinator,
+            queue_child_completion_signal=(
+                lambda run: self.sessions_spawn_followup_service.queue_child_completion_signal(
+                    run,
+                )
+            ),
         )
         self.maintenance_service = OrchestrationMaintenanceService(
             uow_factory=uow_factory,
@@ -209,9 +177,9 @@ class OrchestrationServiceGraph:
             session_service=session_service,
             llm_port=llm_port,
             request_coordinator=self.request_coordinator,
-            request_memory_flush=self._request_memory_flush,
-            request_compaction=self._request_compaction,
-            fail_assignment=self._fail_assignment,
+            request_memory_flush=self.request_coordinator.request_memory_flush,
+            request_compaction=self.request_coordinator.request_compaction,
+            fail_assignment=self.assignment_lifecycle.fail_assignment,
             process_requested_run_inline=(
                 lambda *, run_id, worker_id: self.executor_service.process_assignment_inline(
                     run_id=run_id,
@@ -227,35 +195,43 @@ class OrchestrationServiceGraph:
             engine=engine,
             maintenance_service=self.maintenance_service,
             get_run=self.run_query_service.get_run,
-            advance_assignment=self._advance_assignment,
-            wait_assignment_on_tool=self._wait_assignment_on_tool,
-            wait_for_confirmation=self._wait_for_confirmation,
-            complete_assignment=self._complete_assignment,
-            fail_assignment=self._fail_assignment,
-            clear_prompt_flow_hint=self._clear_prompt_flow_hint,
+            advance_assignment=self.assignment_lifecycle.advance_assignment,
+            wait_assignment_on_tool=self.assignment_lifecycle.wait_assignment_on_tool,
+            wait_for_confirmation=self.assignment_lifecycle.wait_for_confirmation,
+            complete_assignment=self.assignment_lifecycle.complete_assignment,
+            fail_assignment=self.assignment_lifecycle.fail_assignment,
+            clear_prompt_flow_hint=self.assignment_lifecycle.clear_prompt_flow_hint,
             events_service=events_service,
-            metrics=self.metrics,
+            metrics=metrics,
         )
         self.executor_service = OrchestrationExecutorService(
             uow_factory=uow_factory,
             events_service=events_service,
             worker_lease_seconds=worker_lease_seconds,
             lease_manager=self.lease_manager,
-            admit_assignment_fn=self._admit_assignment,
+            admit_assignment_fn=self.assignment_lifecycle.admit_assignment,
             advance_once_fn=self.execution_service.advance_once,
-            next_assigned_assignment_fn=self._next_assigned_assignment,
-            process_assigned_assignment_fn=self._process_assigned_assignment,
-            process_assigned_assignment_async_fn=self._process_assigned_assignment_async,
-            process_next_assigned_assignment_fn=self._process_next_assigned_assignment,
-            heartbeat_assignment_fn=self._heartbeat_assignment,
-            advance_assignment_fn=self._advance_assignment,
-            wait_assignment_on_tool_fn=self._wait_assignment_on_tool,
-            complete_assignment_fn=self._complete_assignment,
-            fail_assignment_fn=self._fail_assignment,
+            next_assigned_assignment_fn=(
+                self.assignment_lifecycle.next_assigned_assignment
+            ),
+            process_assigned_assignment_fn=(
+                self.assignment_lifecycle.process_assigned_assignment
+            ),
+            process_assigned_assignment_async_fn=(
+                self.assignment_lifecycle.process_assigned_assignment_async
+            ),
+            process_next_assigned_assignment_fn=(
+                self.assignment_lifecycle.process_next_assigned_assignment
+            ),
+            heartbeat_assignment_fn=self.assignment_lifecycle.heartbeat_assignment,
+            advance_assignment_fn=self.assignment_lifecycle.advance_assignment,
+            wait_assignment_on_tool_fn=self.assignment_lifecycle.wait_assignment_on_tool,
+            complete_assignment_fn=self.assignment_lifecycle.complete_assignment,
+            fail_assignment_fn=self.assignment_lifecycle.fail_assignment,
         )
         self.progress_coordinator = RunProgressCoordinator(
             uow_factory=uow_factory,
-            dispatch_port=self.dispatch_port,
+            dispatch_port=dispatch,
             lease_manager=self.lease_manager,
             advance_once=lambda run_id, worker_id: self.execution_service.advance_once(
                 run_id=run_id,
@@ -265,10 +241,7 @@ class OrchestrationServiceGraph:
                 run_id=run_id,
                 worker_id=worker_id,
             ),
-            heartbeat_assignment=lambda run_id, worker_id: self.executor_service.heartbeat_assignment(
-                run_id=run_id,
-                worker_id=worker_id,
-            ),
+            heartbeat_assignment=self.assignment_lifecycle.heartbeat_assignment,
             get_run=self.run_query_service.get_run,
             apply_compaction_summary=self.maintenance_service.apply_compaction_summary,
             maybe_request_auto_compaction=(
@@ -303,7 +276,7 @@ class OrchestrationServiceGraph:
         )
         self.wait_coordinator = RunWaitCoordinator(
             uow_factory=uow_factory,
-            dispatch_port=self.dispatch_port,
+            dispatch_port=dispatch,
             engine=engine,
             session_service=session_service,
             agent_service=agent_service,
@@ -328,9 +301,6 @@ class OrchestrationServiceGraph:
                     tool_run_ids,
                 )
             ),
-            continue_recovery_contract_fn=(
-                lambda run_id: self._continue_recovery_contract(run_id)
-            ),
         )
         self.approval_control_service = ApprovalControlService(
             resolve_approval_request_fn=(
@@ -350,7 +320,7 @@ class OrchestrationServiceGraph:
         self.recovery_coordinator = RunRecoveryCoordinator(
             uow_factory=uow_factory,
             lease_manager=self.lease_manager,
-            wait_coordinator=self.wait_coordinator,
+            continue_recovery_contract=self.wait_coordinator.continue_recovery_contract,
             tool_resume=self.tool_resume,
         )
         self.scheduler_service = OrchestrationSchedulerService(
@@ -358,22 +328,24 @@ class OrchestrationServiceGraph:
             intake_port=self.intake_service,
             scheduler_signal_coordinator=self.scheduler_signal_coordinator,
             get_run_fn=self.run_query_service.get_run,
-            assign_next_assignment_fn=self._assign_next_assignment,
-            recover_abandoned_runs_fn=self._recover_abandoned_runs,
-            expire_executor_leases_fn=self._expire_executor_leases,
-            handle_recovered_dispatch_task_fn=self._handle_recovered_dispatch_task,
-            handle_terminal_tool_run_fn=self._handle_terminal_tool_run,
+            assign_next_assignment_fn=self.lease_manager.assign_next_assignment,
+            recover_abandoned_runs_fn=self.recovery_coordinator.recover_abandoned_runs,
+            expire_executor_leases_fn=self.recovery_coordinator.expire_executor_leases,
+            handle_recovered_dispatch_task_fn=(
+                self.recovery_coordinator.handle_recovered_dispatch_task
+            ),
+            handle_terminal_tool_run_fn=self.recovery_coordinator.handle_terminal_tool_run,
             process_sessions_spawn_followup_fn=(
                 lambda child_run_id: self.sessions_spawn_followup_service.process_child_completion(
                     child_run_id,
                 )
             ),
-            request_compaction_fn=self._request_compaction,
-            request_heartbeat_fn=self._request_heartbeat,
-            request_memory_flush_fn=self._request_memory_flush,
-            request_due_heartbeats_fn=self._request_due_heartbeats,
-            resume_run_fn=self._resume_run,
-            fail_assignment_fn=self._fail_assignment,
+            request_compaction_fn=self.request_coordinator.request_compaction,
+            request_heartbeat_fn=self.request_coordinator.request_heartbeat,
+            request_memory_flush_fn=self.request_coordinator.request_memory_flush,
+            request_due_heartbeats_fn=self.request_coordinator.request_due_heartbeats,
+            resume_run_fn=self.wait_coordinator.resume_run,
+            fail_assignment_fn=self.assignment_lifecycle.fail_assignment,
             events_service=events_service,
         )
         self.sessions_spawn_followup_service = SessionsSpawnFollowupService(
@@ -424,201 +396,3 @@ class OrchestrationServiceGraph:
         data: ResolveApprovalRequestInput,
     ) -> OrchestrationRun:
         return self.approval_control_service.resolve_approval_request(data)
-
-    def _assign_next_assignment(self) -> OrchestrationRun | None:
-        return self.lease_manager.assign_next_assignment()
-
-    def _process_next_assigned_assignment(
-        self,
-        *,
-        worker_id: str,
-        exclude_run_ids: tuple[str, ...] = (),
-    ) -> OrchestrationRun | None:
-        return self.progress_coordinator.process_next_assigned_assignment(
-            worker_id=worker_id,
-            exclude_run_ids=exclude_run_ids,
-        )
-
-    def _next_assigned_assignment(
-        self,
-        *,
-        worker_id: str,
-        exclude_run_ids: tuple[str, ...] = (),
-    ) -> OrchestrationRun | None:
-        return self.progress_coordinator.next_assigned_assignment(
-            worker_id=worker_id,
-            exclude_run_ids=exclude_run_ids,
-        )
-
-    def _process_assigned_assignment(
-        self,
-        *,
-        run_id: str,
-        worker_id: str,
-    ) -> OrchestrationRun:
-        return self.progress_coordinator.process_assigned_assignment(
-            run_id=run_id,
-            worker_id=worker_id,
-        )
-
-    async def _process_assigned_assignment_async(
-        self,
-        *,
-        run_id: str,
-        worker_id: str,
-    ) -> OrchestrationRun:
-        return await self.progress_coordinator.process_assigned_assignment_async(
-            run_id=run_id,
-            worker_id=worker_id,
-        )
-
-    def _advance_assignment(self, data: AdvanceAssignmentInput) -> OrchestrationRun:
-        return self.progress_coordinator.advance_assignment(data)
-
-    def _wait_assignment_on_tool(self, data: WaitAssignmentOnToolInput) -> OrchestrationRun:
-        run = self.wait_coordinator.wait_assignment_on_tool(data)
-        self.lease_manager.release_executor_assignment(worker_id=data.worker_id)
-        return run
-
-    def _wait_for_confirmation(
-        self,
-        data: WaitForConfirmationInput,
-    ) -> OrchestrationRun:
-        run = self.wait_coordinator.wait_for_confirmation(data)
-        self.lease_manager.release_executor_assignment(worker_id=data.worker_id)
-        return run
-
-    def _heartbeat_assignment(
-        self,
-        run_id: str,
-        *,
-        worker_id: str,
-    ) -> OrchestrationRun:
-        return self.lease_manager.heartbeat_assignment(
-            run_id,
-            worker_id=worker_id,
-            get_run=self._get_run,
-        )
-
-    def _resume_run(self, data: ResumeOrchestrationRunInput) -> OrchestrationRun:
-        return self.wait_coordinator.resume_run(data)
-
-    def _complete_assignment(self, data: CompleteAssignmentInput) -> OrchestrationRun:
-        completed = self.progress_coordinator.complete_assignment(data)
-        self.lease_manager.release_executor_assignment(worker_id=data.worker_id)
-        self.sessions_spawn_followup_service.queue_child_completion_signal(completed)
-        return completed
-
-    def _fail_assignment(self, data: FailAssignmentInput) -> OrchestrationRun:
-        current_run = self.get_run(data.run_id)
-        if current_run.status in {
-            OrchestrationRunStatus.COMPLETED,
-            OrchestrationRunStatus.FAILED,
-            OrchestrationRunStatus.CANCELLED,
-        }:
-            return current_run
-        release_worker_id = (
-            (data.worker_id or current_run.worker_id)
-            if current_run.status is OrchestrationRunStatus.RUNNING
-            else None
-        )
-        failed = self.progress_coordinator.fail_assignment(data)
-        if release_worker_id is not None:
-            self.lease_manager.release_executor_assignment(worker_id=release_worker_id)
-        return failed
-
-    def _continue_recovery_contract(self, run_id: str) -> OrchestrationRun:
-        return self.wait_coordinator.continue_recovery_contract(run_id)
-
-    def _request_compaction(self, data: RequestCompactionInput) -> OrchestrationRun:
-        return self.request_coordinator.request_compaction(data)
-
-    def _request_heartbeat(self, data: RequestHeartbeatInput) -> OrchestrationRun:
-        return self.request_coordinator.request_heartbeat(data)
-
-    def _request_memory_flush(self, data: RequestMemoryFlushInput) -> OrchestrationRun:
-        return self.request_coordinator.request_memory_flush(data)
-
-    def _request_due_heartbeats(
-        self,
-        data: RequestDueHeartbeatsInput,
-    ) -> list[OrchestrationRun]:
-        return self.request_coordinator.request_due_heartbeats(data)
-
-    def _recover_abandoned_runs(self) -> list[OrchestrationRun]:
-        return self.recovery_coordinator.recover_abandoned_runs()
-
-    def _expire_executor_leases(self) -> list[OrchestrationExecutorLease]:
-        return self.recovery_coordinator.expire_executor_leases()
-
-    def _handle_recovered_dispatch_task(
-        self,
-        *,
-        orchestration_run_id: str,
-        reason: str,
-    ) -> OrchestrationRun | None:
-        return self.recovery_coordinator.handle_recovered_dispatch_task(
-            orchestration_run_id=orchestration_run_id,
-            reason=reason,
-        )
-
-    def _handle_terminal_tool_run(self, tool_run_id: str) -> list[OrchestrationRun]:
-        return self.recovery_coordinator.handle_terminal_tool_run(tool_run_id)
-
-    @staticmethod
-    def _get_run(uow: OrchestrationUnitOfWork, run_id: str) -> OrchestrationRun:
-        run = uow.orchestration_runs.get(run_id)
-        if run is None:
-            raise OrchestrationRunNotFoundError(
-                f"Orchestration run '{run_id}' was not found.",
-            )
-        return run
-
-    def _clear_prompt_flow_hint(self, run_id: str) -> None:
-        with self.uow_factory() as uow:
-            run = self._get_run(uow, run_id)
-            if "prompt_flow_hint" not in run.metadata:
-                return
-            run.metadata.pop("prompt_flow_hint", None)
-            uow.orchestration_runs.add(run)
-            uow.collect(run)
-            uow.commit()
-
-    def _admit_assignment(
-        self,
-        *,
-        run_id: str,
-        worker_id: str,
-        acquire_lane_lock: bool = True,
-    ) -> OrchestrationRun:
-        return self.lease_manager.admit_assignment(
-            run_id,
-            worker_id=worker_id,
-            get_run=self._get_run,
-            acquire_lane_lock=acquire_lane_lock,
-        )
-
-    @staticmethod
-    def _session_start_prompt_flow_hint(
-        bundle: ResolvedSessionBundle,
-    ) -> dict[str, object] | None:
-        resolution = bundle.resolution.resolution
-        if resolution.created:
-            return {
-                "mode": "session_start",
-                "event": "created",
-                "session_kind": resolution.kind.value,
-            }
-        if resolution.reset:
-            payload: dict[str, object] = {
-                "mode": "session_start",
-                "event": "reset",
-                "session_kind": resolution.kind.value,
-            }
-            if (
-                resolution.reset_reason is not None
-                and resolution.reset_reason.strip()
-            ):
-                payload["reason"] = resolution.reset_reason.strip()
-            return payload
-        return None

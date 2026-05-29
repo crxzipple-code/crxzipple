@@ -47,6 +47,10 @@ import UiCard from "@/shared/ui/UiCard.vue";
 import MarkdownView from "@/shared/ui/MarkdownView.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import {
+  getSkillDraft,
+  type SkillDraftApiPayload,
+} from "../settings/ownerApis/skillCatalog";
+import {
   cancelWorkbenchTurn,
   createWorkbenchTurn,
   listWorkbenchAgents,
@@ -111,6 +115,7 @@ const approvalBusyStepId = ref<string | null>(null);
 const approvalBusyDecision = ref<ApprovalDecision | null>(null);
 const approvalErrorStepId = ref<string | null>(null);
 const approvalError = ref<string | null>(null);
+const skillApprovalDrafts = ref<Record<string, SkillApprovalDraftState>>({});
 const liveStream = ref<LiveStreamState | null>(null);
 const posterPreviewUrl = "/workbench-poster-preview.png";
 
@@ -139,6 +144,12 @@ interface LiveStreamState {
   runId: string | null;
   text: string;
   updatedAt: string | null;
+}
+
+interface SkillApprovalDraftState {
+  loading: boolean;
+  error: string | null;
+  draft: SkillDraftApiPayload | null;
 }
 
 type InspectorTabId = "overview" | "step" | "debug" | "memory" | "agent";
@@ -306,6 +317,7 @@ async function refreshWorkbench() {
     home.value = loaded.home;
     run.value = loaded.run ?? createDraftWorkbenchRun();
     runSteps.value = loaded.steps;
+    void loadSkillApprovalDrafts(loaded.steps);
     if (!loaded.run) {
       composerMode.value = "new";
       ensureDraftSessionKey();
@@ -430,6 +442,55 @@ async function resolveApprovalStep(step: TurnStepView, decision: ApprovalDecisio
     approvalBusyStepId.value = null;
     approvalBusyDecision.value = null;
   }
+}
+
+async function loadSkillApprovalDrafts(steps: TurnStepView[]) {
+  const draftIds = Array.from(new Set(steps.map(skillApprovalDraftId).filter((id): id is string => Boolean(id))));
+  if (!draftIds.length) return;
+  for (const draftId of draftIds) {
+    const current = skillApprovalDrafts.value[draftId];
+    if (current?.loading || current?.draft) continue;
+    skillApprovalDrafts.value = {
+      ...skillApprovalDrafts.value,
+      [draftId]: { loading: true, error: null, draft: null },
+    };
+    try {
+      const draft = await getSkillDraft(draftId);
+      skillApprovalDrafts.value = {
+        ...skillApprovalDrafts.value,
+        [draftId]: { loading: false, error: null, draft },
+      };
+    } catch (error) {
+      skillApprovalDrafts.value = {
+        ...skillApprovalDrafts.value,
+        [draftId]: {
+          loading: false,
+          error: commandErrorMessage(error),
+          draft: null,
+        },
+      };
+    }
+  }
+}
+
+function skillApprovalDraftId(step: TurnStepView): string | null {
+  if (step.approval?.tool_name !== "skill_draft_apply") return null;
+  const direct = normalizeText(step.approval.draft_id);
+  if (direct) return direct;
+  const fromArgs = normalizeText(step.approval.tool_arguments?.draft_id);
+  return fromArgs || null;
+}
+
+function skillApprovalDraftState(step: TurnStepView): SkillApprovalDraftState | null {
+  const draftId = skillApprovalDraftId(step);
+  if (!draftId) return null;
+  return skillApprovalDrafts.value[draftId] ?? { loading: true, error: null, draft: null };
+}
+
+function normalizeText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 function syncComposerRuntimeSelection(currentRun: WorkbenchRunView | null, options: { force?: boolean } = {}) {
@@ -1258,6 +1319,104 @@ function isApprovalBusy(step: TurnStepView, decision?: ApprovalDecision) {
   return decision === undefined || approvalBusyDecision.value === decision;
 }
 
+function isSkillDraftApproval(step: TurnStepView) {
+  return step.approval?.tool_name === "skill_draft_apply" && skillApprovalDraftId(step) !== null;
+}
+
+function skillApprovalTarget(step: TurnStepView) {
+  const draft = skillApprovalDraftState(step)?.draft;
+  const target = normalizeText(draft?.target_source_id) ?? normalizeText(draft?.target_scope);
+  return target ?? "-";
+}
+
+function skillApprovalValidation(step: TurnStepView) {
+  const state = skillApprovalDraftState(step);
+  const draft = state?.draft;
+  if (state?.loading) return t("workbench.approval.skill.loadingDraft");
+  if (state?.error) return state.error;
+  if (!draft?.validation) return t("workbench.approval.skill.validationNotRun");
+  if (draft.validation.errors.length) {
+    return t("workbench.approval.skill.validationErrors", { count: String(draft.validation.errors.length) });
+  }
+  if (draft.validation.warnings.length) {
+    return t("workbench.approval.skill.validationWarnings", { count: String(draft.validation.warnings.length) });
+  }
+  return t("workbench.approval.skill.validationClean");
+}
+
+function skillApprovalReadiness(step: TurnStepView) {
+  const validation = skillApprovalDraftState(step)?.draft?.validation;
+  if (!validation) return "-";
+  return titleize(validation.readiness_status, "-");
+}
+
+function skillApprovalMissing(step: TurnStepView) {
+  const validation = skillApprovalDraftState(step)?.draft?.validation;
+  if (!validation) return "-";
+  const items = [
+    ...validation.missing_tools,
+    ...validation.missing_access,
+    ...validation.missing_effects,
+    ...validation.unsupported_surfaces,
+    ...validation.unsupported_platforms,
+  ];
+  return items.length ? items.join(", ") : t("workbench.approval.skill.none");
+}
+
+function skillApprovalDiffSummary(step: TurnStepView) {
+  const draft = skillApprovalDraftState(step)?.draft;
+  const diff = draft?.diff;
+  if (!diff) return t("workbench.approval.skill.diffNotBuilt");
+  const summary = textValue(diff.summary, "");
+  if (summary) return summary;
+  if (diff.file_diffs.length) {
+    return t("workbench.approval.skill.fileDiffs", { count: String(diff.file_diffs.length) });
+  }
+  return t("workbench.approval.skill.diffReady");
+}
+
+function skillApprovalRiskItems(step: TurnStepView) {
+  const draft = skillApprovalDraftState(step)?.draft;
+  if (!draft) return [t("workbench.approval.skill.riskOwnerWrite")];
+  const items = [t("workbench.approval.skill.riskOwnerWrite")];
+  if (!draft.diff) items.push(t("workbench.approval.skill.riskMissingDiff"));
+  if (!draft.validation) items.push(t("workbench.approval.skill.riskMissingValidation"));
+  if (draft.validation?.errors.length) items.push(t("workbench.approval.skill.riskValidationErrors"));
+  if (draft.target_source_id === "system") items.push(t("workbench.approval.skill.riskReadonlySource"));
+  return items;
+}
+
+function skillApprovalDraftTitle(step: TurnStepView) {
+  const draft = skillApprovalDraftState(step)?.draft;
+  return draft?.skill_name ?? skillApprovalDraftId(step) ?? "-";
+}
+
+function textValue(value: unknown, fallback = "-"): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "boolean") return value ? t("common.yes") : t("common.no");
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value.trim() || fallback;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => textValue(item, "")).filter(Boolean);
+    return items.length ? items.join(", ") : fallback;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function titleize(value: unknown, fallback = "-"): string {
+  const text = textValue(value, fallback);
+  if (text === "-") return text;
+  return text
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 function isWaitingStatus(status: string) {
   return status === "waiting" || status === "queued";
 }
@@ -1596,6 +1755,44 @@ function handleTurnsWheel(event: WheelEvent) {
                     </header>
                     <MarkdownView v-if="step.markdown" :source="step.markdown" />
                     <p v-else-if="stepSummary(step)">{{ stepSummary(step) }}</p>
+                    <div v-if="isSkillDraftApproval(step)" class="skill-approval-card">
+                      <header>
+                        <span>{{ t("workbench.approval.skill.title") }}</span>
+                        <strong>{{ skillApprovalDraftTitle(step) }}</strong>
+                      </header>
+                      <dl>
+                        <div>
+                          <dt>{{ t("workbench.approval.skill.draftId") }}</dt>
+                          <dd>{{ skillApprovalDraftId(step) }}</dd>
+                        </div>
+                        <div>
+                          <dt>{{ t("workbench.approval.skill.target") }}</dt>
+                          <dd>{{ skillApprovalTarget(step) }}</dd>
+                        </div>
+                        <div>
+                          <dt>{{ t("workbench.approval.skill.validation") }}</dt>
+                          <dd>{{ skillApprovalValidation(step) }}</dd>
+                        </div>
+                        <div>
+                          <dt>{{ t("workbench.approval.skill.readiness") }}</dt>
+                          <dd>{{ skillApprovalReadiness(step) }}</dd>
+                        </div>
+                        <div>
+                          <dt>{{ t("workbench.approval.skill.missing") }}</dt>
+                          <dd>{{ skillApprovalMissing(step) }}</dd>
+                        </div>
+                        <div>
+                          <dt>{{ t("workbench.approval.skill.diff") }}</dt>
+                          <dd>{{ skillApprovalDiffSummary(step) }}</dd>
+                        </div>
+                      </dl>
+                      <div class="skill-approval-risk">
+                        <span>{{ t("workbench.approval.skill.risk") }}</span>
+                        <ul>
+                          <li v-for="item in skillApprovalRiskItems(step)" :key="item">{{ item }}</li>
+                        </ul>
+                      </div>
+                    </div>
                     <span v-if="isLiveFinalStep(step)" class="live-stream-cursor" aria-hidden="true" />
                     <template v-if="canResolveApproval(step)">
                       <div class="approval-actions">
@@ -3302,6 +3499,101 @@ dd {
   box-shadow: none;
 }
 
+.skill-approval-card {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 32%, var(--border-subtle));
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--color-warning) 7%, var(--surface-raised));
+}
+
+.skill-approval-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-approval-card header span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.skill-approval-card header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-approval-card dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.skill-approval-card dl div {
+  min-width: 0;
+}
+
+.skill-approval-card dt {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.skill-approval-card dd {
+  min-width: 0;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-approval-risk {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding-top: 2px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.skill-approval-risk span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.skill-approval-risk ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skill-approval-risk li {
+  max-width: 100%;
+  padding: 2px 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+  color: var(--color-warning);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .approval-actions {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4031,6 +4323,10 @@ dd {
 
   .approval-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .skill-approval-card dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .status-strip {

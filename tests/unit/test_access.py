@@ -13,10 +13,38 @@ from crxzipple.modules.access import (
     CredentialResolver,
     canonical_credential_binding,
     credential_binding_env_name,
-    is_codex_auth_json_binding,
     is_credential_binding,
     parse_access_requirement,
 )
+from crxzipple.modules.access.application.repositories import AccessCredentialBindingRecord
+from crxzipple.shared.access import AccessConsumerRef, AccessResolvedCredential
+
+
+class _StaticCredentialConfigView:
+    def __init__(self, records: dict[str, AccessCredentialBindingRecord]) -> None:
+        self.records = records
+
+    def get_credential_binding(
+        self,
+        binding_id: str,
+    ) -> AccessCredentialBindingRecord | None:
+        return self.records.get(binding_id)
+
+
+class _MissingOAuthAccountRepository:
+    def get_oauth_account(self, account_id: str) -> None:
+        return None
+
+    def get_oauth_provider(self, provider_id: str) -> None:
+        return None
+
+
+class _FakeAccessEventPublisher:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def publish(self, event: object) -> None:
+        self.events.append(event)
 
 
 class AccessApplicationServiceTestCase(unittest.TestCase):
@@ -33,15 +61,14 @@ class AccessApplicationServiceTestCase(unittest.TestCase):
     def test_credential_binding_helpers_define_shared_binding_shape(self) -> None:
         self.assertTrue(is_credential_binding("env:OPENAI_API_KEY"))
         self.assertTrue(is_credential_binding("file:credentials/openai.txt"))
-        self.assertTrue(is_credential_binding("codex-cli"))
-        self.assertTrue(is_codex_auth_json_binding("codex_auth_json"))
         self.assertFalse(is_credential_binding("inline-token"))
+        self.assertFalse(is_credential_binding("codex-cli"))
         self.assertEqual(
             credential_binding_env_name("env:OPENAI_API_KEY"),
             "OPENAI_API_KEY",
         )
         self.assertIsNone(credential_binding_env_name("file:credentials/openai.txt"))
-        self.assertEqual(canonical_credential_binding("codex-cli"), "codex_auth_json")
+        self.assertEqual(canonical_credential_binding("codex-cli"), "codex-cli")
 
     def test_credential_resolver_supports_env_and_workspace_relative_file_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -68,21 +95,6 @@ class AccessApplicationServiceTestCase(unittest.TestCase):
             resolver.resolve("env:MISSING_ACCESS_TOKEN")
         self.assertFalse(resolver.is_ready("file:missing.txt"))
 
-    def test_credential_resolver_supports_codex_auth_json(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            auth_path = Path(tempdir) / "auth.json"
-            auth_path.write_text(
-                '{"tokens": {"access_token": "codex-token"}}',
-                encoding="utf-8",
-            )
-
-            resolver = CredentialResolver()
-
-            self.assertEqual(
-                resolver.resolve(f"codex_auth_json:{auth_path}"),
-                "codex-token",
-            )
-
     def test_credential_resolver_only_allows_literals_when_requested(self) -> None:
         resolver = CredentialResolver()
 
@@ -92,6 +104,98 @@ class AccessApplicationServiceTestCase(unittest.TestCase):
         self.assertEqual(
             resolver.resolve("inline-token", allow_literal=True),
             "inline-token",
+        )
+
+    def test_resolved_credentials_carry_safe_audit_context(self) -> None:
+        event_publisher = _FakeAccessEventPublisher()
+        service = AccessApplicationService(
+            config_view=_StaticCredentialConfigView(
+                {
+                    "openai-api-key": AccessCredentialBindingRecord(
+                        binding_id="openai-api-key",
+                        asset_id="asset_openai",
+                        binding_kind="api_key",
+                        source_kind="env",
+                        source_ref="OPENAI_API_KEY",
+                        masked_preview="env:OPENAI_API_KEY",
+                    ),
+                },
+            ),
+            event_publisher=event_publisher,
+        )
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-real-secret"}):
+            credential = service.resolve_credential(
+                "openai-api-key",
+                consumer=AccessConsumerRef(
+                    consumer_id="llm.profile:default",
+                    module="llm",
+                ),
+                trace_context={
+                    "request_id": "trace-1",
+                    "api_key": "sk-trace-secret",
+                    "nested": {"token": "trace-token"},
+                },
+            )
+
+        self.assertIsInstance(credential, AccessResolvedCredential)
+        self.assertEqual(credential, "sk-real-secret")
+        audit_context = credential.audit_context
+        self.assertEqual(audit_context["credential_binding_id"], "openai-api-key")
+        self.assertEqual(audit_context["binding_kind"], "api_key")
+        self.assertEqual(audit_context["source_ref"], "env:***")
+        self.assertEqual(audit_context["masked_preview"], "env:***")
+        self.assertEqual(audit_context["consumer"]["module"], "llm")
+        self.assertEqual(audit_context["trace_context"]["request_id"], "trace-1")
+        self.assertEqual(audit_context["trace_context"]["api_key"], "***")
+        self.assertEqual(audit_context["trace_context"]["nested"]["token"], "***")
+        audit_payload = repr(audit_context)
+        self.assertNotIn("sk-real-secret", audit_payload)
+        self.assertNotIn("sk-trace-secret", audit_payload)
+        self.assertNotIn("trace-token", audit_payload)
+        event_names = [getattr(event, "name", "") for event in event_publisher.events]
+        self.assertEqual(
+            event_names,
+            [
+                "access.credential.resolve.requested",
+                "access.credential.resolve.succeeded",
+                "access.credential.lease.granted",
+            ],
+        )
+        event_payload = repr(
+            [getattr(event, "payload", {}) for event in event_publisher.events],
+        )
+        self.assertIn("openai-api-key", event_payload)
+        self.assertNotIn("sk-real-secret", event_payload)
+        self.assertNotIn("sk-trace-secret", event_payload)
+        self.assertNotIn("trace-token", event_payload)
+
+    def test_failed_credential_resolution_publishes_denied_event(self) -> None:
+        event_publisher = _FakeAccessEventPublisher()
+        service = AccessApplicationService(event_publisher=event_publisher)
+
+        with self.assertRaises(CredentialResolutionError):
+            service.resolve_credential(
+                "env:MISSING_ACCESS_TOKEN",
+                consumer=AccessConsumerRef(
+                    consumer_id="tool:weather",
+                    module="tool",
+                ),
+                trace_context={"trace_id": "trace-access-failed"},
+            )
+
+        event_names = [getattr(event, "name", "") for event in event_publisher.events]
+        self.assertEqual(
+            event_names,
+            [
+                "access.credential.resolve.requested",
+                "access.credential.resolve.failed",
+                "access.credential.lease.denied",
+            ],
+        )
+        self.assertEqual(
+            getattr(event_publisher.events[-1], "payload", {}).get("status"),
+            "denied",
         )
 
     def test_service_reports_ready_auth_requirements_from_registry_and_env(self) -> None:
@@ -141,14 +245,46 @@ class AccessApplicationServiceTestCase(unittest.TestCase):
         self.assertEqual(missing.setup_flow.env_vars, ("MISSING_ACCESS_TOKEN",))
         self.assertTrue(missing.setup_available)
 
-    def test_service_returns_command_flow_for_codex_login(self) -> None:
+    def test_service_no_longer_offers_codex_cli_login_setup(self) -> None:
         service = AccessApplicationService()
 
         flow = service.begin_setup("codex_auth_json")
 
-        self.assertEqual(flow.kind, AccessSetupFlowKind.COMMAND)
-        self.assertEqual(flow.command, ("codex", "login"))
-        self.assertTrue(flow.path)
+        self.assertEqual(flow.kind, AccessSetupFlowKind.UNSUPPORTED)
+        self.assertEqual(flow.command, ())
+        self.assertEqual(flow.actions, ())
+
+    def test_oauth_account_binding_missing_account_returns_setup_flow(self) -> None:
+        service = AccessApplicationService(
+            config_view=_StaticCredentialConfigView(
+                {
+                    "codex-oauth-default": AccessCredentialBindingRecord(
+                        asset_id="oauth_provider:openai-codex",
+                        binding_id="codex-oauth-default",
+                        binding_kind="oauth2_account",
+                        source_kind="oauth_account",
+                        source_ref="openai-codex:default",
+                        masked_preview="oauth_account",
+                    ),
+                },
+            ),
+            oauth_account_repository=_MissingOAuthAccountRepository(),
+            oauth_token_store=object(),
+        )
+
+        readiness = service.check_credential_binding("codex-oauth-default")
+
+        self.assertEqual(readiness.status, AccessReadinessStatus.SETUP_NEEDED)
+        self.assertIn("openai-codex:default", readiness.reason)
+        self.assertIsNotNone(readiness.setup_flow)
+        assert readiness.setup_flow is not None
+        self.assertEqual(readiness.setup_flow.kind, AccessSetupFlowKind.OAUTH_BROWSER)
+        self.assertEqual(readiness.setup_flow.callback_url, "http://localhost:1455/auth/callback")
+        self.assertEqual(readiness.setup_flow.action_label, "Start OAuth login")
+        self.assertEqual(
+            readiness.setup_flow.metadata["access_action_intent"],
+            "begin_codex_oauth_login",
+        )
 
 
 if __name__ == "__main__":

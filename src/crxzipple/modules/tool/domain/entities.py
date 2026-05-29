@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from typing import Any
 
 from crxzipple.shared.domain import AggregateRoot
 from crxzipple.shared.domain.events import Event
+from crxzipple.shared.access import AccessCredentialRequirementSet
 
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.domain.value_objects import (
+    ToolCatalogSourceKind,
     ToolEnvironment,
+    ToolFunctionRuntimeKind,
+    ToolFunctionStatus,
     ToolRunAssignmentStatus,
     ToolExecutionContext,
     ToolExecutionPolicy,
@@ -21,8 +26,11 @@ from crxzipple.modules.tool.domain.value_objects import (
     ToolKind,
     ToolMode,
     ToolParameter,
+    ToolProviderBackendStatus,
+    ToolProviderCapability,
     ToolRunStatus,
-    ToolSourceKind,
+    ToolSourceStatus,
+    ToolDefinitionOrigin,
     ToolWorkerStatus,
 )
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
@@ -65,21 +73,282 @@ def _worker_capability_signature(payload: dict[str, Any]) -> tuple[Any, Any]:
     )
 
 
+def _coerce_str_enum(
+    enum_type: type[StrEnum],
+    value: StrEnum | str,
+    *,
+    field_name: str,
+) -> StrEnum:
+    try:
+        return enum_type(value)
+    except ValueError as exc:
+        raise ToolValidationError(
+            f"Unsupported {field_name}: {value!s}.",
+        ) from exc
+
+
+def _normalize_text(value: str, *, field_name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ToolValidationError(f"{field_name} cannot be empty.")
+    return normalized
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_text_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            value.strip()
+            for value in values
+            if isinstance(value, str) and value.strip()
+        ),
+    )
+
+
+def _normalize_json_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    return dict(value)
+
+
+def _normalize_json_mapping_tuple(
+    values: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    return tuple(dict(value) for value in values)
+
+
+@dataclass(kw_only=True)
+class ToolSource(AggregateRoot[str]):
+    display_name: str
+    kind: ToolCatalogSourceKind = ToolCatalogSourceKind.LOCAL_PACKAGE
+    description: str = ""
+    config: dict[str, Any] = field(default_factory=dict)
+    credential_requirements: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    runtime_requirements: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    status: ToolSourceStatus = ToolSourceStatus.ACTIVE
+    revision: int = 1
+    config_hash: str = ""
+    last_discovered_at: datetime | None = None
+    last_discovery_status: str | None = None
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+    @property
+    def source_id(self) -> str:
+        return self.id
+
+    def __post_init__(self) -> None:
+        self.id = _normalize_text(self.id, field_name="Tool source id")
+        self.kind = _coerce_str_enum(
+            ToolCatalogSourceKind,
+            self.kind,
+            field_name="tool source kind",
+        )
+        self.display_name = _normalize_text(
+            self.display_name,
+            field_name="Tool source display_name",
+        )
+        self.description = self.description.strip()
+        self.config = _normalize_json_mapping(self.config)
+        self.credential_requirements = _normalize_json_mapping_tuple(
+            self.credential_requirements,
+        )
+        self.runtime_requirements = _normalize_json_mapping_tuple(
+            self.runtime_requirements,
+        )
+        self.status = _coerce_str_enum(
+            ToolSourceStatus,
+            self.status,
+            field_name="tool source status",
+        )
+        if self.revision < 1:
+            raise ToolValidationError("Tool source revision must be at least 1.")
+        self.config_hash = self.config_hash.strip()
+        self.last_discovery_status = _normalize_optional_text(
+            self.last_discovery_status,
+        )
+
+
+@dataclass(kw_only=True)
+class ToolFunction(AggregateRoot[str]):
+    source_id: str
+    stable_key: str
+    name: str
+    display_name: str
+    description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    runtime_kind: ToolFunctionRuntimeKind = ToolFunctionRuntimeKind.LOCAL
+    handler_ref: dict[str, Any] = field(default_factory=dict)
+    capability_ids: tuple[str, ...] = field(default_factory=tuple)
+    credential_requirements: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    access_requirement_sets: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    runtime_requirements: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
+    execution_support: ToolExecutionSupport = field(
+        default_factory=ToolExecutionSupport,
+    )
+    enabled: bool = True
+    trust_policy: dict[str, Any] = field(default_factory=dict)
+    approval_policy: dict[str, Any] = field(default_factory=dict)
+    credential_binding_overrides: dict[str, str] = field(default_factory=dict)
+    required_effect_overrides: tuple[str, ...] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    schema_hash: str = ""
+    status: ToolFunctionStatus = ToolFunctionStatus.ACTIVE
+    revision: int = 1
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+    last_seen_at: datetime | None = None
+    stale_since: datetime | None = None
+    deprecated_at: datetime | None = None
+
+    @property
+    def function_id(self) -> str:
+        return self.id
+
+    def __post_init__(self) -> None:
+        self.id = _normalize_text(self.id, field_name="Tool function id")
+        self.source_id = _normalize_text(
+            self.source_id,
+            field_name="Tool function source_id",
+        )
+        self.stable_key = _normalize_text(
+            self.stable_key,
+            field_name="Tool function stable_key",
+        )
+        self.name = _normalize_text(self.name, field_name="Tool function name")
+        self.display_name = _normalize_text(
+            self.display_name,
+            field_name="Tool function display_name",
+        )
+        self.description = self.description.strip()
+        self.input_schema = _normalize_json_mapping(self.input_schema)
+        self.runtime_kind = _coerce_str_enum(
+            ToolFunctionRuntimeKind,
+            self.runtime_kind,
+            field_name="tool function runtime kind",
+        )
+        self.handler_ref = _normalize_json_mapping(self.handler_ref)
+        self.capability_ids = _normalize_text_tuple(self.capability_ids)
+        self.credential_requirements = _normalize_json_mapping_tuple(
+            self.credential_requirements,
+        )
+        self.access_requirement_sets = _normalize_access_requirement_sets(
+            self.access_requirement_sets,
+            fallback_requirements=(),
+        )
+        self.runtime_requirements = _normalize_json_mapping_tuple(
+            self.runtime_requirements,
+        )
+        self.required_effect_ids = _normalize_text_tuple(self.required_effect_ids)
+        self.trust_policy = _normalize_json_mapping(self.trust_policy)
+        self.approval_policy = _normalize_json_mapping(self.approval_policy)
+        self.credential_binding_overrides = {
+            _normalize_text(str(key), field_name="Tool function credential override key"): (
+                _normalize_text(
+                    str(value),
+                    field_name="Tool function credential override value",
+                )
+            )
+            for key, value in self.credential_binding_overrides.items()
+        }
+        if self.required_effect_overrides is not None:
+            self.required_effect_overrides = _normalize_text_tuple(
+                self.required_effect_overrides,
+            )
+        self.metadata = _normalize_json_mapping(self.metadata)
+        self.schema_hash = self.schema_hash.strip()
+        self.status = _coerce_str_enum(
+            ToolFunctionStatus,
+            self.status,
+            field_name="tool function status",
+        )
+        if self.revision < 1:
+            raise ToolValidationError("Tool function revision must be at least 1.")
+
+
+@dataclass(kw_only=True)
+class ToolProviderBackend(AggregateRoot[str]):
+    source_id: str
+    display_name: str
+    capability: ToolProviderCapability = ToolProviderCapability.CUSTOM
+    credential_requirements: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    runtime_ref: dict[str, Any] = field(default_factory=dict)
+    priority: int = 100
+    enabled: bool = True
+    status: ToolProviderBackendStatus = ToolProviderBackendStatus.ACTIVE
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+    @property
+    def backend_id(self) -> str:
+        return self.id
+
+    def __post_init__(self) -> None:
+        self.id = _normalize_text(self.id, field_name="Tool provider backend id")
+        self.source_id = _normalize_text(
+            self.source_id,
+            field_name="Tool provider backend source_id",
+        )
+        self.capability = _coerce_str_enum(
+            ToolProviderCapability,
+            self.capability,
+            field_name="tool provider capability",
+        )
+        self.display_name = _normalize_text(
+            self.display_name,
+            field_name="Tool provider backend display_name",
+        )
+        self.credential_requirements = _normalize_json_mapping_tuple(
+            self.credential_requirements,
+        )
+        self.runtime_ref = _normalize_json_mapping(self.runtime_ref)
+        self.priority = int(self.priority)
+        self.status = _coerce_str_enum(
+            ToolProviderBackendStatus,
+            self.status,
+            field_name="tool provider backend status",
+        )
+
+
 @dataclass(kw_only=True)
 class Tool(AggregateRoot[str]):
     name: str
     description: str
+    source_id: str | None = None
     kind: ToolKind = ToolKind.FUNCTION
     parameters: tuple[ToolParameter, ...] = field(default_factory=tuple)
     tags: tuple[str, ...] = field(default_factory=tuple)
     required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
     access_requirements: tuple[str, ...] = field(default_factory=tuple)
     access_requirement_sets: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    runtime_requirement_sets: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    context_requirements: tuple[str, ...] = field(default_factory=tuple)
+    capability_ids: tuple[str, ...] = field(default_factory=tuple)
+    credential_requirements: tuple[AccessCredentialRequirementSet, ...] = (
+        field(default_factory=tuple)
+    )
     execution_policy: ToolExecutionPolicy = field(default_factory=ToolExecutionPolicy)
     execution_support: ToolExecutionSupport = field(
         default_factory=ToolExecutionSupport,
     )
-    source_kind: ToolSourceKind = ToolSourceKind.MANUAL
+    definition_origin: ToolDefinitionOrigin = ToolDefinitionOrigin.LOCAL_DISCOVERY
     runtime_key: str | None = None
     enabled: bool = True
 
@@ -88,6 +357,7 @@ class Tool(AggregateRoot[str]):
             raise ToolValidationError("Tool name cannot be empty.")
         if not self.description.strip():
             raise ToolValidationError("Tool description cannot be empty.")
+        self.source_id = _normalize_optional_text(self.source_id)
 
         parameter_names = [parameter.name for parameter in self.parameters]
         if len(parameter_names) != len(set(parameter_names)):
@@ -118,6 +388,19 @@ class Tool(AggregateRoot[str]):
             self.access_requirement_sets,
             fallback_requirements=self.access_requirements,
         )
+        self.runtime_requirement_sets = _normalize_access_requirement_sets(
+            self.runtime_requirement_sets,
+            fallback_requirements=(),
+        )
+        self.context_requirements = _normalize_text_tuple(self.context_requirements)
+        self.capability_ids = tuple(
+            dict.fromkeys(
+                capability_id.strip()
+                for capability_id in self.capability_ids
+                if capability_id is not None and capability_id.strip()
+            ),
+        )
+        self.credential_requirements = tuple(self.credential_requirements)
         self.parameters = tuple(self.parameters)
 
     def supports(self, target: ToolExecutionTarget) -> bool:
@@ -155,8 +438,14 @@ class Tool(AggregateRoot[str]):
 class ToolRun(AggregateRoot[str]):
     tool_id: str
     target: ToolExecutionTarget
+    function_id: str | None = None
+    function_revision: int | None = None
+    source_id: str | None = None
+    source_revision: int | None = None
+    schema_hash: str | None = None
     status: ToolRunStatus = ToolRunStatus.CREATED
     input_payload: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     invocation_context_payload: dict[str, Any] | None = None
     result_payload: Any | None = None
     error_payload: str | None = None
@@ -174,6 +463,14 @@ class ToolRun(AggregateRoot[str]):
 
     def __post_init__(self) -> None:
         self.input_payload = dict(self.input_payload)
+        self.metadata = dict(self.metadata)
+        self.function_id = _normalize_optional_text(self.function_id)
+        self.source_id = _normalize_optional_text(self.source_id)
+        self.schema_hash = _normalize_optional_text(self.schema_hash)
+        if self.function_revision is not None and self.function_revision < 1:
+            raise ToolValidationError("Tool run function_revision must be at least 1.")
+        if self.source_revision is not None and self.source_revision < 1:
+            raise ToolValidationError("Tool run source_revision must be at least 1.")
         self.invocation_context_payload = (
             dict(self.invocation_context_payload)
             if self.invocation_context_payload is not None
@@ -235,14 +532,26 @@ class ToolRun(AggregateRoot[str]):
         run_id: str,
         tool_id: str,
         input_payload: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
         invocation_context_payload: dict[str, Any] | None = None,
         target: ToolExecutionTarget,
+        function_id: str | None = None,
+        function_revision: int | None = None,
+        source_id: str | None = None,
+        source_revision: int | None = None,
+        schema_hash: str | None = None,
         max_attempts: int = 3,
     ) -> "ToolRun":
         run = cls(
             id=run_id,
             tool_id=tool_id,
+            function_id=function_id,
+            function_revision=function_revision,
+            source_id=source_id,
+            source_revision=source_revision,
+            schema_hash=schema_hash,
             input_payload=input_payload,
+            metadata=metadata or {},
             invocation_context_payload=invocation_context_payload,
             target=target,
             max_attempts=max_attempts,
@@ -253,9 +562,15 @@ class ToolRun(AggregateRoot[str]):
                 payload={
                     "run_id": run.id,
                     "tool_id": run.tool_id,
+                    "function_id": run.function_id,
+                    "function_revision": run.function_revision,
+                    "source_id": run.source_id,
+                    "source_revision": run.source_revision,
+                    "schema_hash": run.schema_hash,
                     "mode": run.target.mode.value,
                     "strategy": run.target.strategy.value,
                     "environment": run.target.environment.value,
+                    "metadata": dict(run.metadata),
                 },
             ),
         )
@@ -274,7 +589,12 @@ class ToolRun(AggregateRoot[str]):
         self.record_event(
             Event(
                 name="tool.run.queued",
-                payload={"run_id": self.id, "tool_id": self.tool_id},
+                payload={
+                    "run_id": self.id,
+                    "tool_id": self.tool_id,
+                    "function_id": self.function_id,
+                    "source_id": self.source_id,
+                },
             ),
         )
 
@@ -295,6 +615,8 @@ class ToolRun(AggregateRoot[str]):
                 payload={
                     "run_id": self.id,
                     "tool_id": self.tool_id,
+                    "function_id": self.function_id,
+                    "source_id": self.source_id,
                     "worker_id": worker_id,
                     "attempt_count": self.attempt_count,
                 },
@@ -310,7 +632,12 @@ class ToolRun(AggregateRoot[str]):
         self.record_event(
             Event(
                 name="tool.run.started",
-                payload={"run_id": self.id, "tool_id": self.tool_id},
+                payload={
+                    "run_id": self.id,
+                    "tool_id": self.tool_id,
+                    "function_id": self.function_id,
+                    "source_id": self.source_id,
+                },
             ),
         )
 
@@ -436,10 +763,15 @@ class ToolRun(AggregateRoot[str]):
             ToolRunStatus.TIMED_OUT,
         }
 
-    def _terminal_event_payload(self) -> dict[str, str]:
+    def _terminal_event_payload(self) -> dict[str, object]:
         return {
             "run_id": self.id,
             "tool_id": self.tool_id,
+            "function_id": self.function_id,
+            "function_revision": self.function_revision,
+            "source_id": self.source_id,
+            "source_revision": self.source_revision,
+            "schema_hash": self.schema_hash,
             "mode": self.target.mode.value,
             "strategy": self.target.strategy.value,
             "environment": self.target.environment.value,
@@ -717,7 +1049,11 @@ class ToolWorkerRegistration(AggregateRoot[str]):
 
 __all__ = [
     "Tool",
+    "ToolCatalogSourceKind",
     "ToolEnvironment",
+    "ToolFunction",
+    "ToolFunctionRuntimeKind",
+    "ToolFunctionStatus",
     "ToolExecutionPolicy",
     "ToolExecutionSupport",
     "ToolExecutionTarget",
@@ -725,11 +1061,16 @@ __all__ = [
     "ToolKind",
     "ToolMode",
     "ToolParameter",
+    "ToolProviderBackend",
+    "ToolProviderBackendStatus",
+    "ToolProviderCapability",
     "ToolRun",
     "ToolRunAssignment",
     "ToolRunAssignmentStatus",
     "ToolRunStatus",
-    "ToolSourceKind",
+    "ToolSource",
+    "ToolDefinitionOrigin",
+    "ToolSourceStatus",
     "ToolWorkerRegistration",
     "ToolWorkerStatus",
 ]

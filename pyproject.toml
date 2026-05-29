@@ -13,6 +13,7 @@ dependencies = [
     "fastapi>=0.135,<0.136",
     "httpx>=0.28,<0.29",
     "lark-oapi>=1.5,<2.0",
+    "mcp-proxy>=0.12,<0.13",
     "opencv-python-headless>=4.10,<5.0",
     "Pillow>=11.0,<12.0",
     "paddleocr>=2.7,<3.0",
@@ -37,3 +38,13 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: benchmark or throughput checks; keep out of default fast loops unless explicitly selected",
+    "fast: module-local unit tests that avoid full runtime/app assembly",
+    "integration: tests that cross a process, browser, or external-service boundary",
+    "live: tests gated by a live external browser/service environment variable",
+    "runtime: tests that assemble the runtime container, HTTP app, CLI app, worker loop, or daemon surface",
+    "slow: intentionally slow coverage that should be audited before being added to common developer loops",
+]

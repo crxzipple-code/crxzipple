@@ -2,51 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from crxzipple.modules.tool.application.discovery import ToolDiscoveryProviderDescriptor
-from crxzipple.modules.tool.application.settings_integration import (
-    ToolEnablementDiscoveryGateway,
-    ToolEnablementRuntimeGateway,
-    ToolEnablementService,
-)
-from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.modules.tool.application.settings_integration import (
     tool_settings_bootstrap_config_from_settings,
 )
-from crxzipple.modules.tool.domain import Tool, ToolSourceKind
-from crxzipple.modules.tool.domain.value_objects import ToolKind
 from crxzipple.shared.settings import (
-    ToolEnablementConfig,
     ToolProviderConfig,
     ToolRootConfig,
 )
-
-
-class _StaticDiscoveryGateway:
-    def __init__(self, specs: tuple[ToolSpec, ...]) -> None:
-        self.specs = specs
-
-    def list_providers(self) -> list[ToolDiscoveryProviderDescriptor]:
-        return [
-            ToolDiscoveryProviderDescriptor(
-                name="weather",
-                description="Weather provider",
-                source_kind=ToolSourceKind.REMOTE_REGISTRY,
-            ),
-        ]
-
-    def discover(self, *, provider_name: str | None = None) -> list[ToolSpec]:
-        return list(self.specs)
-
-
-class _StaticRuntimeGateway:
-    def __init__(self, tools: tuple[Tool, ...]) -> None:
-        self.tools = tools
-
-    def list_local_tools(self) -> list[Tool]:
-        return list(self.tools)
-
-    async def execute(self, tool, target, arguments, execution_context=None):
-        return None
 
 
 class ToolSettingsIntegrationTestCase(unittest.TestCase):
@@ -103,6 +65,26 @@ class ToolSettingsIntegrationTestCase(unittest.TestCase):
         self.assertEqual(provider.timeout_seconds, 12)
         self.assertEqual(provider.max_concurrency, 2)
         self.assertEqual(provider.default_effect_ids, ("local_tool_access",))
+
+    def test_http_mcp_provider_mapping_converts_to_bootstrap_settings(self) -> None:
+        bootstrap = tool_settings_bootstrap_config_from_settings(
+            (
+                {
+                    "id": "sample",
+                    "kind": "mcp",
+                    "description": "Sample MCP",
+                    "transport": "http",
+                    "endpoint_url": "http://127.0.0.1:19800/mcp",
+                    "timeout_seconds": "12",
+                },
+            ),
+        )
+        provider = bootstrap.mcp_providers[0]
+
+        self.assertEqual(provider.name, "sample")
+        self.assertEqual(provider.transport, "http")
+        self.assertEqual(provider.endpoint_url, "http://127.0.0.1:19800/mcp")
+        self.assertEqual(provider.command, ())
 
     def test_local_roots_convert_to_local_path_tuple(self) -> None:
         bootstrap = tool_settings_bootstrap_config_from_settings(
@@ -161,10 +143,10 @@ class ToolSettingsIntegrationTestCase(unittest.TestCase):
                     "provider_kind": "openapi",
                     "spec_path": "petstore.yaml",
                     "credential_bindings": {
-                        "ApiKeyAuth": "env:PETSTORE_TOKEN",
+                        "ApiKeyAuth": "petstore-api-key",
                         "BasicAuth": {
-                            "username_source": "env:PETSTORE_USER",
-                            "password_source": "env:PETSTORE_PASSWORD",
+                            "username_binding_id": "petstore-basic-username",
+                            "password_binding_id": "petstore-basic-password",
                         },
                     },
                 },
@@ -173,69 +155,73 @@ class ToolSettingsIntegrationTestCase(unittest.TestCase):
         bindings = bootstrap.openapi_providers[0].credential_bindings
 
         self.assertEqual(bindings[0].scheme_name, "ApiKeyAuth")
-        self.assertEqual(bindings[0].source, "env:PETSTORE_TOKEN")
+        self.assertEqual(bindings[0].credential_binding_id, "petstore-api-key")
         self.assertEqual(bindings[1].scheme_name, "BasicAuth")
-        self.assertEqual(bindings[1].username_source, "env:PETSTORE_USER")
-        self.assertEqual(bindings[1].password_source, "env:PETSTORE_PASSWORD")
+        self.assertEqual(bindings[1].username_binding_id, "petstore-basic-username")
+        self.assertEqual(bindings[1].password_binding_id, "petstore-basic-password")
 
-    def test_enablement_discovery_adapter_applies_pattern_and_explicit_override(self) -> None:
-        gateway = ToolEnablementDiscoveryGateway(
-            _StaticDiscoveryGateway(
+    def test_openapi_settings_reject_direct_credential_sources(self) -> None:
+        for forbidden_binding_id in (
+            "env:PETSTORE_TOKEN",
+            "file:/tmp/petstore-token",
+            "codex_auth_json",
+            "auth_ref",
+        ):
+            with self.subTest(forbidden_binding_id=forbidden_binding_id):
+                with self.assertRaisesRegex(ValueError, "direct credential source"):
+                    tool_settings_bootstrap_config_from_settings(
+                        (
+                            {
+                                "provider_id": "petstore",
+                                "provider_kind": "openapi",
+                                "spec_path": "petstore.yaml",
+                                "credential_bindings": {
+                                    "ApiKeyAuth": forbidden_binding_id,
+                                },
+                            },
+                        ),
+                    )
+
+    def test_openapi_settings_reject_legacy_auth_ref_field(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no longer accepted"):
+            tool_settings_bootstrap_config_from_settings(
                 (
-                    _tool_spec("weather.forecast", provider_name="weather"),
-                    _tool_spec("weather.current", provider_name="weather"),
+                    {
+                        "provider_id": "petstore",
+                        "provider_kind": "openapi",
+                        "spec_path": "petstore.yaml",
+                        "credential_bindings": {
+                            "ApiKeyAuth": {"auth_ref": "petstore-token"},
+                        },
+                    },
                 ),
-            ),
-            ToolEnablementService(
-                (
-                    ToolEnablementConfig(pattern="weather.*", enabled=False),
-                    ToolEnablementConfig(tool_id="weather.current", enabled=True),
-                ),
-            ),
-        )
+            )
 
-        discovered = {spec.id: spec for spec in gateway.discover(provider_name="weather")}
-
-        self.assertFalse(discovered["weather.forecast"].enabled)
-        self.assertTrue(discovered["weather.current"].enabled)
-
-    def test_enablement_runtime_adapter_applies_local_scope(self) -> None:
-        gateway = ToolEnablementRuntimeGateway(
-            _StaticRuntimeGateway((_tool("workspace.read"), _tool("shell.exec"),)),
-            ToolEnablementService(
-                (
-                    ToolEnablementConfig(scope="local", enabled=False),
-                    ToolEnablementConfig(tool_id="workspace.read", enabled=True),
-                ),
-            ),
-        )
-
-        tools = {tool.id: tool for tool in gateway.list_local_tools()}
-
-        self.assertTrue(tools["workspace.read"].enabled)
-        self.assertFalse(tools["shell.exec"].enabled)
-
-
-def _tool_spec(tool_id: str, *, provider_name: str) -> ToolSpec:
-    return ToolSpec(
-        id=tool_id,
-        name=tool_id,
-        description=f"{tool_id} tool",
-        provider_name=provider_name,
-        kind=ToolKind.HTTP,
-        source_kind=ToolSourceKind.REMOTE_REGISTRY,
-    )
-
-
-def _tool(tool_id: str) -> Tool:
-    return Tool(
-        id=tool_id,
-        name=tool_id,
-        description=f"{tool_id} tool",
-        kind=ToolKind.FUNCTION,
-        source_kind=ToolSourceKind.LOCAL_DISCOVERY,
-    )
-
+    def test_openapi_settings_reject_legacy_binding_alias_fields(self) -> None:
+        for field_name in (
+            "credential_binding",
+            "credential_binding_ref",
+            "binding_id",
+            "username_binding",
+            "password_binding",
+        ):
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(ValueError, "no longer accepted"):
+                    tool_settings_bootstrap_config_from_settings(
+                        (
+                            {
+                                "provider_id": "petstore",
+                                "provider_kind": "openapi",
+                                "spec_path": "petstore.yaml",
+                                "credential_bindings": {
+                                    "ApiKeyAuth": {
+                                        "credential_binding_id": "petstore-api-key",
+                                        field_name: "legacy-binding",
+                                    },
+                                },
+                            },
+                        ),
+                    )
 
 if __name__ == "__main__":
     unittest.main()

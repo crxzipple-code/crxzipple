@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.ocr.domain import OcrExecutionError, OcrValidationError
@@ -26,7 +26,7 @@ def health(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> dict[str, object]:
     try:
-        return container.ocr_service.health()
+        return container.require(AppKey.OCR_SERVICE).health()
     except (OcrValidationError, OcrExecutionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -44,7 +44,7 @@ def analyze_artifact(
             detail="variant must be one of: original, preview, llm.",
         ) from exc
     try:
-        result = container.ocr_service.analyze_artifact(
+        result = container.require(AppKey.OCR_SERVICE).analyze_artifact(
             artifact_id=payload.artifact_id,
             variant=variant,
             language=payload.language,
@@ -52,4 +52,4 @@ def analyze_artifact(
         )
     except (OcrValidationError, OcrExecutionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return container.ocr_result_serializer.serialize(result)
+    return container.require(AppKey.OCR_RESULT_SERIALIZER).serialize(result)

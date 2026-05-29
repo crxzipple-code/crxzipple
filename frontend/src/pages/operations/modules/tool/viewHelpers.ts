@@ -100,6 +100,7 @@ export const lifecycleEventPageSize = 5;
 
 export const knownToolTabIds = new Set([
   "runs",
+  "sources",
   "workers",
   "queue",
   "waiting_io",
@@ -152,6 +153,7 @@ export const knownToolTernaryFilters = new Set<ToolTernaryFilter>([
 
 export const fallbackTabs: OperationsTab[] = [
   { id: "runs", label: "Tool Runs" },
+  { id: "sources", label: "Sources" },
   { id: "workers", label: "Workers" },
   { id: "queue", label: "Queue" },
   { id: "waiting_io", label: "Waiting IO" },
@@ -168,6 +170,7 @@ export const fallbackTabs: OperationsTab[] = [
 export const toolTextKeys: Record<string, string> = {
   "Tool Runtime": "operations.tool.title",
   "Tool Runs": "operations.tool.tab.runs",
+  "Sources": "operations.tool.tab.sources",
   "Workers": "operations.tool.tab.workers",
   "Queue": "operations.tool.tab.queue",
   "Capabilities": "operations.tool.tab.capabilities",
@@ -187,6 +190,11 @@ export const toolTextKeys: Record<string, string> = {
   "Recent Tool Runs": "operations.tool.section.recentRuns",
   "Tool Types": "operations.tool.section.toolTypes",
   "Tool Call Share": "operations.tool.section.toolCallShare",
+  "Source Health": "operations.tool.section.sourceHealth",
+  "Discovery Failures": "operations.tool.section.discoveryFailures",
+  "Function Catalog Risks": "operations.tool.section.functionCatalogRisks",
+  "Provider Backend Health": "operations.tool.section.providerBackendHealth",
+  "CLI Process Health": "operations.tool.section.cliProcessHealth",
   "Tool Types by Runs": "operations.tool.section.toolTypesByRuns",
   "Tool Types by Catalog": "operations.tool.section.toolTypesByCatalog",
   "Other Tools": "operations.tool.section.otherTools",
@@ -215,6 +223,7 @@ export const toolTextKeys: Record<string, string> = {
   "No tool runs match the current filters.": "operations.tool.empty.noFilteredRuns",
   "No tool type data.": "operations.tool.empty.noToolTypes",
   "No access or confirmation risks detected.": "operations.tool.empty.noRisk",
+  "No access or runtime readiness risks detected.": "operations.tool.empty.noRisk",
   "No active worker-held runs.": "operations.tool.empty.noWorkerRuns",
   "No active tool runs.": "operations.tool.empty.noActiveRuns",
   "No waiting tool runs.": "operations.tool.empty.noWaitingRuns",
@@ -228,6 +237,11 @@ export const toolTextKeys: Record<string, string> = {
   "No tool artifacts observed.": "operations.tool.empty.noArtifacts",
   "No tool lifecycle events observed yet.": "operations.tool.empty.noLifecycleEvents",
   "No tool execution strategies observed.": "operations.tool.empty.noStrategies",
+  "No Tool sources are registered.": "operations.tool.empty.noSources",
+  "No Tool discovery failures recorded.": "operations.tool.empty.noDiscoveryFailures",
+  "No stale, deprecated, disabled, or deleted functions.": "operations.tool.empty.noFunctionRisks",
+  "No provider backend sources are registered.": "operations.tool.empty.noProviderBackendSources",
+  "No CLI sources are registered.": "operations.tool.empty.noCliSources",
   "Tool runtime state is queryable": "operations.tool.delta.queryable",
   "Operator attention recommended": "operations.tool.delta.attentionRecommended",
   "Operator action required": "operations.tool.delta.actionRequired",

@@ -1,23 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from crxzipple.modules.orchestration.application.ports import (
     ToolCatalogPort,
     ToolExecutionPort,
 )
-from crxzipple.modules.tool.application import ExecuteToolInput, ToolApplicationService
+from crxzipple.modules.tool.application import ExecuteToolInput
 
 
 @dataclass(slots=True)
 class ToolServiceAdapter(ToolCatalogPort, ToolExecutionPort):
-    service: ToolApplicationService
+    service: Any
 
-    def ensure_local_system_tools_registered(self):
-        return self.service.ensure_local_system_tools_registered()
-
-    def list_enabled_tools(self):
-        return self.service.list_enabled_tools()
+    def list_enabled_tools(self, *, runtime_context: Mapping[str, Any] | None = None):
+        return self.service.list_enabled_tools(runtime_context=runtime_context)
 
     async def execute(self, data: ExecuteToolInput):
         return await self.service.execute(data)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -18,6 +19,8 @@ from crxzipple.modules.browser.domain import (
     ResolvedBrowserProfile,
 )
 from crxzipple.modules.browser.infrastructure import (
+    BrowserDiagnosticsService,
+    BrowserPageNetworkFetchService,
     CdpBackedPlaywrightActionEngine,
     InMemoryBrowserRefStore,
 )
@@ -70,10 +73,21 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         )
         self.session_pool = FakePlaywrightCdpSessionPool()
         self.ref_store = InMemoryBrowserRefStore()
+        self.emitted_browser_events: list[tuple[str, dict[str, object]]] = []
         self.engine = CdpBackedPlaywrightActionEngine(
             session_pool=self.session_pool,
             ref_store=self.ref_store,
             daemon_service=self.daemon_service,
+            network_page_fetch_service=BrowserPageNetworkFetchService(
+                event_emitter=lambda event_name, payload: self.emitted_browser_events.append(
+                    (event_name, payload),
+                ),
+            ),
+            diagnostics_service=BrowserDiagnosticsService(
+                event_emitter=lambda event_name, payload: self.emitted_browser_events.append(
+                    (event_name, payload),
+                ),
+            ),
         )
         self.profile = ResolvedBrowserProfile(
             name="crxzipple",
@@ -151,6 +165,37 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertEqual(page.operations[0][0], "click")
         self.assertIn("type", [operation[0] for operation in page.operations])
         self.assertEqual(click_result.value["result"]["mode"], "direct")
+
+    def test_click_can_target_viewport_coordinates(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        click_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="click",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "x": 530,
+                "y": 636,
+                "button": "left",
+                "double_click": True,
+            },
+            timeout_ms=1500,
+        )
+
+        click_result = self.engine.execute(
+            plan=self._plan(click_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=click_command,
+        )
+
+        self.assertTrue(click_result.ok)
+        self.assertEqual(click_result.value["result"]["mode"], "coordinate")
+        self.assertEqual(click_result.value["result"]["x"], 530.0)
+        self.assertEqual(click_result.value["result"]["y"], 636.0)
+        self.assertIn(
+            ("mouse.click", 530.0, 636.0, {"button": "left", "click_count": 2}),
+            page.operations,
+        )
 
     def test_upload_uses_locator_set_input_files(self) -> None:
         upload_command = BrowserPageActionCommand(
@@ -380,6 +425,166 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertEqual(clear_result.value["result"]["values"], {})
         self.assertEqual(page.local_storage, {})
 
+    def test_deep_storage_read_tools_use_cdp_and_page_context(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.indexeddb_databases = {
+            "app-db": {
+                "version": 2,
+                "objectStores": [
+                    {
+                        "name": "flights",
+                        "keyPath": "id",
+                        "autoIncrement": False,
+                        "indexes": [{"name": "by-city", "keyPath": "city"}],
+                    }
+                ],
+                "entries": {
+                    "flights": [
+                        {
+                            "key": "flight-1",
+                            "primaryKey": "flight-1",
+                            "value": {
+                                "city": "Kunming",
+                                "token": "secret-token",
+                            },
+                        }
+                    ]
+                },
+            }
+        }
+        page.cache_storage_caches = [
+            {
+                "cacheId": "cache-1",
+                "cacheName": "runtime-cache",
+                "securityOrigin": "https://example.com",
+            }
+        ]
+        page.cache_storage_entries = {
+            "cache-1": [
+                {
+                    "requestURL": "https://example.com/api/flights?token=secret",
+                    "requestMethod": "GET",
+                    "responseStatus": 200,
+                    "responseHeaders": [
+                        {"name": "content-type", "value": "application/json"},
+                        {"name": "set-cookie", "value": "sid=secret"},
+                    ],
+                }
+            ]
+        }
+        page.cache_storage_responses = {
+            ("cache-1", "https://example.com/api/flights?token=secret"): {
+                "body": '{"api_key":"secret","ok":true}',
+            }
+        }
+        page.service_worker_registrations = [
+            {
+                "scope_url": "https://example.com/",
+                "active": {
+                    "script_url": "https://example.com/sw.js",
+                    "state": "activated",
+                },
+            }
+        ]
+
+        indexeddb_list = self.engine.execute(
+            plan=self._plan(
+                BrowserPageActionCommand(
+                    profile_name="crxzipple",
+                    kind="storage-indexeddb-list",
+                    target=BrowserActionTarget(target_id="tab-1"),
+                    payload={},
+                )
+            ),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=BrowserPageActionCommand(
+                profile_name="crxzipple",
+                kind="storage-indexeddb-list",
+                target=BrowserActionTarget(target_id="tab-1"),
+                payload={},
+            ),
+        )
+        self.assertEqual(indexeddb_list.value["result"]["database_names"], ["app-db"])
+        self.assertEqual(
+            indexeddb_list.value["result"]["databases"][0]["object_stores"][0]["name"],
+            "flights",
+        )
+
+        indexeddb_query_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage-indexeddb-query",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"database_name": "app-db", "object_store_name": "flights"},
+        )
+        indexeddb_query = self.engine.execute(
+            plan=self._plan(indexeddb_query_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=indexeddb_query_command,
+        )
+        self.assertEqual(indexeddb_query.value["result"]["entries"][0]["key"], "flight-1")
+        self.assertEqual(
+            indexeddb_query.value["result"]["entries"][0]["value"]["token"],
+            "[redacted]",
+        )
+
+        cache_list_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage-cache-list",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={},
+        )
+        cache_list = self.engine.execute(
+            plan=self._plan(cache_list_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=cache_list_command,
+        )
+        self.assertEqual(cache_list.value["result"]["caches"][0]["cache_name"], "runtime-cache")
+
+        cache_get_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="storage-cache-get",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "cache_name": "runtime-cache",
+                "request_url": "https://example.com/api/flights?token=secret",
+            },
+        )
+        cache_get = self.engine.execute(
+            plan=self._plan(cache_get_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=cache_get_command,
+        )
+        self.assertIn("%5Bredacted%5D", cache_get.value["result"]["request_url"])
+        self.assertEqual(
+            cache_get.value["result"]["entries"][0]["response_headers"]["set-cookie"],
+            "[redacted]",
+        )
+        self.assertIn("[redacted]", cache_get.value["result"]["response"]["body"])
+
+        service_worker_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="service-worker-list",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={},
+        )
+        service_workers = self.engine.execute(
+            plan=self._plan(service_worker_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=service_worker_command,
+        )
+        self.assertEqual(service_workers.value["result"]["count"], 1)
+        self.assertEqual(
+            service_workers.value["result"]["registrations"][0]["active"]["state"],
+            "activated",
+        )
+        self.assertIn(("cdp.send", "IndexedDB.requestDatabaseNames", {"securityOrigin": "https://example.com"}), page.operations)
+        self.assertIn(("cdp.send", "CacheStorage.requestCacheNames", {"securityOrigin": "https://example.com"}), page.operations)
+
     def test_cookies_supports_set_get_and_clear(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
 
@@ -441,6 +646,777 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertEqual(clear_result.value["result"]["cookies"], [])
         self.assertEqual(page.browser_context.cookie_store, [])
 
+    def test_cdp_raw_sends_command_through_page_cdp_session(self) -> None:
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="cdp-raw",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "method": "Runtime.evaluate",
+                "params": {"expression": "1 + 1"},
+            },
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        page = self.session_pool.pages["tab-1"]
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value["result"]["kind"], "cdp-raw")
+        self.assertEqual(result.value["result"]["method"], "Runtime.evaluate")
+        self.assertEqual(
+            result.value["result"]["result"],
+            {
+                "method": "Runtime.evaluate",
+                "params": {"expression": "1 + 1"},
+                "targetId": "tab-1",
+            },
+        )
+        self.assertIn(("context.new_cdp_session", "tab-1"), page.operations)
+        self.assertIn(
+            ("cdp.send", "Runtime.evaluate", {"expression": "1 + 1"}),
+            page.operations,
+        )
+        self.assertIn(("cdp.detach",), page.operations)
+
+    def test_network_inspect_returns_performance_entries_and_cdp_facts(self) -> None:
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-inspect",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"limit": 10},
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        page = self.session_pool.pages["tab-1"]
+        self.assertTrue(result.ok)
+        payload = result.value["result"]
+        self.assertEqual(payload["kind"], "network-inspect")
+        self.assertEqual(payload["url"], page.url)
+        self.assertEqual(payload["performance"]["entry_count"], 2)
+        self.assertEqual(payload["performance"]["entries"][0]["entry_type"], "navigation")
+        self.assertEqual(payload["cdp"]["metrics"]["metrics"][0]["name"], "Timestamp")
+        self.assertEqual(
+            payload["cdp"]["resource_tree"]["frameTree"]["resources"][0]["type"],
+            "Script",
+        )
+        self.assertEqual(payload["errors"], [])
+        self.assertIn(
+            ("cdp.send", "Performance.getMetrics", {}),
+            page.operations,
+        )
+        self.assertIn(
+            ("cdp.send", "Page.getResourceTree", {}),
+            page.operations,
+        )
+
+    def test_emulation_set_applies_target_scoped_cdp_overrides(self) -> None:
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="emulation-set",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "width": 390,
+                "height": 844,
+                "device_scale_factor": 3,
+                "is_mobile": True,
+                "has_touch": True,
+                "user_agent": "Test Mobile UA",
+                "timezone_id": "Asia/Shanghai",
+                "locale": "zh-CN",
+            },
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        page = self.session_pool.pages["tab-1"]
+        payload = result.value["result"]
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["kind"], "emulation-set")
+        self.assertEqual(payload["policy"]["runtime_scope"], "target")
+        self.assertEqual(
+            payload["changed_controls"],
+            ["device_metrics", "user_agent", "timezone", "locale"],
+        )
+        self.assertIn(
+            (
+                "cdp.send",
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 390,
+                    "height": 844,
+                    "deviceScaleFactor": 3.0,
+                    "mobile": True,
+                    "screenWidth": 390,
+                    "screenHeight": 844,
+                    "dontSetVisibleSize": False,
+                    "screenOrientation": {
+                        "type": "portraitPrimary",
+                        "angle": 0,
+                    },
+                    "hasTouch": True,
+                },
+            ),
+            page.operations,
+        )
+        self.assertIn(
+            ("cdp.send", "Emulation.setUserAgentOverride", {"userAgent": "Test Mobile UA"}),
+            page.operations,
+        )
+        self.assertIn(("cdp.detach",), page.operations)
+
+    def test_environment_permissions_geolocation_and_network_conditions(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        grant_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="permissions-grant",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "permissions": ["geolocation", "notifications"],
+                "origin": "https://example.com",
+            },
+        )
+        grant_result = self.engine.execute(
+            plan=self._plan(grant_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=grant_command,
+        )
+
+        geolocation_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="geolocation-set",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"latitude": 25.04, "longitude": 102.71, "accuracy": 10},
+        )
+        geolocation_result = self.engine.execute(
+            plan=self._plan(geolocation_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=geolocation_command,
+        )
+
+        network_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-conditions-set",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "offline": False,
+                "latency_ms": 120,
+                "download_kbps": 512,
+                "upload_kbps": 128,
+                "connection_type": "cellular3g",
+            },
+        )
+        network_result = self.engine.execute(
+            plan=self._plan(network_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=network_command,
+        )
+
+        self.assertEqual(grant_result.value["result"]["permission_names"], ["geolocation", "notifications"])
+        self.assertIn(
+            (
+                "context.grant_permissions",
+                {
+                    "permissions": ["geolocation", "notifications"],
+                    "origin": "https://example.com",
+                },
+            ),
+            page.operations,
+        )
+        self.assertEqual(
+            geolocation_result.value["result"]["geolocation"],
+            {"latitude": 25.04, "longitude": 102.71, "accuracy": 10.0},
+        )
+        self.assertIn(
+            (
+                "cdp.send",
+                "Emulation.setGeolocationOverride",
+                {"latitude": 25.04, "longitude": 102.71, "accuracy": 10.0},
+            ),
+            page.operations,
+        )
+        self.assertEqual(
+            network_result.value["result"]["network_conditions"],
+            {
+                "offline": False,
+                "latency_ms": 120.0,
+                "download_throughput_bytes_per_second": 65536,
+                "upload_throughput_bytes_per_second": 16384,
+                "connection_type": "cellular3g",
+            },
+        )
+        self.assertIn(
+            (
+                "cdp.send",
+                "Network.emulateNetworkConditions",
+                {
+                    "offline": False,
+                    "latency": 120.0,
+                    "downloadThroughput": 65536,
+                    "uploadThroughput": 16384,
+                    "connectionType": "cellular3g",
+                },
+            ),
+            page.operations,
+        )
+
+    def test_emulation_reset_clears_target_overrides(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="emulation-reset",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={},
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("device_metrics", result.value["result"]["changed_controls"])
+        self.assertIn("permissions", result.value["result"]["changed_controls"])
+        self.assertIn(("cdp.send", "Emulation.clearDeviceMetricsOverride", {}), page.operations)
+        self.assertIn(("cdp.send", "Emulation.clearGeolocationOverride", {}), page.operations)
+        self.assertIn(("context.clear_permissions",), page.operations)
+
+    def test_diagnostics_collects_lifecycle_performance_and_console_errors(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.emit_console(text="Something failed", message_type="error")
+        page.emit_page_error(
+            message="Unhandled promise rejection",
+            name="UnhandledRejection",
+            stack="stack line",
+        )
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="diagnostics-collect",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"include_entries": True},
+        )
+
+        result = self.engine.execute(
+            plan=self._plan(command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=command,
+        )
+
+        payload = result.value["result"]
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["kind"], "diagnostics-collect")
+        self.assertEqual(payload["issue_count"], 2)
+        self.assertEqual(payload["diagnostics"]["errors"][0]["text"], "Something failed")
+        self.assertEqual(payload["diagnostics"]["errors"][1]["source"], "pageerror")
+        self.assertEqual(
+            payload["diagnostics"]["errors"][1]["text"],
+            "Unhandled promise rejection",
+        )
+        self.assertEqual(payload["diagnostics"]["lifecycle"]["url"], "https://example.com")
+        self.assertEqual(
+            payload["diagnostics"]["performance"]["metrics"]["metrics"][0]["name"],
+            "Timestamp",
+        )
+        self.assertIn(("cdp.send", "Page.getNavigationHistory", {}), page.operations)
+        self.assertEqual(
+            self.emitted_browser_events[-1][0],
+            "browser.diagnostics.collected",
+        )
+        self.assertEqual(self.emitted_browser_events[-1][1]["issue_count"], 2)
+        self.assertEqual(
+            self.emitted_browser_events[-1][1]["diagnostic_kind"],
+            "diagnostics-collect",
+        )
+
+    def test_trace_start_stop_and_export_returns_zip_payload(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        start_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="trace-start",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"trace_id": "trace-1", "title": "checkout"},
+        )
+        start_result = self.engine.execute(
+            plan=self._plan(start_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=start_command,
+        )
+
+        stop_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="trace-stop",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"trace_id": "trace-1"},
+        )
+        stop_result = self.engine.execute(
+            plan=self._plan(stop_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=stop_command,
+        )
+
+        export_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="trace-export",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"trace_id": "trace-1"},
+        )
+        export_result = self.engine.execute(
+            plan=self._plan(export_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=export_command,
+        )
+
+        self.assertEqual(start_result.value["result"]["status"], "active")
+        self.assertEqual(stop_result.value["result"]["content_type"], "application/zip")
+        self.assertEqual(stop_result.value["result"]["encoding"], "base64")
+        self.assertEqual(export_result.value["result"]["data"], stop_result.value["result"]["data"])
+        self.assertIn(
+            (
+                "tracing.start",
+                {"screenshots": True, "snapshots": True, "sources": False, "title": "checkout"},
+            ),
+            page.operations,
+        )
+        self.assertTrue(any(operation[0] == "tracing.stop" for operation in page.operations))
+        self.assertIn(
+            "browser.trace.exported",
+            [event_name for event_name, _payload in self.emitted_browser_events],
+        )
+
+    def test_network_capture_actions_record_and_list_requests(self) -> None:
+        start_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-start-capture",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "capture_id": "cap-1",
+                "max_requests": 10,
+                "max_body_bytes": 128,
+            },
+        )
+
+        start_result = self.engine.execute(
+            plan=self._plan(start_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=start_command,
+        )
+
+        self.assertTrue(start_result.ok)
+        self.assertEqual(
+            start_result.value["result"]["capture"]["capture_id"],
+            "cap-1",
+        )
+        self.assertEqual(start_result.value["result"]["capture"]["status"], "active")
+
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        session = page.browser_context.cdp_sessions[-1]
+        assert self.engine.network_capture_controller is not None
+        subscription = self.engine.network_capture_controller._subscriptions[
+            ("crxzipple", "tab-1", "cap-1")
+        ]
+        self.assertEqual(subscription.session.mode, "subscription")
+        self.assertFalse(subscription.session.detached)
+        page.network_response_bodies["req-1"] = {
+            "body": '{"ok":true}',
+            "base64Encoded": False,
+        }
+        session.emit(
+            "Network.requestWillBeSent",
+            {
+                "requestId": "req-1",
+                "type": "XHR",
+                "frameId": "frame-tab-1",
+                "loaderId": "loader-1",
+                "request": {
+                    "url": "https://example.com/api/search?token=secret&city=kunming",
+                    "method": "POST",
+                    "headers": {
+                        "Authorization": "Bearer secret",
+                        "Content-Type": "application/json",
+                    },
+                    "postData": '{"query":"flights","token":"secret"}',
+                },
+                "initiator": {"type": "script"},
+            },
+        )
+        session.emit(
+            "Network.responseReceived",
+            {
+                "requestId": "req-1",
+                "type": "XHR",
+                "response": {
+                    "status": 200,
+                    "headers": {
+                        "Content-Type": "application/json",
+                        "Set-Cookie": "session=secret",
+                    },
+                    "mimeType": "application/json",
+                    "timing": {"receiveHeadersEnd": 12.0},
+                },
+            },
+        )
+        session.emit(
+            "Network.loadingFinished",
+            {
+                "requestId": "req-1",
+                "encodedDataLength": 128,
+            },
+        )
+
+        list_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-list-requests",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"capture_id": "cap-1", "limit": 10},
+        )
+
+        list_result = self.engine.execute(
+            plan=self._plan(list_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=list_command,
+        )
+
+        payload = list_result.value["result"]
+        self.assertEqual(payload["kind"], "network-list-requests")
+        self.assertEqual(payload["capture"]["capture_id"], "cap-1")
+        self.assertEqual(payload["request_count"], 1)
+        self.assertEqual(payload["requests"][0]["resource_type"], "xhr")
+        self.assertEqual(payload["requests"][0]["status"], 200)
+        self.assertEqual(
+            payload["requests"][0]["url"],
+            "https://example.com/api/search?token=%5Bredacted%5D&city=kunming",
+        )
+        self.assertEqual(payload["requests"][0]["request_headers"]["Authorization"], "[redacted]")
+        self.assertEqual(payload["requests"][0]["response_headers"]["Set-Cookie"], "[redacted]")
+        self.assertEqual(payload["requests"][0]["encoded_data_length"], 128)
+
+        request_id = payload["requests"][0]["request_id"]
+        get_request_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-get-request",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "capture_id": "cap-1",
+                "request_id": request_id,
+            },
+        )
+
+        get_request_result = self.engine.execute(
+            plan=self._plan(get_request_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=get_request_command,
+        )
+
+        self.assertEqual(get_request_result.value["result"]["request"]["request_id"], "req-1")
+        self.assertEqual(
+            get_request_result.value["result"]["request"]["request_post_data_preview"],
+            '{"query":"flights","token":"[redacted]"}',
+        )
+
+        request_body_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-get-request-body",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "capture_id": "cap-1",
+                "request_id": request_id,
+            },
+        )
+
+        request_body_result = self.engine.execute(
+            plan=self._plan(request_body_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=request_body_command,
+        )
+
+        self.assertEqual(request_body_result.value["result"]["body_kind"], "request")
+        self.assertEqual(
+            request_body_result.value["result"]["body"],
+            '{"query":"flights","token":"[redacted]"}',
+        )
+
+        body_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-get-response-body",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "capture_id": "cap-1",
+                "request_id": request_id,
+            },
+        )
+
+        body_result = self.engine.execute(
+            plan=self._plan(body_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=body_command,
+        )
+
+        self.assertEqual(body_result.value["result"]["body"], '{"ok":true}')
+        self.assertEqual(body_result.value["result"]["body_kind"], "response")
+
+        page.network_fetch_responses["https://example.com/api/details?token=secret"] = {
+            "ok": True,
+            "url": "https://example.com/api/details?token=secret",
+            "status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": '{"access_token":"secret","ok":true}',
+            "size_bytes": 35,
+            "stored_size_bytes": 35,
+            "truncated": False,
+        }
+        fetch_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-fetch-as-page",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "url": "/api/details?token=secret",
+                "method": "GET",
+                "headers": {"Authorization": "Bearer secret", "X-Trace": "trace-1"},
+            },
+        )
+
+        fetch_result = self.engine.execute(
+            plan=self._plan(fetch_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=fetch_command,
+        )
+
+        self.assertEqual(fetch_result.value["result"]["status"], 200)
+        self.assertEqual(
+            fetch_result.value["result"]["url"],
+            "https://example.com/api/details?token=%5Bredacted%5D",
+        )
+        self.assertEqual(fetch_result.value["result"]["request"]["headers"], {"X-Trace": "trace-1"})
+        self.assertNotIn("secret", fetch_result.value["result"]["body"])
+
+        page.network_fetch_responses["https://example.com/api/search?city=kunming"] = {
+            "ok": True,
+            "url": "https://example.com/api/search?city=kunming",
+            "status": 201,
+            "headers": {"content-type": "application/json"},
+            "body": '{"items":[1]}',
+            "size_bytes": 13,
+            "stored_size_bytes": 13,
+            "truncated": False,
+        }
+        replay_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-replay-request",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "capture_id": "cap-1",
+                "request_id": request_id,
+                "url": "/api/search?city=kunming",
+                "json": {"query": "flights"},
+                "allow_mutating": True,
+            },
+        )
+
+        replay_result = self.engine.execute(
+            plan=self._plan(replay_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=replay_command,
+        )
+
+        self.assertEqual(replay_result.value["result"]["status"], 201)
+        self.assertEqual(replay_result.value["result"]["source_request_id"], "req-1")
+        self.assertEqual(
+            replay_result.value["result"]["request"]["url"],
+            "https://example.com/api/search?city=kunming",
+        )
+        self.assertEqual(replay_result.value["result"]["body"], '{"items":[1]}')
+        self.assertEqual(
+            [event_name for event_name, _payload in self.emitted_browser_events],
+            [
+                "browser.network.fetch.executed",
+                "browser.network.replay.executed",
+            ],
+        )
+        fetch_event = self.emitted_browser_events[0][1]
+        self.assertEqual(fetch_event["profile_name"], "crxzipple")
+        self.assertEqual(fetch_event["target_id"], "tab-1")
+        self.assertEqual(fetch_event["status"], "succeeded")
+        self.assertEqual(fetch_event["status_code"], 200)
+        self.assertNotIn("secret", str(fetch_event))
+        replay_event = self.emitted_browser_events[1][1]
+        self.assertEqual(replay_event["source_request_id"], "req-1")
+        self.assertEqual(replay_event["source_capture_id"], "cap-1")
+
+    def test_network_fetch_failure_emits_display_safe_event(self) -> None:
+        command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="network-fetch-as-page",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={
+                "url": "https://api.example.test/search?token=secret",
+                "method": "GET",
+            },
+        )
+
+        with self.assertRaisesRegex(BrowserValidationError, "cross-origin"):
+            self.engine.execute(
+                plan=self._plan(command),
+                runtime_state=self.runtime_state,
+                tab=self.tab,
+                command=command,
+            )
+
+        self.assertEqual(len(self.emitted_browser_events), 1)
+        event_name, payload = self.emitted_browser_events[0]
+        self.assertEqual(event_name, "browser.network.fetch.failed")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["level"], "error")
+        self.assertEqual(payload["profile_name"], "crxzipple")
+        self.assertEqual(payload["target_id"], "tab-1")
+        self.assertNotIn("secret", str(payload))
+
+    def test_dom_inspection_actions_return_layout_style_and_clickability(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.main_frame.interactive_items = [
+            {
+                "selector": "#submit",
+                "label": "Submit",
+                "role": "button",
+                "text": "Submit",
+                "tag": "button",
+                "clickable": False,
+                "blocked_by": {
+                    "tag": "div",
+                    "selector_hint": "div.modal-mask",
+                    "text": "",
+                },
+                "computed_style": {
+                    "display": "block",
+                    "pointer-events": "auto",
+                    "z-index": "1",
+                },
+                "box": {
+                    "x": 24,
+                    "y": 48,
+                    "width": 160,
+                    "height": 40,
+                    "top": 48,
+                    "right": 184,
+                    "bottom": 88,
+                    "left": 24,
+                },
+                "mutation_wait": {
+                    "changed": True,
+                    "reason": "quiet",
+                    "mutation_count": 3,
+                    "elapsed_ms": 140,
+                },
+            },
+        ]
+
+        inspect_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="dom-inspect",
+            target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+            payload={"properties": ["display", "z-index"]},
+        )
+
+        inspect_result = self.engine.execute(
+            plan=self._plan(inspect_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=inspect_command,
+        )
+
+        result = inspect_result.value["result"]
+        self.assertEqual(result["kind"], "dom-inspect")
+        self.assertEqual(result["selector"], "#submit")
+        self.assertFalse(result["clickable"])
+        self.assertEqual(result["blocked_by"]["selector_hint"], "div.modal-mask")
+        self.assertEqual(result["computed_style"]["z-index"], "1")
+
+        clickability_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="dom-clickability",
+            target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+            payload={},
+        )
+        clickability_result = self.engine.execute(
+            plan=self._plan(clickability_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=clickability_command,
+        )
+
+        self.assertEqual(clickability_result.value["result"]["kind"], "dom-clickability")
+        self.assertEqual(
+            clickability_result.value["result"]["reasons"],
+            ["blocked_by_overlay"],
+        )
+
+        highlight_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="dom-highlight",
+            target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+            payload={"duration_ms": 900, "color": "#ff0000", "label": "Submit CTA"},
+        )
+        highlight_result = self.engine.execute(
+            plan=self._plan(highlight_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=highlight_command,
+        )
+
+        self.assertEqual(highlight_result.value["result"]["kind"], "dom-highlight")
+        self.assertTrue(highlight_result.value["result"]["highlighted"])
+        self.assertEqual(highlight_result.value["result"]["duration_ms"], 900)
+        self.assertEqual(highlight_result.value["result"]["color"], "#ff0000")
+
+        mutation_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="dom-mutation-wait",
+            target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+            payload={"quiet_ms": 50},
+            timeout_ms=1800,
+        )
+        mutation_result = self.engine.execute(
+            plan=self._plan(mutation_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=mutation_command,
+        )
+
+        self.assertEqual(mutation_result.value["result"]["kind"], "dom-mutation-wait")
+        self.assertTrue(mutation_result.value["result"]["changed"])
+        self.assertEqual(mutation_result.value["result"]["mutation_count"], 3)
+        self.assertEqual(mutation_result.value["result"]["timeout_ms"], 1800)
+
     def test_action_engine_prefers_runtime_cdp_url_over_profile_url(self) -> None:
         self.runtime_state.metadata["cdp_base_url"] = "http://localhost:18800"
         click_command = BrowserPageActionCommand(
@@ -497,6 +1473,56 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
             self.assertTrue(result.ok)
             leases = daemon_service.list_leases(service_key="host:browser:crxzipple")
             self.assertEqual(leases, ())
+
+    def test_execute_uses_runtime_user_data_dir_for_host_daemon_lease_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            daemon_service = self._build_daemon_service(Path(temp_dir))
+            daemon_service.save_instance(
+                DaemonInstance(
+                    id="browser-host-crxzipple",
+                    service_key="host:browser:crxzipple",
+                    status="ready",
+                    pid=8123,
+                    endpoint="http://127.0.0.1:9222",
+                )
+            )
+            user_data_dir = str((Path(temp_dir) / "browser" / "profiles" / "crxzipple" / "userdata").resolve())
+            owner_id = f"crxzipple:{hashlib.sha1(user_data_dir.encode('utf-8')).hexdigest()[:8]}"
+            lease = daemon_service.acquire_lease(
+                service_key="host:browser:crxzipple",
+                owner_kind="browser_profile",
+                owner_id=owner_id,
+                ttl_seconds=60,
+                metadata={"profile_name": "crxzipple", "user_data_dir": user_data_dir},
+            )
+            runtime_state = BrowserProfileRuntimeState(
+                profile_name="crxzipple",
+                metadata={"user_data_dir": user_data_dir},
+            )
+            engine = CdpBackedPlaywrightActionEngine(
+                session_pool=self.session_pool,
+                ref_store=self.ref_store,
+                daemon_service=daemon_service,
+            )
+            click_command = BrowserPageActionCommand(
+                profile_name="crxzipple",
+                kind="click",
+                target=BrowserActionTarget(target_id="tab-1", selector="#submit"),
+                payload={"button": "left"},
+            )
+
+            result = engine.execute(
+                plan=self._plan(click_command),
+                runtime_state=runtime_state,
+                tab=self.tab,
+                command=click_command,
+            )
+
+            self.assertTrue(result.ok)
+            active_leases = daemon_service.list_leases(service_key="host:browser:crxzipple")
+            self.assertEqual(len(active_leases), 1)
+            self.assertEqual(active_leases[0].id, lease.id)
+            daemon_service.release_lease(lease.id)
 
     def test_click_falls_back_to_force_when_pointer_events_intercept(self) -> None:
         page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
@@ -1122,6 +2148,150 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         refs = snapshot_result.value["result"]["value"]["refs"]
         self.assertEqual(len(refs), 1)
         self.assertEqual(refs[0]["label"], "Hangzhou")
+
+    def test_interactive_snapshot_uses_dom_for_active_datepicker_overlay(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.active_overlay_selector = ".date-picker-panel"
+        page.main_frame.aria_snapshot_text = "\n".join(
+            [
+                '- button "Previous month"',
+                '- button "Next month"',
+            ]
+        )
+        page.interactive_items = [
+            {
+                "selector": ".date-picker-panel .day:nth-of-type(1)",
+                "label": "May 27",
+                "role": None,
+                "text": "27",
+                "tag": "div",
+                "scope_selector": ".date-picker-panel",
+            },
+            {
+                "selector": ".date-picker-panel .day:nth-of-type(2)",
+                "label": "May 28",
+                "role": None,
+                "text": "28",
+                "tag": "div",
+                "scope_selector": ".date-picker-panel",
+            },
+        ]
+
+        snapshot_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="snapshot",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"format": "interactive", "active_overlay": True},
+        )
+        snapshot_result = self.engine.execute(
+            plan=self._plan(snapshot_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=snapshot_command,
+        )
+
+        self.assertTrue(snapshot_result.ok)
+        self.assertEqual(snapshot_result.value["result"]["root_selector"], ".date-picker-panel")
+        refs = snapshot_result.value["result"]["value"]["refs"]
+        self.assertEqual(
+            [(item["label"], item["text"], item["tag"]) for item in refs],
+            [("May 27", "27", "div"), ("May 28", "28", "div")],
+        )
+        self.assertEqual(
+            [
+                operation[0]
+                for operation in page.operations
+                if operation[0] in {"aria_snapshot", "frame.evaluate"}
+            ],
+            ["aria_snapshot", "frame.evaluate"],
+        )
+
+    def test_interactive_snapshot_dedupes_nested_overlay_refs(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.active_overlay_selector = ".city-autocomplete-list"
+        page.main_frame.aria_snapshot_text = ""
+        page.interactive_items = [
+            {
+                "selector": ".city-autocomplete-list > li",
+                "label": "昆明(昆明长水)",
+                "role": "button",
+                "text": "昆明(昆明长水)",
+                "tag": "li",
+                "scope_selector": ".city-autocomplete-list",
+            },
+            {
+                "selector": ".city-autocomplete-list > li > span",
+                "label": "昆明(昆明长水)",
+                "role": "button",
+                "text": "昆明(昆明长水)",
+                "tag": "span",
+                "scope_selector": ".city-autocomplete-list",
+            },
+        ]
+
+        snapshot_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="snapshot",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"format": "interactive", "active_overlay": True},
+        )
+        snapshot_result = self.engine.execute(
+            plan=self._plan(snapshot_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=snapshot_command,
+        )
+
+        result = snapshot_result.value["result"]
+        refs = result["value"]["refs"]
+        self.assertEqual(result["ref_count"], 1)
+        self.assertEqual(refs[0]["ref"], "r1")
+        self.assertEqual(refs[0]["tag"], "li")
+        self.assertIn('- scope ".city-autocomplete-list":', result["value"]["snapshot"])
+        self.assertIn('  - button "昆明(昆明长水)" [ref=r1]', result["value"]["snapshot"])
+        self.assertNotIn("[ref=r2]", result["value"]["snapshot"])
+
+    def test_interactive_snapshot_dedupes_descendant_overlay_refs(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.active_overlay_selector = ".city-autocomplete-list"
+        page.main_frame.aria_snapshot_text = ""
+        page.interactive_items = [
+            {
+                "selector": ".city-autocomplete-list li",
+                "label": "上海虹桥",
+                "role": "option",
+                "text": "上海虹桥",
+                "tag": "li",
+                "scope_selector": ".city-autocomplete-list",
+            },
+            {
+                "selector": ".city-autocomplete-list li span",
+                "label": "上海虹桥",
+                "role": "option",
+                "text": "上海虹桥",
+                "tag": "span",
+                "scope_selector": ".city-autocomplete-list",
+            },
+        ]
+
+        snapshot_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="snapshot",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"format": "interactive", "active_overlay": True},
+        )
+        snapshot_result = self.engine.execute(
+            plan=self._plan(snapshot_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=snapshot_command,
+        )
+
+        result = snapshot_result.value["result"]
+        self.assertEqual(result["ref_count"], 1)
+        refs = result["value"]["refs"]
+        self.assertEqual(refs[0]["selector"], ".city-autocomplete-list li")
+        self.assertEqual(refs[0]["tag"], "li")
 
 
 
@@ -1846,6 +3016,8 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertEqual(
             self.runtime_state.page_state(target_id="tab-1"),
             {
+                "page_generation": 1,
+                "snapshot_generation": 1,
                 "current_ref_generation": 1,
                 "last_action_kind": "snapshot",
                 "last_snapshot_format": "interactive",
@@ -1875,6 +3047,8 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertEqual(
             self.runtime_state.page_state(target_id="tab-1"),
             {
+                "page_generation": 1,
+                "snapshot_generation": 1,
                 "current_ref_generation": 1,
                 "last_action_kind": "click",
                 "last_snapshot_format": "interactive",
@@ -2660,6 +3834,57 @@ class BrowserPlaywrightActionEngineTestCase(unittest.TestCase):
         self.assertEqual(
             [operation[0] for operation in page.operations if operation[0] in {"aria_snapshot", "frame.evaluate"}],
             ["aria_snapshot", "frame.evaluate"],
+        )
+
+    def test_interactive_snapshot_skips_detached_child_frames(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+        page.main_frame.aria_snapshot_text = '- button "Open calendar"'
+        page.interactive_items = [
+            {
+                "selector": "#calendar",
+                "label": "Open calendar",
+                "role": "button",
+                "text": "Open calendar",
+                "tag": "button",
+            },
+        ]
+        child_frame = page.add_child_frame(path=(0,), aria_snapshot_text="")
+        child_frame.evaluate_failures.append(RuntimeError("Frame was detached"))
+
+        result = self.engine.execute(
+            plan=self._plan(
+                BrowserPageActionCommand(
+                    profile_name="crxzipple",
+                    kind="snapshot",
+                    target=BrowserActionTarget(target_id="tab-1"),
+                    payload={"format": "interactive", "mode": "focused"},
+                )
+            ),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=BrowserPageActionCommand(
+                profile_name="crxzipple",
+                kind="snapshot",
+                target=BrowserActionTarget(target_id="tab-1"),
+                payload={"format": "interactive", "mode": "focused"},
+            ),
+        )
+
+        refs = result.value["result"]["value"]["refs"]
+        self.assertEqual(
+            [(item["role"], item["label"]) for item in refs],
+            [("button", "Open calendar")],
+        )
+        self.assertEqual(
+            [
+                (operation[0], operation[-1])
+                for operation in page.operations
+                if operation[0] == "frame.evaluate"
+            ],
+            [
+                ("frame.evaluate", ()),
+                ("frame.evaluate", (0,)),
+            ],
         )
 
     def test_interactive_snapshot_focused_excludes_skip_to_content_ref(self) -> None:

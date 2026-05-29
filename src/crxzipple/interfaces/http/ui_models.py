@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from crxzipple.modules.orchestration.application.read_models.workbench import (
+    ApprovalRequestDetail,
     ArtifactPreview,
     RunMetrics,
     RunStatusStrip,
@@ -487,6 +488,39 @@ class WorkbenchRunResponse(BaseModel):
         )
 
 
+class ApprovalRequestDetailResponse(BaseModel):
+    request_id: str
+    effect_id: str
+    label: str
+    reason: str
+    tool_name: str | None = None
+    tool_ids: list[str] = Field(default_factory=list)
+    tool_arguments: dict[str, Any] = Field(default_factory=dict)
+    execution_mode: str | None = None
+    execution_strategy: str | None = None
+    execution_environment: str | None = None
+    draft_id: str | None = None
+
+    @classmethod
+    def from_value(
+        cls,
+        value: ApprovalRequestDetail,
+    ) -> "ApprovalRequestDetailResponse":
+        return cls(
+            request_id=value.request_id,
+            effect_id=value.effect_id,
+            label=value.label,
+            reason=value.reason,
+            tool_name=value.tool_name,
+            tool_ids=list(value.tool_ids),
+            tool_arguments=dict(value.tool_arguments),
+            execution_mode=value.execution_mode,
+            execution_strategy=value.execution_strategy,
+            execution_environment=value.execution_environment,
+            draft_id=value.draft_id,
+        )
+
+
 class TurnStepResponse(BaseModel):
     step_id: str
     turn_id: str
@@ -503,6 +537,7 @@ class TurnStepResponse(BaseModel):
     badges: list[StatusBadgeResponse] = Field(default_factory=list)
     linked_entities: list[WorkbenchLinkedEntityResponse] = Field(default_factory=list)
     actions: list[WorkbenchActionResponse] = Field(default_factory=list)
+    approval: ApprovalRequestDetailResponse | None = None
     details_available: bool
     trace: TraceContextResponse
 
@@ -527,6 +562,11 @@ class TurnStepResponse(BaseModel):
                 for item in view.linked_entities
             ],
             actions=[WorkbenchActionResponse.from_value(item) for item in view.actions],
+            approval=(
+                ApprovalRequestDetailResponse.from_value(view.approval)
+                if view.approval is not None
+                else None
+            ),
             details_available=view.details_available,
             trace=TraceContextResponse.from_value(view.trace),
         )

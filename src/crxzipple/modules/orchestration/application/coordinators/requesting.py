@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from uuid import uuid4
 
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
-from crxzipple.modules.orchestration.application.ports import RunDispatchPort
+from crxzipple.modules.orchestration.application.ports import (
+    RunDispatchPort,
+    SessionCompactionStatePort,
+)
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
 )
@@ -21,7 +24,6 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
     OrchestrationValidationError,
 )
-from crxzipple.modules.session.application import SessionApplicationService
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
@@ -75,7 +77,7 @@ class RunRequestCoordinator:
     uow_factory: Callable[[], RequestCoordinatorUnitOfWork]
     scheduler: OrchestrationScheduler
     dispatch_port: RunDispatchPort
-    session_service: SessionApplicationService | None
+    session_service: SessionCompactionStatePort | None
     request_heartbeat_input_factory: Callable[..., "RequestHeartbeatInput"]
 
     def request_compaction(self, data: "RequestCompactionInput") -> OrchestrationRun:

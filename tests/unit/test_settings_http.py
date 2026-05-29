@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from crxzipple.modules.settings import CreateSettingsResourceInput
-from tests.unit.http_test_support import HttpModuleTestCase
+from tests.unit.http_test_support import AppKey, HttpModuleTestCase
 
 
 class SettingsHttpTestCase(HttpModuleTestCase):
@@ -45,6 +45,14 @@ class SettingsHttpTestCase(HttpModuleTestCase):
         self.assertIn("effective_config", payload)
         self.assertIn("override_trace", payload["resolution"])
         self.assertEqual(payload["validation"]["status"], "valid")
+        runtime_defaults = payload["runtime_defaults"]
+        self.assertEqual(runtime_defaults["schema"], "runtime-defaults.v1")
+        self.assertEqual(runtime_defaults["resource_id"], "defaults")
+        self.assertEqual(
+            [group["id"] for group in runtime_defaults["groups"]],
+            ["orchestration", "compaction", "tool_worker"],
+        )
+        self.assertTrue(runtime_defaults["apply_requirements"])
 
     def test_settings_environment_write_action_is_rejected_by_policy(self) -> None:
         response = self.client.post(
@@ -72,7 +80,7 @@ class SettingsHttpTestCase(HttpModuleTestCase):
 
     def test_settings_redacts_sensitive_values_from_legacy_environment_detail(self) -> None:
         container = self.client.app.state.container
-        container.settings_action_service.create_resource(
+        container.require(AppKey.SETTINGS_ACTION_SERVICE).create_resource(
             CreateSettingsResourceInput(
                 resource_id="redaction-env",
                 resource_kind="environment",
@@ -325,7 +333,15 @@ class SettingsHttpTestCase(HttpModuleTestCase):
                     "actor": "unit-test",
                     "reason": "exercise settings action audit",
                     "risk": "low",
-                    "payload": {"unit_test_marker": action},
+                    "payload": (
+                        {
+                            "orchestration": {
+                                "run_lease_seconds": 31,
+                            },
+                        }
+                        if action == "update"
+                        else {}
+                    ),
                 },
             )
 
@@ -338,6 +354,26 @@ class SettingsHttpTestCase(HttpModuleTestCase):
         audits_response = self.client.get("/settings/audit-logs")
         self.assertEqual(audits_response.status_code, 200)
         self.assertGreaterEqual(audits_response.json()["list"]["total"], len(actions))
+
+    def test_runtime_defaults_update_rejects_unknown_fields_and_audits_failure(self) -> None:
+        response = self.client.post(
+            "/settings/runtime-defaults/defaults/actions/update",
+            json={
+                "actor": "unit-test",
+                "reason": "exercise runtime defaults schema validation",
+                "payload": {
+                    "daemon": {"placeholder": True},
+                    "unit_test_marker": "not allowed",
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "runtime_defaults_validation_failed")
+        self.assertIn("unknown top-level field: daemon", detail["errors"])
+        self.assertIn("unknown top-level field: unit_test_marker", detail["errors"])
+        self.assertEqual(detail["audit"]["status"], "failed")
 
     def test_settings_write_action_requires_reason_but_still_audits_failure(self) -> None:
         response = self.client.post(
@@ -378,7 +414,9 @@ class SettingsHttpTestCase(HttpModuleTestCase):
         return str(payload["resources"][0]["resource_id"])
 
     def _seed_legacy_profile_settings_resource(self) -> None:
-        self.client.app.state.container.settings_action_service.create_resource(
+        self.client.app.state.container.require(
+            AppKey.SETTINGS_ACTION_SERVICE,
+        ).create_resource(
             CreateSettingsResourceInput(
                 resource_id="legacy-openai",
                 resource_kind="llm-profiles",

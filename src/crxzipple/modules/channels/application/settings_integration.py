@@ -65,7 +65,12 @@ def _accounts_from_payload(
                 raise ValueError(
                     f"channel profile '{channel_type}' accounts[{index}] must be an object.",
                 )
-            accounts.append(ChannelAccountProfile.from_payload(dict(raw_account)))
+            accounts.append(
+                ChannelAccountProfile.from_payload(
+                    dict(raw_account),
+                    channel_type=channel_type,
+                ),
+            )
 
     account_id = _optional_text(payload.get("account_id"))
     if account_id and not any(account.account_id == account_id for account in accounts):
@@ -74,9 +79,12 @@ def _accounts_from_payload(
         if isinstance(raw_transport, Mapping):
             account_metadata["transport"] = dict(raw_transport)
         accounts.append(
-            ChannelAccountProfile(
-                account_id=account_id,
-                metadata=account_metadata,
+            ChannelAccountProfile.from_payload(
+                {
+                    "account_id": account_id,
+                    "metadata": account_metadata,
+                },
+                channel_type=channel_type,
             ),
         )
 

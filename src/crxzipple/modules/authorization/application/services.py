@@ -331,13 +331,23 @@ class AuthorizationApplicationService:
             effect_ids=tuple(sorted(effect_ids)),
         )
 
-    def upsert_policy(self, policy: AuthorizationPolicy) -> AuthorizationPolicy:
+    def upsert_policy(
+        self,
+        policy: AuthorizationPolicy,
+        *,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        reason: str = "",
+    ) -> AuthorizationPolicy:
         before = self.policy_repository.get(policy.id)
         self.policy_repository.upsert(policy)
         self._record_audit(
             action="policy.upsert",
             status="succeeded",
+            actor_type=actor_type,
+            actor_id=actor_id,
             target_policy_id=policy.id,
+            reason=reason,
             before_payload=_policy_payload(before) if before is not None else {},
             after_payload=_policy_payload(policy),
         )
@@ -603,6 +613,9 @@ class AuthorizationApplicationService:
         *,
         agent_id: str,
         effect_id: str,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        reason: str = "",
     ) -> AuthorizationPolicy:
         agent = agent_id.strip()
         effect = effect_id.strip()
@@ -623,6 +636,9 @@ class AuthorizationApplicationService:
                 enabled=True,
                 source_kind="local_managed",
             ),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
         )
 
     def grant_agent_tool_authorization(
@@ -630,6 +646,9 @@ class AuthorizationApplicationService:
         *,
         agent_id: str,
         tool_id: str,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        reason: str = "",
     ) -> AuthorizationPolicy:
         agent = agent_id.strip()
         tool = tool_id.strip()
@@ -650,6 +669,75 @@ class AuthorizationApplicationService:
                 enabled=True,
                 source_kind="local_managed",
             ),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
+        )
+
+    def revoke_agent_effect_authorization(
+        self,
+        *,
+        agent_id: str,
+        effect_id: str,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        reason: str = "",
+    ) -> AuthorizationPolicy | None:
+        agent = agent_id.strip()
+        effect = effect_id.strip()
+        if not agent:
+            raise ValueError("agent_id cannot be empty.")
+        if not effect:
+            raise ValueError("effect_id cannot be empty.")
+        return self._delete_agent_managed_policy(
+            _agent_effect_policy_id(agent, effect),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
+        )
+
+    def revoke_agent_tool_authorization(
+        self,
+        *,
+        agent_id: str,
+        tool_id: str,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        reason: str = "",
+    ) -> AuthorizationPolicy | None:
+        agent = agent_id.strip()
+        tool = tool_id.strip()
+        if not agent:
+            raise ValueError("agent_id cannot be empty.")
+        if not tool:
+            raise ValueError("tool_id cannot be empty.")
+        return self._delete_agent_managed_policy(
+            _agent_tool_authorization_policy_id(agent, tool),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
+        )
+
+    def _delete_agent_managed_policy(
+        self,
+        policy_id: str,
+        *,
+        actor_type: str | None,
+        actor_id: str | None,
+        reason: str,
+    ) -> AuthorizationPolicy | None:
+        policy = self.policy_repository.get(policy_id)
+        if policy is None:
+            return None
+        if policy.source_kind != "local_managed":
+            raise ValueError(
+                f"Authorization policy '{policy_id}' is not a local managed agent grant.",
+            )
+        return self.delete_policy(
+            policy_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            reason=reason,
         )
 
     def _record_audit(

@@ -8,6 +8,8 @@ from crxzipple.modules.settings import (
     SettingsEffectiveConfigMaterializer,
     create_bootstrap_settings_services,
     create_in_memory_settings_services,
+    import_core_settings_resources,
+    seed_core_settings_resources,
 )
 
 
@@ -36,6 +38,7 @@ class SettingsMaterializationTestCase(unittest.TestCase):
                 channel_profiles=(),
                 agent_profiles=(),
                 memory_retrieval_backend="hybrid",
+                memory_storage_root="/tmp/crxzipple/memory",
                 memory_vector_provider="local",
                 memory_watch_interval_seconds=15.0,
                 orchestration_run_lease_seconds=45,
@@ -60,12 +63,108 @@ class SettingsMaterializationTestCase(unittest.TestCase):
         self.assertEqual(tool_providers[0].spec_path, "/tmp/weather.yaml")
         self.assertIsNotNone(memory)
         self.assertEqual(memory.retrieval_backend, "hybrid")
+        self.assertEqual(memory.storage_root, "/tmp/crxzipple/memory")
         self.assertIsNotNone(runtime)
         self.assertEqual(runtime.orchestration["run_lease_seconds"], 45)
         self.assertEqual(runtime.tool_worker["max_in_flight"], 7)
         self.assertEqual(runtime.tool_worker["run_max_attempts"], 5)
-        self.assertEqual(materializer.access_configs(), ())
+        access_bindings = {
+            binding["binding_id"]: binding
+            for config in materializer.access_configs()
+            for binding in config.credential_bindings
+        }
+        self.assertEqual(
+            access_bindings["openai-api-key"]["source_ref"],
+            "OPENAI_API_KEY",
+        )
+        self.assertEqual(
+            access_bindings["codex-oauth-default"]["binding_kind"],
+            "oauth2_account",
+        )
         self.assertEqual(materializer.warnings, ())
+
+    def test_startup_seed_does_not_overwrite_existing_runtime_defaults(self) -> None:
+        services = create_in_memory_settings_services()
+        services.actions.create_resource(
+            CreateSettingsResourceInput(
+                resource_id="defaults",
+                resource_kind="runtime-defaults",
+                owner_module="runtime",
+                payload={
+                    "config_id": "defaults",
+                    "enabled": True,
+                    "orchestration": {"run_lease_seconds": 99},
+                    "tool_worker": {"max_in_flight": 8},
+                },
+                reason="user published runtime defaults",
+                publish=True,
+            ),
+        )
+
+        result = seed_core_settings_resources(
+            SimpleNamespace(
+                environment="test",
+                llm_profiles=(),
+                tool_local_paths=(),
+                tool_openapi_providers=(),
+                tool_mcp_providers=(),
+                channel_profiles=(),
+                agent_profiles=(),
+                orchestration_run_lease_seconds=11,
+                tool_worker_max_in_flight=2,
+            ),
+            services=services,
+        )
+        runtime = SettingsEffectiveConfigMaterializer(services.queries).runtime_defaults()
+
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertGreaterEqual(result.skipped, 1)
+        self.assertEqual(runtime.orchestration["run_lease_seconds"], 99)
+        self.assertEqual(runtime.tool_worker["max_in_flight"], 8)
+
+    def test_explicit_import_updates_runtime_defaults(self) -> None:
+        services = create_in_memory_settings_services()
+        services.actions.create_resource(
+            CreateSettingsResourceInput(
+                resource_id="defaults",
+                resource_kind="runtime-defaults",
+                owner_module="runtime",
+                payload={
+                    "config_id": "defaults",
+                    "enabled": True,
+                    "orchestration": {"run_lease_seconds": 99},
+                    "tool_worker": {"max_in_flight": 8},
+                },
+                reason="user published runtime defaults",
+                publish=True,
+            ),
+        )
+
+        result = import_core_settings_resources(
+            SimpleNamespace(
+                environment="test",
+                llm_profiles=(),
+                tool_local_paths=(),
+                tool_openapi_providers=(),
+                tool_mcp_providers=(),
+                channel_profiles=(),
+                agent_profiles=(),
+                orchestration_run_lease_seconds=11,
+                tool_worker_max_in_flight=2,
+            ),
+            services=services,
+            actor="unit-test",
+            reason="explicit runtime defaults import",
+        )
+        runtime = SettingsEffectiveConfigMaterializer(services.queries).runtime_defaults()
+
+        self.assertEqual(result.updated, 1)
+        self.assertGreaterEqual(len(result.audit_refs), 1)
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertEqual(runtime.orchestration["run_lease_seconds"], 11)
+        self.assertEqual(runtime.tool_worker["max_in_flight"], 2)
 
     def test_missing_kind_returns_empty_or_none(self) -> None:
         services = create_in_memory_settings_services()
@@ -78,6 +177,29 @@ class SettingsMaterializationTestCase(unittest.TestCase):
         self.assertEqual(materializer.access_configs(), ())
         self.assertIsNone(materializer.memory_config())
         self.assertIsNone(materializer.runtime_defaults())
+        self.assertEqual(materializer.warnings, ())
+
+    def test_tool_catalog_enablement_is_not_materialized_by_settings(self) -> None:
+        services = create_in_memory_settings_services()
+        services.actions.create_resource(
+            CreateSettingsResourceInput(
+                resource_id="legacy-tool-enable-weather",
+                resource_kind="tool-catalog",
+                owner_module="settings",
+                payload={
+                    "tool_id": "weather.forecast",
+                    "enabled": False,
+                    "pattern": "weather.*",
+                },
+                reason="legacy Settings-owned tool enablement",
+                publish=True,
+            ),
+        )
+        materializer = SettingsEffectiveConfigMaterializer(services.queries)
+
+        self.assertFalse(hasattr(materializer, "tool_enablements"))
+        self.assertEqual(materializer.tool_roots(), ())
+        self.assertEqual(materializer.tool_providers(), ())
         self.assertEqual(materializer.warnings, ())
 
     def test_access_declarations_materialize_as_settings_truth(self) -> None:

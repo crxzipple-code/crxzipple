@@ -17,6 +17,30 @@
     match:
       mutates_state: false
 
+- id: allow_browser_tool_execution
+  description: Allow executing configured browser tools through the browser runtime source.
+  effect: allow
+  actions:
+    - tool.run
+  resource:
+    kind: tool
+    match:
+      source_id: configured.browser
+
+- id: allow_browser_local_tool_access_effect
+  description: Allow configured browser tools to use the local browser runtime effect.
+  effect: allow
+  actions:
+    - tool.effect.authorize
+  resource:
+    kind: tool
+    match:
+      source_id: configured.browser
+  condition:
+    eq:
+      - context.requested_effect_id
+      - local_tool_access
+
 - id: allow_session_context_tool_execution
   description: Allow executing session-context tools inside a bound session run.
   effect: allow
@@ -44,6 +68,48 @@
       - eq:
           - context.requested_effect_id
           - state_mutation
+
+- id: allow_skill_authoring_draft_tool_execution
+  description: Allow governed skill draft tools to manage draft lifecycle state.
+  effect: allow
+  actions:
+    - tool.run
+  resource:
+    kind: tool
+    id: skill_draft_*
+
+- id: allow_skill_authoring_draft_lifecycle_effects
+  description: Allow low-risk skill draft lifecycle effects; applying drafts still requires approval.
+  effect: allow
+  actions:
+    - tool.effect.authorize
+  resource:
+    kind: tool
+    id: skill_draft_*
+  condition:
+    in:
+      - context.requested_effect_id
+      - - skill_authoring.create
+        - skill_authoring.update
+        - skill_authoring.validate
+        - skill_authoring.diff
+        - skill_authoring.reject
+
+- id: allow_cli_source_cancel_from_cli_interface
+  description: Allow local operator CLI to cancel governed CLI source processes.
+  effect: allow
+  actions:
+    - tool.run
+  resource:
+    kind: tool
+  condition:
+    all:
+      - eq:
+          - context.interface
+          - cli
+      - contains:
+          - resource.required_effect_ids
+          - tool.cli.cancel
 
 - id: deny_tool_access_when_required_scope_missing
   description: Hide tools when the current run context does not provide the required scope.

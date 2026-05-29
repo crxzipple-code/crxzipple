@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import shutil
 from typing import Any
@@ -8,9 +11,12 @@ import yaml
 
 from crxzipple.modules.skills.application.models import (
     InstalledSkill,
+    SkillCreateRequest,
+    SkillMutationResult,
     SkillPackage,
     SkillReadResult,
     SkillResource,
+    SkillUpdateRequest,
 )
 from crxzipple.modules.skills.domain import (
     SkillInstallScope,
@@ -35,15 +41,26 @@ MAX_SKILL_CONTENT_CHARS = 20_000
 MAX_SKILL_DESCRIPTION_CHARS = 240
 
 
+@dataclass(frozen=True, slots=True)
+class FilesystemSkillSourceRoot:
+    source_id: str
+    root_path: str
+
+
+FilesystemSkillSourceProvider = Callable[[], tuple[FilesystemSkillSourceRoot, ...]]
+
+
 class FilesystemSkillRepository:
     def __init__(
         self,
         *,
         global_root: Path | None = None,
         system_root: Path | None = None,
+        source_provider: FilesystemSkillSourceProvider | None = None,
     ) -> None:
         self._global_root = global_root or DEFAULT_GLOBAL_SKILLS_DIR
         self._system_root = system_root or DEFAULT_SYSTEM_SKILLS_DIR
+        self._source_provider = source_provider
 
     def list_available(
         self,
@@ -104,7 +121,12 @@ class FilesystemSkillRepository:
 
     def validate(self, *, path: str) -> SkillPackage:
         skill_dir = self._resolve_skill_directory(path=path, label="Skill package")
-        package = self._load_explicit_skill_dir(skill_dir=skill_dir, source="validation")
+        package = self._load_explicit_skill_dir(
+            skill_dir=skill_dir,
+            source="validation",
+            strict=True,
+            allow_legacy_manifest=True,
+        )
         if package is None:
             raise SkillValidationError(
                 f"Skill package '{skill_dir}' is not a valid skill bundle.",
@@ -127,9 +149,11 @@ class FilesystemSkillRepository:
                 f"Target skill '{target_path}' already exists.",
             )
         shutil.copytree(Path(package.root_path), target_path)
+        self._materialize_current_manifest(target_path=target_path, manifest=package.manifest)
         installed_package = self._load_explicit_skill_dir(
             skill_dir=target_path,
             source=scope.value,
+            strict=True,
         )
         if installed_package is None:
             raise SkillValidationError(
@@ -140,6 +164,203 @@ class FilesystemSkillRepository:
             scope=scope,
             target_root=str(target_root),
             target_path=str(target_path),
+        )
+
+    def create(self, request: SkillCreateRequest) -> SkillMutationResult:
+        name = self._normalize_skill_name(request.name)
+        target_root = self._resolve_install_root(
+            scope=request.scope,
+            workspace_dir=request.workspace_dir,
+        )
+        target_root.mkdir(parents=True, exist_ok=True)
+        target_path = target_root / name
+        if target_path.exists():
+            raise SkillValidationError(
+                f"Target skill '{target_path}' already exists.",
+            )
+        manifest = SkillManifest(
+            api_version="skills.crxzipple/v1alpha1",
+            kind="Skill",
+            name=name,
+            description=request.description,
+            version=request.version,
+            tags=request.tags,
+            required_tools=self._normalize_tool_function_ids(request.required_tools),
+            optional_tools=self._normalize_tool_function_ids(request.optional_tools),
+            suggested_tools=self._normalize_tool_function_ids(request.suggested_tools),
+            allowed_tools=self._normalize_tool_function_ids(request.suggested_tools),
+            required_effects=request.required_effects,
+            required_access=self._normalize_access_requirement_sequence(
+                request.required_access,
+            ),
+            surfaces=request.surfaces,
+            supported_platforms=self._normalize_string_sequence(
+                request.supported_platforms,
+            ),
+            setup_hints=request.setup_hints,
+        )
+        target_path.mkdir(parents=True)
+        (target_path / DEFAULT_SKILL_INSTRUCTIONS_FILENAME).write_text(
+            self._render_skill_markdown(
+                manifest=manifest,
+                body=request.instructions,
+            ),
+            encoding="utf-8",
+        )
+        package = self._load_explicit_skill_dir(
+            skill_dir=target_path,
+            source=request.scope.value,
+        )
+        if package is None:
+            raise SkillValidationError(
+                f"Created skill at '{target_path}' could not be loaded.",
+            )
+        return SkillMutationResult(
+            skill=package,
+            action="create",
+            changed=True,
+            message=f"Skill '{package.name}' created.",
+        )
+
+    def update(self, request: SkillUpdateRequest) -> SkillMutationResult:
+        package = self._package_by_name(
+            workspace_dir=request.workspace_dir,
+            skill_name=request.skill_name,
+        )
+        self._ensure_writable_package(package)
+        manifest = self._updated_manifest(package.manifest, request)
+        body = self._read_existing_instruction_body(package)
+        Path(package.instructions_path).write_text(
+            self._render_skill_markdown(manifest=manifest, body=body),
+            encoding="utf-8",
+        )
+        updated_package = self._package_by_name(
+            workspace_dir=request.workspace_dir,
+            skill_name=package.name,
+        )
+        return SkillMutationResult(
+            skill=updated_package,
+            action="update",
+            changed=True,
+            message=f"Skill '{updated_package.name}' updated.",
+        )
+
+    def write_instructions(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        content: str,
+    ) -> SkillMutationResult:
+        package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        self._ensure_writable_package(package)
+        Path(package.instructions_path).write_text(
+            self._render_skill_markdown(
+                manifest=package.manifest,
+                body=content,
+            ),
+            encoding="utf-8",
+        )
+        updated_package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        return SkillMutationResult(
+            skill=updated_package,
+            action="write_instructions",
+            changed=True,
+            message=f"Skill '{updated_package.name}' instructions updated.",
+        )
+
+    def write_file(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        path: str,
+        content: str,
+    ) -> SkillMutationResult:
+        package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        self._ensure_writable_package(package)
+        relative_path = self._normalize_support_file_path(package=package, path=path)
+        target_path = (Path(package.root_path) / relative_path).resolve(strict=False)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
+        updated_package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        return SkillMutationResult(
+            skill=updated_package,
+            action="write_file",
+            changed=True,
+            message=f"Skill file '{relative_path}' updated.",
+        )
+
+    def delete_file(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+        path: str,
+    ) -> SkillMutationResult:
+        package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        self._ensure_writable_package(package)
+        relative_path = self._normalize_support_file_path(package=package, path=path)
+        target_path = (Path(package.root_path) / relative_path).resolve(strict=True)
+        if not target_path.is_file():
+            raise SkillValidationError(f"Skill file '{relative_path}' is not a file.")
+        target_path.unlink()
+        updated_package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        return SkillMutationResult(
+            skill=updated_package,
+            action="delete_file",
+            changed=True,
+            message=f"Skill file '{relative_path}' deleted.",
+        )
+
+    def delete(
+        self,
+        *,
+        workspace_dir: str | None,
+        skill_name: str,
+    ) -> SkillMutationResult:
+        package = self._package_by_name(
+            workspace_dir=workspace_dir,
+            skill_name=skill_name,
+        )
+        if package.source == "system":
+            raise SkillValidationError(
+                f"Skill '{package.name}' is from a readonly system source and cannot be deleted.",
+            )
+        root_path = Path(package.root_path)
+        if not root_path.is_dir():
+            raise SkillValidationError(
+                f"Skill '{package.name}' root '{root_path}' is not a directory.",
+            )
+        try:
+            shutil.rmtree(root_path)
+        except OSError as exc:
+            raise SkillValidationError(
+                f"Skill '{package.name}' could not be deleted from '{root_path}'.",
+            ) from exc
+        return SkillMutationResult(
+            skill=package,
+            action="delete",
+            changed=True,
+            message=f"Skill '{package.name}' deleted.",
         )
 
     def _package_by_name(
@@ -164,7 +385,24 @@ class FilesystemSkillRepository:
             for relative_root in DEFAULT_WORKSPACE_SKILL_ROOTS:
                 roots.append((workspace_root / relative_root, "workspace"))
         roots.append((self._normalize_skill_root(self._global_root), "global"))
+        roots.extend(self._provided_skill_roots())
         roots.append((self._normalize_skill_root(self._system_root), "system"))
+        return tuple(roots)
+
+    def _provided_skill_roots(self) -> tuple[tuple[Path, str], ...]:
+        if self._source_provider is None:
+            return ()
+        roots: list[tuple[Path, str]] = []
+        for source in self._source_provider():
+            source_id = source.source_id.strip()
+            if source_id in {"workspace", "global", "system"}:
+                continue
+            if not source_id:
+                continue
+            root_path = source.root_path.strip()
+            if not root_path:
+                continue
+            roots.append((self._normalize_skill_root(Path(root_path)), source_id))
         return tuple(roots)
 
     def _resolve_install_root(
@@ -219,6 +457,9 @@ class FilesystemSkillRepository:
         root: Path,
         source: str,
     ) -> tuple[SkillPackage, ...]:
+        direct_package = self._load_explicit_skill_dir(skill_dir=root, source=source)
+        if direct_package is not None:
+            return (direct_package,)
         discovered: list[SkillPackage] = []
         try:
             children = sorted(
@@ -239,6 +480,8 @@ class FilesystemSkillRepository:
         root: Path,
         skill_dir: Path,
         source: str,
+        strict: bool = False,
+        allow_legacy_manifest: bool = False,
     ) -> SkillPackage | None:
         try:
             root_path = skill_dir.resolve(strict=True)
@@ -252,9 +495,10 @@ class FilesystemSkillRepository:
         )
         if instructions_path is None:
             return None
-        legacy_manifest_path, legacy_payload = self._load_legacy_manifest(
-            root=root,
-            skill_dir=skill_dir,
+        legacy_manifest_path, legacy_payload = (
+            self._load_legacy_manifest(root=root, skill_dir=skill_dir)
+            if allow_legacy_manifest
+            else (None, None)
         )
         frontmatter_payload = self._load_skill_frontmatter(instructions_path)
         if frontmatter_payload is None and legacy_payload is None:
@@ -268,6 +512,8 @@ class FilesystemSkillRepository:
                 legacy_payload=legacy_payload,
             )
         except SkillValidationError:
+            if strict:
+                raise
             return None
         resolved_instructions_path = self._resolve_instructions_path(
             root=root_path,
@@ -275,13 +521,23 @@ class FilesystemSkillRepository:
         )
         if resolved_instructions_path is None:
             return None
+        resources = self._discover_resources(root=root_path)
         return SkillPackage(
             manifest=manifest,
             root_path=str(root_path),
             manifest_path=str(manifest_path),
             instructions_path=str(resolved_instructions_path),
             source=source,
-            resources=self._discover_resources(root=root_path),
+            resources=resources,
+            fingerprint=self._fingerprint_package(
+                root=root_path,
+                manifest_path=manifest_path,
+                instructions_path=resolved_instructions_path,
+                resources=resources,
+                source=source,
+                name=manifest.name,
+                version=manifest.version,
+            ),
         )
 
     def _load_explicit_skill_dir(
@@ -289,11 +545,15 @@ class FilesystemSkillRepository:
         *,
         skill_dir: Path,
         source: str,
+        strict: bool = False,
+        allow_legacy_manifest: bool = False,
     ) -> SkillPackage | None:
         return self._load_skill_package(
             root=skill_dir.parent,
             skill_dir=skill_dir,
             source=source,
+            strict=strict,
+            allow_legacy_manifest=allow_legacy_manifest,
         )
 
     def _load_legacy_manifest(
@@ -361,93 +621,65 @@ class FilesystemSkillRepository:
         frontmatter_payload: dict[str, Any] | None,
         legacy_payload: dict[str, Any] | None,
     ) -> SkillManifest:
-        legacy = self._parse_manifest(legacy_payload) if legacy_payload is not None else None
         if frontmatter_payload is None:
+            legacy = self._parse_manifest(legacy_payload) if legacy_payload is not None else None
             if legacy is None:
                 raise SkillValidationError("Skill package must define SKILL.md frontmatter.")
             return legacy
-        name = self._optional_string(frontmatter_payload.get("name")) or (
-            legacy.name if legacy is not None else None
-        )
+        name = self._optional_string(frontmatter_payload.get("name"))
         if name is None:
             raise SkillValidationError("Skill frontmatter field 'name' is required.")
-        description = self._optional_string(frontmatter_payload.get("description")) or (
-            legacy.description if legacy is not None else None
-        )
+        description = self._optional_string(frontmatter_payload.get("description"))
         if description is None:
             raise SkillValidationError("Skill frontmatter field 'description' is required.")
+        self._reject_legacy_access_fields(frontmatter_payload)
         setup = frontmatter_payload.get("setup")
         setup = setup if isinstance(setup, dict) else {}
-        legacy_suggested_tools = (
-            legacy.suggested_tools or legacy.allowed_tools
-        ) if legacy is not None else ()
         suggested_tools = (
-            self._normalize_string_sequence(frontmatter_payload.get("suggested_tools"))
-            or self._normalize_string_sequence(frontmatter_payload.get("preferred_tools"))
-            or self._normalize_string_sequence(frontmatter_payload.get("allowed_tools"))
-            or legacy_suggested_tools
-        )
-        required_secrets = self._normalize_requirement_sequence(
-            frontmatter_payload.get("required_secrets"),
-        ) + self._normalize_requirement_sequence(
-            frontmatter_payload.get("required_environment_variables"),
+            self._normalize_tool_function_ids(frontmatter_payload.get("suggested_tools"))
+            or self._normalize_tool_function_ids(frontmatter_payload.get("preferred_tools"))
+            or self._normalize_tool_function_ids(frontmatter_payload.get("allowed_tools"))
         )
         return SkillManifest(
             api_version=self._optional_string(frontmatter_payload.get("apiVersion"))
-            or (legacy.api_version if legacy is not None else "skills.crxzipple/v1alpha1"),
+            or "skills.crxzipple/v1alpha1",
             kind=self._optional_string(frontmatter_payload.get("kind"))
-            or (legacy.kind if legacy is not None else "Skill"),
+            or "Skill",
             name=name,
             description=self._normalize_description(description),
-            version=self._optional_string(frontmatter_payload.get("version"))
-            or (legacy.version if legacy is not None else None),
-            tags=self._normalize_string_sequence(frontmatter_payload.get("tags"))
-            or (legacy.tags if legacy is not None else ()),
+            version=self._optional_string(frontmatter_payload.get("version")),
+            tags=self._normalize_string_sequence(frontmatter_payload.get("tags")),
             when_to_use=self._optional_string(frontmatter_payload.get("when_to_use"))
-            or self._optional_string(frontmatter_payload.get("whenToUse"))
-            or (legacy.when_to_use if legacy is not None else None),
+            or self._optional_string(frontmatter_payload.get("whenToUse")),
             anti_patterns=self._normalize_string_sequence(
                 frontmatter_payload.get("anti_patterns"),
-            )
-            or (legacy.anti_patterns if legacy is not None else ()),
+            ),
             instructions_path=self._optional_string(
                 frontmatter_payload.get("instructions_path"),
             )
             or self._optional_string(frontmatter_payload.get("instructions"))
-            or (
-                legacy.instructions_path
-                if legacy is not None
-                else DEFAULT_SKILL_INSTRUCTIONS_FILENAME
-            ),
-            required_tools=self._normalize_string_sequence(
+            or DEFAULT_SKILL_INSTRUCTIONS_FILENAME,
+            required_tools=self._normalize_tool_function_ids(
                 frontmatter_payload.get("required_tools"),
-            )
-            or (legacy.required_tools if legacy is not None else ()),
-            optional_tools=self._normalize_string_sequence(
+            ),
+            optional_tools=self._normalize_tool_function_ids(
                 frontmatter_payload.get("optional_tools"),
-            )
-            or (legacy.optional_tools if legacy is not None else ()),
+            ),
             suggested_tools=suggested_tools,
             allowed_tools=suggested_tools,
             required_effects=self._normalize_string_sequence(
                 frontmatter_payload.get("required_effects"),
+            ),
+            required_access=self._normalize_access_requirement_sequence(
+                frontmatter_payload.get("required_access"),
+            ),
+            surfaces=self._normalize_string_sequence(frontmatter_payload.get("surfaces")),
+            supported_platforms=self._normalize_string_sequence(
+                frontmatter_payload.get("supported_platforms"),
             )
-            or (legacy.required_effects if legacy is not None else ()),
-            required_auth=self._normalize_requirement_sequence(
-                frontmatter_payload.get("required_auth"),
-            )
-            or (legacy.required_auth if legacy is not None else ()),
-            required_secrets=tuple(dict.fromkeys(required_secrets))
-            or (legacy.required_secrets if legacy is not None else ()),
-            required_credential_files=self._normalize_requirement_sequence(
-                frontmatter_payload.get("required_credential_files"),
-            )
-            or (legacy.required_credential_files if legacy is not None else ()),
-            surfaces=self._normalize_string_sequence(frontmatter_payload.get("surfaces"))
-            or (legacy.surfaces if legacy is not None else ()),
+            or self._normalize_string_sequence(frontmatter_payload.get("platforms")),
             setup_hints=self._normalize_string_sequence(frontmatter_payload.get("setup_hints"))
-            or self._normalize_string_sequence(setup.get("help"))
-            or (legacy.setup_hints if legacy is not None else ()),
+            or self._normalize_string_sequence(setup.get("help")),
         )
 
     def _parse_manifest(self, payload: dict[str, Any]) -> SkillManifest:
@@ -481,10 +713,14 @@ class FilesystemSkillRepository:
             version=version,
             tags=tags,
             instructions_path=instructions_path,
-            required_tools=self._normalize_string_sequence(tools.get("required")),
-            optional_tools=self._normalize_string_sequence(tools.get("optional")),
-            suggested_tools=allowed_tools,
-            allowed_tools=allowed_tools,
+            required_tools=self._normalize_tool_function_ids(tools.get("required")),
+            optional_tools=self._normalize_tool_function_ids(tools.get("optional")),
+            suggested_tools=self._normalize_tool_function_ids(allowed_tools),
+            allowed_tools=self._normalize_tool_function_ids(allowed_tools),
+            supported_platforms=self._normalize_string_sequence(
+                runtime.get("supported_platforms"),
+            )
+            or self._normalize_string_sequence(runtime.get("platforms")),
         )
 
     @staticmethod
@@ -529,6 +765,185 @@ class FilesystemSkillRepository:
             )
         return candidate
 
+    def _normalize_support_file_path(
+        self,
+        *,
+        package: SkillPackage,
+        path: str,
+    ) -> str:
+        normalized = path.strip().replace("\\", "/")
+        if not normalized:
+            raise SkillValidationError("Skill file path is required.")
+        if normalized.startswith("/") or normalized in {".", ".."}:
+            raise SkillValidationError("Skill file path must be package-relative.")
+        root = Path(package.root_path)
+        candidate = (root / normalized).resolve(strict=False)
+        try:
+            candidate.relative_to(root.resolve(strict=True))
+        except (OSError, ValueError) as exc:
+            raise SkillValidationError(
+                f"Skill file '{normalized}' escapes the skill package root.",
+            ) from exc
+        if normalized == package.manifest.instructions_path:
+            raise SkillValidationError(
+                "Use the instructions endpoint to update the skill instructions file.",
+            )
+        if not any(
+            normalized == resource_dir or normalized.startswith(f"{resource_dir}/")
+            for resource_dir in DEFAULT_SKILL_RESOURCE_DIRS
+        ):
+            allowed = ", ".join(DEFAULT_SKILL_RESOURCE_DIRS)
+            raise SkillValidationError(
+                f"Skill support files must live under one of: {allowed}.",
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_skill_name(name: str) -> str:
+        normalized = name.strip()
+        if not normalized:
+            raise SkillValidationError("Skill name is required.")
+        if normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
+            raise SkillValidationError("Skill name must be a package-safe identifier.")
+        return normalized
+
+    @staticmethod
+    def _ensure_writable_package(package: SkillPackage) -> None:
+        if package.source == "system":
+            raise SkillValidationError(
+                f"Skill '{package.name}' is from a readonly system source and cannot be changed.",
+            )
+
+    def _read_existing_instruction_body(self, package: SkillPackage) -> str:
+        content = self._read_text_file(
+            Path(package.instructions_path),
+            label=f"Skill '{package.name}' instructions",
+        )
+        return self._strip_markdown_frontmatter(content).strip()
+
+    def _materialize_current_manifest(self, *, target_path: Path, manifest: SkillManifest) -> None:
+        instructions_path = self._resolve_instructions_path(
+            root=target_path,
+            relative_path=manifest.instructions_path,
+        )
+        if instructions_path is None:
+            raise SkillValidationError(
+                f"Installed skill '{target_path}' is missing '{manifest.instructions_path}'.",
+            )
+        body = self._strip_markdown_frontmatter(
+            self._read_text_file(
+                instructions_path,
+                label=f"Skill '{manifest.name}' instructions",
+            ),
+        ).strip()
+        instructions_path.write_text(
+            self._render_skill_markdown(manifest=manifest, body=body),
+            encoding="utf-8",
+        )
+        legacy_manifest_path = target_path / DEFAULT_SKILL_MANIFEST_FILENAME
+        try:
+            resolved_legacy_manifest = legacy_manifest_path.resolve(strict=True)
+        except OSError:
+            return
+        if self._is_within_root(root=target_path, target=resolved_legacy_manifest):
+            resolved_legacy_manifest.unlink()
+
+    def _updated_manifest(
+        self,
+        manifest: SkillManifest,
+        request: SkillUpdateRequest,
+    ) -> SkillManifest:
+        return SkillManifest(
+            api_version=manifest.api_version,
+            kind=manifest.kind,
+            name=manifest.name,
+            description=request.description if request.description is not None else manifest.description,
+            version=request.version if request.version is not None else manifest.version,
+            tags=request.tags if request.tags is not None else manifest.tags,
+            when_to_use=manifest.when_to_use,
+            anti_patterns=manifest.anti_patterns,
+            instructions_path=manifest.instructions_path,
+            required_tools=(
+                self._normalize_tool_function_ids(request.required_tools)
+                if request.required_tools is not None
+                else manifest.required_tools
+            ),
+            optional_tools=(
+                self._normalize_tool_function_ids(request.optional_tools)
+                if request.optional_tools is not None
+                else manifest.optional_tools
+            ),
+            suggested_tools=(
+                self._normalize_tool_function_ids(request.suggested_tools)
+                if request.suggested_tools is not None
+                else manifest.suggested_tools
+            ),
+            allowed_tools=(
+                self._normalize_tool_function_ids(request.suggested_tools)
+                if request.suggested_tools is not None
+                else manifest.allowed_tools
+            ),
+            required_effects=(
+                request.required_effects
+                if request.required_effects is not None
+                else manifest.required_effects
+            ),
+            required_access=(
+                self._normalize_access_requirement_sequence(request.required_access)
+                if request.required_access is not None
+                else manifest.required_access
+            ),
+            surfaces=request.surfaces if request.surfaces is not None else manifest.surfaces,
+            supported_platforms=(
+                self._normalize_string_sequence(request.supported_platforms)
+                if request.supported_platforms is not None
+                else manifest.supported_platforms
+            ),
+            setup_hints=(
+                request.setup_hints
+                if request.setup_hints is not None
+                else manifest.setup_hints
+            ),
+        )
+
+    def _render_skill_markdown(self, *, manifest: SkillManifest, body: str) -> str:
+        payload = self._manifest_frontmatter_payload(manifest)
+        frontmatter = yaml.safe_dump(
+            payload,
+            sort_keys=False,
+            allow_unicode=True,
+        ).strip()
+        normalized_body = body.strip()
+        return f"---\n{frontmatter}\n---\n\n{normalized_body}\n"
+
+    @staticmethod
+    def _manifest_frontmatter_payload(manifest: SkillManifest) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "apiVersion": manifest.api_version,
+            "kind": manifest.kind,
+            "name": manifest.name,
+            "description": manifest.description,
+            "instructions_path": manifest.instructions_path,
+        }
+        optional_values: tuple[tuple[str, object | None], ...] = (
+            ("version", manifest.version),
+            ("tags", list(manifest.tags) or None),
+            ("when_to_use", manifest.when_to_use),
+            ("anti_patterns", list(manifest.anti_patterns) or None),
+            ("required_tools", list(manifest.required_tools) or None),
+            ("optional_tools", list(manifest.optional_tools) or None),
+            ("suggested_tools", list(manifest.suggested_tools) or None),
+            ("required_effects", list(manifest.required_effects) or None),
+            ("required_access", list(manifest.required_access) or None),
+            ("surfaces", list(manifest.surfaces) or None),
+            ("supported_platforms", list(manifest.supported_platforms) or None),
+            ("setup_hints", list(manifest.setup_hints) or None),
+        )
+        for key, value in optional_values:
+            if value is not None:
+                payload[key] = value
+        return payload
+
     def _discover_resources(self, *, root: Path) -> tuple[SkillResource, ...]:
         resources: list[SkillResource] = []
         for resource_kind in DEFAULT_SKILL_RESOURCE_DIRS:
@@ -561,6 +976,40 @@ class FilesystemSkillRepository:
                 )
         return tuple(resources)
 
+    def _fingerprint_package(
+        self,
+        *,
+        root: Path,
+        manifest_path: Path,
+        instructions_path: Path,
+        resources: tuple[SkillResource, ...],
+        source: str,
+        name: str,
+        version: str | None,
+    ) -> str:
+        digest = hashlib.sha256()
+        digest.update(f"skill:{source}:{name}:{version or ''}\n".encode("utf-8"))
+        file_paths: dict[str, Path] = {}
+        for path in (manifest_path, instructions_path):
+            if self._is_within_root(root=root, target=path):
+                file_paths[path.relative_to(root).as_posix()] = path
+        for resource in resources:
+            try:
+                path = (root / resource.path).resolve(strict=True)
+            except OSError:
+                continue
+            if self._is_within_root(root=root, target=path):
+                file_paths[resource.path] = path
+        for relative_path in sorted(file_paths):
+            digest.update(f"path:{relative_path}\n".encode("utf-8"))
+            path = file_paths[relative_path]
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(b"<unreadable>")
+            digest.update(b"\n")
+        return f"sha256:{digest.hexdigest()}"
+
     @staticmethod
     def _required_string(value: Any, field_name: str) -> str:
         if not isinstance(value, str):
@@ -582,7 +1031,7 @@ class FilesystemSkillRepository:
         if isinstance(value, str):
             normalized = value.strip()
             return (normalized,) if normalized else ()
-        if not isinstance(value, list):
+        if not isinstance(value, list | tuple):
             return ()
         items: list[str] = []
         for raw_item in value:
@@ -593,6 +1042,52 @@ class FilesystemSkillRepository:
                 continue
             items.append(normalized)
         return tuple(items)
+
+    @classmethod
+    def _normalize_tool_function_ids(cls, value: Any) -> tuple[str, ...]:
+        items = cls._normalize_string_sequence(value)
+        for item in items:
+            if item.startswith(("env:", "file:")) or item in {
+                "codex_auth_json",
+                "auth_ref",
+            }:
+                raise SkillValidationError(
+                    "Skill required_tools must reference ToolFunction ids, not credential sources.",
+                )
+            if "/" in item or "\\" in item or any(character.isspace() for character in item):
+                raise SkillValidationError(
+                    f"Skill tool requirement '{item}' is not a valid ToolFunction id.",
+                )
+        return items
+
+    @classmethod
+    def _normalize_access_requirement_sequence(cls, value: Any) -> tuple[str, ...]:
+        items = cls._normalize_requirement_sequence(value)
+        for item in items:
+            if item.startswith(("env:", "file:", "codex_auth_json", "auth_ref")):
+                raise SkillValidationError(
+                    "Skill required_access must reference Access bindings or requirements, not direct credential sources.",
+                )
+            if item.startswith(("~", "/")) or "\\" in item:
+                raise SkillValidationError(
+                    f"Skill access requirement '{item}' must not reference a local path.",
+                )
+        return items
+
+    @staticmethod
+    def _reject_legacy_access_fields(payload: dict[str, Any]) -> None:
+        legacy_fields = (
+            "required_auth",
+            "required_secrets",
+            "required_environment_variables",
+            "required_credential_files",
+        )
+        present = [field for field in legacy_fields if field in payload]
+        if present:
+            joined = ", ".join(present)
+            raise SkillValidationError(
+                f"Skill frontmatter uses retired access fields: {joined}. Use required_access instead.",
+            )
 
     @classmethod
     def _normalize_requirement_sequence(cls, value: Any) -> tuple[str, ...]:
@@ -620,13 +1115,7 @@ class FilesystemSkillRepository:
     def _normalize_requirement_mapping(value: dict[str, Any]) -> str:
         provider = str(value.get("provider") or "").strip()
         kind = str(value.get("kind") or "").strip()
-        name = str(
-            value.get("name")
-            or value.get("env")
-            or value.get("env_var")
-            or value.get("path")
-            or "",
-        ).strip()
+        name = str(value.get("name") or "").strip()
         if provider:
             label = f"{provider}:{kind}" if kind else provider
         else:

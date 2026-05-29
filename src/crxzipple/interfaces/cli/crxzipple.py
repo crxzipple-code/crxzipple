@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import typer
 import uvicorn
+from typing import Any
 
 from crxzipple.core.config import (
     RuntimeDatabaseGuardError,
     load_settings,
     require_runtime_database,
 )
-from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.orchestration.application.turn_submission import (
     AwaitTurnTimeoutError,
@@ -18,7 +18,6 @@ from crxzipple.modules.orchestration.application.turn_submission import (
     submit_and_wait_for_turn,
 )
 from crxzipple.core.logger import get_logger
-from crxzipple.bootstrap import AppContainer
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationRun,
@@ -31,6 +30,7 @@ from crxzipple.modules.session.domain import DirectSessionScope
 logger = get_logger(__name__)
 
 _ACTIVE_DAEMON_STATUSES = frozenset({"starting", "ready", "degraded"})
+_RUNTIME_CONTAINER_KEY = "runtime_container"
 
 
 def guard_runtime_database(settings, *, runtime_name: str) -> None:  # noqa: ANN001
@@ -41,14 +41,30 @@ def guard_runtime_database(settings, *, runtime_name: str) -> None:  # noqa: ANN
         raise typer.Exit(code=1) from None
 
 
-def _require_orchestration_runtime(container: AppContainer) -> None:
-    service_keys = container.daemon_manager.resolve_reconcile_service_keys(
+def ensure_runtime_container(ctx: typer.Context) -> Any:
+    from crxzipple.interfaces.runtime_container import (
+        AssemblyTarget,
+        ensure_typer_runtime_container,
+    )
+
+    return ensure_typer_runtime_container(
+        ctx,
+        target=AssemblyTarget.CLI_ADMIN,
+        key=_RUNTIME_CONTAINER_KEY,
+    )
+
+
+def _require_orchestration_runtime(container: Any) -> None:
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    daemon_manager = container.require(AppKey.DAEMON_MANAGER)
+    service_keys = daemon_manager.resolve_reconcile_service_keys(
         service_set_keys=("orchestration-runtime",),
         include_eager=False,
     )
     unavailable: list[str] = []
     for service_key in service_keys:
-        instances = container.daemon_manager.healthcheck_service(service_key)
+        instances = daemon_manager.healthcheck_service(service_key)
         if any(instance.status in _ACTIVE_DAEMON_STATUSES for instance in instances):
             continue
         unavailable.append(service_key)
@@ -141,8 +157,13 @@ def ask(
         help="Print the full orchestration run payload instead of only the reply text.",
     ),
 ) -> None:
-    container = ensure_container(ctx)
-    profile, error = resolve_profile(container.agent_service, agent_id=agent_id)
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    container = ensure_runtime_container(ctx)
+    profile, error = resolve_profile(
+        container.require(AppKey.AGENT_SERVICE),
+        agent_id=agent_id,
+    )
     if profile is None:
         typer.secho(error or "Unable to resolve agent profile.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from None
@@ -167,9 +188,9 @@ def ask(
     try:
         _require_orchestration_runtime(container)
         run = submit_and_wait_for_turn(
-            container.orchestration_scheduler_service,
-            container.orchestration_run_query_service,
-            container.events_service,
+            container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE),
+            container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
+            container.require(AppKey.EVENTS_SERVICE),
             content=content,
             options=options,
         )
@@ -235,8 +256,13 @@ def chat(
         help="Observe interval while waiting for orchestration runtime updates.",
     ),
 ) -> None:
-    container = ensure_container(ctx)
-    profile, error = resolve_profile(container.agent_service, agent_id=agent_id)
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    container = ensure_runtime_container(ctx)
+    profile, error = resolve_profile(
+        container.require(AppKey.AGENT_SERVICE),
+        agent_id=agent_id,
+    )
     if profile is None:
         typer.secho(error or "Unable to resolve agent profile.", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=1) from None
@@ -280,9 +306,9 @@ def chat(
 
         try:
             run = submit_and_wait_for_turn(
-                container.orchestration_scheduler_service,
-                container.orchestration_run_query_service,
-                container.events_service,
+                container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE),
+                container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
+                container.require(AppKey.EVENTS_SERVICE),
                 content=content,
                 options=options,
             )
@@ -300,15 +326,12 @@ def serve(
     host: str = typer.Option("127.0.0.1", help="HTTP bind host."),
     port: int = typer.Option(8000, min=1, max=65535, help="HTTP bind port."),
 ) -> None:
-    guard_runtime_database(load_settings(), runtime_name="HTTP API")
+    del ctx
+    settings = load_settings()
+    guard_runtime_database(settings, runtime_name="HTTP API")
     from crxzipple.interfaces.http.app import create_app
 
-    container = ensure_container(ctx)
-    http_app = create_app(
-        settings=container.settings,
-        container=container,
-        manage_container_lifecycle=False,
-    )
+    http_app = create_app(settings=settings)
     server = uvicorn.Server(
         uvicorn.Config(
             http_app,

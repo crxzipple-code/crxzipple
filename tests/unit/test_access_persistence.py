@@ -12,6 +12,8 @@ from crxzipple.modules.access.application.repositories import (
     AccessConnectionProfileRecord,
     AccessConsumerBindingRecord,
     AccessCredentialBindingRecord,
+    AccessOAuthAccountRecord,
+    AccessOAuthProviderRecord,
     AccessReadinessSnapshotRecord,
     AccessSecretBindingRecord,
     AccessSetupSessionRecord,
@@ -22,6 +24,8 @@ from crxzipple.modules.access.infrastructure.persistence import (
     AccessConnectionProfileModel,
     AccessConsumerBindingModel,
     AccessCredentialBindingModel,
+    AccessOAuthAccountModel,
+    AccessOAuthProviderModel,
     AccessReadinessSnapshotModel,
     AccessSecretBindingModel,
     AccessSetupSessionModel,
@@ -39,6 +43,8 @@ class AccessPersistenceTestCase(unittest.TestCase):
             AccessConnectionProfileModel,
             AccessConsumerBindingModel,
             AccessCredentialBindingModel,
+            AccessOAuthAccountModel,
+            AccessOAuthProviderModel,
             AccessReadinessSnapshotModel,
             AccessSecretBindingModel,
             AccessSetupSessionModel,
@@ -102,6 +108,10 @@ class AccessPersistenceTestCase(unittest.TestCase):
                 display_name="Writer model",
                 asset_id=asset.asset_id,
                 credential_binding_id=credential_binding.binding_id,
+                credential_bindings={
+                    "default": credential_binding.binding_id,
+                    "audit": "cred_audit_binding",
+                },
                 requirement_sets=(("openai:api_key(env:OPENAI_API_KEY)",),),
                 redaction_policy={"mode": "metadata_only"},
                 metadata={"imported_from": "settings"},
@@ -128,6 +138,35 @@ class AccessPersistenceTestCase(unittest.TestCase):
                 profile_kind="llm_provider",
                 endpoint_ref="https://api.openai.com",
                 credential_binding_id=credential_binding.binding_id,
+                redaction_policy={"mode": "metadata_only"},
+                created_at=timestamp,
+            ),
+        )
+        oauth_provider = self.repository.upsert_oauth_provider(
+            AccessOAuthProviderRecord(
+                provider_id="openai-codex",
+                display_name="OpenAI Codex",
+                authorization_url="https://auth.example.test/authorize",
+                token_url="https://auth.example.test/token",
+                default_scopes=("openid", "profile"),
+                client_id="public-client",
+                callback_url="http://127.0.0.1:1455/callback",
+                redaction_policy={"mode": "metadata_only"},
+                created_at=timestamp,
+            ),
+        )
+        oauth_account = self.repository.upsert_oauth_account(
+            AccessOAuthAccountRecord(
+                account_id="openai-codex:default",
+                provider_id=oauth_provider.provider_id,
+                credential_binding_id="codex-oauth-default",
+                display_name="Codex default",
+                subject="acct_codex",
+                granted_scopes=("openid", "profile"),
+                expires_at=timestamp + timedelta(hours=1),
+                refresh_ready=True,
+                storage_key="oauth_tokens/openai-codex_default.json",
+                masked_preview="tok...tail",
                 redaction_policy={"mode": "metadata_only"},
                 created_at=timestamp,
             ),
@@ -168,9 +207,21 @@ class AccessPersistenceTestCase(unittest.TestCase):
             self.repository.get_consumer_binding("consumer_llm_writer"),
             consumer_binding,
         )
+        consumer_columns = {
+            column["name"]
+            for column in inspect(self.engine).get_columns("access_consumer_bindings")
+        }
+        self.assertIn("credential_bindings", consumer_columns)
         self.assertEqual(len(self.repository.list_consumer_bindings()), 1)
         self.assertEqual(len(self.repository.list_secret_bindings()), 1)
         self.assertEqual(len(self.repository.list_connection_profiles()), 1)
+        self.assertEqual(self.repository.get_oauth_provider("openai-codex"), oauth_provider)
+        self.assertEqual(
+            self.repository.get_oauth_account("openai-codex:default"),
+            oauth_account,
+        )
+        self.assertEqual(len(self.repository.list_oauth_providers()), 1)
+        self.assertEqual(len(self.repository.list_oauth_accounts()), 1)
         self.assertEqual(len(self.repository.list_setup_sessions()), 1)
         self.assertEqual(len(self.repository.list_readiness_snapshots()), 1)
 

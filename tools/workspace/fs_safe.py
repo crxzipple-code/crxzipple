@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from crxzipple.modules.memory.domain import is_memory_relative_path
+
 
 MAX_WORKSPACE_READ_FILE_BYTES = 256 * 1024
 MAX_WORKSPACE_WRITE_FILE_BYTES = 256 * 1024
@@ -155,6 +157,7 @@ def replace_text_within_workspace(
         root=root,
         relative_path=relative_path,
     )
+    _assert_not_memory_managed_path(normalized_relative)
     try:
         stat = target.stat()
     except OSError as exc:
@@ -229,6 +232,7 @@ def delete_text_file_within_workspace(
         root=root,
         relative_path=relative_path,
     )
+    _assert_not_memory_managed_path(normalized_relative)
     try:
         stat = target.stat()
     except OSError as exc:
@@ -508,6 +512,7 @@ def resolve_workspace_write_target(
     relative_path: str,
 ) -> tuple[Path, str, bool]:
     normalized_relative = _normalize_relative_path(relative_path)
+    _assert_not_memory_managed_path(normalized_relative)
     normalized_path = Path(normalized_relative)
     _assert_no_symlink_components(root=root, relative_path=normalized_path)
     parent = _ensure_workspace_parent_dir(
@@ -613,6 +618,14 @@ def _normalize_relative_path(relative_path: str) -> str:
     if not cleaned.parts:
         raise ValueError("A non-empty workspace-relative path is required.")
     return cleaned.as_posix()
+
+
+def _assert_not_memory_managed_path(relative_path: str) -> None:
+    if is_memory_relative_path(relative_path):
+        raise ValueError(
+            "Workspace write tools cannot modify memory-managed paths; "
+            "use memory tools instead.",
+        )
 
 
 def _assert_no_symlink_components(*, root: Path, relative_path: Path) -> None:

@@ -53,6 +53,11 @@ EFFECTS: dict[str, EffectDescriptor] = {
         label="Local tool access",
         description="Use locally provided tools that are gated by approval.",
     ),
+    "browser.cdp.raw": EffectDescriptor(
+        id="browser.cdp.raw",
+        label="Raw browser CDP access",
+        description="Send a raw Chrome DevTools Protocol command to a browser tab.",
+    ),
     "remote_tool_execution": EffectDescriptor(
         id="remote_tool_execution",
         label="Remote tool execution",
@@ -62,6 +67,41 @@ EFFECTS: dict[str, EffectDescriptor] = {
         id="state_mutation",
         label="State-changing access",
         description="Use tools that mutate local or external state.",
+    ),
+    "skill_authoring.create": EffectDescriptor(
+        id="skill_authoring.create",
+        label="Skill draft creation",
+        description="Create governed skill authoring drafts.",
+    ),
+    "skill_authoring.update": EffectDescriptor(
+        id="skill_authoring.update",
+        label="Skill draft update",
+        description="Update governed skill authoring drafts.",
+    ),
+    "skill_authoring.validate": EffectDescriptor(
+        id="skill_authoring.validate",
+        label="Skill draft validation",
+        description="Validate governed skill authoring drafts.",
+    ),
+    "skill_authoring.diff": EffectDescriptor(
+        id="skill_authoring.diff",
+        label="Skill draft diff",
+        description="Build review diffs for governed skill authoring drafts.",
+    ),
+    "skill_authoring.apply": EffectDescriptor(
+        id="skill_authoring.apply",
+        label="Skill draft apply",
+        description="Apply an approved skill draft to the owner skill catalog.",
+    ),
+    "skill_authoring.reject": EffectDescriptor(
+        id="skill_authoring.reject",
+        label="Skill draft rejection",
+        description="Reject governed skill authoring drafts.",
+    ),
+    "skill.package.write": EffectDescriptor(
+        id="skill.package.write",
+        label="Skill package write",
+        description="Write skill package files in an owner skill source.",
     ),
     "sensitive_operation_confirmation": EffectDescriptor(
         id="sensitive_operation_confirmation",

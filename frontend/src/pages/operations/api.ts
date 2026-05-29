@@ -3,11 +3,13 @@ import { buildApiUrl, dataMode, requestJson } from "@/shared/api/client";
 import type {
   OperationsModuleOverview,
   OperationsAccessReadModel,
+  OperationsBrowserReadModel,
   OperationsChannelsReadModel,
   OperationsDaemonReadModel,
   OperationsEventsReadModel,
   OperationsLlmReadModel,
   OperationsLlmInvocationDetail,
+  OperationsMemoryFileDetail,
   OperationsMemoryReadModel,
   OperationsOrchestrationReadModel,
   OperationsSkillsReadModel,
@@ -92,6 +94,11 @@ export interface ToolOperationsData {
   source: "fixture" | "api";
 }
 
+export interface BrowserOperationsData {
+  page: OperationsBrowserReadModel;
+  source: "fixture" | "api";
+}
+
 export interface LlmOperationsData {
   page: OperationsLlmReadModel;
   source: "fixture" | "api";
@@ -109,6 +116,14 @@ export interface ToolOperationsQueryParams {
   worker_id?: string;
   has_artifact?: string;
   retryable?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface BrowserOperationsQueryParams {
+  status?: string;
+  profile?: string;
+  search?: string;
   limit?: number;
   offset?: number;
 }
@@ -276,6 +291,12 @@ export interface SkillInstallResponse {
   skill: SkillPackageResponse;
 }
 
+export interface SkillSyncResponse {
+  source_id?: string | null;
+  synced_count: number;
+  skills: SkillPackageResponse[];
+}
+
 export type DaemonServiceActionKind = "ensure" | "healthcheck" | "reconcile" | "stop";
 
 export interface OperationsModulePageReadModel {
@@ -301,6 +322,7 @@ export interface OperationsModulePageData {
 const apiModules = new Set([
   "orchestration",
   "tool",
+  "browser",
   "llm",
   "access",
   "channels",
@@ -470,6 +492,22 @@ export async function loadToolOperations(
   };
 }
 
+export async function loadBrowserOperations(
+  params: BrowserOperationsQueryParams = {},
+): Promise<BrowserOperationsData> {
+  if (dataMode !== "api") {
+    return {
+      page: fixtureBrowserPage(),
+      source: "fixture",
+    };
+  }
+
+  return {
+    page: await requestJson<OperationsBrowserReadModel>(browserOperationsPath(params)),
+    source: "api",
+  };
+}
+
 export async function loadLlmOperations(
   params: LlmOperationsQueryParams = {},
 ): Promise<LlmOperationsData> {
@@ -523,6 +561,17 @@ function toolOperationsPath(params: ToolOperationsQueryParams): string {
   if (typeof params.offset === "number") search.set("offset", String(params.offset));
   const query = search.toString();
   return `/operations/tool${query ? `?${query}` : ""}`;
+}
+
+function browserOperationsPath(params: BrowserOperationsQueryParams): string {
+  const search = new URLSearchParams();
+  if (params.status) search.set("status", params.status);
+  if (params.profile) search.set("profile", params.profile);
+  if (params.search) search.set("search", params.search);
+  if (typeof params.limit === "number") search.set("limit", String(params.limit));
+  if (typeof params.offset === "number") search.set("offset", String(params.offset));
+  const query = search.toString();
+  return `/operations/browser${query ? `?${query}` : ""}`;
 }
 
 function llmOperationsPath(params: LlmOperationsQueryParams): string {
@@ -680,6 +729,21 @@ export async function installGlobalSkill(sourceDir: string): Promise<SkillInstal
         source_dir: sourceDir,
         ...operationsActionPayload({
           defaultReason: "Operations global skill install",
+        }),
+      }),
+    },
+  );
+}
+
+export async function syncSkillCatalog(): Promise<SkillSyncResponse> {
+  return requestJson<SkillSyncResponse>(
+    "/operations/skills/sync",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        surface: "interactive",
+        ...operationsActionPayload({
+          defaultReason: "Operations skill catalog sync",
         }),
       }),
     },
@@ -947,6 +1011,17 @@ export async function loadMemoryOperations(
   };
 }
 
+export async function loadMemoryFileDetail(
+  fileId: string,
+): Promise<OperationsMemoryFileDetail | null> {
+  if (dataMode !== "api") {
+    return fixtureMemoryPage().file_details.find((item) => item.file_id === fileId) ?? null;
+  }
+  return requestJson<OperationsMemoryFileDetail>(
+    `/operations/memory/files/${encodeURIComponent(fileId)}/detail`,
+  );
+}
+
 export async function writeLongTermMemory(
   agentId: string,
   content: string,
@@ -1062,6 +1137,11 @@ function fixtureToolPage(): OperationsToolReadModel {
       total: Number(overview.metrics.find((metric) => metric.id === "catalog")?.value ?? 0),
       segments: [],
     },
+    source_health: emptyTable("source_health", "Source Health"),
+    discovery_failures: emptyTable("discovery_failures", "Discovery Failures"),
+    function_catalog: emptyTable("function_catalog", "Function Catalog Risks"),
+    provider_backend_health: emptyTable("provider_backend_health", "Provider Backend Health"),
+    cli_process_health: emptyTable("cli_process_health", "CLI Process Health"),
     auth_missing: emptyTable("auth_missing", "Runtime Risk / Access"),
     worker_pool: {
       id: "worker_pool",
@@ -1086,6 +1166,30 @@ function fixtureToolPage(): OperationsToolReadModel {
     strategies: emptyTable("strategies", "Execution Strategies"),
     worker_details: [],
     tool_run_details: [],
+  };
+}
+
+function fixtureBrowserPage(): OperationsBrowserReadModel {
+  const base = fixtureModulePage("browser");
+  const emptyTable = (id: string, title: string) => ({
+    id,
+    title,
+    columns: [],
+    rows: [],
+    total: 0,
+    empty_state: "No records.",
+  });
+  return {
+    ...base,
+    module: "browser",
+    health: base.health as OperationsBrowserReadModel["health"],
+    profiles: emptyTable("profiles", "Browser Profiles"),
+    profile_pools: emptyTable("profile_pools", "Browser Profile Pools"),
+    profile_allocations: emptyTable("profile_allocations", "Browser Profile Allocations"),
+    page_observations: emptyTable("page_observations", "Page Observations"),
+    daemon_runtimes: emptyTable("daemon_runtimes", "Browser Daemon Runtimes"),
+    network_activity: emptyTable("network_activity", "Browser Network Activity"),
+    diagnostics: emptyTable("diagnostics", "Browser Diagnostics"),
   };
 }
 
@@ -1161,6 +1265,8 @@ function fixtureAccessPage(): OperationsAccessReadModel {
     module: "access",
     health: base.health as OperationsAccessReadModel["health"],
     access_targets: emptyTable("access_targets", "Access Targets"),
+    access_requirements: emptyTable("access_requirements", "Requirements"),
+    access_audit_summary: emptyTable("access_audit_summary", "Audit Summary"),
     missing_access: emptyTable("missing_access", "Missing Access"),
     credential_health: emptyChart("credential_health", "Credential Health"),
     provider_auth_blocked: emptyTable("provider_auth_blocked", "Provider Auth / Access Blocked"),
@@ -1241,7 +1347,10 @@ function fixtureSkillsPage(): OperationsSkillsReadModel {
     access_requirements: emptyTable("access_requirements", "Access Requirements"),
     capability_requirements: emptyTable("capability_requirements", "Capability Requirements"),
     resolution_logs: emptyTable("resolution_logs", "Resolution Logs"),
+    skill_reads: emptyTable("skill_reads", "Skill Reads"),
     resolver_detail: emptyTable("resolver_detail", "Resolver Detail"),
+    authoring_backlog: emptyTable("authoring_backlog", "Authoring Backlog"),
+    authoring_failures: emptyTable("authoring_failures", "Authoring Failures"),
     import_normalize: [],
     skill_package_sources: emptyChart("skill_package_sources", "Skill Package Sources"),
     conflicts_overrides: emptyTable("conflicts_overrides", "Conflicts / Overrides"),

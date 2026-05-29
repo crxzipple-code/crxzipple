@@ -188,8 +188,8 @@ class LlmResolver:
         if self.access_port is None:
             return None
         binding = (
-            profile.credential_binding.strip()
-            if isinstance(profile.credential_binding, str)
+            profile.credential_binding_id.strip()
+            if isinstance(profile.credential_binding_id, str)
             else ""
         )
         if not binding:
@@ -197,7 +197,7 @@ class LlmResolver:
         return self.access_port.check_credential_binding(
             binding,
             workspace_dir=workspace_dir,
-            allow_literal=True,
+            allow_literal=False,
         )
 
 

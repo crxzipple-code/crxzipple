@@ -8,10 +8,6 @@ from crxzipple.modules.access.application.inventory import (
     AccessReadinessCheckSpec,
     collect_access_inventory_from_read_models,
 )
-from crxzipple.modules.access.application.migration import (
-    AccessMigration,
-    AccessMigrationSnapshot,
-)
 from crxzipple.modules.access.application.read_models import (
     AccessAssetDetailReadModel,
     AccessConsumerBindingReadModel,
@@ -20,8 +16,14 @@ from crxzipple.modules.access.application.read_models import (
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsConfigProvider,
 )
-from crxzipple.modules.settings.application import SettingsEffectiveConfigMaterializer
+from crxzipple.modules.access.interfaces.external_consumers import (
+    external_access_consumer_bindings,
+)
 from crxzipple.modules.access.interfaces.presenters import present_readiness
+
+_ACCESS_SERVICE_KEY = "access.service"
+_CORE_SETTINGS_KEY = "core.settings"
+_SETTINGS_QUERY_SERVICE_KEY = "settings.query_service"
 
 
 def collect_access_inventory(
@@ -32,17 +34,38 @@ def collect_access_inventory(
     include_disabled: bool = False,
 ) -> dict[str, object]:
     source = _collect_settings_inventory_input(
-        getattr(container, "settings_query_service", None),
-        environment=getattr(getattr(container, "settings", None), "environment", None),
+        container.require(_SETTINGS_QUERY_SERVICE_KEY),
+        environment=container.require(_CORE_SETTINGS_KEY).environment,
     )
+    source = _with_external_consumer_bindings(
+        source,
+        external_access_consumer_bindings(container),
+    )
+    access_service = container.require(_ACCESS_SERVICE_KEY)
     return collect_access_inventory_from_read_models(
         source,
         check_readiness=_container_readiness_checker(
-            container,
+            access_service,
             workspace_dir=workspace_dir,
         ),
         include_ready=include_ready,
         include_disabled=include_disabled,
+    )
+
+
+def _with_external_consumer_bindings(
+    source: AccessInventoryInput,
+    external_consumer_bindings: tuple[AccessConsumerBindingReadModel, ...],
+) -> AccessInventoryInput:
+    if not external_consumer_bindings:
+        return source
+    return AccessInventoryInput(
+        assets=source.assets,
+        credential_bindings=source.credential_bindings,
+        consumer_bindings=_dedupe_by_attr(
+            source.consumer_bindings + external_consumer_bindings,
+            "binding_id",
+        ),
     )
 
 
@@ -66,96 +89,11 @@ def _collect_settings_inventory_input(
         _consumer_binding_read_model(record)
         for record in provider.list_consumer_bindings()
     )
-    inferred = _infer_access_inventory_from_settings_profiles(
-        settings_query_service,
-        environment=environment,
-    )
     return AccessInventoryInput(
-        assets=_dedupe_by_attr(
-            (*assets, *inferred.assets),
-            "asset_id",
-        ),
-        credential_bindings=_dedupe_by_attr(
-            (*credential_bindings, *inferred.credential_bindings),
-            "binding_id",
-        ),
-        consumer_bindings=_dedupe_by_attr(
-            (*consumer_bindings, *inferred.consumer_bindings),
-            "binding_id",
-        ),
+        assets=_dedupe_by_attr(assets, "asset_id"),
+        credential_bindings=_dedupe_by_attr(credential_bindings, "binding_id"),
+        consumer_bindings=_dedupe_by_attr(consumer_bindings, "binding_id"),
     )
-
-
-def _infer_access_inventory_from_settings_profiles(
-    settings_query_service: object,
-    *,
-    environment: str | None,
-) -> AccessInventoryInput:
-    materializer = SettingsEffectiveConfigMaterializer(
-        settings_query_service,
-        environment=environment,
-    )
-    llm_profiles = _dedupe_profile_payloads(
-        *(
-            _llm_profile_payload(profile)
-            for profile in materializer.legacy_llm_profile_payloads()
-        ),
-    )
-    if not llm_profiles:
-        return AccessInventoryInput()
-    plan = AccessMigration().build_plan(
-        AccessMigrationSnapshot(
-            llm_profiles=llm_profiles,
-            source="settings",
-        ),
-    )
-    return AccessInventoryInput(
-        assets=tuple(_asset_read_model(record) for record in plan.assets),
-        credential_bindings=tuple(
-            _credential_binding_read_model(record)
-            for record in plan.credential_bindings
-        ),
-        consumer_bindings=tuple(
-            _consumer_binding_read_model(record) for record in plan.consumer_bindings
-        ),
-    )
-
-
-def _llm_profile_payload(profile: object) -> dict[str, object]:
-    if isinstance(profile, Mapping):
-        return {
-            "id": str(profile.get("profile_id") or profile.get("id") or "").strip(),
-            "enabled": bool(profile.get("enabled", True)),
-            "credential_binding": profile.get("credential_binding"),
-            "model_name": profile.get("model_name"),
-            "provider": profile.get("provider"),
-            "api_family": profile.get("api_family"),
-        }
-    profile_id = str(
-        getattr(profile, "profile_id", None) or getattr(profile, "id", None) or "",
-    ).strip()
-    credential_binding = getattr(profile, "credential_binding", None)
-    return {
-        "id": profile_id,
-        "enabled": bool(getattr(profile, "enabled", True)),
-        "credential_binding": credential_binding,
-        "model_name": getattr(profile, "model_name", None),
-        "provider": getattr(profile, "provider", None),
-        "api_family": getattr(profile, "api_family", None),
-    }
-
-
-def _dedupe_profile_payloads(
-    *profiles: dict[str, object]
-) -> tuple[dict[str, object], ...]:
-    keyed: dict[str, dict[str, object]] = {}
-    for profile in profiles:
-        profile_id = str(profile.get("id") or "").strip()
-        credential_binding = str(profile.get("credential_binding") or "").strip()
-        if not profile_id or not credential_binding:
-            continue
-        keyed.setdefault(profile_id, profile)
-    return tuple(keyed.values())
 
 
 def _asset_read_model(record: object) -> AccessAssetDetailReadModel:
@@ -231,8 +169,6 @@ def _credential_source_ref_for_inventory(record: object) -> str:
         return f"env:{source_ref}" if source_ref else "env:"
     if source_kind == "file":
         return f"file:{source_ref}" if source_ref else "file:"
-    if source_kind == "codex_auth_json":
-        return f"codex_auth_json:{source_ref}" if source_ref else "codex_auth_json"
     return source_ref
 
 
@@ -247,7 +183,7 @@ def _dedupe_by_attr(items: tuple[Any, ...], attr_name: str) -> tuple[Any, ...]:
 
 
 def _container_readiness_checker(
-    container: Any,
+    access_service: Any,
     *,
     workspace_dir: str | None,
 ) -> Callable[[tuple[AccessReadinessCheckSpec, ...]], tuple[dict[str, object], ...]]:
@@ -257,13 +193,13 @@ def _container_readiness_checker(
         checks: list[dict[str, object]] = []
         for target_type, raw, allow_literal in specs:
             if target_type == "credential_binding":
-                readiness = container.access_service.check_credential_binding(
+                readiness = access_service.check_credential_binding(
                     raw,
                     workspace_dir=workspace_dir,
                     allow_literal=allow_literal,
                 )
             else:
-                readiness = container.access_service.check_requirement(
+                readiness = access_service.check_requirement(
                     raw,
                     workspace_dir=workspace_dir,
                 )

@@ -6,7 +6,19 @@ from datetime import datetime, timezone
 import json
 from typing import Any
 
-from crxzipple.modules.access.interfaces.inventory import collect_access_inventory
+from crxzipple.modules.access.application.inventory import (
+    AccessInventoryInput,
+    AccessReadinessCheckSpec,
+    collect_access_inventory_from_read_models,
+)
+from crxzipple.modules.access.application.read_models import (
+    AccessAssetDetailReadModel,
+    AccessConsumerBindingReadModel,
+    CredentialBindingReadModel,
+)
+from crxzipple.modules.access.application.settings_integration import (
+    AccessSettingsConfigProvider,
+)
 from crxzipple.modules.channels.domain import channel_dead_letter_topic
 from crxzipple.modules.daemon import DaemonNotFoundError, DaemonValidationError
 from crxzipple.modules.daemon.interfaces.presenters import (
@@ -25,6 +37,24 @@ from crxzipple.modules.operations.application.read_models.models import (
     OperationsTableRowModel,
     OperationsTableSectionModel,
 )
+from crxzipple.modules.operations.application.read_models.ports import (
+    OperationsAccessReadinessPort,
+    OperationsAgentProfilePort,
+    OperationsBrowserProfilePort,
+    OperationsChannelProfilePort,
+    OperationsChannelRuntimePort,
+    OperationsDaemonManagerPort,
+    OperationsDaemonRegistryPort,
+    OperationsEventContractRegistryPort,
+    OperationsEventDefinitionRegistryPort,
+    OperationsEventStreamPort,
+    OperationsLlmQueryPort,
+    OperationsMemoryQueryPort,
+    OperationsObservationReadPort,
+    OperationsSettingsQueryPort,
+    OperationsSkillCatalogPort,
+    OperationsToolQueryPort,
+)
 from crxzipple.shared.time import format_datetime_utc
 
 _STUCK_SUBSCRIPTION_AFTER_SECONDS = 15.0
@@ -32,25 +62,24 @@ _STUCK_SUBSCRIPTION_AFTER_SECONDS = 15.0
 
 @dataclass(frozen=True, slots=True)
 class OperationsModuleQuerySet:
-    access_service: Any
+    access_service: OperationsAccessReadinessPort
     access_governance_repository: Any | None
-    agent_service: Any
-    channel_profile_service: Any
-    channel_runtime_manager: Any
-    daemon_manager: Any
-    daemon_service: Any
-    event_contract_registry: Any
-    event_definition_registry: Any
-    events_service: Any
-    operations_observation_store: Any | None
-    file_memory_service: Any
-    lark_channel_runtime_service: Any
-    llm_service: Any
-    memory_context_resolver: Any
-    skill_manager: Any
-    tool_service: Any
-    web_channel_runtime_service: Any
-    webhook_channel_runtime_service: Any
+    settings_query_service: OperationsSettingsQueryPort | None
+    settings_environment: str | None
+    agent_service: OperationsAgentProfilePort
+    channel_profile_service: OperationsChannelProfilePort
+    channel_runtime_manager: OperationsChannelRuntimePort
+    daemon_manager: OperationsDaemonManagerPort
+    daemon_service: OperationsDaemonRegistryPort
+    event_contract_registry: OperationsEventContractRegistryPort
+    event_definition_registry: OperationsEventDefinitionRegistryPort
+    events_service: OperationsEventStreamPort | None
+    operations_observation_store: OperationsObservationReadPort | None
+    llm_service: OperationsLlmQueryPort
+    memory_query_service: OperationsMemoryQueryPort
+    skill_manager: OperationsSkillCatalogPort
+    browser_profile_service: OperationsBrowserProfilePort
+    tool_service: OperationsToolQueryPort
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,9 +111,9 @@ class OperationsModuleReadModelProvider:
 
 def operations_module_page(
     module: str,
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModulePage | None:
-    overview = operations_module_overview(module, container)
+    overview = operations_module_overview(module, query)
     if overview is None:
         return None
     sections = _sections_for_overview(overview)
@@ -118,28 +147,31 @@ def operations_module_page(
 
 def operations_module_overview(
     module: str,
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview | None:
     if module == "access":
-        return access_operations_overview(container)
+        return access_operations_overview(query)
     if module == "channels":
-        return channels_operations_overview(container)
+        return channels_operations_overview(query)
     if module == "memory":
-        return memory_operations_overview(container)
+        return memory_operations_overview(query)
     if module == "skills":
-        return skills_operations_overview(container)
+        return skills_operations_overview(query)
     if module == "events":
-        return events_operations_overview(container)
+        return events_operations_overview(query)
     if module == "daemon":
-        return daemon_operations_overview(container)
+        return daemon_operations_overview(query)
     return None
 
 
 def access_operations_overview(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview:
     now = _now()
-    inventory = collect_access_inventory(container, include_ready=True)
+    inventory = _collect_access_inventory_for_operations(
+        query,
+        include_ready=True,
+    )
     targets = _as_list(inventory.get("targets"))
     counts = _as_dict(inventory.get("counts"))
     total = _int(counts.get("total"), len(targets))
@@ -198,26 +230,161 @@ def access_operations_overview(
     )
 
 
+def _collect_access_inventory_for_operations(
+    query: OperationsModuleQuerySet,
+    *,
+    include_ready: bool,
+) -> dict[str, object]:
+    source = _access_inventory_input_from_settings(
+        query.settings_query_service,
+        environment=query.settings_environment,
+    )
+    return collect_access_inventory_from_read_models(
+        source,
+        check_readiness=_operations_access_readiness_checker(
+            query.access_service,
+        ),
+        include_ready=include_ready,
+    )
+
+
+def _access_inventory_input_from_settings(
+    settings_query_service: Any | None,
+    *,
+    environment: str | None,
+) -> AccessInventoryInput:
+    provider = AccessSettingsConfigProvider(
+        settings_query_service,
+        environment=environment,
+    )
+    return AccessInventoryInput(
+        assets=tuple(_access_asset_read_model(record) for record in provider.list_assets()),
+        credential_bindings=tuple(
+            _credential_binding_read_model(record)
+            for record in provider.list_credential_bindings()
+        ),
+        consumer_bindings=tuple(
+            _access_consumer_binding_read_model(record)
+            for record in provider.list_consumer_bindings()
+        ),
+    )
+
+
+def _access_asset_read_model(record: Any) -> AccessAssetDetailReadModel:
+    return AccessAssetDetailReadModel(
+        asset_id=str(getattr(record, "asset_id")),
+        asset_kind=str(getattr(record, "asset_kind")),
+        display_name=str(getattr(record, "display_name")),
+        governance_scope=str(getattr(record, "governance_scope")),
+        status=str(getattr(record, "status", "active")),
+        secret_policy=dict(getattr(record, "secret_policy", {}) or {}),
+        storage_key=getattr(record, "storage_key", None),
+        consumer_modules=tuple(getattr(record, "consumer_modules", ()) or ()),
+        readiness_policy=dict(getattr(record, "readiness_policy", {}) or {}),
+        rotation_policy=dict(getattr(record, "rotation_policy", {}) or {}),
+        audit_required=bool(getattr(record, "audit_required", True)),
+        export_policy=dict(getattr(record, "export_policy", {}) or {}),
+        degraded_reason=getattr(record, "degraded_reason", None),
+        metadata=dict(getattr(record, "metadata", {}) or {}),
+        created_at=getattr(record, "created_at", None),
+        updated_at=getattr(record, "updated_at", None),
+    )
+
+
+def _credential_binding_read_model(record: Any) -> CredentialBindingReadModel:
+    return CredentialBindingReadModel(
+        binding_id=str(getattr(record, "binding_id")),
+        asset_id=getattr(record, "asset_id", None),
+        binding_kind=str(getattr(record, "binding_kind")),
+        source_kind=str(getattr(record, "source_kind")),
+        source_ref=_credential_source_ref_for_operations(record),
+        masked_preview=getattr(record, "masked_preview", None),
+        status=str(getattr(record, "status", "active")),
+        metadata=dict(getattr(record, "metadata", {}) or {}),
+        created_at=getattr(record, "created_at", None),
+        updated_at=getattr(record, "updated_at", None),
+    )
+
+
+def _credential_source_ref_for_operations(record: Any) -> str:
+    source_kind = str(getattr(record, "source_kind")).strip().lower()
+    source_ref = str(getattr(record, "source_ref")).strip()
+    if source_kind == "env":
+        return f"env:{source_ref}" if source_ref else "env:"
+    if source_kind == "file":
+        return f"file:{source_ref}" if source_ref else "file:"
+    return source_ref
+
+
+def _access_consumer_binding_read_model(
+    record: Any,
+) -> AccessConsumerBindingReadModel:
+    return AccessConsumerBindingReadModel(
+        binding_id=str(getattr(record, "binding_id")),
+        consumer_module=str(getattr(record, "consumer_module")),
+        consumer_kind=str(getattr(record, "consumer_kind")),
+        consumer_id=str(getattr(record, "consumer_id")),
+        display_name=getattr(record, "display_name", None),
+        enabled=bool(getattr(record, "enabled", True)),
+        asset_id=getattr(record, "asset_id", None),
+        credential_binding_id=getattr(record, "credential_binding_id", None),
+        credential_bindings=dict(getattr(record, "credential_bindings", {}) or {}),
+        requirement_sets=tuple(
+            tuple(str(item) for item in requirement_set)
+            for requirement_set in getattr(record, "requirement_sets", ()) or ()
+        ),
+        status=str(getattr(record, "status", "active")),
+        metadata=dict(getattr(record, "metadata", {}) or {}),
+        created_at=getattr(record, "created_at", None),
+        updated_at=getattr(record, "updated_at", None),
+    )
+
+
+def _operations_access_readiness_checker(
+    access_service: Any,
+):
+    def check(
+        specs: tuple[AccessReadinessCheckSpec, ...],
+    ) -> tuple[dict[str, object], ...]:
+        checks: list[dict[str, object]] = []
+        for target_type, raw, allow_literal in specs:
+            if target_type == "credential_binding":
+                readiness = access_service.check_credential_binding(
+                    raw,
+                    allow_literal=allow_literal,
+                )
+            else:
+                readiness = access_service.check_requirement(raw)
+            payload = readiness.to_payload()
+            payload["target_type"] = target_type
+            checks.append(payload)
+        return tuple(checks)
+
+    return check
+
+
 def memory_operations_overview(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview:
     now = _now()
-    profiles = container.agent_service.list_profiles()
+    profiles = query.agent_service.list_profiles()
     selected_profile = _select_memory_profile(profiles)
     recent_files: list[Any] = []
     long_term = None
-    context = None
+    inventory = None
     if selected_profile is not None:
-        context = container.memory_context_resolver.resolve(selected_profile.id)
-    if context is not None:
-        long_term = container.file_memory_service.get(
-            context=context, path="MEMORY.md"
-        ) or container.file_memory_service.get(context=context, path="memory.md")
-        recent_files = container.file_memory_service.list_files(
-            context=context, limit=12
+        inventory = query.memory_query_service.agent_scope_inventory(
+            selected_profile.id,
+            file_limit=12,
         )
+    if inventory is not None and not getattr(inventory, "error", ""):
+        long_term = query.memory_query_service.get_agent_long_term_excerpt(
+            selected_profile.id,
+        )
+        recent_files = list(getattr(inventory, "files", ()) or ())
 
-    health = "healthy" if context is not None else "warning"
+    health = "healthy" if inventory is not None and not getattr(inventory, "error", "") else "warning"
+    memory_available = health == "healthy"
     store_count = len(recent_files) + (1 if long_term is not None else 0)
     agent_id = getattr(selected_profile, "id", None) or "-"
     return _overview(
@@ -258,9 +425,9 @@ def memory_operations_overview(
             ),
             MetricCardModel(
                 "errors",
-                "0" if context is not None else "1",
+                "0" if memory_available else "1",
                 "memory context availability",
-                "success" if context is not None else "warning",
+                "success" if memory_available else "warning",
             ),
         ),
         queue=tuple(
@@ -281,10 +448,10 @@ def memory_operations_overview(
 
 
 def skills_operations_overview(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview:
     now = _now()
-    skills = container.skill_manager.list_available(
+    skills = query.skill_manager.list_available(
         workspace_dir=None, surface="interactive"
     )
     source_counts = Counter(skill.source for skill in skills)
@@ -357,14 +524,14 @@ def skills_operations_overview(
 
 
 def channels_operations_overview(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview:
     now = _now()
-    runtimes = container.channel_runtime_manager.list_runtimes(channel_type=None)
-    runtime_rows = [_channel_runtime_row(container, runtime) for runtime in runtimes]
+    runtimes = query.channel_runtime_manager.list_runtimes(channel_type=None)
+    runtime_rows = [_channel_runtime_row(query, runtime) for runtime in runtimes]
     stale_count = sum(1 for row in runtime_rows if row["status"] == "Stale")
     online_count = sum(1 for row in runtime_rows if row["status"] == "online")
-    dead_letters = _channel_dead_letter_rows(container, runtime_rows)
+    dead_letters = _channel_dead_letter_rows(query, runtime_rows)
     health = "error" if dead_letters else "warning" if stale_count else "healthy"
     type_counts = Counter(row["channel_type"] for row in runtime_rows)
 
@@ -437,19 +604,19 @@ def channels_operations_overview(
 
 
 def events_operations_overview(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview:
     now = _now()
-    contract_payload = container.event_contract_registry.to_payload()
-    definition_payload = container.event_definition_registry.to_payload()
+    contract_payload = query.event_contract_registry.to_payload()
+    definition_payload = query.event_definition_registry.to_payload()
     topics = _as_list(contract_payload.get("topics"))
     definitions = _as_list(definition_payload.get("definitions"))
     observer_definitions = _as_list(definition_payload.get("observers"))
     surfaces = _as_list(definition_payload.get("surfaces"))
-    subscription_items = _event_subscription_rows(container)
+    subscription_items = _event_subscription_rows(query)
     operations_snapshot = (
-        container.operations_observation_store.snapshot()
-        if container.operations_observation_store is not None
+        query.operations_observation_store.snapshot()
+        if query.operations_observation_store is not None
         else None
     )
     observed_module_count = (
@@ -554,21 +721,21 @@ def events_operations_overview(
 
 
 def daemon_operations_overview(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> OperationsModuleOverview:
     now = _now()
     services = [
-        spec_payload(spec) for spec in container.daemon_service.list_service_specs()
+        spec_payload(spec) for spec in query.daemon_service.list_service_specs()
     ]
     service_sets = [
         service_set_payload(item)
-        for item in container.daemon_service.list_service_sets()
+        for item in query.daemon_service.list_service_sets()
     ]
-    leases = [lease_payload(item) for item in container.daemon_service.list_leases()]
+    leases = [lease_payload(item) for item in query.daemon_service.list_leases()]
     try:
         instances = [
             instance_payload(item)
-            for item in container.daemon_manager.list_instances(refresh=False)
+            for item in query.daemon_manager.list_instances(refresh=False)
         ]
     except (DaemonValidationError, DaemonNotFoundError):
         instances = []
@@ -945,8 +1112,8 @@ def _select_memory_profile(profiles: list[Any]) -> Any | None:
 
 def _memory_long_term_row(agent_id: str, long_term: Any) -> dict[str, str]:
     return {
-        "path": _s(getattr(long_term, "path", "MEMORY.md")),
-        "title": _s(getattr(long_term, "path", "MEMORY.md")),
+        "path": _s(getattr(long_term, "path", "-")),
+        "title": _s(getattr(long_term, "path", "-")),
         "kind": _s(getattr(long_term, "kind", "long_term")),
         "preview": _short(getattr(long_term, "text", ""), 120),
         "updated_at": "-",
@@ -983,13 +1150,7 @@ def _skill_row(skill: Any) -> dict[str, str]:
         "required_tools": list(getattr(requirements, "required_tools", ())),
         "optional_tools": list(getattr(requirements, "optional_tools", ())),
         "suggested_tools": list(getattr(requirements, "suggested_tools", ())),
-        "compatibility_auth": list(getattr(requirements, "compatibility_auth", ())),
-        "compatibility_secrets": list(
-            getattr(requirements, "compatibility_secrets", ())
-        ),
-        "compatibility_credential_files": list(
-            getattr(requirements, "compatibility_credential_files", ())
-        ),
+        "required_access": list(getattr(requirements, "required_access", ())),
     }
     return {
         "name": _s(getattr(skill, "name", None)),
@@ -1010,9 +1171,7 @@ def _skill_requirement_rows(skills: list[Any]) -> list[dict[str, str]]:
         requirements = getattr(skill, "requirements", None)
         for field, capability_type in (
             ("required_tools", "Tool"),
-            ("compatibility_auth", "Access"),
-            ("compatibility_secrets", "Secret"),
-            ("compatibility_credential_files", "Credential File"),
+            ("required_access", "Access"),
         ):
             for value in getattr(requirements, field, ()):
                 rows.append(
@@ -1029,13 +1188,13 @@ def _skill_requirement_rows(skills: list[Any]) -> list[dict[str, str]]:
 
 
 def _channel_runtime_row(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
     runtime: Any,
 ) -> dict[str, str]:
-    accounts = container.channel_runtime_manager.list_account_bindings(
+    accounts = query.channel_runtime_manager.list_account_bindings(
         runtime_id=runtime.runtime_id
     )
-    connections = container.channel_runtime_manager.list_connection_bindings(
+    connections = query.channel_runtime_manager.list_connection_bindings(
         runtime_id=runtime.runtime_id
     )
     heartbeat = getattr(runtime, "last_heartbeat_at", None)
@@ -1058,17 +1217,17 @@ def _channel_runtime_row(
 
 
 def _channel_dead_letter_rows(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
     runtime_rows: list[dict[str, str]],
 ) -> list[dict[str, str]]:
-    if container.events_service is None:
+    if query.events_service is None:
         return []
     rows: list[dict[str, str]] = []
     for channel_type in sorted(
         {row["channel_type"] for row in runtime_rows} | {"web", "lark", "webhook"}
     ):
         topic = channel_dead_letter_topic(channel_type)
-        for record in container.events_service.read_event_topic(topic, limit=20):
+        for record in query.events_service.read_event_topic(topic, limit=20):
             rows.append(
                 {
                     "cursor": record.cursor,
@@ -1088,13 +1247,13 @@ def _channel_dead_letter_rows(
 
 
 def _event_subscription_rows(
-    container: OperationsModuleQuerySet,
+    query: OperationsModuleQuerySet,
 ) -> list[dict[str, str]]:
-    if container.events_service is None:
+    if query.events_service is None:
         return []
-    states = container.events_service.list_subscription_cursors()
+    states = query.events_service.list_subscription_cursors()
     latest_cursors = {
-        state.source_topic: container.events_service.snapshot_event_topic(
+        state.source_topic: query.events_service.snapshot_event_topic(
             state.source_topic
         )
         for state in states

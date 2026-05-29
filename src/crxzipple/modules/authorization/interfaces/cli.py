@@ -4,7 +4,7 @@ import json
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
@@ -37,7 +37,7 @@ def build_cli() -> typer.Typer:
     @app.command("policies")
     def list_policies(ctx: typer.Context) -> None:
         container = ensure_container(ctx)
-        echo_data(container.authorization_service.list_policies())
+        echo_data(container.require(AppKey.AUTHORIZATION_SERVICE).list_policies())
 
     @app.command("check")
     def check_authorization(
@@ -61,7 +61,7 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         container = ensure_container(ctx)
-        decision = container.authorization_service.check(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(
                     type=subject_type,

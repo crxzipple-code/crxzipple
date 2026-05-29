@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.interfaces.cli.main import app
 from crxzipple.modules.channels import ChannelAccountProfile, ChannelProfile
 from tests.unit.support import SqliteTestHarness
@@ -88,9 +89,11 @@ class ChannelsCliTestCase(unittest.TestCase):
 
         self.assertEqual(enabled.exit_code, 0)
         self.assertIn('"enabled": true', enabled.stdout)
-        reopened = self.harness.build_container()
+        reopened = self.harness.build_runtime_container()
         try:
-            profile = reopened.channel_profile_service.get_profile("web")
+            profile = reopened.require(AppKey.CHANNEL_PROFILE_SERVICE).get_profile(
+                "web",
+            )
             self.assertIsNotNone(profile)
             assert profile is not None
             self.assertTrue(profile.enabled)
@@ -99,9 +102,9 @@ class ChannelsCliTestCase(unittest.TestCase):
             reopened.close()
 
     def test_channel_runtime_cli_registers_runtime_from_profile(self) -> None:
-        container = self.harness.build_container()
+        container = self.harness.build_runtime_container()
         try:
-            container.channel_profile_service.upsert_profile(
+            container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
                 ChannelProfile(
                     channel_type="web",
                     accounts=(
@@ -126,6 +129,8 @@ class ChannelsCliTestCase(unittest.TestCase):
                 "web-runtime-cli-1",
                 "--max-cycles",
                 "1",
+                "--poll-interval-seconds",
+                "0.05",
             ],
             env=self.env,
         )
@@ -134,11 +139,15 @@ class ChannelsCliTestCase(unittest.TestCase):
         self.assertIn('"status": "running"', result.stdout)
         self.assertIn('"runtime_id": "web-runtime-cli-1"', result.stdout)
 
-        reopened = self.harness.build_container()
+        reopened = self.harness.build_runtime_container()
         try:
-            runtime = reopened.channel_runtime_manager.get_runtime("web-runtime-cli-1")
+            runtime = reopened.require(AppKey.CHANNEL_RUNTIME_MANAGER).get_runtime(
+                "web-runtime-cli-1",
+            )
             self.assertIsNone(runtime)
-            binding = reopened.channel_runtime_manager.resolve_account_binding(
+            binding = reopened.require(
+                AppKey.CHANNEL_RUNTIME_MANAGER,
+            ).resolve_account_binding(
                 channel_type="web",
                 channel_account_id="default",
             )

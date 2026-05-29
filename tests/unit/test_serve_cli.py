@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import importlib
 
 from tests.unit.cli_test_support import *
 
 
 class ServeCliTestCase(CliModuleTestCase):
+    def test_http_app_import_does_not_build_api_container(self) -> None:
+        import crxzipple.interfaces.http.app as http_app_module
+
+        with patch(
+            "crxzipple.interfaces.runtime_container.build_runtime_container",
+        ) as build_container_mock:
+            reloaded = importlib.reload(http_app_module)
+
+        build_container_mock.assert_not_called()
+        self.assertFalse(hasattr(reloaded.app, "state"))
+        self.assertTrue(callable(reloaded.app))
+        importlib.reload(http_app_module)
+
     def test_serve_runs_http_server_without_starting_worker_loops(self) -> None:
-        fake_container = SimpleNamespace(
-            settings=SimpleNamespace(),
-        )
         fake_http_app = object()
         server_instances: list[object] = []
 
@@ -23,9 +33,6 @@ class ServeCliTestCase(CliModuleTestCase):
                 self.run_called = True
 
         with patch(
-            "crxzipple.interfaces.cli.crxzipple.ensure_container",
-            return_value=fake_container,
-        ), patch(
             "crxzipple.interfaces.http.app.create_app",
             return_value=fake_http_app,
         ) as create_app_mock, patch(

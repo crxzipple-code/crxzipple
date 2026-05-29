@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -14,14 +15,51 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ToolResolver
+from crxzipple.modules.tool.application.activation import ToolPackageApplyContext
+from crxzipple.modules.tool.domain.exceptions import (
+    ToolExecutionNotAllowedError,
+    ToolValidationError,
+)
+from crxzipple.modules.tool.domain import ToolExecutionContext
+from crxzipple.modules.tool.infrastructure.tool_packages import (
+    apply_tool_package_plans,
+    load_tool_package_plan,
+)
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    AccessCredentialKind,
+    CredentialBindingRef,
+)
+from tools.openai_image.local import OpenAIImageDeps, openai_image_generate
 
-from tests.unit.tool_test_support import *  # noqa: F403
+from tests.unit.tool_test_support import (
+    ExecuteToolInput,
+    LocalToolRuntimeRegistry,
+    ToolMode,
+    ToolRunStatus,
+    ToolTestCaseBase,
+    tool_dependency_bindings,
+)
 from tests.unit.tool_runtime_test_support import process_next_background_tool_run
 
 
 _PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
 )
+_OPENAI_IMAGE_PLAN = load_tool_package_plan(
+    Path(__file__).resolve().parents[2] / "tools" / "openai_image" / "tool.yaml",
+)
+
+
+def _openai_image_backend_context() -> ToolExecutionContext:
+    return ToolExecutionContext(
+        attrs={
+            "provider_backend": {
+                "backend_id": "openai_image.default",
+                "credential_bindings": {"openai_api_key": "openai-api-key"},
+            },
+        },
+    )
 
 
 class _FakeOpenAIImageResponse:
@@ -81,6 +119,16 @@ class _FakeOpenAIImageClient:
         )
 
 
+class _FakeCredentialProvider:
+    def __init__(self, token: str) -> None:
+        self.token = token
+        self.calls: list[dict[str, Any]] = []
+
+    def resolve_credential(self, binding, **kwargs):  # noqa: ANN001, ANN003
+        self.calls.append({"binding": binding, "kwargs": dict(kwargs)})
+        return self.token
+
+
 class OpenAIImageToolTestCase(ToolTestCaseBase):
     def setUp(self) -> None:
         super().setUp()
@@ -99,7 +147,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
         arguments: dict[str, Any],
     ):
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id=tool_id,
                     arguments=arguments,
@@ -121,6 +169,24 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
                 break
         return processed_run
 
+    def _register_openai_image_tools(self) -> None:
+        if (
+            self.local_runtime_registry.get_handler("openai_image_generate")
+            is not None
+        ):
+            return
+        apply_tool_package_plans(
+            ToolPackageApplyContext(
+                local_runtime_registry=self.local_runtime_registry,
+                dependency_bindings=tool_dependency_bindings({
+                    "artifact_service": self.artifact_service,
+                    "credential_provider": self.access_service,
+                }),
+            ),
+            (_OPENAI_IMAGE_PLAN,),
+            include_openapi=False,
+        )
+
     def tearDown(self) -> None:
         if self.previous_openai_api_key is None:
             os.environ.pop("OPENAI_API_KEY", None)
@@ -141,11 +207,13 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
                 },
             ],
         }
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
-        tool = self.container.tool_service.get_tool("openai_image_generate")
-        self.assertEqual(tool.access_requirement_sets, (("env:OPENAI_API_KEY",),))
+        tool = self.tool_service.get_tool("openai_image_generate")
+        self.assertEqual(tool.access_requirement_sets, (("openai-api-key",),))
+        requirement = tool.credential_requirements[0].requirements[0]
+        self.assertEqual(requirement.slot.binding_id, "openai-api-key")
+        self.assertEqual(requirement.slot.expected_kind.value, "api_key")
         self.assertEqual(tool.required_effect_ids, ("remote_tool_execution",))
         self.assertEqual(tool.execution_support.supported_modes, (ToolMode.BACKGROUND,))
         self.assertIn("surface:interactive", tool.tags)
@@ -175,12 +243,161 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
         )
         self.assertEqual(tool_run.result.blocks[0]["type"], "text")
         self.assertEqual(tool_run.result.blocks[1]["type"], "image_ref")
-        artifact = self.container.artifact_service.get_artifact(
+        self.assertEqual(
+            tool_run.metadata["provider_backend"]["backend_id"],
+            "openai_image.default",
+        )
+        artifact = self.artifact_service.get_artifact(
             tool_run.result.blocks[1]["artifact_id"],
         )
         self.assertEqual(artifact.mime_type, "image/png")
         self.assertEqual(artifact.name, "openai-gpt-image-2-generate-1.png")
         self.assertNotIn("fake-openai-png", json.dumps(tool_run.result.details))
+
+    def test_generate_uses_injected_access_credential_provider(self) -> None:
+        _FakeOpenAIImageClient.response_payload = {
+            "data": [
+                {
+                    "b64_json": base64.b64encode(b"fake-openai-png").decode("ascii"),
+                },
+            ],
+        }
+        catalog = LocalToolRuntimeRegistry()
+        credential_provider = _FakeCredentialProvider("provider-openai-key")
+        apply_tool_package_plans(
+            ToolPackageApplyContext(
+                local_runtime_registry=catalog,
+                dependency_bindings=tool_dependency_bindings(
+                    {"credential_provider": credential_provider},
+                ),
+                config={"openai_image_http_client_factory": _FakeOpenAIImageClient},
+            ),
+            (_OPENAI_IMAGE_PLAN,),
+            include_openapi=False,
+        )
+        handler = catalog.get_handler("openai_image_generate")
+        self.assertIsNotNone(handler)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "prompt": "Design a compact access binding check.",
+                    "size": "1024x1024",
+                },
+                _openai_image_backend_context(),
+            ),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            _FakeOpenAIImageClient.posts[-1]["headers"]["Authorization"],
+            "Bearer provider-openai-key",
+        )
+        binding = credential_provider.calls[0]["binding"]
+        self.assertIsInstance(binding, CredentialBindingRef)
+        self.assertEqual(binding.binding_id, "openai-api-key")
+        self.assertEqual(binding.expected_kind, AccessCredentialKind.API_KEY)
+        consumer = credential_provider.calls[0]["kwargs"]["consumer"]
+        self.assertIsInstance(consumer, AccessConsumerRef)
+        self.assertEqual(consumer.consumer_id, "tool.local:openai_image_generate")
+        self.assertNotIn("allow_literal", credential_provider.calls[0]["kwargs"])
+        self.assertEqual(result.blocks[0]["type"], "text")
+        self.assertEqual(result.blocks[1]["type"], "image")
+
+    def test_generate_entrypoint_accepts_openai_image_typed_deps(self) -> None:
+        _FakeOpenAIImageClient.response_payload = {
+            "data": [
+                {
+                    "b64_json": base64.b64encode(b"fake-openai-png").decode("ascii"),
+                },
+            ],
+        }
+        credential_provider = _FakeCredentialProvider("typed-openai-key")
+        handler = openai_image_generate(
+            OpenAIImageDeps(
+                credential_provider=credential_provider,
+                http_client_factory=_FakeOpenAIImageClient,
+            ),
+        )
+
+        result = asyncio.run(
+            handler(
+                {
+                    "prompt": "Design a direct typed dependency path.",
+                    "size": "1024x1024",
+                },
+                _openai_image_backend_context(),
+            ),
+        )
+
+        self.assertEqual(
+            _FakeOpenAIImageClient.posts[-1]["headers"]["Authorization"],
+            "Bearer typed-openai-key",
+        )
+        binding = credential_provider.calls[0]["binding"]
+        self.assertIsInstance(binding, CredentialBindingRef)
+        self.assertEqual(binding.binding_id, "openai-api-key")
+        self.assertEqual(
+            credential_provider.calls[0]["kwargs"]["consumer"].runtime_ref,
+            "openai_image_generate",
+        )
+        self.assertEqual(result.blocks[1]["type"], "image")
+
+    def test_generate_rejects_missing_access_credential_before_queueing(self) -> None:
+        os.environ.pop("OPENAI_API_KEY", None)
+        self._register_openai_image_tools()
+
+        readiness = self.tool_service.check_access_readiness(
+            "openai_image_generate",
+        )
+        self.assertIsNotNone(readiness)
+        assert readiness is not None
+        self.assertFalse(readiness.ready)
+        self.assertEqual(readiness.status, "setup_needed")
+
+        with self.assertRaisesRegex(
+            ToolExecutionNotAllowedError,
+            "requires access setup",
+        ):
+            asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="openai_image_generate",
+                        arguments={
+                            "prompt": "Should not be queued without credentials.",
+                        },
+                        mode=ToolMode.BACKGROUND,
+                    ),
+                ),
+            )
+
+        self.assertEqual(
+            self.tool_service.list_tool_runs(
+                tool_id="openai_image_generate",
+            ),
+            [],
+        )
+
+    def test_generate_requires_injected_credential_provider_port(self) -> None:
+        catalog = LocalToolRuntimeRegistry()
+        with self.assertRaisesRegex(
+            ToolValidationError,
+            "requires service dependency 'credential_provider'",
+        ):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(
+                    local_runtime_registry=catalog,
+                    dependency_bindings=tool_dependency_bindings({
+                        "access_service": _FakeCredentialProvider(
+                            "legacy-service-token",
+                        ),
+                    }),
+                    config={"openai_image_http_client_factory": _FakeOpenAIImageClient},
+                ),
+                (_OPENAI_IMAGE_PLAN,),
+                include_openapi=False,
+            )
 
     def test_generate_uses_openai_image_model_env_override(self) -> None:
         os.environ["OPENAI_IMAGE_MODEL"] = "dall-e-3"
@@ -191,8 +408,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
                 },
             ],
         }
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
         with patch("tools.openai_image.local.httpx.AsyncClient", _FakeOpenAIImageClient):
             self._execute_background_image_tool(
@@ -214,8 +430,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
                 ),
             },
         }
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
         with patch("tools.openai_image.local.httpx.AsyncClient", _FakeOpenAIImageClient):
             tool_run = self._execute_background_image_tool(
@@ -230,8 +445,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
 
     def test_generate_reports_openai_timeout_with_retry_guidance(self) -> None:
         _FakeOpenAIImageClient.post_exception = httpx.ReadTimeout(" ")
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
         with patch("tools.openai_image.local.httpx.AsyncClient", _FakeOpenAIImageClient):
             tool_run = self._execute_background_image_tool(
@@ -245,7 +459,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
         self.assertIn("OPENAI_IMAGE_TIMEOUT_SECONDS", tool_run.error_message)
 
     def test_edit_sends_artifact_as_data_url_and_externalizes_result_image(self) -> None:
-        source = self.container.artifact_service.create_artifact(
+        source = self.artifact_service.create_artifact(
             data=_PNG_1X1,
             mime_type="image/png",
             name="source.png",
@@ -257,11 +471,13 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
                 },
             ],
         }
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
-        tool = self.container.tool_service.get_tool("openai_image_edit")
-        self.assertEqual(tool.access_requirement_sets, (("env:OPENAI_API_KEY",),))
+        tool = self.tool_service.get_tool("openai_image_edit")
+        self.assertEqual(tool.access_requirement_sets, (("openai-api-key",),))
+        requirement = tool.credential_requirements[0].requirements[0]
+        self.assertEqual(requirement.slot.binding_id, "openai-api-key")
+        self.assertEqual(requirement.slot.expected_kind.value, "api_key")
         self.assertEqual(
             tool.required_effect_ids,
             ("remote_tool_execution", "sensitive_operation_confirmation"),
@@ -293,7 +509,7 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
             ),
         )
         self.assertEqual(tool_run.result.blocks[1]["type"], "image_ref")
-        artifact = self.container.artifact_service.get_artifact(
+        artifact = self.artifact_service.get_artifact(
             tool_run.result.blocks[1]["artifact_id"],
         )
         self.assertEqual(artifact.mime_type, "image/webp")
@@ -301,24 +517,26 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
         self.assertNotIn("data:image/png", json.dumps(tool_run.result.details))
 
     def test_image_tools_declare_the_same_openai_access_requirement(self) -> None:
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
-        generate = self.container.tool_service.get_tool("openai_image_generate")
-        edit = self.container.tool_service.get_tool("openai_image_edit")
+        generate = self.tool_service.get_tool("openai_image_generate")
+        edit = self.tool_service.get_tool("openai_image_edit")
 
         self.assertEqual(
             generate.access_requirement_sets,
-            (("env:OPENAI_API_KEY",),),
+            (("openai-api-key",),),
         )
         self.assertEqual(
             edit.access_requirement_sets,
             generate.access_requirement_sets,
         )
+        self.assertEqual(
+            edit.credential_requirements[0].requirements[0].slot.binding_id,
+            generate.credential_requirements[0].requirements[0].slot.binding_id,
+        )
 
     def test_image_tools_are_visible_to_interactive_orchestration_runs(self) -> None:
-        register_scanned_tool_packages(self.container, include_openapi=False)
-        self.container.tool_service.discover_local_tools()
+        self._register_openai_image_tools()
 
         run = OrchestrationRun.accept(
             run_id="run-openai-image-tools",
@@ -328,9 +546,9 @@ class OpenAIImageToolTestCase(ToolTestCaseBase):
             ),
         )
         resolver = ToolResolver(
-            tool_catalog=self.container.tool_service,
-            authorization_port=self.container.authorization_service,
-            access_port=self.container.access_service,
+            tool_catalog=self.tool_service,
+            authorization_port=self.authorization_service,
+            access_port=self.access_service,
         )
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "test-openai-key"}):

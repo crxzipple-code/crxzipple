@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -59,6 +60,7 @@ class ProcessSupervisorPort(Protocol):
         working_directory: str,
         session_key: str | None = None,
         metadata: dict[str, object] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessSession:
         ...
 

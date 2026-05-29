@@ -7,10 +7,9 @@ from crxzipple.modules.channels.domain import (
     ChannelProfile,
     ChannelSystemConfig,
 )
-from crxzipple.modules.daemon.application import DaemonApplicationService
 from crxzipple.modules.daemon.domain import DaemonServiceSpec
 
-from .bindings import collect_channel_binding_env_vars
+from .ports import ChannelDaemonSpecRegistryPort
 from .services import ChannelProfileApplicationService
 
 
@@ -55,7 +54,6 @@ class ChannelRuntimePlanner:
         if _is_retired_channel_type(channel_type):
             return None
         service_key = f"channel:{channel_type}"
-        env_keys = self._profile_env_keys(profile, enabled_accounts)
         spec = DaemonServiceSpec(
             key=service_key,
             display_name=f"{_title_case_channel(channel_type)} Channel Runtime",
@@ -73,7 +71,7 @@ class ChannelRuntimePlanner:
                 "managed_kind": "channel-runtime",
                 "channel_type": channel_type,
                 "accounts": [account.account_id for account in enabled_accounts],
-                "env_keys": list(env_keys),
+                "env_keys": [],
                 "cli_args": [
                     "channel-runtime",
                     "run",
@@ -103,29 +101,13 @@ class ChannelRuntimePlanner:
             return "eager"
         return "lazy"
 
-    def _profile_env_keys(
-        self,
-        profile: ChannelProfile,
-        accounts: tuple[ChannelAccountProfile, ...],
-    ) -> tuple[str, ...]:
-        resolved: list[str] = []
-        for env_name in collect_channel_binding_env_vars(profile.metadata):
-            if env_name not in resolved:
-                resolved.append(env_name)
-        for account in accounts:
-            for env_name in collect_channel_binding_env_vars(account.metadata):
-                if env_name not in resolved:
-                    resolved.append(env_name)
-        return tuple(sorted(resolved))
-
-
 class ChannelControlService:
     def __init__(
         self,
         *,
         profile_service: ChannelProfileApplicationService,
         planner: ChannelRuntimePlanner,
-        daemon_service: DaemonApplicationService,
+        daemon_service: ChannelDaemonSpecRegistryPort,
     ) -> None:
         self.profile_service = profile_service
         self.planner = planner

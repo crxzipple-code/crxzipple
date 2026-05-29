@@ -11,7 +11,6 @@ import {
   Search,
   ServerCog,
   ShieldAlert,
-  Terminal,
   X,
 } from "lucide-vue-next";
 import { computed, onMounted, onUnmounted, ref } from "vue";
@@ -778,11 +777,19 @@ onUnmounted(() => {
       </article>
     </section>
 
-    <nav class="daemon-tabs">
-      <button v-for="tab in tabs" :key="tab.id" :class="{ active: tab.id === activeTab }" type="button" @click="selectTab(tab.id)">
-        {{ tabLabel(tab) }}<span v-if="tab.count != null">{{ tab.count }}</span>
-      </button>
-    </nav>
+    <div class="daemon-tabbar">
+      <nav class="daemon-tabs">
+        <button v-for="tab in tabs" :key="tab.id" :class="{ active: tab.id === activeTab }" type="button" @click="selectTab(tab.id)">
+          {{ tabLabel(tab) }}<span v-if="tab.count != null">{{ tab.count }}</span>
+        </button>
+      </nav>
+      <div v-if="(page?.links_to_operations ?? []).length" class="daemon-related-links">
+        <span><GitBranch :size="12" /> {{ t("operations.linksToOperations") }}</span>
+        <RouterLink v-for="link in page?.links_to_operations ?? []" :key="link.id" :to="linkedRoute(link)">
+          {{ link.label ?? link.id }}
+        </RouterLink>
+      </div>
+    </div>
 
     <section class="daemon-main-grid">
       <article class="daemon-table-panel">
@@ -887,15 +894,6 @@ onUnmounted(() => {
           </div>
           <DataTable v-if="dependencyTable.rows.length" :columns="dependencyTable.columns" :rows="dependencyTable.rows" section-id="daemon-dependencies-side" :page-size="2" />
           <p v-if="!dependencyTable.rows.length" class="panel-empty compact-empty">{{ emptyState(dependencyTable) }}</p>
-        </article>
-
-        <article class="links-panel">
-          <h3>{{ t("operations.linksToOperations") }}</h3>
-          <RouterLink v-for="link in page?.links_to_operations ?? []" :key="link.id" :to="linkedRoute(link)">
-            <Terminal :size="15" />
-            <span>{{ link.label ?? link.id }}</span>
-          </RouterLink>
-          <p v-if="!(page?.links_to_operations ?? []).length" class="panel-empty compact-empty">{{ t("table.noRecords") }}</p>
         </article>
       </aside>
     </section>
@@ -1059,7 +1057,11 @@ onUnmounted(() => {
 .daemon-header,
 .daemon-header__ops,
 .daemon-metrics,
+.daemon-tabbar,
 .daemon-tabs,
+.daemon-related-links,
+.daemon-related-links span,
+.daemon-related-links a,
 .panel-heading,
 .chart-card-body,
 .daemon-alert,
@@ -1067,8 +1069,7 @@ onUnmounted(() => {
 .daemon-action-target,
 .auto-toggle,
 .table-controls,
-.table-search,
-.links-panel a {
+.table-search {
   display: flex;
   align-items: center;
 }
@@ -1466,7 +1467,7 @@ h4 {
   min-height: 64px;
 }
 
-.daemon-tabs {
+.daemon-tabbar {
   gap: 8px;
   min-height: 29px;
   margin-top: 6px;
@@ -1474,6 +1475,13 @@ h4 {
   border: 0;
   border-bottom: 1px solid var(--border-subtle);
   border-radius: 0;
+}
+
+.daemon-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 8px;
+  min-height: 29px;
   overflow-x: auto;
 }
 
@@ -1505,6 +1513,40 @@ h4 {
   color: var(--color-blue);
   font-size: 10px;
   text-align: center;
+}
+
+.daemon-related-links {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 42%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.daemon-related-links > span {
+  flex: 0 0 auto;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.daemon-related-links a {
+  flex: 0 1 auto;
+  max-width: 118px;
+  height: 23px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  background: var(--surface-panel-soft);
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .daemon-main-grid {
@@ -1608,42 +1650,9 @@ h4 {
 
 .lease-panel,
 .state-panel,
-.dependency-panel,
-.links-panel {
+.dependency-panel {
   min-height: 118px;
   overflow: visible;
-}
-
-.links-panel {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  align-content: start;
-}
-
-.links-panel h3,
-.links-panel .panel-empty {
-  grid-column: 1 / -1;
-}
-
-.links-panel a {
-  gap: 6px;
-  min-height: 26px;
-  padding: 0 7px;
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-1);
-  background: var(--surface-panel-soft);
-  color: var(--text-secondary);
-  font-size: 11px;
-  text-decoration: none;
-}
-
-.links-panel a span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .daemon-drawer {

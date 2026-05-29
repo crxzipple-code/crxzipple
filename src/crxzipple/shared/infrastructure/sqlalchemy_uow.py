@@ -26,8 +26,13 @@ from crxzipple.modules.session.infrastructure.persistence.repositories import (
     SqlAlchemySessionRepository,
 )
 from crxzipple.modules.tool.infrastructure.persistence.repositories import (
+    SqlAlchemyToolFunctionCatalogRepository,
+    SqlAlchemyToolFunctionRepository,
+    SqlAlchemyToolProviderBackendRepository,
     SqlAlchemyToolRunAssignmentRepository,
     SqlAlchemyToolRunRepository,
+    SqlAlchemyToolSourceDiscoveryRunRepository,
+    SqlAlchemyToolSourceRepository,
     SqlAlchemyToolWorkerRepository,
 )
 from crxzipple.shared.application.unit_of_work import UnitOfWork
@@ -47,6 +52,17 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
         self._session = self._session_factory()
         self.dispatch_tasks = SqlAlchemyDispatchTaskRepository(self.session)
+        self.tool_sources = SqlAlchemyToolSourceRepository(self.session)
+        self.tool_source_discovery_runs = SqlAlchemyToolSourceDiscoveryRunRepository(
+            self.session,
+        )
+        self.tool_functions = SqlAlchemyToolFunctionRepository(self.session)
+        self.tool_function_catalog = SqlAlchemyToolFunctionCatalogRepository(
+            self.session,
+        )
+        self.tool_provider_backends = SqlAlchemyToolProviderBackendRepository(
+            self.session,
+        )
         self.tool_runs = SqlAlchemyToolRunRepository(self.session)
         self.tool_run_assignments = SqlAlchemyToolRunAssignmentRepository(
             self.session,

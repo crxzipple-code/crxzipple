@@ -132,6 +132,11 @@ export interface WorkbenchAgentProfile {
     image_llm_id: string | null;
     document_llm_id: string | null;
   };
+  memory?: {
+    enabled?: boolean;
+    scope_ref?: string | null;
+    access?: string;
+  };
 }
 
 export interface WorkbenchLlmProfile {

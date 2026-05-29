@@ -13,7 +13,7 @@ from crxzipple.shared import (
     ORCHESTRATION_RUNTIME_STATUS_EVENT,
 )
 
-from tests.unit.http_test_support import HttpModuleTestCase
+from tests.unit.http_test_support import AppKey, HttpModuleTestCase
 
 
 class EventsHttpTestCase(HttpModuleTestCase):
@@ -136,7 +136,7 @@ class EventsHttpTestCase(HttpModuleTestCase):
 
     def test_event_stream_endpoint_bootstraps_snapshot_and_streams_new_records(self) -> None:
         container = self.client.app.state.container
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic="turn.session.agent:assistant:deck-console",
                 kind="fact",
@@ -151,8 +151,8 @@ class EventsHttpTestCase(HttpModuleTestCase):
         )
 
         def _publish_later() -> None:
-            time.sleep(0.1)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic="turn.live.session.agent:assistant:deck-console",
                     kind="live",
@@ -173,7 +173,9 @@ class EventsHttpTestCase(HttpModuleTestCase):
                 "/events/stream",
                 params={
                     "snapshot_limit": 5,
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.4,
+                    "owner": "orchestration",
+                    "session_key": "agent:assistant:deck-console",
                 },
             ) as response:
                 body = response.read().decode("utf-8")
@@ -188,19 +190,20 @@ class EventsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.headers["x-crx-stream-scope"], "bus")
         self.assertIn("event: connected", body)
         self.assertIn("event: snapshot", body)
-        self.assertIn('"topic_count": 1', body)
-        self.assertIn('"filters": {}', body)
+        self.assertIn('"owner": "orchestration"', body)
+        self.assertIn('"session_key": "agent:assistant:deck-console"', body)
         self.assertIn("orchestration.run.queued", body)
         self.assertIn('"source_publication_mode": "reduced"', body)
         self.assertIn("event: event", body)
         self.assertIn("orchestration.run.llm_text_delta", body)
         self.assertIn('"source_publication_mode": "direct"', body)
         self.assertIn("hello console", body)
+        self.assertNotIn("tool.source.created", body)
         self.assertIn("event: timeout", body)
 
     def test_event_stream_endpoint_filters_by_session_and_owner(self) -> None:
         container = self.client.app.state.container
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic="turn.session.agent:assistant:deck-filtered",
                 kind="fact",
@@ -213,7 +216,7 @@ class EventsHttpTestCase(HttpModuleTestCase):
                 },
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic="channel.observe.web.connection.conn-other",
                 kind="observe",
@@ -244,7 +247,7 @@ class EventsHttpTestCase(HttpModuleTestCase):
 
     def test_event_records_endpoint_filters_by_payload_value(self) -> None:
         container = self.client.app.state.container
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="agent.profile.updated",
                 payload={
@@ -253,7 +256,7 @@ class EventsHttpTestCase(HttpModuleTestCase):
                 },
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="agent.profile.updated",
                 payload={
@@ -290,7 +293,7 @@ class EventsHttpTestCase(HttpModuleTestCase):
     def test_event_topic_diagnostics_reports_contracts_cursors_and_records(self) -> None:
         container = self.client.app.state.container
         topic = "turn.session.agent:assistant:deck-diagnostics"
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=topic,
                 kind="fact",
@@ -301,7 +304,7 @@ class EventsHttpTestCase(HttpModuleTestCase):
                 },
             ),
         )
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             "channel.web.connection.conn-diagnostics.observe",
             source_topic=topic,
             cursor="1",
@@ -346,21 +349,21 @@ class EventsHttpTestCase(HttpModuleTestCase):
         healthy_topic = "turn.session.agent:assistant:deck-subscriptions-healthy"
         lagging_topic = "turn.session.agent:assistant:deck-subscriptions-lagging"
 
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=healthy_topic,
                 kind="fact",
                 payload={"event_name": "orchestration.run.completed"},
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=lagging_topic,
                 kind="fact",
                 payload={"event_name": "orchestration.run.queued"},
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=lagging_topic,
                 kind="fact",
@@ -371,22 +374,22 @@ class EventsHttpTestCase(HttpModuleTestCase):
         healthy_subscription = "channel.web.connection.conn-healthy.observe"
         lagging_subscription = "channel.web.connection.conn-lagging.observe"
         stuck_subscription = "channel.web.connection.conn-stuck.observe"
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             healthy_subscription,
             source_topic=healthy_topic,
             cursor="1",
         )
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             lagging_subscription,
             source_topic=lagging_topic,
             cursor="1",
         )
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             stuck_subscription,
             source_topic=lagging_topic,
             cursor="1",
         )
-        backend = container.events_service.backend
+        backend = container.require(AppKey.EVENTS_SERVICE).backend
         stale_state = EventSubscriptionCursor(
             subscription_id=stuck_subscription,
             source_topic=lagging_topic,

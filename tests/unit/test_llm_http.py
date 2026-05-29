@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -12,8 +10,11 @@ from fastapi.testclient import TestClient
 
 from crxzipple.core.config import LlmProfileSettings, load_settings
 from crxzipple.interfaces.http.app import create_app
+from crxzipple.modules.access.application.repositories import AccessOAuthAccountRecord
+from crxzipple.modules.access.infrastructure.oauth_tokens import OAuthTokenDocument
 from crxzipple.modules.settings import CreateSettingsResourceInput
 from tests.unit.http_test_support import (
+    AppKey,
     _FakeStreamResponse,
     HttpModuleTestCase,
     SampleLlmApiServer,
@@ -23,7 +24,9 @@ from tests.unit.http_test_support import (
 
 class LlmHttpTestCase(HttpModuleTestCase):
     def test_llm_profile_endpoints_register_fetch_and_list(self) -> None:
-            settings_actions = self.client.app.state.container.settings_action_service
+            settings_actions = self.client.app.state.container.require(
+                AppKey.SETTINGS_ACTION_SERVICE,
+            )
             settings_actions.create_resource = Mock(
                 side_effect=AssertionError("HTTP LLM register must not write Settings"),
             )
@@ -51,7 +54,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                                 "chat_template_kwargs": {"enable_thinking": False},
                             },
                         },
-                        "credential_binding": "env:OPENAI_API_KEY",
+                        "credential_binding_id": "openai-api-key",
                         "max_concurrency": 2,
                         "concurrency_key": "provider:openai",
                     },
@@ -63,7 +66,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                         "provider": "openai",
                         "api_family": "openai_responses",
                         "model_name": "gpt-5.1",
-                        "credential_binding": "env:OPENAI_API_KEY",
+                        "credential_binding_id": "openai-api-key",
                     },
                 )
 
@@ -91,8 +94,8 @@ class LlmHttpTestCase(HttpModuleTestCase):
             }
             self.assertIn("writer", profiles_by_id)
             self.assertEqual(
-                profiles_by_id["writer"]["credential_binding"],
-                "env:OPENAI_API_KEY",
+                profiles_by_id["writer"]["credential_binding_id"],
+                "openai-api-key",
             )
             self.assertEqual(profiles_by_id["writer"]["source_kind"], "manual")
 
@@ -113,7 +116,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                             "chat_template_kwargs": {"enable_thinking": False},
                         },
                     },
-                    "credential_binding": "env:OPENAI_API_KEY",
+                    "credential_binding_id": "openai-api-key",
                     "max_concurrency": 2,
                     "concurrency_key": "provider:openai",
                 },
@@ -121,7 +124,9 @@ class LlmHttpTestCase(HttpModuleTestCase):
 
             self.assertEqual(create_response.status_code, 201)
 
-            settings_actions = self.client.app.state.container.settings_action_service
+            settings_actions = self.client.app.state.container.require(
+                AppKey.SETTINGS_ACTION_SERVICE,
+            )
             settings_actions.set_resource_enabled = Mock(
                 side_effect=AssertionError("HTTP LLM enablement must not write Settings"),
             )
@@ -146,8 +151,8 @@ class LlmHttpTestCase(HttpModuleTestCase):
 
     def test_llm_invoke_endpoint_uses_openai_compatible_adapter(self) -> None:
             server = SampleLlmApiServer(tool_calls_on_tools=True)
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
             server.start()
 
             try:
@@ -159,7 +164,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                         "api_family": "openai_chat_compatible",
                         "model_name": "llama3.2",
                         "base_url": f"{server.base_url}/v1",
-                        "credential_binding": "env:OPENAI_COMPATIBLE_TOKEN",
+                        "credential_binding_id": "openai-api-key",
                     },
                 )
 
@@ -195,17 +200,96 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(list_response.json()[0]["id"], payload["id"])
             finally:
                 if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                    os.environ.pop("OPENAI_API_KEY", None)
                 else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                    os.environ["OPENAI_API_KEY"] = previous_token
+                server.close()
+
+    def test_llm_profile_test_endpoint_invokes_current_form_without_persisting(self) -> None:
+            server = SampleLlmApiServer(tool_calls_on_tools=True)
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
+            server.start()
+
+            try:
+                response = self.client.post(
+                    "/llms/test",
+                    json={
+                        "profile": {
+                            "id": "unsaved-local-chat",
+                            "provider": "openai_compatible",
+                            "api_family": "openai_chat_compatible",
+                            "model_name": "llama3.2",
+                            "base_url": f"{server.base_url}/v1",
+                            "credential_binding_id": "openai-api-key",
+                        },
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+
+                self.assertEqual(response.status_code, 201)
+                payload = response.json()
+                self.assertEqual(payload["llm_id"], "unsaved-local-chat")
+                self.assertEqual(payload["status"], "succeeded")
+                self.assertEqual(payload["result"]["text"], "hello from sample llm")
+
+                list_response = self.client.get("/llms")
+                invocation_response = self.client.get(
+                    "/llms/unsaved-local-chat/invocations",
+                )
+
+                self.assertEqual(list_response.status_code, 200)
+                self.assertNotIn(
+                    "unsaved-local-chat",
+                    {item["id"] for item in list_response.json()},
+                )
+                self.assertEqual(invocation_response.status_code, 200)
+                self.assertEqual(invocation_response.json(), [])
+            finally:
+                if previous_token is None:
+                    os.environ.pop("OPENAI_API_KEY", None)
+                else:
+                    os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
 
     def test_llm_stream_endpoint_returns_sse_events_for_codex(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            auth_path = Path(tempdir) / "auth.json"
-            auth_path.write_text(
-                json.dumps({"tokens": {"access_token": "codex-http-token"}}),
-                encoding="utf-8",
+        with tempfile.TemporaryDirectory():
+            container = self.client.app.state.container
+            container.require(AppKey.ACCESS_OAUTH_TOKEN_STORE).write_token(
+                "oauth_tokens/codex-http.json",
+                OAuthTokenDocument(
+                    access_token="codex-http-token",
+                    refresh_token="codex-http-refresh",
+                ),
+            )
+            container.require(AppKey.ACCESS_GOVERNANCE_REPOSITORY).upsert_oauth_account(
+                AccessOAuthAccountRecord(
+                    account_id="openai-codex:http-test",
+                    provider_id="openai-codex",
+                    credential_binding_id="codex-test",
+                    storage_key="oauth_tokens/codex-http.json",
+                    status="active",
+                ),
+            )
+            self.client.app.state.container.require(
+                AppKey.SETTINGS_ACTION_SERVICE,
+            ).create_resource(
+                CreateSettingsResourceInput(
+                    resource_id="codex-test",
+                    resource_kind="access-assets",
+                    owner_module="access",
+                    payload={
+                        "access_declaration_kind": "credential_binding",
+                        "binding_id": "codex-test",
+                        "binding_kind": "oauth2_account",
+                        "source_kind": "oauth_account",
+                        "source_ref": "openai-codex:http-test",
+                        "masked_preview": "oauth_account",
+                        "status": "active",
+                    },
+                    reason="seed codex test credential binding",
+                    publish=True,
+                ),
             )
             create_response = self.client.post(
                 "/llms",
@@ -215,7 +299,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                     "api_family": "openai_codex_responses",
                     "model_name": "gpt-5-codex",
                     "model_family": "codex",
-                    "credential_binding": f"codex_auth_json:{auth_path}",
+                    "credential_binding_id": "codex-test",
                 },
             )
 
@@ -302,7 +386,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                                 "chat_template_kwargs": {"enable_thinking": False},
                             },
                         },
-                        credential_binding="env:OPENAI_API_KEY",
+                        credential_binding_id="openai-api-key",
                         timeout_seconds=120,
                         max_concurrency=2,
                         concurrency_key="provider:openai",
@@ -342,7 +426,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 )
             finally:
                 client.close()
-                client.app.state.container.engine.dispose()
+                client.app.state.container.close()
                 harness.close()
 
     def test_llm_sync_profiles_endpoint_ignores_legacy_settings_resources(self) -> None:
@@ -362,7 +446,9 @@ class LlmHttpTestCase(HttpModuleTestCase):
             )
 
             try:
-                client.app.state.container.settings_action_service.create_resource(
+                client.app.state.container.require(
+                    AppKey.SETTINGS_ACTION_SERVICE,
+                ).create_resource(
                     CreateSettingsResourceInput(
                         resource_id="legacy-openai",
                         resource_kind="llm-profiles",
@@ -392,7 +478,7 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 )
             finally:
                 client.close()
-                client.app.state.container.engine.dispose()
+                client.app.state.container.close()
                 harness.close()
 
 

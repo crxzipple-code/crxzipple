@@ -4,7 +4,7 @@ import json
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.dispatch.application import (
     CancelDispatchTaskInput,
@@ -95,7 +95,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.create_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).create_task(
                 CreateDispatchTaskInput(
                     task_id=task_id,
                     owner_kind=owner_kind,
@@ -119,7 +119,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.get_task(task_id)
+            task = container.require(AppKey.DISPATCH_SERVICE).get_task(task_id)
         except DispatchTaskNotFoundError as exc:
             _exit_not_found(exc)
         echo_data(DispatchTaskDTO.from_entity(task))
@@ -132,7 +132,7 @@ def build_cli() -> typer.Typer:
         lane_key: str | None = typer.Option(None, help="Optional lane key filter."),
     ) -> None:
         container = ensure_container(ctx)
-        tasks = container.dispatch_service.list_tasks(
+        tasks = container.require(AppKey.DISPATCH_SERVICE).list_tasks(
             status=_parse_status(status),
             owner_kind=owner_kind,
             lane_key=lane_key,
@@ -149,7 +149,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.enqueue_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).enqueue_task(
                 EnqueueDispatchTaskInput(
                     task_id=task_id,
                     lane_key=lane_key,
@@ -178,7 +178,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.claim_next_queued_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).claim_next_queued_task(
                 owner_kind=owner_kind,
                 worker_id=worker_id,
                 claim_token=claim_token,
@@ -197,7 +197,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.wait_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).wait_task(
                 WaitDispatchTaskInput(task_id=task_id, reason=reason),
             )
         except DispatchTaskNotFoundError as exc:
@@ -217,7 +217,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.heartbeat_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).heartbeat_task(
                 HeartbeatDispatchTaskInput(
                     task_id=task_id,
                     worker_id=worker_id,
@@ -242,7 +242,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.requeue_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).requeue_task(
                 RequeueDispatchTaskInput(
                     task_id=task_id,
                     policy=_parse_policy(policy),
@@ -268,7 +268,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            tasks = container.dispatch_service.recover_abandoned_tasks(
+            tasks = container.require(AppKey.DISPATCH_SERVICE).recover_abandoned_tasks(
                 RecoverAbandonedDispatchTasksInput(
                     owner_kind=owner_kind,
                     reason=reason,
@@ -286,7 +286,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.complete_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).complete_task(
                 CompleteDispatchTaskInput(task_id=task_id),
             )
         except DispatchTaskNotFoundError as exc:
@@ -304,7 +304,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.cancel_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).cancel_task(
                 CancelDispatchTaskInput(task_id=task_id, reason=reason),
             )
         except DispatchTaskNotFoundError as exc:
@@ -327,7 +327,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            task = container.dispatch_service.fail_task(
+            task = container.require(AppKey.DISPATCH_SERVICE).fail_task(
                 FailDispatchTaskInput(
                     task_id=task_id,
                     message=message,

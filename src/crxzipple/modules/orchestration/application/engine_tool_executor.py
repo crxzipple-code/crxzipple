@@ -126,6 +126,7 @@ class OrchestrationEngineToolExecutor:
         batch_context = self._batch_context(
             run,
             session_key=session_key,
+            active_session_id=active_session_id,
             resolved_tools=resolved_tools,
             extra_context_attrs=extra_context_attrs,
         )
@@ -171,6 +172,13 @@ class OrchestrationEngineToolExecutor:
                             ExecuteToolInput(
                                 tool_id=prepared.tool_id,
                                 arguments=dict(prepared.tool_call.arguments),
+                                metadata=self._tool_run_metadata(
+                                    run,
+                                    session_key=session_key,
+                                    active_session_id=active_session_id,
+                                    prepared=prepared,
+                                    batch_context=batch_context,
+                                ),
                                 mode=prepared.target.mode,
                                 strategy=prepared.target.strategy,
                                 environment=prepared.target.environment,
@@ -257,6 +265,7 @@ class OrchestrationEngineToolExecutor:
                 target=resolved_tool.target,
                 context_attrs=batch_context.context_attrs,
                 resource_attrs=self._resource_attrs_for(batch_context, resolved_tool),
+                arguments=tool_call.arguments,
             )
             if execution_decision.mode == "blocked":
                 await _flush_tool_call_messages()
@@ -328,6 +337,7 @@ class OrchestrationEngineToolExecutor:
         run: OrchestrationRun,
         *,
         session_key: str,
+        active_session_id: str,
         resolved_tools: ResolvedToolSet,
         extra_context_attrs: dict[str, object] | None = None,
     ) -> _ToolExecutionBatchContext:
@@ -340,6 +350,12 @@ class OrchestrationEngineToolExecutor:
                 **extra_context_attrs,
                 **attrs,
             }
+        normalized_active_session_id = active_session_id.strip()
+        if normalized_active_session_id:
+            attrs["active_session_id"] = normalized_active_session_id
+        trace_id = _optional_context_text(run.metadata.get("trace_id")) or run.id
+        if trace_id:
+            attrs["trace_id"] = trace_id
         resolved_by_name: dict[str, ResolvedTool] = {}
         for resolved_tool in resolved_tools.tools:
             resolved_by_name[resolved_tool.tool.id] = resolved_tool
@@ -350,6 +366,36 @@ class OrchestrationEngineToolExecutor:
             resolved_by_name=resolved_by_name,
             resource_attrs_by_tool_id={},
         )
+
+    @staticmethod
+    def _tool_run_metadata(
+        run: OrchestrationRun,
+        *,
+        session_key: str,
+        active_session_id: str,
+        prepared: _PreparedToolExecution,
+        batch_context: _ToolExecutionBatchContext,
+    ) -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "source": "orchestration",
+            "orchestration_run_id": run.id,
+            "session_key": session_key,
+            "active_session_id": active_session_id,
+            "tool_call_id": prepared.tool_call.id,
+            "tool_name": prepared.tool_call.name,
+            "queue_policy": run.queue_policy.value,
+            "priority": run.priority,
+        }
+        if run.agent_id is not None:
+            metadata["agent_id"] = run.agent_id
+        if run.lane_key is not None:
+            metadata["lane_key"] = run.lane_key
+        if run.lane_lock_key is not None:
+            metadata["lane_lock_key"] = run.lane_lock_key
+        workspace_dir = batch_context.context_attrs.get("workspace_dir")
+        if isinstance(workspace_dir, str) and workspace_dir.strip():
+            metadata["workspace_dir"] = workspace_dir
+        return metadata
 
     def replay_approved_tool_call(
         self,
@@ -463,3 +509,10 @@ class OrchestrationEngineToolExecutor:
             "orchestration.engine.phase_seconds",
             labels={"phase": phase},
         )
+
+
+def _optional_context_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None

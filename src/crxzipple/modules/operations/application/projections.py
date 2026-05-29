@@ -7,12 +7,13 @@ from enum import Enum
 import logging
 from typing import Any, Protocol
 
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.operations.application.event_contracts import (
     OPERATIONS_PROJECTION_INVALIDATED_EVENT,
 )
+from crxzipple.modules.operations.application.ports import OperationsEventPublishPort
 from crxzipple.modules.operations.application.read_models import (
     AccessOperationsQuery,
+    BrowserOperationsQuery,
     ChannelsOperationsQuery,
     DaemonOperationsQuery,
     EventsOperationsQuery,
@@ -31,6 +32,7 @@ _TABLE_PROJECTION_LIMIT = 200
 OPERATIONS_PROJECTION_MODULES: tuple[str, ...] = (
     "orchestration",
     "tool",
+    "browser",
     "llm",
     "access",
     "channels",
@@ -47,6 +49,7 @@ _EVENT_MODULE_TO_PROJECTION_MODULES: dict[str, tuple[str, ...]] = {
     "orchestration": ("orchestration", "events"),
     "dispatch": ("orchestration", "events"),
     "tool": ("tool", "events"),
+    "browser": ("browser", "daemon", "events"),
     "llm": ("llm", "events"),
     "access": ("access", "events"),
     "channels": ("channels", "events"),
@@ -56,8 +59,8 @@ _EVENT_MODULE_TO_PROJECTION_MODULES: dict[str, tuple[str, ...]] = {
     "skill": ("skills", "events"),
     "events": ("events",),
     "event_relay": ("events",),
-    "daemon": ("daemon", "events"),
-    "process": ("daemon", "events"),
+    "daemon": ("daemon", "browser", "events"),
+    "process": ("daemon", "browser", "events"),
 }
 
 class OperationsProjectionWritePort(Protocol):
@@ -87,7 +90,7 @@ class OperationsProjectionMaterializer:
         *,
         source_provider: OperationsReadModelProvider,
         projection_store: OperationsProjectionWritePort,
-        events_service: EventsApplicationService | None = None,
+        events_service: OperationsEventPublishPort | None = None,
     ) -> None:
         self._source_provider = source_provider
         self._projection_store = projection_store
@@ -124,7 +127,7 @@ class OperationsProjectionMaterializer:
         page_payload = _json_ready(_module_page(self._source_provider, module))
         overview = self._source_provider.module_overview(module)
         overview_payload = _json_ready(overview) if overview is not None else {}
-        detail_kind = _module_detail_kind(module)
+        detail_kinds = _module_detail_kinds(module)
         detail_projections = _extract_detail_projections(module, page_payload)
         table_projections, table_detail_projections = _module_table_projections(
             self._source_provider,
@@ -140,7 +143,7 @@ class OperationsProjectionMaterializer:
                 "source": "operations-observer",
                 "materialized_at": format_datetime_utc(now),
             }
-        if detail_kind is not None:
+        for detail_kind in detail_kinds:
             self._projection_store.clear(module=module, kind=detail_kind)
         if table_projections:
             self._projection_store.clear(module=module, kind="table")
@@ -180,7 +183,7 @@ class OperationsProjectionMaterializer:
                 "page",
                 "overview",
                 *(("table",) if table_projections else ()),
-                *((detail_kind,) if detail_kind is not None else ()),
+                *detail_kinds,
             ),
         )
 
@@ -219,6 +222,8 @@ def _module_page(provider: OperationsReadModelProvider, module: str) -> Any:
         return provider.orchestration_page()
     if module == "tool":
         return provider.tool_page(ToolOperationsQuery(limit=50))
+    if module == "browser":
+        return provider.browser_page(BrowserOperationsQuery(limit=1000))
     if module == "llm":
         return provider.llm_page(LlmOperationsQuery(limit=50))
     if module == "access":
@@ -338,15 +343,67 @@ def _extract_detail_projections(
             id_key="invocation_id",
             detail_kind="llm_invocation_detail",
         )
+    if module == "memory":
+        return (
+            *_extract_list_detail_projections(
+                page_payload=page_payload,
+                payload_key="file_details",
+                id_key="file_id",
+                detail_kind="memory_file_detail",
+            ),
+            *_extract_memory_space_detail_projections(page_payload),
+        )
+
     return ()
 
 
-def _module_detail_kind(module: str) -> str | None:
+def _module_detail_kinds(module: str) -> tuple[str, ...]:
     if module == "tool":
-        return "tool_run_detail"
+        return ("tool_run_detail",)
     if module == "llm":
-        return "llm_invocation_detail"
-    return None
+        return ("llm_invocation_detail",)
+    if module == "memory":
+        return ("memory_file_detail", "memory_space_detail")
+    return ()
+
+
+def _extract_memory_space_detail_projections(
+    page_payload: dict[str, Any],
+) -> tuple[tuple[str, str, dict[str, Any]], ...]:
+    stores = page_payload.get("memory_stores")
+    if not isinstance(stores, dict):
+        return ()
+    rows = stores.get("rows")
+    if not isinstance(rows, list):
+        return ()
+    details: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cells = row.get("cells")
+        if not isinstance(cells, dict):
+            continue
+        space_id = str(cells.get("space_id") or "").strip()
+        if not space_id:
+            continue
+        detail = details.setdefault(
+            space_id,
+            {
+                "space_id": space_id,
+                "agents": [],
+                "status": row.get("status") or cells.get("status") or "unknown",
+                "tone": row.get("tone") or "neutral",
+                "stores": [],
+            },
+        )
+        agent_id = str(cells.get("agent") or row.get("id") or "").strip()
+        if agent_id:
+            detail["agents"].append(agent_id)
+        detail["stores"].append(dict(cells))
+    return tuple(
+        ("memory_space_detail", space_id, payload)
+        for space_id, payload in sorted(details.items())
+    )
 
 
 def _extract_list_detail_projections(

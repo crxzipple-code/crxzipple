@@ -6,11 +6,11 @@ from threading import Event as StopEvent
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
 from crxzipple.modules.orchestration.application.lease_manager import (
     OrchestrationLeaseManager,
 )
+from crxzipple.modules.orchestration.application.ports import EventTopicWaitPort
 from crxzipple.modules.orchestration.domain.entities import (
     OrchestrationExecutorLease,
     OrchestrationRun,
@@ -59,7 +59,7 @@ class OrchestrationExecutorService:
     """Execution-side helpers for orchestration executor workers."""
 
     uow_factory: Callable[[], "OrchestrationUnitOfWork"]
-    events_service: EventsApplicationService | None
+    events_service: EventTopicWaitPort | None
     worker_lease_seconds: int
     lease_manager: OrchestrationLeaseManager
     admit_assignment_fn: Callable[..., OrchestrationRun]

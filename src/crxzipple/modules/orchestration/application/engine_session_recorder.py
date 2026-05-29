@@ -7,10 +7,10 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationValidationError,
 )
+from crxzipple.modules.orchestration.application.ports import SessionRecorderPort
 from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
     AppendSessionMessagesInput,
-    SessionApplicationService,
 )
 from crxzipple.modules.session.domain import SessionMessageKind
 from crxzipple.modules.tool.domain import ToolRun
@@ -22,7 +22,7 @@ from crxzipple.shared.content_blocks import (
 
 @dataclass(slots=True)
 class OrchestrationSessionRecorder:
-    session_service: SessionApplicationService
+    session_service: SessionRecorderPort
 
     def ensure_inbound_message(
         self,

@@ -6,11 +6,15 @@ from uuid import uuid4
 
 import typer
 
-from crxzipple.bootstrap import build_container
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging
 from crxzipple.interfaces.cli.crxzipple import guard_runtime_database
 from crxzipple.interfaces.cli.formatters import echo_data
+from crxzipple.interfaces.runtime_container import (
+    AppKey,
+    AssemblyTarget,
+    runtime_container,
+)
 from crxzipple.interfaces.worker_loops import run_tool_worker_loop
 from crxzipple.modules.tool.interfaces.dto import ToolRunDTO
 
@@ -21,10 +25,10 @@ def _resolve_worker_id(worker_id: str | None) -> str:
     return f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
 
 
-def _resolve_max_in_flight(settings: object, explicit_value: int | None) -> int:
+def _resolve_max_in_flight(runtime_bootstrap_config: object, explicit_value: int | None) -> int:
     if explicit_value is not None:
         return max(int(explicit_value), 1)
-    configured_value = getattr(settings, "tool_worker_max_in_flight", 4)
+    configured_value = getattr(runtime_bootstrap_config, "tool_worker_max_in_flight", 4)
     return max(int(configured_value), 1)
 
 
@@ -41,26 +45,30 @@ def build_cli() -> typer.Typer:
     ) -> None:
         settings = load_settings()
         configure_logging(settings)
-        container = build_container(settings=settings)
         resolved_worker_id = _resolve_worker_id(worker_id)
-        try:
-            if container.tool_runtime_event_service is not None:
-                container.tool_runtime_event_service.process_available_events()
-            container.tool_worker_service.register_worker(
-                worker_id=resolved_worker_id,
-            )
-            tool_run = container.tool_worker_service.process_next_assigned_run(
-                worker_id=resolved_worker_id,
-            )
-            if tool_run is None:
-                echo_data({"status": "idle", "worker_id": resolved_worker_id})
-                return
-            echo_data(ToolRunDTO.from_entity(tool_run))
-        finally:
-            container.tool_worker_service.mark_worker_stale(
-                worker_id=resolved_worker_id,
-            )
-            container.engine.dispose()
+        with runtime_container(
+            settings,
+            target=AssemblyTarget.TOOL_WORKER,
+        ) as container:
+            runtime_event_service = container.require(AppKey.TOOL_RUNTIME_EVENT_SERVICE)
+            if runtime_event_service is not None:
+                runtime_event_service.process_available_events()
+            tool_worker_service = container.require(AppKey.TOOL_WORKER_SERVICE)
+            try:
+                tool_worker_service.register_worker(
+                    worker_id=resolved_worker_id,
+                )
+                tool_run = tool_worker_service.process_next_assigned_run(
+                    worker_id=resolved_worker_id,
+                )
+                if tool_run is None:
+                    echo_data({"status": "idle", "worker_id": resolved_worker_id})
+                    return
+                echo_data(ToolRunDTO.from_entity(tool_run))
+            finally:
+                tool_worker_service.mark_worker_stale(
+                    worker_id=resolved_worker_id,
+                )
 
     @app.command("run")
     def run_worker(
@@ -93,30 +101,33 @@ def build_cli() -> typer.Typer:
             min=1,
             help=(
                 "Maximum number of in-flight assignment slots registered for this worker. "
-                "Defaults to APP_TOOL_WORKER_MAX_IN_FLIGHT."
+                "Defaults to Settings runtime defaults."
             ),
         ),
     ) -> None:
         settings = load_settings()
         guard_runtime_database(settings, runtime_name="tool worker")
         configure_logging(settings)
-        container = build_container(settings=settings)
-        resolved_worker_id = _resolve_worker_id(worker_id)
-        resolved_max_in_flight = _resolve_max_in_flight(settings, max_in_flight)
+        with runtime_container(
+            settings,
+            target=AssemblyTarget.TOOL_WORKER,
+        ) as container:
+            resolved_worker_id = _resolve_worker_id(worker_id)
+            resolved_max_in_flight = _resolve_max_in_flight(
+                container.require(AppKey.RUNTIME_BOOTSTRAP_CONFIG),
+                max_in_flight,
+            )
 
-        try:
             run_tool_worker_loop(
-                container.tool_worker_service,
+                container.require(AppKey.TOOL_WORKER_SERVICE),
                 worker_id=resolved_worker_id,
                 poll_interval_seconds=poll_interval_seconds,
                 max_runs=max_runs,
                 max_idle_cycles=max_idle_cycles,
-                events_service=container.events_service,
-                runtime_event_service=container.tool_runtime_event_service,
+                events_service=container.require(AppKey.EVENTS_SERVICE),
+                runtime_event_service=container.require(AppKey.TOOL_RUNTIME_EVENT_SERVICE),
                 max_in_flight=resolved_max_in_flight,
             )
-        finally:
-            container.engine.dispose()
 
     return app
 

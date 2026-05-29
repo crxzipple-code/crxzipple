@@ -55,7 +55,7 @@ class SessionHttpTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
-        self.client.app.state.container.engine.dispose()
+        self.client.app.state.container.close()
         self.harness.close()
         self._system_skills_patcher.stop()
         self._global_skills_patcher.stop()
@@ -75,6 +75,7 @@ class SessionHttpTestCase(unittest.TestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
             },
         )
         self.assertEqual(llm_response.status_code, 201)

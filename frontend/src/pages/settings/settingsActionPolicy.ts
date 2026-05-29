@@ -101,12 +101,12 @@ const actionPolicies: Record<SettingsResourceKind, SettingsActionPolicy> = {
     actions: settingsOwnedActions,
   },
   "skill-catalog": {
-    ownership: "settings-owned",
+    ownership: "module-owned",
     ownerKey: "settings.actionPolicy.owner.settingsSkills",
     truthSourceKey: "settings.actionPolicy.truth.skillCatalog",
     applyPolicyKey: "settings.actionPolicy.apply.skillCatalog",
-    descriptionKey: "settings.actionPolicy.description.validationOnly",
-    actions: validationOnlyActions,
+    descriptionKey: "settings.actionPolicy.description.moduleOwned",
+    actions: [],
   },
   "tool-catalog": {
     ownership: "settings-owned",

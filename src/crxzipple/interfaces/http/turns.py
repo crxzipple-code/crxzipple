@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.orchestration.application.turn_submission import (
     build_submission_options,
@@ -28,7 +28,8 @@ from crxzipple.modules.orchestration.application.ports import (
     OrchestrationExecutorProcessPort,
     OrchestrationInspectionPort,
     OrchestrationRunLookupPort,
-    OrchestrationSchedulerRuntimePort,
+    OrchestrationSchedulerMaintenancePort,
+    OrchestrationSubmissionPort,
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
@@ -181,29 +182,35 @@ def _turn_response_from_run(run) -> TurnResponse:  # noqa: ANN001
 
 
 def _inspection_port(container: AppContainer) -> OrchestrationInspectionPort:
-    return container.orchestration_inspection_service
+    return container.require(AppKey.ORCHESTRATION_INSPECTION_SERVICE)
 
 
 def _approval_control_port(
     container: AppContainer,
 ) -> OrchestrationApprovalControlPort:
-    return container.orchestration_approval_control_service
+    return container.require(AppKey.ORCHESTRATION_APPROVAL_CONTROL_SERVICE)
 
 
 def _cancellation_port(container: AppContainer) -> OrchestrationCancellationPort:
-    return container.orchestration_cancellation_service
+    return container.require(AppKey.ORCHESTRATION_CANCELLATION_SERVICE)
 
 
 def _run_lookup_port(container: AppContainer) -> OrchestrationRunLookupPort:
-    return container.orchestration_run_query_service
+    return container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE)
 
 
-def _scheduler_port(container: AppContainer) -> OrchestrationSchedulerRuntimePort:
-    return container.orchestration_scheduler_service
+def _submission_port(container: AppContainer) -> OrchestrationSubmissionPort:
+    return container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE)
+
+
+def _scheduler_maintenance_port(
+    container: AppContainer,
+) -> OrchestrationSchedulerMaintenancePort:
+    return container.require(AppKey.ORCHESTRATION_SCHEDULER_MAINTENANCE_SERVICE)
 
 
 def _executor_process_port(container: AppContainer) -> OrchestrationExecutorProcessPort:
-    return container.orchestration_executor_service
+    return container.require(AppKey.ORCHESTRATION_EXECUTOR_CONTROL_SERVICE)
 
 
 @router.post(
@@ -216,7 +223,7 @@ def create_turn(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> TurnResponse:
     profile, error = resolve_profile(
-        container.agent_service,
+        container.require(AppKey.AGENT_SERVICE),
         agent_id=payload.agent_id,
     )
     if profile is None:
@@ -240,9 +247,9 @@ def create_turn(
     )
 
     try:
-        scheduler_service = _scheduler_port(container)
+        submission_service = _submission_port(container)
         run = submit_turn(
-            scheduler_service,
+            submission_service,
             content=payload.content,
             options=options,
             inline_worker_id=None,
@@ -315,7 +322,7 @@ def request_turn_compaction(
     payload: RequestCompactionRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> TurnResponse:
-    scheduler_service = _scheduler_port(container)
+    scheduler_service = _scheduler_maintenance_port(container)
     try:
         run = scheduler_service.request_compaction(
             RequestCompactionInput(
@@ -344,7 +351,7 @@ def request_turn_heartbeat(
     payload: RequestHeartbeatRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> TurnResponse:
-    scheduler_service = _scheduler_port(container)
+    scheduler_service = _scheduler_maintenance_port(container)
     try:
         run = scheduler_service.request_heartbeat(
             RequestHeartbeatInput(
@@ -373,7 +380,7 @@ def request_turn_memory_flush(
     payload: RequestMemoryFlushRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> TurnResponse:
-    scheduler_service = _scheduler_port(container)
+    scheduler_service = _scheduler_maintenance_port(container)
     try:
         run = scheduler_service.request_memory_flush(
             RequestMemoryFlushInput(

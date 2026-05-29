@@ -65,6 +65,7 @@ class RedisEventsBackend(
         self._publisher_id = uuid4().hex
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
         self._listener_threads: dict[str, Thread] = {}
+        self._listener_stop_events: dict[str, ThreadEvent] = {}
         self._listener_lock = Lock()
         self.published_events: list[BusEvent] = []
 
@@ -399,19 +400,26 @@ class RedisEventsBackend(
         with self._listener_lock:
             if topic in self._listener_threads:
                 return
+            stop_event = ThreadEvent()
             thread = Thread(
                 target=self._listen_topic_stream,
-                args=(topic, start_cursor),
+                args=(topic, start_cursor, stop_event),
                 name=f"events-topic-{uuid4().hex[:8]}",
                 daemon=True,
             )
+            self._listener_stop_events[topic] = stop_event
             self._listener_threads[topic] = thread
             thread.start()
 
-    def _listen_topic_stream(self, topic: str, start_cursor: str) -> None:
+    def _listen_topic_stream(
+        self,
+        topic: str,
+        start_cursor: str,
+        stop_event: ThreadEvent,
+    ) -> None:
         stream_key = self._topic_stream_key(topic)
         cursor = start_cursor
-        while True:
+        while not stop_event.is_set():
             try:
                 response = self._client.xread(
                     {stream_key: cursor},
@@ -437,6 +445,21 @@ class RedisEventsBackend(
                         EventSelector.topic_only(topic),
                     ):
                         handler(envelope)
+
+    def close(self) -> None:
+        with self._listener_lock:
+            stop_events = tuple(self._listener_stop_events.values())
+            threads = tuple(self._listener_threads.values())
+            self._listener_stop_events.clear()
+            self._listener_threads.clear()
+            self._handlers.clear()
+        for stop_event in stop_events:
+            stop_event.set()
+        for thread in threads:
+            thread.join(timeout=max(self._block_ms / 1000.0, 0.05) + 0.1)
+        close_client = getattr(self._client, "close", None)
+        if callable(close_client):
+            close_client()
 
     def _snapshot_handlers(self, selector: EventSelector) -> tuple[EventHandler, ...]:
         return tuple(self._handlers.get(selector.key, ()))

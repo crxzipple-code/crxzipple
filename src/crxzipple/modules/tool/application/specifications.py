@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from crxzipple.shared.domain import ValueObject
+from crxzipple.shared.access import AccessCredentialRequirementSet
 
 from crxzipple.modules.tool.domain.entities import Tool
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
@@ -11,7 +12,7 @@ from crxzipple.modules.tool.domain.value_objects import (
     ToolExecutionSupport,
     ToolKind,
     ToolParameter,
-    ToolSourceKind,
+    ToolDefinitionOrigin,
 )
 
 
@@ -48,9 +49,15 @@ class ToolSpec(ValueObject):
     required_effect_ids: tuple[str, ...] = field(default_factory=tuple)
     access_requirements: tuple[str, ...] = field(default_factory=tuple)
     access_requirement_sets: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    runtime_requirement_sets: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    context_requirements: tuple[str, ...] = field(default_factory=tuple)
+    capability_ids: tuple[str, ...] = field(default_factory=tuple)
+    credential_requirements: tuple[AccessCredentialRequirementSet, ...] = (
+        field(default_factory=tuple)
+    )
     execution_policy: ToolExecutionPolicy = field(default_factory=ToolExecutionPolicy)
     execution_support: ToolExecutionSupport = field(default_factory=ToolExecutionSupport)
-    source_kind: ToolSourceKind = ToolSourceKind.MANUAL
+    definition_origin: ToolDefinitionOrigin = ToolDefinitionOrigin.LOCAL_DISCOVERY
     runtime_key: str | None = None
     enabled: bool = True
 
@@ -98,6 +105,41 @@ class ToolSpec(ValueObject):
                 fallback_requirements=access_requirements,
             ),
         )
+        object.__setattr__(
+            self,
+            "runtime_requirement_sets",
+            _normalize_access_requirement_sets(
+                self.runtime_requirement_sets,
+                fallback_requirements=(),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "context_requirements",
+            tuple(
+                dict.fromkeys(
+                    requirement.strip()
+                    for requirement in self.context_requirements
+                    if requirement is not None and requirement.strip()
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "capability_ids",
+            tuple(
+                dict.fromkeys(
+                    capability_id.strip()
+                    for capability_id in self.capability_ids
+                    if capability_id is not None and capability_id.strip()
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "credential_requirements",
+            tuple(self.credential_requirements),
+        )
 
     @classmethod
     def from_tool(cls, tool: Tool, *, provider_name: str) -> "ToolSpec":
@@ -112,9 +154,13 @@ class ToolSpec(ValueObject):
             required_effect_ids=tool.required_effect_ids,
             access_requirements=tool.access_requirements,
             access_requirement_sets=tool.access_requirement_sets,
+            runtime_requirement_sets=tool.runtime_requirement_sets,
+            context_requirements=tool.context_requirements,
+            capability_ids=tool.capability_ids,
+            credential_requirements=tool.credential_requirements,
             execution_policy=tool.execution_policy,
             execution_support=tool.execution_support,
-            source_kind=tool.source_kind,
+            definition_origin=tool.definition_origin,
             runtime_key=tool.runtime_key,
             enabled=tool.enabled,
         )

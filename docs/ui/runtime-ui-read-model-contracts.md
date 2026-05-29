@@ -271,6 +271,15 @@ section：
 - `failed_tools`
 - `recent_artifacts`
 - `strategies`
+- `source_health`
+- `discovery_failures`
+- `function_catalog`
+- `provider_backend_health`
+- `cli_process_health`
+
+`provider_backend_health` 的 readiness 来自 Tool application service 对 Access
+credential readiness 与 runtime requirements 的聚合；Operations 只增加 24h
+calls/failures 等运维统计，不在页面侧重新解释 credential requirement。
 
 动作：
 
@@ -517,6 +526,21 @@ Settings 共享契约分成两层。
 
 不同资源的 detail section 由 owner module 定义。例如 Tool Catalog 必须有 input schema、output schema、runtime strategy、access/effects、artifact output、contract test；Runtime Defaults 必须有 precedence、dry run、impact preview、audit reason。
 
+Tool Catalog Settings 当前按全屏应用结构组织为：
+
+- Function table：source、runtime、status、enabled、credential readiness、policy。
+- Source table：source kind（catalog source type）、status、revision、discovery history 和
+  refresh/disable/delete；runtime function 使用 definition origin 表达定义来源。
+- Backend table：backend capability、credential binding、Tool-owned readiness、runtime、status。
+- Run table：tool run lifecycle、attempt、target、error/result。
+- 右侧 detail drawer：根据所选视角展示 contract、requirements、policy、recent runs、
+  source config、discovery history 或 backend readiness；不把 provider/backend/source
+  假数据塞进通用卡片。
+
+Settings 可以触发 Tool owner module 提供的 create/update/refresh/disable/delete/test
+application action，但不直接调用 discovery adapter、runtime registry 或 Access secret
+material。
+
 ## API 设计建议
 
 第一阶段只做 read endpoints：
@@ -536,8 +560,8 @@ Settings 共享契约分成两层。
 
 该 endpoint 只作为 console action dispatcher，payload 必须包含 owner、target、confirmation、reason 和 trace。实际写操作不在 `/ui` 内部完成，而是路由到治理 owner 的 application service：
 
-- Settings-owned config resource 写入 Settings action service；access asset、credential binding 声明、authorization policy、permission enable/disable 等访问配置也属于 Settings-owned config resource。
-- Access runtime action 只处理 secret material capture、credential verification、setup session、temporary runtime grant 等运行时事实，不持有配置治理真相。
+- Settings-owned config resource 写入 Settings action service；access asset、credential binding 声明、consumer binding、provider/account/scope enablement、rotation/export/redaction policy 等外部访问配置属于 Settings-owned config resource 或 Access-governed config shell。
+- Access runtime action 只处理 secret material capture、credential verification、setup session、OAuth account lifecycle、credential lease 等外部访问运行时事实，不持有内部 authorization policy 或 authorization grant。
 - Operations/runtime action 写入 Operations 或对应 runtime control action service。
 - 业务模块可以提供 validator、runtime summary 和 apply hook，但不能绕过 Settings / Access 成为配置或访问治理写入口。
 

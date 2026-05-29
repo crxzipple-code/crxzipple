@@ -10,7 +10,13 @@ from crxzipple.modules.channels.application.event_contracts import (
     channel_event_topic_contracts,
 )
 from crxzipple.modules.channels.application.ports import (
+    ChannelAccessReadinessPort,
+    ChannelAgentProfilePort,
+    ChannelArtifactReadPort,
+    ChannelDaemonSpecRegistryPort,
+    ChannelEventStreamPort,
     ChannelInteractionRegistryStore,
+    ChannelResolvedArtifactVariantPort,
     ChannelRuntimeRegistryStore,
     ChannelSystemConfigStore,
 )
@@ -31,9 +37,15 @@ from crxzipple.modules.channels.application.settings_integration import (
 
 __all__ = [
     "ChannelControlService",
+    "ChannelAccessReadinessPort",
+    "ChannelAgentProfilePort",
+    "ChannelArtifactReadPort",
+    "ChannelDaemonSpecRegistryPort",
+    "ChannelEventStreamPort",
     "ChannelInteractionRegistryStore",
     "ChannelInteractionService",
     "ChannelProfileApplicationService",
+    "ChannelResolvedArtifactVariantPort",
     "ChannelRuntimePlan",
     "ChannelRuntimePlanner",
     "ChannelRuntimeBootstrapService",

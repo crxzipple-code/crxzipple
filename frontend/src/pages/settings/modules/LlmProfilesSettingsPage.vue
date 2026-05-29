@@ -1,334 +1,304 @@
 <script setup lang="ts">
-import { ArrowRight, Brain, CheckCircle2, Copy, GitBranch, Layers, ListFilter, Play, RefreshCcw, Save, Search, Shield } from "lucide-vue-next";
+import {
+  Brain,
+  CheckCircle2,
+  KeyRound,
+  Layers,
+  Play,
+  Plus,
+  RefreshCcw,
+  Save,
+  Search,
+  Zap,
+} from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 
-import DataTable from "@/shared/ui/DataTable.vue";
-import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
-import { listSettingsResources } from "../api";
 import {
+  getAccessOverview,
+  type AccessCredentialBindingPayload,
+} from "../ownerApis/accessAssets";
+import {
+  createLlmProfile,
   getLlmProfile,
-  invokeLlmProfile,
   listLlmProfiles,
   setLlmProfileEnabled,
+  testLlmProfile,
   updateLlmProfile,
   type LlmInvocationApiPayload,
   type LlmProfileApiPayload,
   type LlmProfileWritePayload,
 } from "../ownerApis/llmProfiles";
 
-type TableRow = Record<string, string | number | null>;
-type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
+const PROVIDER_OPTIONS = ["openai", "openai_codex", "openai_compatible", "anthropic", "google", "ollama"];
+const API_FAMILY_OPTIONS = [
+  "openai_responses",
+  "openai_codex_responses",
+  "openai_chat_compatible",
+  "anthropic_messages",
+  "gemini_generate_content",
+  "ollama_native",
+];
+const MODEL_FAMILY_OPTIONS = ["general", "codex", "reasoning", "vision"];
+const REASONING_EFFORT_OPTIONS = ["", "low", "medium", "high"];
+type CredentialExpectationKind = "api_key" | "oauth2_account" | "optional_api_key" | "none" | "any";
 
-interface SettingsSourcePayload {
-  kind?: string;
-  name?: string;
-  source_id?: string;
-  version?: number | string | null;
-  version_id?: string | null;
-  override_id?: string | null;
-  applied?: boolean;
-  reason?: string | null;
+interface CredentialExpectation {
+  kind: CredentialExpectationKind;
+  label: string;
+  requiresCredential: boolean;
 }
 
-interface SettingsResolutionPayload {
-  value?: unknown;
-  source?: SettingsSourcePayload;
-  sources?: SettingsSourcePayload[];
-  override_trace?: SettingsSourcePayload[];
-  snapshot_id?: string | null;
-  resolved_at?: string | null;
-  validation?: {
-    ok?: boolean;
-    errors?: unknown[];
-    warnings?: unknown[];
-    metadata?: Record<string, unknown>;
-  };
-}
-
-interface SettingsResourceSummary {
-  resource_id: string;
-  id?: string;
-  display_name?: string;
-  status?: string;
-  enabled?: boolean;
-  source?: string | null;
-  version?: number | string | null;
-  updated_at?: string | null;
-  metadata?: Record<string, unknown>;
-  effective_config?: Record<string, unknown>;
-  resolution?: SettingsResolutionPayload;
-}
-
-interface SettingsVersionPayload {
-  id?: string;
-  version_number?: number | string | null;
-  status?: string;
-  source?: string | null;
-  reason?: string | null;
-  created_by?: string | null;
-  created_at?: string | null;
-  published_at?: string | null;
-  validation?: {
-    ok?: boolean;
-    errors?: unknown[];
-    warnings?: unknown[];
-  };
-}
-
-interface SettingsValidationPayload {
-  status?: string;
-  last_validated_at?: string | null;
-  checks?: {
-    columns?: string[];
-    rows?: TableRow[];
-  };
-  result?: {
-    ok?: boolean;
-    errors?: unknown[];
-    warnings?: unknown[];
-  };
-}
-
-interface SettingsAuditPayload {
-  recent_changes?: {
-    columns?: string[];
-    rows?: TableRow[];
-  };
-  reason_required?: boolean;
-  audit_history_route?: string;
-}
-
-interface SettingsResourceDetail extends SettingsResourceSummary {
-  title?: string;
-  payload?: Record<string, unknown>;
-  validation?: SettingsValidationPayload;
-  audit?: SettingsAuditPayload;
-  versions?: SettingsVersionPayload[];
-}
-
-interface SettingsListPayload {
-  total?: number;
-  limit?: number;
-  offset?: number;
-}
-
-interface SettingsKindPayload {
-  title?: string;
-  description?: string;
-  status?: string;
-  resources?: SettingsResourceSummary[];
-  list?: SettingsListPayload;
-  detail?: SettingsResourceDetail | null;
-  audit?: SettingsAuditPayload;
-}
-
-const page = ref<SettingsKindPayload | null>(null);
-const selectedDetail = ref<SettingsResourceDetail | null>(null);
-const selectedResourceId = ref<string | null>(null);
+const profiles = ref<LlmProfileApiPayload[]>([]);
+const selectedProfileId = ref<string | null>(null);
+const isCreatingProfile = ref(false);
 const isLoading = ref(false);
 const detailLoading = ref(false);
 const loadError = ref<string | null>(null);
 const detailError = ref<string | null>(null);
 const searchTerm = ref("");
-const editorText = ref("");
 const editorError = ref<string | null>(null);
 const actionMessage = ref<string | null>(null);
 const actionError = ref<string | null>(null);
-const testError = ref<string | null>(null);
 const isSaving = ref(false);
 const isToggling = ref(false);
 const isTesting = ref(false);
 const testPrompt = ref("Reply with a short readiness check.");
+const testError = ref<string | null>(null);
 const testResult = ref<LlmInvocationApiPayload | null>(null);
+const editProfileId = ref("");
+const editProvider = ref("");
+const editApiFamily = ref("");
+const editModelName = ref("");
+const editContextWindowTokens = ref("");
+const editModelFamily = ref("general");
+const editCapabilities = ref("");
+const editBaseUrl = ref("");
+const editCredentialBindingId = ref("");
+const editTimeoutSeconds = ref("60");
+const editMaxConcurrency = ref("");
+const editConcurrencyKey = ref("");
+const editTemperature = ref("");
+const editTopP = ref("");
+const editMaxOutputTokens = ref("");
+const editReasoningEffort = ref("");
+const editEnabled = ref(true);
+const credentialBindings = ref<AccessCredentialBindingPayload[]>([]);
+const credentialBindingsLoading = ref(false);
+const credentialBindingsError = ref<string | null>(null);
 
-const resources = computed(() => page.value?.resources ?? []);
-const backendTotal = computed(() => page.value?.list?.total ?? resources.value.length);
-const listLimit = computed(() => page.value?.list?.limit ?? resources.value.length);
-const listOffset = computed(() => page.value?.list?.offset ?? 0);
+const selectedProfile = computed(() =>
+  profiles.value.find((profile) => profile.id === selectedProfileId.value) ?? null,
+);
 
-const filteredResources = computed(() => {
+const filteredProfiles = computed(() => {
   const query = searchTerm.value.trim().toLowerCase();
-  if (!query) return resources.value;
-  return resources.value.filter((resource) => {
-    const config = effectiveConfig(resource);
-    return [
-      resource.display_name,
-      resource.resource_id,
-      config.provider,
-      config.api_family,
-      config.model_name,
-      config.model_family,
-      resource.status,
-      resource.source,
-    ].some((value) => textValue(value, "").toLowerCase().includes(query));
-  });
+  if (!query) return profiles.value;
+  return profiles.value.filter((profile) =>
+    [
+      profile.id,
+      profile.provider,
+      profile.api_family,
+      profile.model_name,
+      profile.model_family,
+      profile.credential_binding_id,
+      profile.source_kind,
+      ...profile.capabilities,
+    ].filter(Boolean).join(" ").toLowerCase().includes(query),
+  );
 });
 
-const profileRows = computed<TableRow[]>(() =>
-  filteredResources.value.map((resource) => {
-    const config = effectiveConfig(resource);
-    return {
-      Name: textValue(resource.display_name, resource.resource_id),
-      ID: resource.resource_id,
-      Provider: textValue(config.provider),
-      "API Family": textValue(config.api_family),
-      Model: textValue(config.model_name),
-      Status: titleize(resource.status),
-      Enabled: yesNo(resource.enabled),
-      Source: textValue(resource.source),
-      Version: textValue(resource.version),
-      "Updated At": textValue(resource.updated_at),
-    };
+const enabledCount = computed(() => profiles.value.filter((profile) => profile.enabled).length);
+const disabledCount = computed(() => Math.max(0, profiles.value.length - enabledCount.value));
+const usedCredentialBindingCount = computed(() =>
+  new Set(
+    profiles.value
+      .map((profile) => profile.credential_binding_id)
+      .filter((value): value is string => Boolean(value)),
+  ).size,
+);
+const credentialExpectation = computed(() =>
+  credentialExpectationFor(editProvider.value, editApiFamily.value),
+);
+const credentialBindingOptions = computed(() =>
+  [...credentialBindings.value].sort((left, right) => {
+    const leftCompatibility = credentialBindingCompatibility(left, credentialExpectation.value);
+    const rightCompatibility = credentialBindingCompatibility(right, credentialExpectation.value);
+    if (leftCompatibility.compatible !== rightCompatibility.compatible) {
+      return leftCompatibility.compatible ? -1 : 1;
+    }
+    const byRank = credentialBindingRank(left) - credentialBindingRank(right);
+    if (byRank !== 0) return byRank;
+    return left.binding_id.localeCompare(right.binding_id);
   }),
 );
-
-const selectedConfig = computed(() => selectedDetail.value?.effective_config ?? {});
-const selectedResolution = computed(() => selectedDetail.value?.resolution ?? null);
-const selectedSource = computed(() => selectedResolution.value?.source ?? null);
-const validationStatus = computed(() => {
-  const explicit = selectedDetail.value?.validation?.status;
-  if (explicit) return explicit;
-  return selectedResolution.value?.validation?.ok === true ? "valid" : "unknown";
-});
-const validationTone = computed<StatusTone>(() => toneForStatus(validationStatus.value));
-
-const effectiveRows = computed<TableRow[]>(() =>
-  objectRows(selectedConfig.value, [
-    "provider",
-    "api_family",
-    "model_name",
-    "model_family",
-    "capabilities",
-    "default_params",
-    "base_url",
-    "credential_binding",
-    "timeout_seconds",
-    "max_concurrency",
-    "concurrency_key",
-    "source_kind",
-    "enabled",
-  ]),
+const credentialBindingCount = computed(() => credentialBindingOptions.value.length);
+const selectedCredentialBinding = computed(() =>
+  credentialBindingOptions.value.find((binding) => binding.binding_id === editCredentialBindingId.value) ?? null,
 );
-
-const payloadRows = computed<TableRow[]>(() => objectRows(selectedDetail.value?.payload ?? {}, []));
-
-const resolutionRows = computed<TableRow[]>(() => {
-  const sources = selectedResolution.value?.sources ?? [];
-  return sources.map((source, index) => ({
-    Step: index + 1,
-    Kind: titleize(source.kind),
-    Source: textValue(source.name ?? source.source_id),
-    Version: textValue(source.version ?? source.version_id),
-    Applied: yesNo(source.applied),
-    Reason: textValue(source.reason),
-  }));
-});
-
-const overrideRows = computed<TableRow[]>(() =>
-  (selectedResolution.value?.override_trace ?? []).map((source, index) => ({
-    Step: index + 1,
-    Kind: titleize(source.kind),
-    Source: textValue(source.name ?? source.source_id),
-    Version: textValue(source.version ?? source.version_id),
-    Applied: yesNo(source.applied),
-    Reason: textValue(source.reason),
-  })),
+const selectedCredentialCompatibility = computed(() =>
+  selectedCredentialBinding.value
+    ? credentialBindingCompatibility(selectedCredentialBinding.value, credentialExpectation.value)
+    : null,
 );
-
-const validationRows = computed<TableRow[]>(() => {
-  const checkRows = selectedDetail.value?.validation?.checks?.rows;
-  if (checkRows?.length) return checkRows;
-  const validation = selectedDetail.value?.validation?.result ?? selectedResolution.value?.validation;
-  return [
-    { Check: "schema", Result: validation?.ok === false ? "failed" : textValue(validationStatus.value) },
-    { Check: "warnings", Result: String(validation?.warnings?.length ?? 0) },
-    { Check: "errors", Result: String(validation?.errors?.length ?? 0) },
-  ];
-});
-
-const versionRows = computed<TableRow[]>(() =>
-  (selectedDetail.value?.versions ?? []).map((version) => ({
-    Version: textValue(version.version_number, version.id ?? "-"),
-    Status: titleize(version.status),
-    Source: textValue(version.source),
-    "Created By": textValue(version.created_by),
-    "Created At": textValue(version.created_at),
-    "Published At": textValue(version.published_at),
-    Reason: textValue(version.reason),
-  })),
+const currentCredentialBindingMissing = computed(() =>
+  Boolean(editCredentialBindingId.value && !selectedCredentialBinding.value && !credentialBindingsLoading.value),
 );
+const credentialBindingSelectionError = computed(() => {
+  if (credentialBindingsError.value) return credentialBindingsError.value;
+  if (currentCredentialBindingMissing.value) return `${editCredentialBindingId.value} is not registered in Access.`;
+  if (credentialExpectation.value.requiresCredential && !editCredentialBindingId.value) {
+    return `${credentialExpectation.value.label} credential is required.`;
+  }
+  if (selectedCredentialCompatibility.value && !selectedCredentialCompatibility.value.compatible) {
+    return selectedCredentialCompatibility.value.reason;
+  }
+  return null;
+});
+const limitedProfilesCount = computed(() =>
+  profiles.value.filter((profile) => profile.max_concurrency !== null).length,
+);
+const unlimitedProfilesCount = computed(() =>
+  Math.max(0, profiles.value.length - limitedProfilesCount.value),
+);
+const isRefreshing = computed(() => isLoading.value || credentialBindingsLoading.value);
 
-const auditRows = computed<TableRow[]>(() => selectedDetail.value?.audit?.recent_changes?.rows ?? []);
-const selectedStatusTone = computed<StatusTone>(() => toneForStatus(selectedDetail.value?.status));
-const selectedTitle = computed(() => selectedDetail.value?.title ?? selectedDetail.value?.display_name ?? selectedDetail.value?.resource_id ?? "No profile selected");
-const sourceCount = computed(() => selectedResolution.value?.sources?.length ?? 0);
-const overrideCount = computed(() => selectedResolution.value?.override_trace?.length ?? 0);
-const capabilities = computed(() => arrayValue(selectedConfig.value.capabilities));
-const canRunOwnerAction = computed(() => Boolean(selectedResourceId.value && selectedDetail.value));
-const testDisabledReason = computed(() => {
-  if (!selectedResourceId.value) return "Select a profile before running a probe.";
-  if (selectedDetail.value?.enabled === false) return "Disabled LLM profiles cannot be invoked.";
-  return "Dedicated /test endpoint is not exposed; this probe uses /llms/{id}/invoke.";
+const canEditProfile = computed(() => isCreatingProfile.value || Boolean(selectedProfile.value));
+const canSaveProfile = computed(() =>
+  canEditProfile.value && !credentialBindingSelectionError.value,
+);
+const canRunProfileProbe = computed(() =>
+  canEditProfile.value
+  && !credentialBindingSelectionError.value
+  && Boolean(editProfileId.value.trim())
+  && Boolean(editProvider.value.trim())
+  && Boolean(editApiFamily.value.trim())
+  && Boolean(editModelName.value.trim()),
+);
+const selectedTitle = computed(() => {
+  if (isCreatingProfile.value) return "New LLM profile";
+  const profile = selectedProfile.value;
+  if (!profile) return "Select an LLM profile";
+  return `${profile.provider} / ${profile.model_name}`;
+});
+const selectedSubtitle = computed(() => {
+  if (isCreatingProfile.value) return "Manual profile · POST /llms";
+  const profile = selectedProfile.value;
+  if (!profile) return "Profiles are loaded directly from /llms.";
+  return `${profile.id} · ${profile.api_family} · ${profile.model_family}`;
+});
+const probeStatusLabel = computed(() => {
+  if (isTesting.value) return "Running";
+  if (testResult.value?.status) return testResult.value.status;
+  if (testError.value) return "request failed";
+  return "idle";
+});
+const probeResultText = computed(() => {
+  if (testResult.value?.error) return testResult.value.error.message;
+  return testResult.value?.result?.text ?? "";
+});
+const probeUsageLabel = computed(() => formatUsage(testResult.value?.result?.usage ?? null));
+const probeFinishLabel = computed(() => testResult.value?.result?.finish_reason ?? "-");
+const probeRequestLabel = computed(() => testResult.value?.provider_request_id ?? testResult.value?.id ?? "-");
+const credentialBindingNote = computed(() => {
+  if (credentialBindingsLoading.value) return "Loading credential bindings from Access...";
+  if (credentialBindingSelectionError.value) return credentialBindingSelectionError.value;
+  if (selectedCredentialBinding.value) {
+    return `${formatCredentialBindingMeta(selectedCredentialBinding.value)} · matches ${credentialExpectation.value.label}`;
+  }
+  if (!credentialBindingOptions.value.length) return "No Access credential bindings found. Create one in Access first.";
+  if (credentialExpectation.value.kind === "none") return "This provider normally does not need a credential.";
+  return `Select an Access-owned ${credentialExpectation.value.label} binding.`;
+});
+const credentialBindingNoteTone = computed(() => {
+  if (credentialBindingSelectionError.value) return "is-error";
+  if (selectedCredentialBinding.value) return "is-success";
+  return "is-muted";
 });
 
 onMounted(() => {
-  void loadProfiles();
+  void loadAll();
 });
+
+async function loadAll(): Promise<void> {
+  await Promise.all([loadProfiles(), loadAccessCredentialBindings()]);
+}
 
 async function loadProfiles(): Promise<void> {
   isLoading.value = true;
   loadError.value = null;
+  detailError.value = null;
   try {
-    const [profiles, overlay] = await Promise.all([
-      listLlmProfiles(),
-      loadSettingsOverlay(),
-    ]);
-    const payload = buildLlmProfilePage(profiles, overlay);
-    page.value = payload;
-    const firstResourceId = payload.resources?.[0]?.resource_id ?? null;
-    selectedResourceId.value = firstResourceId;
-    selectedDetail.value = payload.detail ?? null;
-    syncEditorFromDetail();
+    const loaded = await listLlmProfiles();
+    profiles.value = loaded;
+    const selectedStillExists = loaded.some((profile) => profile.id === selectedProfileId.value);
+    selectedProfileId.value = selectedStillExists
+      ? selectedProfileId.value
+      : loaded[0]?.id ?? null;
+    syncFormFromProfile();
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : String(error);
-    page.value = null;
-    selectedDetail.value = null;
-    selectedResourceId.value = null;
+    profiles.value = [];
+    selectedProfileId.value = null;
+    syncFormFromProfile(null);
   } finally {
     isLoading.value = false;
   }
 }
 
-async function loadProfileDetail(resourceId: string): Promise<void> {
-  detailLoading.value = true;
-  detailError.value = null;
-  selectedResourceId.value = resourceId;
-  testResult.value = null;
-  testError.value = null;
+async function loadAccessCredentialBindings(): Promise<void> {
+  credentialBindingsLoading.value = true;
+  credentialBindingsError.value = null;
   try {
-    selectedDetail.value = llmProfileToDetail(await getLlmProfile(resourceId));
-    syncEditorFromDetail();
+    const overview = await getAccessOverview();
+    credentialBindings.value = overview.credential_bindings ?? [];
+  } catch (error) {
+    credentialBindingsError.value = error instanceof Error ? error.message : String(error);
+    credentialBindings.value = [];
+  } finally {
+    credentialBindingsLoading.value = false;
+  }
+}
+
+async function selectProfile(profileId: string): Promise<void> {
+  if (!profileId || profileId === selectedProfileId.value) return;
+  isCreatingProfile.value = false;
+  selectedProfileId.value = profileId;
+  detailError.value = null;
+  testError.value = null;
+  testResult.value = null;
+  detailLoading.value = true;
+  try {
+    const profile = await getLlmProfile(profileId);
+    replaceProfile(profile);
+    syncFormFromProfile(profile);
   } catch (error) {
     detailError.value = error instanceof Error ? error.message : String(error);
+    syncFormFromProfile();
   } finally {
     detailLoading.value = false;
   }
 }
 
-async function saveProfileJson(): Promise<void> {
-  if (!selectedResourceId.value) return;
+async function saveProfileForm(): Promise<void> {
+  if (!canEditProfile.value) return;
   isSaving.value = true;
   editorError.value = null;
   actionError.value = null;
   actionMessage.value = null;
   try {
-    const payload = parseProfileWritePayload(editorText.value, selectedResourceId.value);
-    const updated = await updateLlmProfile(selectedResourceId.value, payload);
-    selectedDetail.value = llmProfileToDetail(updated);
-    syncEditorFromDetail();
-    actionMessage.value = `Updated ${updated.id} through the LLM module API.`;
-    await refreshListKeepingSelection(updated.id);
+    const wasCreating = isCreatingProfile.value;
+    const payload = buildProfileWritePayload();
+    const updated = wasCreating
+      ? await createLlmProfile(payload)
+      : await updateLlmProfile(payload.id, payload);
+    replaceProfile(updated);
+    selectedProfileId.value = updated.id;
+    isCreatingProfile.value = false;
+    syncFormFromProfile(updated);
+    actionMessage.value = wasCreating
+      ? `Created ${updated.id} through /llms.`
+      : `Saved ${updated.id} through /llms/${updated.id}.`;
   } catch (error) {
     editorError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -336,31 +306,42 @@ async function saveProfileJson(): Promise<void> {
   }
 }
 
-async function toggleProfileEnabled(enabled: boolean): Promise<void> {
-  if (!selectedResourceId.value) return;
+async function toggleSelectedProfile(enabled: boolean): Promise<void> {
+  if (!selectedProfileId.value) return;
   isToggling.value = true;
   actionError.value = null;
   actionMessage.value = null;
   try {
-    const updated = await setLlmProfileEnabled(selectedResourceId.value, enabled);
-    selectedDetail.value = llmProfileToDetail(updated);
-    syncEditorFromDetail();
-    actionMessage.value = `${enabled ? "Enabled" : "Disabled"} ${updated.id} through the LLM module API.`;
-    await refreshListKeepingSelection(updated.id);
+    const updated = await setLlmProfileEnabled(selectedProfileId.value, enabled);
+    replaceProfile(updated);
+    syncFormFromProfile(updated);
+    actionMessage.value = `${enabled ? "Enabled" : "Disabled"} ${updated.id}.`;
   } catch (error) {
     actionError.value = error instanceof Error ? error.message : String(error);
+    syncFormFromProfile();
   } finally {
     isToggling.value = false;
   }
 }
 
+async function handleEnabledChange(event: Event): Promise<void> {
+  const target = event.target instanceof HTMLInputElement ? event.target : null;
+  if (!target) return;
+  const enabled = target.checked;
+  editEnabled.value = enabled;
+  if (isCreatingProfile.value) return;
+  if (!selectedProfileId.value || !selectedProfile.value) return;
+  await toggleSelectedProfile(enabled);
+}
+
 async function runProfileProbe(): Promise<void> {
-  if (!selectedResourceId.value || selectedDetail.value?.enabled === false) return;
+  if (!canRunProfileProbe.value) return;
   isTesting.value = true;
   testError.value = null;
   testResult.value = null;
   try {
-    testResult.value = await invokeLlmProfile(selectedResourceId.value, {
+    testResult.value = await testLlmProfile({
+      profile: buildProfileWritePayload(),
       messages: [{ role: "user", content: testPrompt.value || "Ping" }],
       tool_schemas: [],
       overrides: {},
@@ -372,570 +353,588 @@ async function runProfileProbe(): Promise<void> {
   }
 }
 
-async function refreshListKeepingSelection(resourceId: string): Promise<void> {
-  const [profiles, overlay] = await Promise.all([
-    listLlmProfiles(),
-    loadSettingsOverlay(),
-  ]);
-  page.value = buildLlmProfilePage(profiles, overlay, resourceId);
+function startCreateProfile(): void {
+  isCreatingProfile.value = true;
+  selectedProfileId.value = null;
+  detailError.value = null;
+  editorError.value = null;
+  actionError.value = null;
+  actionMessage.value = null;
+  testError.value = null;
+  testResult.value = null;
+  seedNewProfileForm();
 }
 
-async function loadSettingsOverlay(): Promise<SettingsKindPayload | null> {
-  try {
-    return await listSettingsResources("llm-profiles", { limit: 1, offset: 0 }) as SettingsKindPayload;
-  } catch {
-    return null;
+function cancelCreateProfile(): void {
+  isCreatingProfile.value = false;
+  selectedProfileId.value = profiles.value[0]?.id ?? null;
+  syncFormFromProfile();
+}
+
+function replaceProfile(profile: LlmProfileApiPayload): void {
+  const index = profiles.value.findIndex((item) => item.id === profile.id);
+  if (index >= 0) {
+    profiles.value.splice(index, 1, profile);
+  } else {
+    profiles.value.unshift(profile);
   }
 }
 
-function buildLlmProfilePage(
-  profiles: LlmProfileApiPayload[],
-  overlay: SettingsKindPayload | null,
-  preferredResourceId?: string | null,
-): SettingsKindPayload {
-  const selectedProfile =
-    profiles.find((profile) => profile.id === preferredResourceId) ?? profiles[0] ?? null;
-  return {
-    title: overlay?.title ?? "LLM Profiles",
-    description: overlay?.description ?? "LLM module profiles with Settings governance overlay.",
-    status: overlay?.status ?? (profiles.length ? "ready" : "empty"),
-    resources: profiles.map(llmProfileToResource),
-    list: {
-      total: profiles.length,
-      limit: profiles.length,
-      offset: 0,
-    },
-    detail: selectedProfile ? llmProfileToDetail(selectedProfile) : null,
-    audit: overlay?.audit,
-  };
-}
-
-function llmProfileToResource(profile: LlmProfileApiPayload): SettingsResourceSummary {
-  const effectiveConfig = llmProfileConfig(profile);
-  return {
-    id: profile.id,
-    resource_id: profile.id,
-    display_name: `${profile.provider} / ${profile.model_name}`,
-    status: profile.enabled ? "ready" : "disabled",
-    enabled: profile.enabled,
-    source: "llm_module_api",
-    version: null,
-    updated_at: null,
-    metadata: {
-      owner: "llm",
-      source_kind: profile.source_kind,
-    },
-    effective_config: effectiveConfig,
-    resolution: ownerResolution("LLM module API", effectiveConfig),
-  };
-}
-
-function llmProfileToDetail(profile: LlmProfileApiPayload): SettingsResourceDetail {
-  return {
-    ...llmProfileToResource(profile),
-    title: `${profile.provider} / ${profile.model_name}`,
-    payload: llmProfileConfig(profile),
-    validation: {
-      status: "owner-api",
-      result: { ok: true, errors: [], warnings: [] },
-      checks: {
-        rows: [
-          { Check: "truth source", Result: "LLM module API" },
-          { Check: "settings role", Result: "governance overlay only" },
-        ],
-      },
-    },
-    audit: { recent_changes: { rows: [] } },
-    versions: [],
-  };
-}
-
-function llmProfileConfig(profile: LlmProfileApiPayload): Record<string, unknown> {
-  return {
-    id: profile.id,
-    provider: profile.provider,
-    api_family: profile.api_family,
-    model_name: profile.model_name,
-    context_window_tokens: profile.context_window_tokens,
-    model_family: profile.model_family,
-    capabilities: profile.capabilities,
-    default_params: profile.default_params,
-    base_url: profile.base_url,
-    credential_binding: profile.credential_binding,
-    timeout_seconds: profile.timeout_seconds,
-    max_concurrency: profile.max_concurrency,
-    concurrency_key: profile.concurrency_key,
-    source_kind: profile.source_kind,
-    enabled: profile.enabled,
-  };
-}
-
-function ownerResolution(
-  name: string,
-  value: Record<string, unknown>,
-): SettingsResolutionPayload {
-  return {
-    value,
-    source: { kind: "owner_module", name },
-    sources: [{ kind: "owner_module", name, version_id: null, applied: true }],
-    override_trace: [],
-    validation: { ok: true, errors: [], warnings: [] },
-  };
-}
-
-function syncEditorFromDetail(): void {
-  editorText.value = formatJson(selectedDetail.value?.payload ?? {});
+function syncFormFromProfile(profile = selectedProfile.value): void {
+  editProfileId.value = profile?.id ?? "";
+  editProvider.value = profile?.provider ?? "";
+  editApiFamily.value = profile?.api_family ?? "";
+  editModelName.value = profile?.model_name ?? "";
+  editContextWindowTokens.value = numberText(profile?.context_window_tokens);
+  editModelFamily.value = profile?.model_family ?? "general";
+  editCapabilities.value = profile?.capabilities.join(", ") ?? "";
+  editBaseUrl.value = profile?.base_url ?? "";
+  editCredentialBindingId.value = profile?.credential_binding_id ?? "";
+  editTimeoutSeconds.value = numberText(profile?.timeout_seconds ?? 60);
+  editMaxConcurrency.value = numberText(profile?.max_concurrency);
+  editConcurrencyKey.value = profile?.concurrency_key ?? "";
+  editTemperature.value = numberText(profile?.default_params.temperature);
+  editTopP.value = numberText(profile?.default_params.top_p);
+  editMaxOutputTokens.value = numberText(profile?.default_params.max_output_tokens);
+  editReasoningEffort.value = profile?.default_params.reasoning_effort ?? "";
+  editEnabled.value = profile?.enabled ?? true;
   editorError.value = null;
 }
 
-function parseProfileWritePayload(text: string, expectedId: string): LlmProfileWritePayload {
-  const parsed = parseJsonObject(text);
-  if (parsed.id !== expectedId) {
-    throw new Error("JSON id must match the selected LLM profile.");
+function seedNewProfileForm(): void {
+  editProfileId.value = "";
+  editProvider.value = "openai";
+  editApiFamily.value = "openai_responses";
+  editModelName.value = "";
+  editContextWindowTokens.value = "";
+  editModelFamily.value = "general";
+  editCapabilities.value = "tool_calling, structured_output";
+  editBaseUrl.value = "";
+  editCredentialBindingId.value = firstCompatibleCredentialBindingId() ?? "";
+  editTimeoutSeconds.value = "90";
+  editMaxConcurrency.value = "";
+  editConcurrencyKey.value = "";
+  editTemperature.value = "";
+  editTopP.value = "";
+  editMaxOutputTokens.value = "";
+  editReasoningEffort.value = "";
+  editEnabled.value = true;
+}
+
+function buildProfileWritePayload(): LlmProfileWritePayload {
+  if (credentialBindingSelectionError.value) {
+    throw new Error(credentialBindingSelectionError.value);
   }
+  const selected = selectedProfile.value;
+  if (!isCreatingProfile.value && (!selectedProfileId.value || !selected)) {
+    throw new Error("Select an LLM profile before saving.");
+  }
+  const profileId = isCreatingProfile.value
+    ? requiredText(editProfileId.value, "profile id")
+    : requiredText(selectedProfileId.value ?? "", "profile id");
   return {
-    id: stringField(parsed, "id"),
-    provider: stringField(parsed, "provider"),
-    api_family: stringField(parsed, "api_family"),
-    model_name: stringField(parsed, "model_name"),
-    context_window_tokens: nullableNumberField(parsed, "context_window_tokens"),
-    model_family: stringField(parsed, "model_family", "general"),
-    capabilities: stringArrayField(parsed, "capabilities"),
-    default_params: defaultsField(parsed.default_params),
-    base_url: nullableStringField(parsed, "base_url"),
-    credential_binding: nullableStringField(parsed, "credential_binding"),
-    timeout_seconds: numberField(parsed, "timeout_seconds", 60),
-    max_concurrency: nullableNumberField(parsed, "max_concurrency"),
-    concurrency_key: nullableStringField(parsed, "concurrency_key"),
-    enabled: booleanField(parsed, "enabled", true),
+    id: profileId,
+    provider: requiredText(editProvider.value, "provider"),
+    api_family: requiredText(editApiFamily.value, "api family"),
+    model_name: requiredText(editModelName.value, "model name"),
+    context_window_tokens: nullableNumberText(editContextWindowTokens.value, "context window"),
+    model_family: requiredText(editModelFamily.value, "model family"),
+    capabilities: commaList(editCapabilities.value),
+    default_params: {
+      temperature: nullableNumberText(editTemperature.value, "temperature"),
+      top_p: nullableNumberText(editTopP.value, "top p"),
+      max_output_tokens: nullableNumberText(editMaxOutputTokens.value, "max output tokens"),
+      reasoning_effort: nullableText(editReasoningEffort.value),
+      extra_body: selected?.default_params.extra_body ?? {},
+    },
+    base_url: nullableText(editBaseUrl.value),
+    credential_binding_id: nullableText(editCredentialBindingId.value),
+    timeout_seconds: requiredNumberText(editTimeoutSeconds.value, "timeout seconds"),
+    max_concurrency: nullableNumberText(editMaxConcurrency.value, "max concurrency"),
+    concurrency_key: nullableText(editConcurrencyKey.value),
+    enabled: editEnabled.value,
   };
 }
 
-function parseJsonObject(text: string): Record<string, unknown> {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`Invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+function numberText(value: number | null | undefined): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function requiredText(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${label} is required.`);
+  return trimmed;
+}
+
+function nullableText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function requiredNumberText(value: string, label: string): number {
+  const parsed = nullableNumberText(value, label);
+  if (parsed === null) throw new Error(`${label} is required.`);
+  return parsed;
+}
+
+function nullableNumberText(value: string, label: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) throw new Error(`${label} must be a number.`);
+  return parsed;
+}
+
+function commaList(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function formatUsage(usage: Record<string, unknown> | null): string {
+  if (!usage) return "-";
+  const parts = [
+    ["input", usage.input_tokens],
+    ["output", usage.output_tokens],
+    ["total", usage.total_tokens],
+    ["reasoning", usage.reasoning_tokens],
+  ]
+    .filter(([, value]) => typeof value === "number")
+    .map(([label, value]) => `${label}: ${value}`);
+  return parts.length ? parts.join(" · ") : "-";
+}
+
+function credentialBindingRank(binding: AccessCredentialBindingPayload): number {
+  const status = (binding.status ?? "active").toLowerCase();
+  if (["active", "ready", "enabled"].includes(status)) return 0;
+  if (["degraded", "warning", "pending"].includes(status)) return 1;
+  if (["disabled", "revoked", "blocked", "failed"].includes(status)) return 2;
+  return 3;
+}
+
+function credentialExpectationFor(provider: string, apiFamily: string): CredentialExpectation {
+  const normalizedProvider = provider.trim();
+  const normalizedFamily = apiFamily.trim();
+  if (normalizedProvider === "openai_codex" || normalizedFamily === "openai_codex_responses") {
+    return { kind: "oauth2_account", label: "OAuth account", requiresCredential: true };
   }
-  if (!isRecord(value)) {
-    throw new Error("Profile JSON must be an object.");
+  if (
+    normalizedProvider === "openai"
+    || normalizedProvider === "anthropic"
+    || normalizedProvider === "google"
+    || normalizedFamily === "openai_responses"
+    || normalizedFamily === "anthropic_messages"
+    || normalizedFamily === "gemini_generate_content"
+  ) {
+    return { kind: "api_key", label: "API key", requiresCredential: true };
   }
-  return value;
-}
-
-function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
-}
-
-function stringField(source: Record<string, unknown>, key: string, fallback?: string): string {
-  const value = source[key];
-  if (typeof value === "string" && value.trim()) return value;
-  if (fallback !== undefined) return fallback;
-  throw new Error(`Profile JSON must include string field "${key}".`);
-}
-
-function nullableStringField(source: Record<string, unknown>, key: string): string | null {
-  const value = source[key];
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "string") return value;
-  throw new Error(`Profile JSON field "${key}" must be a string or null.`);
-}
-
-function numberField(source: Record<string, unknown>, key: string, fallback: number): number {
-  const value = source[key];
-  if (value === null || value === undefined || value === "") return fallback;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  throw new Error(`Profile JSON field "${key}" must be a number.`);
-}
-
-function nullableNumberField(source: Record<string, unknown>, key: string): number | null {
-  const value = source[key];
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  throw new Error(`Profile JSON field "${key}" must be a number or null.`);
-}
-
-function booleanField(source: Record<string, unknown>, key: string, fallback: boolean): boolean {
-  const value = source[key];
-  if (value === null || value === undefined) return fallback;
-  if (typeof value === "boolean") return value;
-  throw new Error(`Profile JSON field "${key}" must be a boolean.`);
-}
-
-function stringArrayField(source: Record<string, unknown>, key: string): string[] {
-  const value = source[key];
-  if (value === null || value === undefined) return [];
-  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
-  throw new Error(`Profile JSON field "${key}" must be a string array.`);
-}
-
-function defaultsField(value: unknown): LlmProfileWritePayload["default_params"] {
-  if (value === null || value === undefined) return { extra_body: {} };
-  if (!isRecord(value)) throw new Error('Profile JSON field "default_params" must be an object.');
-  const extraBody = value.extra_body;
-  return {
-    temperature: optionalNumberValue(value.temperature, "default_params.temperature"),
-    top_p: optionalNumberValue(value.top_p, "default_params.top_p"),
-    max_output_tokens: optionalNumberValue(value.max_output_tokens, "default_params.max_output_tokens"),
-    reasoning_effort: optionalStringValue(value.reasoning_effort, "default_params.reasoning_effort"),
-    extra_body: isRecord(extraBody) ? extraBody : {},
-  };
-}
-
-function optionalNumberValue(value: unknown, label: string): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  throw new Error(`${label} must be a number or null.`);
-}
-
-function optionalStringValue(value: unknown, label: string): string | null {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "string") return value;
-  throw new Error(`${label} must be a string or null.`);
-}
-
-function selectProfile(row: unknown): void {
-  const resourceId = rowValue(row, "ID");
-  if (resourceId && resourceId !== selectedResourceId.value) {
-    void loadProfileDetail(resourceId);
+  if (normalizedProvider === "openai_compatible" || normalizedFamily === "openai_chat_compatible") {
+    return { kind: "optional_api_key", label: "API key or none", requiresCredential: false };
   }
-}
-
-function effectiveConfig(resource: SettingsResourceSummary): Record<string, unknown> {
-  return resource.effective_config ?? {};
-}
-
-function rowValue(row: unknown, key: string): string | null {
-  if (!isRecord(row)) return null;
-  const value = row[key];
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function objectRows(source: Record<string, unknown>, preferredKeys: string[]): TableRow[] {
-  const entries = Object.entries(source);
-  const orderedKeys = [
-    ...preferredKeys.filter((key) => Object.prototype.hasOwnProperty.call(source, key)),
-    ...entries.map(([key]) => key).filter((key) => !preferredKeys.includes(key)),
-  ];
-  return orderedKeys.map((key) => ({
-    Setting: humanizeKey(key),
-    Value: shortValue(source[key]),
-  }));
-}
-
-function arrayValue(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => textValue(item, "")).filter(Boolean);
-}
-
-function textValue(value: unknown, fallback = "-"): string {
-  if (value === null || value === undefined || value === "") return fallback;
-  if (typeof value === "boolean") return yesNo(value);
-  if (typeof value === "number") return String(value);
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    const items = value.map((item) => textValue(item, "")).filter(Boolean);
-    return items.length ? items.join(", ") : fallback;
+  if (normalizedProvider === "ollama" || normalizedFamily === "ollama_native") {
+    return { kind: "none", label: "No credential", requiresCredential: false };
   }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return fallback;
+  return { kind: "any", label: "Access credential", requiresCredential: false };
+}
+
+function credentialBindingCompatibility(
+  binding: AccessCredentialBindingPayload,
+  expectation: CredentialExpectation,
+): { compatible: boolean; reason: string } {
+  if (expectation.kind === "any") return { compatible: true, reason: "" };
+  if (expectation.kind === "none") {
+    return {
+      compatible: false,
+      reason: `${binding.binding_id} is not expected for ${expectation.label} profiles.`,
+    };
   }
+  if (expectation.kind === "oauth2_account") {
+    const compatible = isOAuthAccountBinding(binding);
+    return {
+      compatible,
+      reason: compatible ? "" : `${binding.binding_id} is ${credentialBindingTypeLabel(binding)}, not an OAuth account.`,
+    };
+  }
+  if (expectation.kind === "api_key" || expectation.kind === "optional_api_key") {
+    const compatible = isApiKeyBinding(binding);
+    return {
+      compatible,
+      reason: compatible ? "" : `${binding.binding_id} is ${credentialBindingTypeLabel(binding)}, not an API key binding.`,
+    };
+  }
+  return { compatible: true, reason: "" };
 }
 
-function shortValue(value: unknown): string {
-  const text = textValue(value);
-  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+function isApiKeyBinding(binding: AccessCredentialBindingPayload): boolean {
+  if (isOAuthAccountBinding(binding)) return false;
+  const kind = normalizedCredentialText(binding.binding_kind);
+  return kind === "api_key";
 }
 
-function yesNo(value: unknown): string {
-  if (value === true) return "Yes";
-  if (value === false) return "No";
-  return textValue(value);
+function isOAuthAccountBinding(binding: AccessCredentialBindingPayload): boolean {
+  return normalizedCredentialText(binding.source_kind) === "oauth_account"
+    || normalizedCredentialText(binding.binding_kind) === "oauth2_account"
+    || normalizedCredentialText(binding.binding_kind) === "openid_connect";
 }
 
-function titleize(value: unknown, fallback = "-"): string {
-  const text = textValue(value, fallback);
-  if (text === "-") return text;
-  return text
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+function normalizedCredentialText(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
 }
 
-function humanizeKey(value: string): string {
-  return titleize(value);
+function firstCompatibleCredentialBindingId(): string | null {
+  return credentialBindingOptions.value.find((binding) =>
+    credentialBindingCompatibility(binding, credentialExpectation.value).compatible,
+  )?.binding_id ?? null;
 }
 
-function toneForStatus(value: unknown): StatusTone {
-  const text = textValue(value, "").toLowerCase();
-  if (/(failed|invalid|error|disabled|blocked)/.test(text)) return "danger";
-  if (/(warning|draft|pending|unknown)/.test(text)) return "warning";
-  if (/(active|ready|valid|success|published|enabled)/.test(text)) return "success";
-  if (text) return "info";
-  return "neutral";
+function credentialBindingTypeLabel(binding: AccessCredentialBindingPayload): string {
+  if (isOAuthAccountBinding(binding)) return "OAuth account";
+  const source = normalizedCredentialText(binding.source_kind);
+  const kind = normalizedCredentialText(binding.binding_kind);
+  if (kind === "api_key") {
+    if (source === "env") return "API key / env";
+    if (source === "file") return "API key / file";
+    return "API key";
+  }
+  return binding.binding_kind ?? binding.source_kind ?? "credential";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function formatCredentialBindingLabel(binding: AccessCredentialBindingPayload): string {
+  const source = credentialBindingTypeLabel(binding);
+  const status = binding.status ? ` · ${binding.status}` : "";
+  const compatibility = credentialBindingCompatibility(binding, credentialExpectation.value);
+  const suffix = compatibility.compatible ? "" : ` · not for ${credentialExpectation.value.label}`;
+  return `${binding.binding_id} · ${source}${status}${suffix}`;
 }
+
+function formatCredentialBindingMeta(binding: AccessCredentialBindingPayload): string {
+  const source = credentialBindingTypeLabel(binding);
+  const preview = binding.masked_preview ?? "secret held by Access";
+  return `${source} · ${preview}`;
+}
+
 </script>
 
 <template>
-  <main class="settings-module llm-settings scroll-area">
-    <header class="settings-page-header">
+  <main class="settings-module llm-settings">
+    <header class="settings-page-header llm-header">
       <div>
         <h1>LLM Profiles</h1>
-        <p>Owner view from <code>/llms</code>. Settings only contributes governance ownership and policy overlay.</p>
+        <p>Profile truth and writes come directly from <code>/llms</code>.</p>
       </div>
       <div class="settings-header-actions">
-        <UiButton size="sm" variant="secondary" @click="loadProfiles"><RefreshCcw :size="14" /> Refresh</UiButton>
+        <UiButton size="sm" variant="primary" :disabled="isSaving" @click="startCreateProfile">
+          <Plus :size="14" /> New Model
+        </UiButton>
+        <UiButton size="sm" variant="secondary" :disabled="isRefreshing" @click="loadAll">
+          <RefreshCcw :size="14" /> {{ isRefreshing ? "Refreshing" : "Refresh" }}
+        </UiButton>
       </div>
     </header>
 
-    <section class="llm-summary-grid">
+    <section class="llm-summary-grid" aria-label="LLM profile summary">
       <article class="settings-panel llm-summary-card">
         <span><Layers :size="18" /></span>
-        <div><small>Owner total</small><strong>{{ backendTotal }}</strong><p>Count from the LLM module API.</p></div>
-      </article>
-      <article class="settings-panel llm-summary-card">
-        <span><Shield :size="18" /></span>
-        <div><small>Health</small><strong>{{ titleize(page?.status ?? "unknown") }}</strong><p>{{ page?.description ?? "Loading Settings status." }}</p></div>
-      </article>
-      <article class="settings-panel llm-summary-card">
-        <span><GitBranch :size="18" /></span>
-        <div><small>Selected source</small><strong>{{ textValue(selectedSource?.name ?? selectedDetail?.source) }}</strong><p>{{ sourceCount }} resolution sources, {{ overrideCount }} overrides.</p></div>
+        <div><small>Profiles</small><strong>{{ profiles.length }}</strong><p>{{ filteredProfiles.length }} visible</p></div>
       </article>
       <article class="settings-panel llm-summary-card">
         <span><CheckCircle2 :size="18" /></span>
-        <div><small>Validation</small><strong>{{ titleize(validationStatus) }}</strong><p>{{ selectedDetail?.validation?.last_validated_at ?? "No validation timestamp yet." }}</p></div>
+        <div><small>Enabled</small><strong>{{ enabledCount }}</strong><p>{{ disabledCount }} disabled</p></div>
+      </article>
+      <article class="settings-panel llm-summary-card">
+        <span><KeyRound :size="18" /></span>
+        <div><small>Access Bindings</small><strong>{{ credentialBindingCount }}</strong><p>{{ usedCredentialBindingCount }} used by profiles</p></div>
+      </article>
+      <article class="settings-panel llm-summary-card">
+        <span><Zap :size="18" /></span>
+        <div><small>Rate Limits</small><strong>{{ limitedProfilesCount }}</strong><p>{{ unlimitedProfilesCount }} unlimited profiles</p></div>
       </article>
     </section>
 
-    <section class="llm-toolbar">
-      <label>
-        <Search :size="14" />
-        <input v-model="searchTerm" placeholder="Search loaded LLM profiles..." />
-      </label>
-      <button type="button" aria-label="Filters are local to loaded rows"><ListFilter :size="14" /></button>
-    </section>
+    <section class="llm-workspace">
+      <article class="settings-panel llm-list-panel">
+        <div class="settings-panel-heading">
+          <h2>Profiles</h2>
+          <span>{{ filteredProfiles.length }} / {{ profiles.length }}</span>
+        </div>
+        <label class="llm-search">
+          <Search :size="14" />
+          <input v-model="searchTerm" placeholder="Search profiles" />
+        </label>
+        <div v-if="isLoading" class="settings-state">Loading LLM profiles from /llms...</div>
+        <div v-else-if="loadError" class="settings-state settings-state--error">{{ loadError }}</div>
+        <div v-else-if="!profiles.length" class="settings-state">No LLM profiles returned by /llms.</div>
+        <div v-else class="llm-profile-list" role="listbox" aria-label="LLM profiles">
+          <button
+            v-for="profile in filteredProfiles"
+            :key="profile.id"
+            type="button"
+            :class="['llm-profile-list-item', { 'is-active': !isCreatingProfile && profile.id === selectedProfileId }]"
+            :aria-selected="!isCreatingProfile && profile.id === selectedProfileId"
+            @click="selectProfile(profile.id)"
+          >
+            <span class="llm-list-primary">
+              <strong>{{ profile.model_name }}</strong>
+              <em :class="profile.enabled ? 'is-enabled' : 'is-disabled'">{{ profile.enabled ? "Enabled" : "Disabled" }}</em>
+            </span>
+            <span class="llm-list-id">{{ profile.id }}</span>
+            <span class="llm-list-meta">
+              <span>{{ profile.provider }}</span>
+              <span>{{ profile.model_family }}</span>
+            </span>
+          </button>
+        </div>
+      </article>
 
-    <section class="settings-panel llm-list">
-      <div v-if="isLoading" class="settings-state">Loading LLM profiles from owner API...</div>
-      <div v-else-if="loadError" class="settings-state settings-state--error">{{ loadError }}</div>
-      <div v-else-if="!resources.length" class="settings-state">No LLM profiles were returned. Create, update, enable, and disable profiles through the LLM module API.</div>
-      <DataTable
-        v-else
-        :columns="['Name', 'ID', 'Provider', 'API Family', 'Model', 'Status', 'Enabled', 'Source', 'Version', 'Updated At']"
-        :rows="profileRows"
-        section-id="llm-profiles"
-        clickable-rows
-        @row-click="selectProfile"
-      />
-      <footer>Showing {{ profileRows.length }} loaded rows from {{ backendTotal }} owner profiles (limit {{ listLimit }}, offset {{ listOffset }}).</footer>
-    </section>
+      <article class="settings-panel llm-profile-panel">
+        <div class="llm-profile-head">
+          <div>
+            <h2>{{ selectedTitle }}</h2>
+            <p>{{ selectedSubtitle }}</p>
+          </div>
+        </div>
 
-    <section v-if="resources.length || selectedDetail || detailLoading" class="llm-detail-layout">
-      <div class="llm-main-column">
-        <article class="settings-panel llm-editor">
-          <aside class="llm-editor-tabs">
-            <button class="active" type="button">Resource</button>
-            <button type="button">Effective Config</button>
-            <button type="button">Resolution</button>
-            <button type="button">Validation</button>
-            <button type="button">Versions</button>
-            <button type="button">Audit</button>
-          </aside>
-
-          <div class="llm-form">
-            <div v-if="detailLoading" class="settings-state detail-state">Loading selected profile...</div>
-            <div v-else-if="detailError" class="settings-state settings-state--error detail-state">{{ detailError }}</div>
-            <template v-else-if="selectedDetail">
-              <header>
-                <div class="profile-title">
-                  <h2>{{ selectedTitle }}</h2>
-                  <em><StatusDot :tone="selectedStatusTone" />{{ titleize(selectedDetail.status) }}</em>
-                  <span>{{ selectedDetail.enabled ? "Enabled" : "Disabled" }}</span>
-                </div>
-              </header>
-
-              <div class="profile-id">
-                <span>ID <code>{{ selectedDetail.resource_id }}</code></span>
-                <Copy :size="13" />
-                <span>Version {{ textValue(selectedDetail.version) }}</span>
+        <div v-if="detailLoading" class="settings-state">Loading selected profile...</div>
+        <div v-else-if="detailError" class="settings-state settings-state--error">{{ detailError }}</div>
+        <template v-else-if="canEditProfile">
+          <section class="llm-editor-block">
+            <div class="settings-panel-heading">
+              <div>
+                <h3>Profile Configuration</h3>
+                <span>{{ isCreatingProfile ? "POST /llms" : `PUT /llms/${selectedProfile?.id}` }}</span>
               </div>
-
-              <section class="llm-form-grid">
-                <article>
-                  <h3><Shield :size="15" />Governed Provider</h3>
-                  <dl class="settings-kv">
-                    <div><dt>Provider</dt><dd>{{ textValue(selectedConfig.provider) }}</dd></div>
-                    <div><dt>API Family</dt><dd>{{ textValue(selectedConfig.api_family) }}</dd></div>
-                    <div><dt>Model</dt><dd>{{ textValue(selectedConfig.model_name) }}</dd></div>
-                    <div><dt>Credential Binding</dt><dd>{{ textValue(selectedConfig.credential_binding) }}</dd></div>
-                  </dl>
-                </article>
-
-                <article>
-                  <h3>Resource State</h3>
-                  <dl class="settings-kv">
-                    <div><dt>Status</dt><dd>{{ titleize(selectedDetail.status) }}</dd></div>
-                    <div><dt>Enabled</dt><dd>{{ yesNo(selectedDetail.enabled) }}</dd></div>
-                    <div><dt>Source</dt><dd>{{ textValue(selectedDetail.source) }}</dd></div>
-                    <div><dt>Updated</dt><dd>{{ textValue(selectedDetail.updated_at) }}</dd></div>
-                  </dl>
-                </article>
-
-                <article class="llm-notes">
-                  <h3>Configured Capabilities</h3>
-                  <div class="settings-chip-row">
-                    <span v-for="capability in capabilities" :key="capability">{{ titleize(capability) }}</span>
-                    <span v-if="!capabilities.length">No capability list in Settings payload.</span>
-                  </div>
-                </article>
-              </section>
-
-              <dl class="llm-meta-strip">
-                <div><dt>Snapshot</dt><dd>{{ textValue(selectedResolution?.snapshot_id) }}</dd></div>
-                <div><dt>Resolved At</dt><dd>{{ textValue(selectedResolution?.resolved_at) }}</dd></div>
-                <div><dt>Sources</dt><dd>{{ sourceCount }}</dd></div>
-                <div><dt>Overrides</dt><dd>{{ overrideCount }}</dd></div>
-              </dl>
-            </template>
-            <div v-else class="settings-state detail-state">Select a profile to inspect its owner detail.</div>
-          </div>
-        </article>
-
-        <article class="settings-panel effective-preview">
-          <div class="settings-panel-heading"><h3>Effective Configuration</h3><span>Owner detail</span></div>
-          <DataTable v-if="effectiveRows.length" :columns="['Setting', 'Value']" :rows="effectiveRows" section-id="llm-effective-config" />
-          <div v-else class="settings-state settings-state--compact">No effective configuration returned for the selected profile.</div>
-        </article>
-
-        <article class="settings-panel llm-json-editor">
-          <div class="settings-panel-heading">
-            <div>
-              <h3>Profile JSON</h3>
-              <span>Writes go to <code>PUT /llms/{{ selectedResourceId ?? ":id" }}</code></span>
+              <div class="llm-editor-actions">
+                <label class="llm-switch-field">
+                  <span>Enabled</span>
+                  <input
+                    type="checkbox"
+                    :checked="editEnabled"
+                    :disabled="isSaving || isToggling || !canEditProfile"
+                    @change="handleEnabledChange"
+                  />
+                </label>
+                <UiButton
+                  v-if="isCreatingProfile"
+                  size="sm"
+                  variant="secondary"
+                  :disabled="isSaving"
+                  @click="cancelCreateProfile"
+                >
+                  Cancel
+                </UiButton>
+                <UiButton
+                  size="sm"
+                  variant="primary"
+                  :disabled="!canSaveProfile || isSaving || isToggling"
+                  @click="saveProfileForm"
+                >
+                  <Save :size="13" /> {{ isSaving ? "Saving" : isCreatingProfile ? "Create" : "Save" }}
+                </UiButton>
+              </div>
             </div>
-            <UiButton
-              size="sm"
-              variant="primary"
-              :disabled="!canRunOwnerAction || isSaving"
-              @click="saveProfileJson"
-            >
-              <Save :size="13" /> {{ isSaving ? "Saving" : "Save" }}
-            </UiButton>
-          </div>
-          <textarea v-model="editorText" spellcheck="false" :disabled="!selectedDetail || isSaving" />
-          <p v-if="editorError" class="llm-inline-error">{{ editorError }}</p>
-          <p v-else>Credential binding is a read-only reference label from the LLM owner response. Readiness stays in Access.</p>
-          <DataTable v-if="payloadRows.length" :columns="['Setting', 'Value']" :rows="payloadRows" section-id="llm-payload" />
-          <div v-else class="settings-state settings-state--compact">No payload returned for the selected profile.</div>
-        </article>
-      </div>
+            <div class="llm-field-grid">
+              <label class="llm-field">
+                <span>Profile ID</span>
+                <input v-model="editProfileId" :disabled="!isCreatingProfile || isSaving" placeholder="openai.gpt-5.4-mini" />
+              </label>
+              <label class="llm-field">
+                <span>Provider</span>
+                <select v-model="editProvider" :disabled="isSaving">
+                  <option v-for="provider in PROVIDER_OPTIONS" :key="provider" :value="provider">{{ provider }}</option>
+                </select>
+              </label>
+              <label class="llm-field">
+                <span>API Family</span>
+                <select v-model="editApiFamily" :disabled="isSaving">
+                  <option v-for="family in API_FAMILY_OPTIONS" :key="family" :value="family">{{ family }}</option>
+                </select>
+              </label>
+              <label class="llm-field">
+                <span>Model Name</span>
+                <input v-model="editModelName" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Model Family</span>
+                <select v-model="editModelFamily" :disabled="isSaving">
+                  <option v-for="family in MODEL_FAMILY_OPTIONS" :key="family" :value="family">{{ family }}</option>
+                </select>
+              </label>
+              <label class="llm-field">
+                <span>Context Window</span>
+                <input v-model="editContextWindowTokens" inputmode="numeric" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Timeout Seconds</span>
+                <input v-model="editTimeoutSeconds" inputmode="numeric" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Max Concurrency</span>
+                <input v-model="editMaxConcurrency" inputmode="numeric" placeholder="unlimited" :disabled="isSaving" />
+              </label>
+              <div class="llm-field llm-field--span-2 llm-field--credential">
+                <span>Access Binding ID</span>
+                <div class="llm-binding-control">
+                  <select
+                    v-model="editCredentialBindingId"
+                    :disabled="isSaving || credentialBindingsLoading"
+                    :aria-invalid="Boolean(credentialBindingSelectionError)"
+                  >
+                    <option value="" :disabled="credentialExpectation.requiresCredential">No credential binding</option>
+                    <option
+                      v-if="currentCredentialBindingMissing"
+                      :value="editCredentialBindingId"
+                      disabled
+                    >
+                      {{ editCredentialBindingId }} · missing in Access
+                    </option>
+                    <option
+                      v-for="binding in credentialBindingOptions"
+                      :key="binding.binding_id"
+                      :value="binding.binding_id"
+                      :disabled="!credentialBindingCompatibility(binding, credentialExpectation).compatible"
+                    >
+                      {{ formatCredentialBindingLabel(binding) }}
+                    </option>
+                  </select>
+                  <button
+                    type="button"
+                    class="llm-binding-refresh"
+                    :disabled="credentialBindingsLoading || isSaving"
+                    aria-label="Refresh Access credential bindings"
+                    @click="loadAccessCredentialBindings"
+                  >
+                    <RefreshCcw :size="13" />
+                  </button>
+                </div>
+                <small :class="['llm-field-note', credentialBindingNoteTone]">{{ credentialBindingNote }}</small>
+              </div>
+              <label class="llm-field llm-field--span-2">
+                <span>Base URL</span>
+                <input v-model="editBaseUrl" placeholder="default adapter endpoint" :disabled="isSaving" />
+              </label>
+              <label class="llm-field llm-field--full">
+                <span>Capabilities</span>
+                <input v-model="editCapabilities" placeholder="tool_calling, structured_output, reasoning" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Temperature</span>
+                <input v-model="editTemperature" inputmode="decimal" placeholder="provider default" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Top P</span>
+                <input v-model="editTopP" inputmode="decimal" placeholder="provider default" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Max Output Tokens</span>
+                <input v-model="editMaxOutputTokens" inputmode="numeric" placeholder="provider default" :disabled="isSaving" />
+              </label>
+              <label class="llm-field">
+                <span>Reasoning Effort</span>
+                <select v-model="editReasoningEffort" :disabled="isSaving">
+                  <option v-for="effort in REASONING_EFFORT_OPTIONS" :key="effort || 'default'" :value="effort">
+                    {{ effort || "provider default" }}
+                  </option>
+                </select>
+              </label>
+              <label class="llm-field llm-field--full">
+                <span>Concurrency Key</span>
+                <input v-model="editConcurrencyKey" placeholder="shared limiter key" :disabled="isSaving" />
+              </label>
+            </div>
+            <p v-if="editorError" class="llm-inline-error">{{ editorError }}</p>
+            <p v-if="actionMessage" class="llm-inline-success">{{ actionMessage }}</p>
+            <p v-if="actionError" class="llm-inline-error">{{ actionError }}</p>
+          </section>
+        </template>
+        <div v-else class="settings-state">Select a profile to inspect and edit it.</div>
+      </article>
 
-      <aside class="llm-summary-stack">
-        <article class="settings-panel">
-          <div class="settings-panel-heading"><h2>Resolution Trace</h2><span>{{ sourceCount }} sources</span></div>
-          <DataTable v-if="resolutionRows.length" :columns="['Step', 'Kind', 'Source', 'Version', 'Applied', 'Reason']" :rows="resolutionRows" section-id="llm-resolution" />
-          <div v-else class="settings-state settings-state--compact">No resolution sources returned.</div>
-          <DataTable v-if="overrideRows.length" class="llm-overrides" :columns="['Step', 'Kind', 'Source', 'Version', 'Applied', 'Reason']" :rows="overrideRows" section-id="llm-overrides" />
-        </article>
-
-        <article class="settings-panel">
-          <div class="settings-panel-heading"><h2>Validation</h2><span><StatusDot :tone="validationTone" />{{ titleize(validationStatus) }}</span></div>
-          <DataTable :columns="['Check', 'Result']" :rows="validationRows" section-id="llm-validation" />
-        </article>
-
-        <article class="settings-panel llm-owner-actions">
+      <aside class="llm-side-stack">
+        <article class="settings-panel llm-probe-panel">
           <div class="settings-panel-heading">
-            <h2>Owner Actions</h2>
-            <span>/llms</span>
+            <h2>Direct LLM Test</h2>
+            <span>{{ probeStatusLabel }}</span>
           </div>
-          <div class="llm-action-row">
-            <UiButton
-              size="sm"
-              variant="secondary"
-              :disabled="!canRunOwnerAction || selectedDetail?.enabled === true || isToggling"
-              @click="toggleProfileEnabled(true)"
-            >
-              Enable
-            </UiButton>
-            <UiButton
-              size="sm"
-              variant="secondary"
-              :disabled="!canRunOwnerAction || selectedDetail?.enabled === false || isToggling"
-              @click="toggleProfileEnabled(false)"
-            >
-              Disable
-            </UiButton>
-          </div>
-          <p>Enable and disable call the LLM module directly. Settings does not use the generic write proxy here.</p>
-          <p v-if="actionMessage" class="llm-inline-success">{{ actionMessage }}</p>
-          <p v-if="actionError" class="llm-inline-error">{{ actionError }}</p>
-        </article>
-
-        <article class="settings-panel llm-test-panel">
-          <div class="settings-panel-heading">
-            <h2>Probe</h2>
-            <span>/invoke</span>
+          <div class="llm-probe-target">
+            <strong>{{ editProfileId || selectedProfile?.id || "No profile id" }}</strong>
+            <span>POST /llms/test</span>
           </div>
           <textarea v-model="testPrompt" spellcheck="false" />
           <UiButton
             size="sm"
             variant="primary"
-            :disabled="!canRunOwnerAction || selectedDetail?.enabled === false || isTesting"
+            :disabled="!canRunProfileProbe || isTesting || isToggling || isSaving"
             @click="runProfileProbe"
           >
-            <Play :size="13" /> {{ isTesting ? "Running" : "Run Probe" }}
+            <Play :size="13" /> {{ isTesting ? "Running" : "Run" }}
           </UiButton>
-          <p>{{ testDisabledReason }}</p>
-          <p v-if="testError" class="llm-inline-error">{{ testError }}</p>
-          <pre v-if="testResult">{{ formatJson(testResult) }}</pre>
-          <div v-else class="settings-state settings-state--compact">No probe result yet.</div>
-        </article>
-
-        <article class="settings-panel">
-          <div class="settings-panel-heading"><h2>Versions</h2><span>{{ versionRows.length }}</span></div>
-          <DataTable v-if="versionRows.length" :columns="['Version', 'Status', 'Source', 'Created By', 'Created At', 'Published At', 'Reason']" :rows="versionRows" section-id="llm-versions" />
-          <div v-else class="settings-state settings-state--compact">No versions returned for this profile.</div>
-        </article>
-
-        <article class="settings-panel">
-          <div class="settings-panel-heading"><h2>Settings Audit</h2><span>{{ auditRows.length }}</span></div>
-          <DataTable v-if="auditRows.length" :columns="['Audit ID', 'Action', 'Target', 'Status', 'Actor', 'Reason']" :rows="auditRows" section-id="llm-audit" />
-          <div v-else class="settings-state settings-state--compact">No Settings audit entries yet.</div>
-          <a class="panel-link" href="/settings/audit-logs">Open audit logs <ArrowRight :size="12" /></a>
+          <section class="llm-test-output">
+            <p v-if="testError" class="llm-inline-error">{{ testError }}</p>
+            <div v-else-if="testResult" class="llm-probe-result">
+              <div>
+                <span>Status</span>
+                <strong>{{ testResult.status }}</strong>
+              </div>
+              <div>
+                <span>Finish</span>
+                <strong>{{ probeFinishLabel }}</strong>
+              </div>
+              <div class="llm-probe-result--wide">
+                <span>Usage</span>
+                <strong>{{ probeUsageLabel }}</strong>
+              </div>
+              <div class="llm-probe-result--wide">
+                <span>Request</span>
+                <strong>{{ probeRequestLabel }}</strong>
+              </div>
+              <p v-if="probeResultText">{{ probeResultText }}</p>
+            </div>
+            <div v-else class="llm-probe-empty">
+              <Play :size="18" />
+              <strong>{{ canRunProfileProbe ? "Run a prompt against the current form." : "Complete provider, model, and credential fields before testing." }}</strong>
+              <span>Results stay in this panel; profile changes are saved only when you click Save.</span>
+            </div>
+          </section>
         </article>
       </aside>
     </section>
 
-    <footer class="settings-footer">
+    <footer class="settings-footer llm-footer">
       <span><Brain :size="14" />Truth source: LLM module API</span>
-      <span><GitBranch :size="14" />Detail: /llms/{{ selectedResourceId ?? ":id" }}</span>
-      <span><Shield :size="14" />Settings provides governance, validation, and audit only.</span>
+      <span><Zap :size="14" />Runtime probe: /llms/{{ selectedProfileId ?? ":id" }}/invoke</span>
+      <span><KeyRound :size="14" />Credential readiness is owned by Access.</span>
     </footer>
   </main>
 </template>
 
 <style scoped>
+.llm-settings {
+  display: grid;
+  grid-template-rows: auto 74px minmax(0, 1fr) auto;
+  gap: 10px;
+  box-sizing: border-box;
+  height: calc(100vh - 50px);
+  min-height: 0;
+  padding: 12px 16px;
+  overflow: hidden;
+}
+
+.llm-header {
+  margin: 0;
+}
+
 .llm-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 10px;
+  min-height: 0;
 }
 
 .llm-summary-card {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);
-  gap: 10px;
   align-items: center;
-  min-height: 88px;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
 }
 
 .llm-summary-card > span {
@@ -948,35 +947,74 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   color: var(--color-accent);
 }
 
+.llm-summary-card div,
+.llm-profile-head div {
+  min-width: 0;
+}
+
 .llm-summary-card small,
-.llm-summary-card p {
+.llm-summary-card p,
+.llm-profile-head p,
+.llm-muted {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.llm-summary-card p,
+.llm-profile-head p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .llm-summary-card strong {
   display: block;
   overflow: hidden;
-  margin: 3px 0;
+  margin: 2px 0;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.llm-toolbar {
-  display: grid;
-  grid-template-columns: minmax(300px, 1fr) 34px;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 10px;
+.llm-editor-block p,
+.llm-probe-panel p {
+  margin: 0;
 }
 
-.llm-toolbar label {
+.llm-workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.68fr) minmax(620px, 1.34fr) minmax(320px, 0.72fr);
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.llm-list-panel,
+.llm-profile-panel,
+.llm-side-stack {
+  min-width: 0;
+  min-height: 0;
+}
+
+.llm-list-panel,
+.llm-profile-panel,
+.llm-probe-panel {
+  overflow: hidden;
+}
+
+.llm-list-panel {
+  display: grid;
+  grid-template-rows: auto 34px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.llm-search {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
   align-items: center;
+  gap: 8px;
   min-height: 30px;
   padding: 0 10px;
   border: 1px solid var(--border-subtle);
@@ -985,350 +1023,480 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   color: var(--text-muted);
 }
 
-.llm-toolbar input,
-.llm-toolbar button {
-  min-height: 30px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
+.llm-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
   color: var(--text-primary);
   font-size: 12px;
 }
 
-.llm-toolbar input {
-  border: 0;
-  outline: 0;
-  background: transparent;
-}
-
-.llm-toolbar button {
-  display: grid;
-  place-items: center;
-  padding: 0;
-}
-
-.llm-list {
-  padding: 0;
-  overflow: hidden;
-}
-
-.llm-list :deep(tbody tr:first-child) {
-  background: color-mix(in srgb, var(--color-blue) 10%, transparent);
-}
-
-.llm-list :deep(td:first-child) {
-  position: relative;
-  padding-left: 38px;
-  color: var(--text-primary);
-  font-weight: 750;
-}
-
-.llm-list :deep(td:first-child)::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 12px;
-  width: 18px;
-  height: 18px;
-  transform: translateY(-50%);
-  border-radius: var(--radius-1);
-  background: color-mix(in srgb, var(--color-gray) 22%, transparent);
-}
-
-.llm-list footer {
-  min-height: 28px;
-  padding: 7px 12px;
-  border-top: 1px solid var(--border-subtle);
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.llm-detail-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 390px;
-  gap: 10px;
-  align-items: start;
-  margin-top: 10px;
-}
-
-.llm-main-column {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.llm-editor {
-  display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
-  padding: 0;
-  overflow: hidden;
-}
-
-.llm-editor-tabs {
+.llm-profile-list {
   display: grid;
   align-content: start;
-  gap: 1px;
-  padding: 6px;
-  border-right: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-sidebar) 72%, transparent);
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
 }
 
-.llm-editor-tabs button {
-  min-height: 31px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: var(--radius-2);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 11px;
-  text-align: left;
-}
-
-.llm-editor-tabs .active {
-  background: var(--surface-active);
-  color: var(--text-primary);
-}
-
-.llm-form {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px;
-}
-
-.llm-form header,
-.profile-title,
-.profile-id,
-.llm-form-grid h3,
-.panel-link {
-  display: flex;
-  align-items: center;
-}
-
-.llm-form header {
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.profile-title {
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.profile-title h2 {
-  font-size: 16px;
-}
-
-.profile-title span,
-.profile-title em {
-  min-height: 20px;
-  padding: 3px 7px;
-  border-radius: var(--radius-1);
-  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-  color: var(--color-accent);
-  font-size: 11px;
-  font-style: normal;
-}
-
-.profile-title em {
-  display: inline-flex;
-  gap: 5px;
-  background: transparent;
-  color: var(--text-secondary);
-}
-
-.profile-id {
-  flex-wrap: wrap;
-  gap: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.profile-id code {
-  color: var(--text-primary);
-}
-
-.llm-form-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
-  gap: 10px;
-}
-
-.llm-form-grid article,
-.llm-meta-strip {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: color-mix(in srgb, var(--surface-panel-soft) 74%, transparent);
-}
-
-.llm-form-grid article {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px;
-}
-
-.llm-notes {
-  grid-column: 1 / -1;
-}
-
-.llm-form-grid h3 {
-  gap: 7px;
-  font-size: 13px;
-}
-
-.llm-meta-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.llm-meta-strip div {
+.llm-profile-list-item {
   display: grid;
   gap: 4px;
-  min-height: 42px;
-  padding: 8px 10px;
-  border-right: 1px solid var(--border-subtle);
-}
-
-.llm-meta-strip dt {
-  color: var(--text-muted);
-  font-size: 10.5px;
-}
-
-.llm-meta-strip dd {
-  overflow: hidden;
-  margin: 0;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-2);
+  outline: 0;
+  background: transparent;
   color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.llm-profile-list-item:hover,
+.llm-profile-list-item.is-active {
+  border-color: color-mix(in srgb, var(--color-accent) 48%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+.llm-list-primary,
+.llm-list-meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.llm-list-primary {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.llm-list-primary strong,
+.llm-list-id,
+.llm-list-meta span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.llm-summary-stack {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-}
-
-.llm-summary-stack .settings-panel {
-  padding: 10px 12px;
-}
-
-.llm-summary-stack :deep(th),
-.llm-summary-stack :deep(td),
-.effective-preview :deep(th),
-.effective-preview :deep(td) {
-  padding-block: 4px;
-  font-size: 10.5px;
-}
-
-.llm-overrides {
-  margin-top: 8px;
-}
-
-.llm-json-editor {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-}
-
-.llm-json-editor textarea,
-.llm-test-panel textarea,
-.llm-test-panel pre {
-  width: 100%;
+.llm-list-primary strong {
   min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
   color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.llm-json-editor textarea {
-  min-height: 220px;
-  max-height: 340px;
-  resize: vertical;
-  padding: 10px;
-}
-
-.llm-json-editor p,
-.llm-owner-actions p,
-.llm-test-panel p {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.llm-owner-actions,
-.llm-test-panel {
-  display: grid;
-  gap: 8px;
-}
-
-.llm-action-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.llm-test-panel textarea {
-  min-height: 72px;
-  resize: vertical;
-  padding: 8px;
-}
-
-.llm-test-panel pre {
-  overflow: auto;
-  max-height: 180px;
-  margin: 0;
-  padding: 8px;
-  white-space: pre-wrap;
-}
-
-.llm-inline-error {
-  color: var(--color-danger) !important;
-}
-
-.llm-inline-success {
-  color: var(--color-success) !important;
-}
-
-.panel-link {
-  gap: 5px;
-  margin-top: 8px;
-  color: var(--color-accent);
-  font-size: 11px;
-  text-decoration: none;
-}
-
-.settings-state {
-  display: grid;
-  place-items: center;
-  min-height: 168px;
-  padding: 18px;
-  color: var(--text-muted);
   font-size: 12px;
-  text-align: center;
 }
 
-.settings-state--compact {
-  min-height: 74px;
-  border: 1px dashed var(--border-subtle);
-  border-radius: var(--radius-2);
+.llm-list-primary em {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 780;
 }
 
-.settings-state--error {
+.llm-list-primary em.is-enabled {
+  color: var(--color-success);
+}
+
+.llm-list-primary em.is-disabled {
   color: var(--color-danger);
 }
 
-.detail-state {
-  min-height: 300px;
+.llm-list-id {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.llm-list-meta {
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.llm-list-meta span {
+  min-width: 0;
+  padding-right: 6px;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.llm-list-meta span:last-child {
+  border-right: 0;
+}
+
+.llm-profile-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px;
+}
+
+.llm-profile-head,
+.llm-footer {
+  display: flex;
+  align-items: center;
+}
+
+.llm-profile-head {
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.llm-profile-head h2 {
+  overflow: hidden;
+  margin: 0 0 2px;
+  color: var(--text-primary);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-editor-block {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.llm-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.llm-field-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-content: start;
+  align-items: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.llm-field {
+  display: grid;
+  grid-template-rows: auto 30px;
+  align-self: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.llm-field--credential {
+  grid-template-rows: auto 30px auto;
+}
+
+.llm-field--span-2 {
+  grid-column: span 2;
+}
+
+.llm-field--full {
+  grid-column: 1 / -1;
+}
+
+.llm-field span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-field input,
+.llm-field select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  outline: 0;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.llm-field input:disabled,
+.llm-field select:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.llm-binding-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.llm-binding-refresh {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-input);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.llm-binding-refresh:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 46%, var(--border-subtle));
+  color: var(--color-accent);
+}
+
+.llm-binding-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.llm-field-note {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-field-note.is-error {
+  color: var(--color-danger);
+}
+
+.llm-field-note.is-success {
+  color: var(--color-success);
+}
+
+.llm-switch-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.llm-switch-field input {
+  position: relative;
+  appearance: none;
+  width: 34px;
+  height: 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-input);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.llm-switch-field input::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  content: "";
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.llm-switch-field input:checked {
+  border-color: color-mix(in srgb, var(--color-success) 70%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-success) 28%, var(--surface-input));
+}
+
+.llm-switch-field input:checked::after {
+  transform: translateX(16px);
+  background: var(--color-success);
+}
+
+.llm-switch-field input:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.llm-side-stack {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.llm-side-stack .settings-panel {
+  padding: 10px 12px;
+}
+
+.llm-probe-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(150px, 0.36fr) auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.llm-probe-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-raised) 74%, transparent);
+}
+
+.llm-probe-target strong,
+.llm-probe-target span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-probe-target strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.llm-probe-target span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.llm-probe-panel textarea {
+  width: 100%;
+  min-height: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  outline: 0;
+  resize: none;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.llm-test-output {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.llm-probe-result {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.llm-probe-result div,
+.llm-probe-result p {
+  min-width: 0;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-input);
+}
+
+.llm-probe-result--wide,
+.llm-probe-result p {
+  grid-column: 1 / -1;
+}
+
+.llm-probe-result span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.llm-probe-result strong,
+.llm-probe-result p {
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.llm-probe-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 6px;
+  min-height: 0;
+  height: 100%;
+  padding: 14px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-2);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.llm-probe-empty strong {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.llm-probe-empty span {
+  max-width: 260px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.llm-inline-success {
+  color: var(--color-success);
+}
+
+.llm-inline-error {
+  color: var(--color-danger);
+}
+
+.llm-footer {
+  flex-wrap: wrap;
+  gap: 16px;
+  min-height: 28px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.llm-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 1280px) {
+  .llm-settings {
+    height: auto;
+    min-height: calc(100vh - 50px);
+    overflow: visible;
+  }
+
+  .llm-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .llm-list-panel,
+  .llm-profile-panel,
+  .llm-side-stack {
+    min-height: 420px;
+  }
+}
+
+@media (max-width: 760px) {
+  .llm-settings {
+    padding: 10px;
+  }
+
+  .llm-summary-grid,
+  .llm-field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

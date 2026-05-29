@@ -69,7 +69,7 @@ def join_url(base_url: str, path: str) -> str:
 
 
 def resolve_credential_binding(
-    binding: str | None,
+    binding_id: str | None,
     *,
     required: bool,
     description: str,
@@ -78,27 +78,15 @@ def resolve_credential_binding(
     if resolved_credential is not None and resolved_credential.strip():
         return resolved_credential.strip()
 
-    normalized_binding = binding.strip() if binding is not None else ""
-    if normalized_binding:
+    normalized_binding_id = binding_id.strip() if binding_id is not None else ""
+    if normalized_binding_id:
         raise RuntimeError(
-            f"{description} declares {_credential_binding_label(normalized_binding)} "
+            f"{description} declares Access credential binding '{normalized_binding_id}' "
             "but no resolved credential was injected.",
         )
     if required:
         raise RuntimeError(f"{description} requires an injected resolved credential.")
     return None
-
-
-def _credential_binding_label(binding: str) -> str:
-    if binding.startswith("env:"):
-        env_name = binding.removeprefix("env:").strip()
-        return f"credential binding 'env:{env_name}'" if env_name else "env credential binding"
-    if binding.startswith("file:"):
-        return "file credential binding"
-    if binding.startswith("codex_auth_json") or binding in {"codex-cli", "codex_auth_json"}:
-        return "Codex auth json credential binding"
-    return "credential binding"
-
 
 def ensure_json_response(
     response: requests.Response,

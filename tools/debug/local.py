@@ -30,5 +30,5 @@ async def _local_echo_handler(
     )
 
 
-def echo(_container: Any):
+def echo(_deps: Any):
     return _local_echo_handler

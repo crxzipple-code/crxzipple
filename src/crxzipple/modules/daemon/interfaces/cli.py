@@ -7,13 +7,12 @@ import shlex
 import shutil
 import sys
 import time
-from typing import Callable
+from typing import Any
 import typer
 
 from crxzipple.interfaces.worker_loops import run_daemon_supervisor_loop
 from crxzipple.core.config import load_settings
 from crxzipple.interfaces.cli.crxzipple import guard_runtime_database
-from crxzipple.interfaces.cli.context import ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.daemon import DaemonNotFoundError, DaemonValidationError
 from crxzipple.modules.process import ProcessValidationError
@@ -32,6 +31,44 @@ def _exit_error(exc: Exception) -> None:
 
 
 _SUPERVISOR_SESSION_KEY = "daemon:supervisor"
+_DAEMON_CONTAINER_KEY = "daemon_runtime_container"
+
+
+def ensure_container(ctx: typer.Context) -> Any:
+    from crxzipple.interfaces.runtime_container import (
+        AssemblyTarget,
+        ensure_typer_runtime_container,
+    )
+
+    return ensure_typer_runtime_container(
+        ctx,
+        target=AssemblyTarget.DAEMON_SUPERVISOR,
+        key=_DAEMON_CONTAINER_KEY,
+    )
+
+
+def _daemon_service(container: Any) -> Any:
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    return container.require(AppKey.DAEMON_SERVICE)
+
+
+def _daemon_manager(container: Any) -> Any:
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    return container.require(AppKey.DAEMON_MANAGER)
+
+
+def _process_service(container: Any) -> Any:
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    return container.require(AppKey.PROCESS_SERVICE)
+
+
+def _channel_control_service(container: Any) -> Any:
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    return container.require(AppKey.CHANNEL_CONTROL_SERVICE)
 
 
 def _process_session_payload(session) -> dict[str, object]:  # noqa: ANN001
@@ -215,22 +252,8 @@ def _await_supervisor_bootstrap(
     return session
 
 
-def _managed_spec_syncers(container) -> tuple[Callable[[], object], ...]:  # noqa: ANN001
-    raw = getattr(container, "daemon_spec_syncers", ())
-    if raw is None:
-        return ()
-    if not isinstance(raw, tuple):
-        raw = tuple(raw)
-    syncers: list[Callable[[], object]] = []
-    for candidate in raw:
-        if callable(candidate):
-            syncers.append(candidate)
-    return tuple(syncers)
-
-
 def _sync_managed_specs(container) -> None:  # noqa: ANN001
-    for syncer in _managed_spec_syncers(container):
-        syncer()
+    _channel_control_service(container).sync_daemon_specs()
 
 
 def build_cli() -> typer.Typer:
@@ -243,7 +266,7 @@ def build_cli() -> typer.Typer:
         echo_data(
             [
                 service_set_payload(service_set)
-                for service_set in container.daemon_service.list_service_sets()
+                for service_set in _daemon_service(container).list_service_sets()
             ]
         )
 
@@ -262,7 +285,7 @@ def build_cli() -> typer.Typer:
         echo_data(
             [
                 spec_payload(spec)
-                for spec in container.daemon_service.list_service_specs(
+                for spec in _daemon_service(container).list_service_specs(
                     role=role,
                     service_group=service_group,
                 )
@@ -286,7 +309,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
         try:
-            instances = container.daemon_manager.list_instances(
+            instances = _daemon_manager(container).list_instances(
                 service_key=service_key,
                 refresh=refresh,
             )
@@ -319,7 +342,7 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         container = ensure_container(ctx)
-        leases = container.daemon_service.list_leases(service_key=service_key)
+        leases = _daemon_service(container).list_leases(service_key=service_key)
         if status is not None:
             normalized_status = status.strip().lower()
             leases = tuple(lease for lease in leases if lease.status == normalized_status)
@@ -346,12 +369,13 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
         try:
-            spec = container.daemon_service.get_service_spec(service_key)
-            instances = container.daemon_manager.list_instances(
+            daemon_service = _daemon_service(container)
+            spec = daemon_service.get_service_spec(service_key)
+            instances = _daemon_manager(container).list_instances(
                 service_key=service_key,
                 refresh=refresh,
             )
-            leases = container.daemon_service.list_leases(service_key=service_key)
+            leases = daemon_service.list_leases(service_key=service_key)
         except (DaemonValidationError, DaemonNotFoundError) as exc:
             _exit_error(exc)
         echo_data(
@@ -371,7 +395,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
         try:
-            instances = container.daemon_manager.ensure_service(service_key)
+            instances = _daemon_manager(container).ensure_service(service_key)
         except (DaemonValidationError, DaemonNotFoundError) as exc:
             _exit_error(exc)
         echo_data([instance_payload(instance) for instance in instances])
@@ -384,7 +408,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
         try:
-            instances = container.daemon_manager.healthcheck_service(service_key)
+            instances = _daemon_manager(container).healthcheck_service(service_key)
         except (DaemonValidationError, DaemonNotFoundError) as exc:
             _exit_error(exc)
         echo_data([instance_payload(instance) for instance in instances])
@@ -397,7 +421,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
         try:
-            instances = container.daemon_manager.reconcile_service(service_key)
+            instances = _daemon_manager(container).reconcile_service(service_key)
         except (DaemonValidationError, DaemonNotFoundError) as exc:
             _exit_error(exc)
         echo_data([instance_payload(instance) for instance in instances])
@@ -453,13 +477,14 @@ def build_cli() -> typer.Typer:
         service_groups = _normalized_tuple(service_group)
         try:
             _validate_supervisor_targets(
-                container.daemon_service,
+                _daemon_service(container),
                 service_set_keys=service_set_keys,
                 service_keys=service_keys,
             )
         except (DaemonValidationError, DaemonNotFoundError) as exc:
             _exit_error(exc)
-        active_session = _active_supervisor_session(container.process_service)
+        process_service = _process_service(container)
+        active_session = _active_supervisor_session(process_service)
         if active_session is not None:
             echo_data(
                 {
@@ -478,7 +503,7 @@ def build_cli() -> typer.Typer:
             max_cycles=max_cycles,
         )
         try:
-            session = container.process_service.start_command(
+            session = process_service.start_command(
                 command=command,
                 shell=_resolve_shell_executable(),
                 working_directory=str(Path.cwd().resolve()),
@@ -497,11 +522,11 @@ def build_cli() -> typer.Typer:
         except (DaemonValidationError, ProcessValidationError) as exc:
             _exit_error(exc)
         session = _await_supervisor_bootstrap(
-            container.process_service,
+            process_service,
             process_id=session.id,
         )
         if not session.is_running:
-            output = container.process_service.read_output(process_id=session.id, limit=4000)
+            output = process_service.read_output(process_id=session.id, limit=4000)
             echo_data(
                 {
                     "status": "failed_to_start",
@@ -559,7 +584,7 @@ def build_cli() -> typer.Typer:
         _sync_managed_specs(container)
         try:
             run_daemon_supervisor_loop(
-                container.daemon_manager,
+                _daemon_manager(container),
                 poll_interval_seconds=poll_interval_seconds,
                 service_set_keys=_normalized_tuple(service_set),
                 service_keys=_normalized_tuple(service_key),
@@ -575,8 +600,9 @@ def build_cli() -> typer.Typer:
     @app.command("status")
     def supervisor_status(ctx: typer.Context) -> None:
         container = ensure_container(ctx)
-        active_session = _active_supervisor_session(container.process_service)
-        latest_session = active_session or _latest_supervisor_session(container.process_service)
+        process_service = _process_service(container)
+        active_session = _active_supervisor_session(process_service)
+        latest_session = active_session or _latest_supervisor_session(process_service)
         echo_data(
             {
                 "status": "running" if active_session is not None else "stopped",
@@ -596,13 +622,14 @@ def build_cli() -> typer.Typer:
         limit: int = typer.Option(4000, min=1, max=20000, help="Maximum characters."),
     ) -> None:
         container = ensure_container(ctx)
-        session = _active_supervisor_session(container.process_service)
+        process_service = _process_service(container)
+        session = _active_supervisor_session(process_service)
         if session is None:
-            session = _latest_supervisor_session(container.process_service)
+            session = _latest_supervisor_session(process_service)
         if session is None:
             echo_data({"status": "not_running", "supervisor": None, "output": None})
             return
-        output = container.process_service.read_output(
+        output = process_service.read_output(
             process_id=session.id,
             stdout_offset=stdout_offset,
             stderr_offset=stderr_offset,
@@ -618,9 +645,10 @@ def build_cli() -> typer.Typer:
 
     def _stop_supervisor_impl(ctx: typer.Context) -> None:
         container = ensure_container(ctx)
-        active_session = _active_supervisor_session(container.process_service)
+        process_service = _process_service(container)
+        active_session = _active_supervisor_session(process_service)
         if active_session is None:
-            latest_session = _latest_supervisor_session(container.process_service)
+            latest_session = _latest_supervisor_session(process_service)
             echo_data(
                 {
                     "status": "not_running",
@@ -632,7 +660,7 @@ def build_cli() -> typer.Typer:
                 }
             )
             return
-        session = container.process_service.terminate_session(process_id=active_session.id)
+        session = process_service.terminate_session(process_id=active_session.id)
         echo_data({"status": "stopped", "supervisor": _process_session_payload(session)})
 
     @app.command("stop-supervisor")
@@ -646,23 +674,26 @@ def build_cli() -> typer.Typer:
     def _stop_all_impl(ctx: typer.Context) -> None:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
-        active_session = _active_supervisor_session(container.process_service)
+        process_service = _process_service(container)
+        active_session = _active_supervisor_session(process_service)
         latest_session = None
         supervisor_payload: dict[str, object] | None = None
         supervisor_status = "not_running"
         if active_session is not None:
-            session = container.process_service.terminate_session(process_id=active_session.id)
+            session = process_service.terminate_session(process_id=active_session.id)
             supervisor_payload = _process_session_summary(session)
             supervisor_status = "stopped"
         else:
-            latest_session = _latest_supervisor_session(container.process_service)
+            latest_session = _latest_supervisor_session(process_service)
             if latest_session is not None:
                 supervisor_payload = _process_session_summary(latest_session)
 
         stopped_services: list[dict[str, object]] = []
-        for service_key in _managed_process_service_keys(container.daemon_service):
+        daemon_service = _daemon_service(container)
+        daemon_manager = _daemon_manager(container)
+        for service_key in _managed_process_service_keys(daemon_service):
             try:
-                instances = container.daemon_manager.stop_service(service_key)
+                instances = daemon_manager.stop_service(service_key)
             except (DaemonValidationError, DaemonNotFoundError) as exc:
                 _exit_error(exc)
             stopped_services.append(
@@ -697,7 +728,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         _sync_managed_specs(container)
         try:
-            instances = container.daemon_manager.stop_service(service_key)
+            instances = _daemon_manager(container).stop_service(service_key)
         except (DaemonValidationError, DaemonNotFoundError) as exc:
             _exit_error(exc)
         echo_data([instance_payload(instance) for instance in instances])

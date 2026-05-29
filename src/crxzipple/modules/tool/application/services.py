@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from crxzipple.modules.tool.application.catalog_service import ToolCatalogService
 from crxzipple.modules.tool.application.concurrency import ToolRunConcurrencyPolicy
+from crxzipple.modules.tool.application.provider_backend_service import (
+    ToolProviderBackendReadinessEvaluator,
+)
 from crxzipple.modules.tool.application.service_support import (
     ExecuteToolInput,
-    RegisterToolInput,
-    RegisterToolParameterInput,
-    SetToolAvailabilityInput,
     ToolRuntimeGateway,
     ToolUnitOfWork,
+)
+from crxzipple.modules.tool.application.context_requirements import (
+    check_tool_context_readiness,
 )
 from crxzipple.modules.tool.application.submission_service import ToolSubmissionService
 from crxzipple.modules.tool.application.worker_service import ToolWorkerService
@@ -29,22 +32,17 @@ class ToolApplicationService:
         catalog_service: ToolCatalogService,
         worker_service: ToolWorkerService,
         submission_service: ToolSubmissionService,
+        runtime_pool_service: object,
     ) -> None:
         self.catalog_service = catalog_service
         self.worker_service = worker_service
         self.submission_service = submission_service
+        self.runtime_pool_service = runtime_pool_service
+        self.provider_backend_readiness = ToolProviderBackendReadinessEvaluator()
 
     @property
     def dispatch_port(self):
         return self.submission_service.dispatch_port
-
-    @property
-    def discovery_gateway(self):
-        return self.catalog_service.discovery_gateway
-
-    @discovery_gateway.setter
-    def discovery_gateway(self, value) -> None:
-        self.catalog_service.deps.discovery_gateway = value
 
     @property
     def worker_lease_seconds(self) -> int:
@@ -74,32 +72,127 @@ class ToolApplicationService:
     def concurrency_policy(self) -> ToolRunConcurrencyPolicy:
         return self.worker_service.concurrency_policy
 
-    def register(self, data: RegisterToolInput) -> Tool:
-        return self.catalog_service.register(data)
-
-    def list_discovery_providers(self):
-        return self.catalog_service.list_discovery_providers()
-
-    def discover_tools(self, *, provider_name: str | None = None):
-        return self.catalog_service.discover_tools(provider_name=provider_name)
-
-    def discover_local_tools(self):
-        return self.catalog_service.discover_local_tools()
-
-    def set_availability(self, data: SetToolAvailabilityInput) -> Tool:
-        return self.catalog_service.set_availability(data)
-
     def list_tools(self):
         return self.catalog_service.list_tools()
 
-    def list_enabled_tools(self):
+    def list_enabled_tools(
+        self,
+        *,
+        runtime_context: object | None = None,
+    ):
+        if runtime_context is not None:
+            return self.runtime_pool_service.list_enabled_tools(
+                runtime_context=runtime_context,
+            )
         return self.catalog_service.list_enabled_tools()
 
-    def ensure_local_system_tools_registered(self):
-        return self.catalog_service.ensure_local_system_tools_registered()
+    def list_runtime_pool_tools(
+        self,
+        *,
+        runtime_context: object | None = None,
+    ):
+        return self.runtime_pool_service.list_enabled_tools(
+            runtime_context=runtime_context,
+        )
 
     def get_tool(self, tool_id: str) -> Tool:
         return self.catalog_service.get_tool(tool_id)
+
+    def check_access_readiness(
+        self,
+        tool_id: str,
+        *,
+        workspace_dir: str | None = None,
+    ):
+        del workspace_dir
+        tool = self.get_tool(tool_id)
+        if self.submission_service.access_readiness is None:
+            return None
+        return self.submission_service.access_readiness.check_tool_access(
+            tool,
+        )
+
+    def check_runtime_readiness(
+        self,
+        tool_id: str,
+        *,
+        workspace_dir: str | None = None,
+    ):
+        tool = self.get_tool(tool_id)
+        if self.submission_service.runtime_readiness is None:
+            return None
+        return self.submission_service.runtime_readiness.check_tool_runtime(
+            tool,
+            workspace_dir=workspace_dir,
+        )
+
+    def check_context_readiness(
+        self,
+        tool_id: str,
+        *,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
+        active_session_id: str | None = None,
+        workspace_dir: str | None = None,
+    ):
+        tool = self.get_tool(tool_id)
+        if not tool.context_requirements:
+            return None
+        return check_tool_context_readiness(
+            tool,
+            {
+                "agent_id": agent_id,
+                "run_id": run_id,
+                "session_key": session_key,
+                "active_session_id": active_session_id,
+                "workspace_dir": workspace_dir,
+            },
+        )
+
+    def check_readiness(
+        self,
+        tool_id: str,
+        *,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+        session_key: str | None = None,
+        active_session_id: str | None = None,
+        workspace_dir: str | None = None,
+    ) -> dict[str, object]:
+        return _combined_readiness_payload(
+            context=self.check_context_readiness(
+                tool_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                session_key=session_key,
+                active_session_id=active_session_id,
+                workspace_dir=workspace_dir,
+            ),
+            access=self.check_access_readiness(tool_id),
+            runtime=self.check_runtime_readiness(tool_id, workspace_dir=workspace_dir),
+        )
+
+    def check_provider_backend_readiness(self, backend: object):
+        backend_entity = (
+            self._get_provider_backend(str(backend))
+            if isinstance(backend, str)
+            else backend
+        )
+        return self.provider_backend_readiness.check_backend_readiness(
+            backend_entity,
+            access_readiness=self.submission_service.access_readiness,
+            runtime_readiness=self.submission_service.runtime_readiness,
+        )
+
+    def _get_provider_backend(self, backend_id: str):
+        with self.submission_service.uow_factory() as uow:
+            backend = uow.tool_provider_backends.get(backend_id)
+            if backend is None:
+                raise ToolValidationError(
+                    f"Tool provider backend '{backend_id}' does not exist.",
+                )
+            return backend
 
     def get_tool_run(self, run_id: str) -> ToolRun:
         return self.submission_service.get_tool_run(run_id)
@@ -131,6 +224,7 @@ class ToolApplicationService:
             ExecuteToolInput(
                 tool_id=original.tool_id,
                 arguments=dict(original.input_payload),
+                metadata=dict(original.metadata),
                 mode=original.target.mode,
                 strategy=original.target.strategy,
                 environment=original.target.environment,
@@ -148,11 +242,89 @@ class ToolApplicationService:
         return await self.submission_service.execute_many(items)
 
 
+def _combined_readiness_payload(
+    *,
+    context: object | None,
+    access: object | None,
+    runtime: object | None,
+) -> dict[str, object]:
+    parts: list[tuple[str, dict[str, object]]] = []
+    for category, readiness in (
+        ("context", context),
+        ("access", access),
+        ("runtime", runtime),
+    ):
+        payload = _readiness_payload(readiness)
+        if payload is not None:
+            parts.append((category, payload))
+    if not parts:
+        return {
+            "ready": True,
+            "status": "ready",
+            "reason": "No readiness checks are configured.",
+            "setup_available": False,
+            "checks": [],
+            "parts": {},
+        }
+
+    checks: list[dict[str, object]] = []
+    for category, payload in parts:
+        raw_checks = payload.get("checks")
+        if isinstance(raw_checks, list):
+            checks.extend(
+                {"category": category, **dict(raw_check)}
+                for raw_check in raw_checks
+                if isinstance(raw_check, dict)
+            )
+
+    blocked = tuple((category, payload) for category, payload in parts if not payload["ready"])
+    if not blocked:
+        return {
+            "ready": True,
+            "status": "ready",
+            "reason": "All readiness checks are ready.",
+            "setup_available": False,
+            "checks": checks,
+            "parts": {category: payload for category, payload in parts},
+        }
+
+    statuses = tuple(str(payload.get("status") or "") for _category, payload in blocked)
+    if "unsupported" in statuses:
+        status = "unsupported"
+    elif "degraded" in statuses:
+        status = "degraded"
+    else:
+        status = "setup_needed"
+    reasons = tuple(
+        dict.fromkeys(
+            str(payload.get("reason") or "").strip()
+            for _category, payload in blocked
+            if str(payload.get("reason") or "").strip()
+        )
+    )
+    return {
+        "ready": False,
+        "status": status,
+        "reason": "; ".join(reasons) or "Tool readiness setup is required.",
+        "setup_available": any(bool(payload.get("setup_available")) for _c, payload in blocked),
+        "checks": checks,
+        "parts": {category: payload for category, payload in parts},
+    }
+
+
+def _readiness_payload(readiness: object | None) -> dict[str, object] | None:
+    if readiness is None:
+        return None
+    to_payload = getattr(readiness, "to_payload", None)
+    if callable(to_payload):
+        payload = to_payload()
+        if isinstance(payload, dict):
+            return dict(payload)
+    return None
+
+
 __all__ = [
     "ExecuteToolInput",
-    "RegisterToolInput",
-    "RegisterToolParameterInput",
-    "SetToolAvailabilityInput",
     "ToolApplicationService",
     "ToolRuntimeGateway",
     "ToolUnitOfWork",

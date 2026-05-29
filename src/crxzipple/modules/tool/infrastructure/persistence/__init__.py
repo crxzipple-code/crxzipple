@@ -1,19 +1,37 @@
 from crxzipple.modules.tool.infrastructure.persistence.models import (
+    ToolFunctionModel,
+    ToolProviderBackendModel,
     ToolRunAssignmentModel,
     ToolRunModel,
+    ToolSourceDiscoveryRunModel,
+    ToolSourceModel,
     ToolWorkerModel,
 )
 from crxzipple.modules.tool.infrastructure.persistence.repositories import (
+    SqlAlchemyToolFunctionRepository,
+    SqlAlchemyToolFunctionCatalogRepository,
+    SqlAlchemyToolProviderBackendRepository,
     SqlAlchemyToolRunAssignmentRepository,
     SqlAlchemyToolRunRepository,
+    SqlAlchemyToolSourceDiscoveryRunRepository,
+    SqlAlchemyToolSourceRepository,
     SqlAlchemyToolWorkerRepository,
 )
 
 __all__ = [
+    "SqlAlchemyToolFunctionRepository",
+    "SqlAlchemyToolFunctionCatalogRepository",
+    "SqlAlchemyToolProviderBackendRepository",
     "SqlAlchemyToolRunAssignmentRepository",
     "SqlAlchemyToolRunRepository",
+    "SqlAlchemyToolSourceDiscoveryRunRepository",
+    "SqlAlchemyToolSourceRepository",
     "SqlAlchemyToolWorkerRepository",
+    "ToolFunctionModel",
+    "ToolProviderBackendModel",
     "ToolRunAssignmentModel",
     "ToolRunModel",
+    "ToolSourceDiscoveryRunModel",
+    "ToolSourceModel",
     "ToolWorkerModel",
 ]

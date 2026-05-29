@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import requests
 
-from crxzipple.modules.artifacts.application import ArtifactApplicationService
 from crxzipple.modules.artifacts.domain import (
     ArtifactError,
     ArtifactKind,
@@ -22,9 +21,16 @@ from crxzipple.modules.channels.application.services import (
     ChannelRuntimeManager,
 )
 from crxzipple.modules.channels.application.bindings import (
+    ChannelCredentialResolutionError,
     collect_channel_access_requirements,
     mask_channel_metadata,
     resolve_channel_metadata_binding,
+)
+from crxzipple.modules.channels.application.ports import (
+    ChannelAccessReadinessPort,
+    ChannelAgentProfilePort,
+    ChannelArtifactReadPort,
+    ChannelEventStreamPort,
 )
 from crxzipple.modules.channels.domain import (
     ChannelAccountRuntimeBinding,
@@ -43,7 +49,6 @@ from crxzipple.modules.events import (
     Event,
     EventTopicRecord,
     EventTopicWatch,
-    EventsApplicationService,
 )
 from crxzipple.modules.orchestration.application import (
     turn_session_live_topic,
@@ -62,11 +67,9 @@ from crxzipple.shared.http import request_url
 from crxzipple.shared.access import AccessConsumerRef, CredentialProvider
 
 if TYPE_CHECKING:
-    from crxzipple.modules.access import AccessApplicationService
-    from crxzipple.modules.agent.application import AgentApplicationService
     from crxzipple.modules.orchestration.application.ports import (
         OrchestrationRunLookupPort,
-        OrchestrationSchedulerSubmitPort,
+        OrchestrationSubmissionPort,
     )
 
 
@@ -140,7 +143,7 @@ class ChannelRuntimeBootstrapService:
         *,
         profile_service: ChannelProfileApplicationService,
         runtime_manager: ChannelRuntimeManager,
-        access_service: "AccessApplicationService | None" = None,
+        access_service: ChannelAccessReadinessPort | None = None,
         credential_provider: CredentialProvider | None = None,
     ) -> None:
         self.profile_service = profile_service
@@ -293,10 +296,11 @@ class ChannelRuntimeBootstrapService:
         for account in profile.accounts:
             if not account.enabled:
                 continue
-            if isinstance(account.auth_ref, str) and account.auth_ref.strip():
-                auth_ref = account.auth_ref.strip()
-                if auth_ref not in resolved:
-                    resolved.append(auth_ref)
+            for binding_id in account.credential_bindings.values():
+                if isinstance(binding_id, str) and binding_id.strip():
+                    normalized_binding = binding_id.strip()
+                    if normalized_binding not in resolved:
+                        resolved.append(normalized_binding)
             for requirement in collect_channel_access_requirements(account.metadata):
                 if requirement not in resolved:
                     resolved.append(requirement)
@@ -368,8 +372,8 @@ class WebChannelRuntimeService(ChannelRuntimeBootstrapService):
         *,
         profile_service: ChannelProfileApplicationService,
         runtime_manager: ChannelRuntimeManager,
-        events_service: EventsApplicationService,
-        access_service: "AccessApplicationService | None" = None,
+        events_service: ChannelEventStreamPort,
+        access_service: ChannelAccessReadinessPort | None = None,
         credential_provider: CredentialProvider | None = None,
     ) -> None:
         super().__init__(
@@ -822,15 +826,15 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
     def __init__(
         self,
         *,
-        agent_service: "AgentApplicationService",
-        orchestration_scheduler_service: "OrchestrationSchedulerSubmitPort",
+        agent_service: ChannelAgentProfilePort,
+        orchestration_submission_port: "OrchestrationSubmissionPort",
         orchestration_run_lookup: "OrchestrationRunLookupPort",
-        artifact_service: ArtifactApplicationService,
+        artifact_service: ChannelArtifactReadPort,
         interaction_service: ChannelInteractionService,
         profile_service: ChannelProfileApplicationService,
         runtime_manager: ChannelRuntimeManager,
-        events_service: EventsApplicationService,
-        access_service: "AccessApplicationService | None" = None,
+        events_service: ChannelEventStreamPort,
+        access_service: ChannelAccessReadinessPort | None = None,
         credential_provider: CredentialProvider | None = None,
     ) -> None:
         super().__init__(
@@ -840,7 +844,7 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
             credential_provider=credential_provider,
         )
         self.agent_service = agent_service
-        self.orchestration_scheduler_service = orchestration_scheduler_service
+        self.orchestration_submission_port = orchestration_submission_port
         self.orchestration_run_lookup = orchestration_run_lookup
         self.artifact_service = artifact_service
         self.interaction_service = interaction_service
@@ -1864,7 +1868,7 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
         )
         try:
             run = submit_turn(
-                self.orchestration_scheduler_service,
+                self.orchestration_submission_port,
                 content=normalize_lark_message_content(message, mentions=mentions),
                 options=options,
                 run_id=interaction.run_id,
@@ -2184,6 +2188,8 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
                 timeout=10,
             )
             payload = response.json()
+        except ChannelCredentialResolutionError:
+            raise
         except (requests.RequestException, ValueError, RuntimeError):
             return None
         code = payload.get("code")
@@ -2292,14 +2298,14 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
     def __init__(
         self,
         *,
-        agent_service: "AgentApplicationService",
-        orchestration_scheduler_service: "OrchestrationSchedulerSubmitPort",
+        agent_service: ChannelAgentProfilePort,
+        orchestration_submission_port: "OrchestrationSubmissionPort",
         orchestration_run_lookup: "OrchestrationRunLookupPort",
         interaction_service: ChannelInteractionService,
         profile_service: ChannelProfileApplicationService,
         runtime_manager: ChannelRuntimeManager,
-        events_service: EventsApplicationService,
-        access_service: "AccessApplicationService | None" = None,
+        events_service: ChannelEventStreamPort,
+        access_service: ChannelAccessReadinessPort | None = None,
         credential_provider: CredentialProvider | None = None,
     ) -> None:
         super().__init__(
@@ -2309,7 +2315,7 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
             credential_provider=credential_provider,
         )
         self.agent_service = agent_service
-        self.orchestration_scheduler_service = orchestration_scheduler_service
+        self.orchestration_submission_port = orchestration_submission_port
         self.orchestration_run_lookup = orchestration_run_lookup
         self.interaction_service = interaction_service
         self.events_service = events_service
@@ -2419,7 +2425,7 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
         )
         try:
             run = submit_turn(
-                self.orchestration_scheduler_service,
+                self.orchestration_submission_port,
                 content=content,
                 options=options,
                 run_id=planned_run_id,

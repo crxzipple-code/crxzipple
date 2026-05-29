@@ -42,7 +42,7 @@ class ConfigTestCase(unittest.TestCase):
         os.environ["APP_TOOL_MCP_PROVIDERS"] = """
         [
           {
-            "name": "browser_mcp",
+            "name": "sample_mcp",
             "command": ["node", "server.js"],
             "max_concurrency": 3
           }
@@ -100,6 +100,76 @@ max_concurrency: 7
         settings = load_settings()
 
         self.assertEqual(settings.tool_worker_max_in_flight, 6)
+
+    def test_load_settings_reads_browser_profile_fields(self) -> None:
+        os.environ["APP_BROWSER_PROFILE_SPECS"] = """
+        [
+          {
+            "name": "work",
+            "cdp_port": 18800,
+            "user_data_dir": "/tmp/crx-browser-work",
+            "profile_directory": "Profile 1",
+            "autostart": false,
+            "proxy_mode": "static",
+            "proxy_server": "socks5://127.0.0.1:7890",
+            "proxy_bypass_list": ["127.0.0.1", "localhost"],
+            "proxy_credential_kind": "bearer"
+          }
+        ]
+        """
+
+        settings = load_settings()
+
+        work = next(profile for profile in settings.browser_profiles if profile.name == "work")
+        self.assertEqual(work.profile_directory, "Profile 1")
+        self.assertFalse(work.autostart)
+        self.assertEqual(work.proxy_mode, "static")
+        self.assertEqual(work.proxy_server, "socks5://127.0.0.1:7890")
+        self.assertEqual(work.proxy_bypass_list, ("127.0.0.1", "localhost"))
+        self.assertEqual(work.proxy_credential_kind, "bearer_token")
+
+    def test_load_settings_rejects_removed_browser_profile_runtime_fields(self) -> None:
+        for removed_field in ("runtime_mode", "transport", "executable_path", "headless"):
+            with self.subTest(removed_field=removed_field):
+                value = "false" if removed_field == "headless" else '"legacy"'
+                os.environ["APP_BROWSER_PROFILE_SPECS"] = (
+                    f'[{{"name":"work","{removed_field}":{value}}}]'
+                )
+
+                with self.assertRaisesRegex(ValueError, f"{removed_field} has been removed"):
+                    load_settings()
+
+    def test_load_settings_rejects_static_browser_proxy_credentials(self) -> None:
+        os.environ["APP_BROWSER_PROFILE_SPECS"] = """
+        [
+          {
+            "name": "work",
+            "proxy_mode": "static",
+            "proxy_server": "http://user:secret@proxy.example:8080"
+          }
+        ]
+        """
+
+        with self.assertRaisesRegex(ValueError, "must not contain credentials"):
+            load_settings()
+
+    def test_load_settings_reads_http_mcp_provider(self) -> None:
+        os.environ["APP_TOOL_MCP_PROVIDERS"] = """
+        [
+          {
+            "name": "sample_mcp",
+            "transport": "http",
+            "endpoint_url": "http://127.0.0.1:19800/mcp"
+          }
+        ]
+        """
+
+        settings = load_settings()
+
+        provider = settings.tool_mcp_providers[0]
+        self.assertEqual(provider.transport, "http")
+        self.assertEqual(provider.endpoint_url, "http://127.0.0.1:19800/mcp")
+        self.assertEqual(provider.command, ())
 
     def test_load_settings_defaults_tool_worker_inflight_capacity_to_four(self) -> None:
         os.environ.pop("APP_TOOL_WORKER_MAX_IN_FLIGHT", None)

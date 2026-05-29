@@ -10,8 +10,8 @@ from crxzipple.modules.memory.application.contracts import (
     MemoryStorePort,
 )
 from crxzipple.modules.memory.application.events import (
-    MEMORY_WRITE_FAILED_EVENT,
-    MEMORY_WRITE_SUCCEEDED_EVENT,
+    MEMORY_REMEMBER_FAILED_EVENT,
+    MEMORY_REMEMBER_SUCCEEDED_EVENT,
     MemoryEventEmitter,
     emit_memory_event,
 )
@@ -58,6 +58,10 @@ class FileBackedMemoryService:
     def warm_context(self, *, context: MemoryUseContext) -> bool:
         assert self.sync_index is not None
         return self.sync_index.warm_context(context=context)
+
+    def rebuild_index(self, *, context: MemoryUseContext) -> bool:
+        assert self.sync_index is not None
+        return self.sync_index.ensure_synced(context=context, force=True)
 
     def search(
         self,
@@ -162,7 +166,7 @@ class FileBackedMemoryService:
         except Exception as exc:
             emit_memory_event(
                 self.event_emitter,
-                MEMORY_WRITE_FAILED_EVENT,
+                MEMORY_REMEMBER_FAILED_EVENT,
                 context=context,
                 status="failed",
                 level="error",
@@ -175,7 +179,7 @@ class FileBackedMemoryService:
             raise
         emit_memory_event(
             self.event_emitter,
-            MEMORY_WRITE_SUCCEEDED_EVENT,
+            MEMORY_REMEMBER_SUCCEEDED_EVENT,
             context=context,
             status="succeeded",
             payload={

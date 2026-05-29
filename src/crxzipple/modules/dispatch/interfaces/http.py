@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.dispatch.application import (
     CancelDispatchTaskInput,
@@ -169,7 +169,7 @@ def create_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.create_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).create_task(
             CreateDispatchTaskInput(
                 task_id=payload.task_id,
                 owner_kind=payload.owner_kind,
@@ -192,7 +192,7 @@ def get_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.get_task(task_id)
+        task = container.require(AppKey.DISPATCH_SERVICE).get_task(task_id)
     except DispatchTaskNotFoundError as exc:
         raise _not_found(exc) from exc
     return _to_response(DispatchTaskDTO.from_entity(task))
@@ -213,7 +213,7 @@ def list_tasks(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     items = [
         _to_response(DispatchTaskDTO.from_entity(task))
-        for task in container.dispatch_service.list_tasks(
+        for task in container.require(AppKey.DISPATCH_SERVICE).list_tasks(
             status=resolved_status,
             owner_kind=owner_kind,
             lane_key=lane_key,
@@ -229,7 +229,7 @@ def enqueue_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.enqueue_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).enqueue_task(
             EnqueueDispatchTaskInput(
                 task_id=task_id,
                 lane_key=payload.lane_key,
@@ -250,7 +250,7 @@ def claim_next_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse | None:
     try:
-        task = container.dispatch_service.claim_next_queued_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).claim_next_queued_task(
             owner_kind=payload.owner_kind,
             worker_id=payload.worker_id,
             claim_token=payload.claim_token,
@@ -270,7 +270,7 @@ def wait_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.wait_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).wait_task(
             WaitDispatchTaskInput(
                 task_id=task_id,
                 reason=payload.reason,
@@ -290,7 +290,7 @@ def heartbeat_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.heartbeat_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).heartbeat_task(
             HeartbeatDispatchTaskInput(
                 task_id=task_id,
                 worker_id=payload.worker_id,
@@ -312,7 +312,7 @@ def requeue_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.requeue_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).requeue_task(
             RequeueDispatchTaskInput(
                 task_id=task_id,
                 policy=payload.policy,
@@ -333,7 +333,7 @@ def recover_abandoned_tasks(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[DispatchTaskResponse]:
     try:
-        tasks = container.dispatch_service.recover_abandoned_tasks(
+        tasks = container.require(AppKey.DISPATCH_SERVICE).recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
                 owner_kind=payload.owner_kind,
                 reason=payload.reason,
@@ -350,7 +350,7 @@ def complete_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.complete_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).complete_task(
             CompleteDispatchTaskInput(task_id=task_id),
         )
     except DispatchTaskNotFoundError as exc:
@@ -367,7 +367,7 @@ def cancel_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.cancel_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).cancel_task(
             CancelDispatchTaskInput(
                 task_id=task_id,
                 reason=payload.reason,
@@ -387,7 +387,7 @@ def fail_task(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> DispatchTaskResponse:
     try:
-        task = container.dispatch_service.fail_task(
+        task = container.require(AppKey.DISPATCH_SERVICE).fail_task(
             FailDispatchTaskInput(
                 task_id=task_id,
                 message=payload.message,

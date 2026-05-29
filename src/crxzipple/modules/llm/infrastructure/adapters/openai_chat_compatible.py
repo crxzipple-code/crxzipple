@@ -103,7 +103,7 @@ class OpenAIChatCompatibleAdapter:
             for original, alias in tool_name_aliases.items()
         }
         token = resolve_credential_binding(
-            profile.credential_binding,
+            profile.credential_binding_id,
             required=profile.provider.value == "openai_compatible",
             description=f"LLM profile '{profile.id}'",
             resolved_credential=request.resolved_credential,
@@ -341,7 +341,7 @@ class OpenAIChatCompatibleAdapter:
             for original, alias in tool_name_aliases.items()
         }
         token = resolve_credential_binding(
-            profile.credential_binding,
+            profile.credential_binding_id,
             required=profile.provider.value == "openai_compatible",
             description=f"LLM profile '{profile.id}'",
             resolved_credential=request.resolved_credential,

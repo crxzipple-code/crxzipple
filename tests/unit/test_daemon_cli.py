@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
+from types import SimpleNamespace as _SimpleNamespace
 from unittest.mock import ANY, Mock
 
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.daemon import DaemonNotFoundError
 
 from tests.unit.cli_test_support import *
+
+
+class _NoopChannelControlService:
+    def sync_daemon_specs(self) -> tuple[object, ...]:
+        return ()
+
+
+class SimpleNamespace(_SimpleNamespace):
+    def require(self, key):  # noqa: ANN001
+        value = getattr(key, "value", str(key))
+        mapping = {
+            "channels.control_service": "channel_control_service",
+            "daemon.service": "daemon_service",
+            "daemon.manager": "daemon_manager",
+            "process.service": "process_service",
+        }
+        attr = mapping[value]
+        if attr == "channel_control_service" and not hasattr(self, attr):
+            setattr(self, attr, _NoopChannelControlService())
+        return getattr(self, attr)
 
 
 class DaemonCliTestCase(CliModuleTestCase):
@@ -183,7 +204,7 @@ class DaemonCliTestCase(CliModuleTestCase):
     def test_daemon_services_lists_registered_specs(self) -> None:
         syncer = Mock()
         container = SimpleNamespace(
-            daemon_spec_syncers=(syncer,),
+            channel_control_service=SimpleNamespace(sync_daemon_specs=syncer),
             daemon_service=SimpleNamespace(
                 list_service_specs=lambda **_: (
                     SimpleNamespace(
@@ -551,7 +572,7 @@ class DaemonCliTestCase(CliModuleTestCase):
         syncer = Mock()
         container = SimpleNamespace(
             daemon_manager=SimpleNamespace(),
-            daemon_spec_syncers=(syncer,),
+            channel_control_service=SimpleNamespace(sync_daemon_specs=syncer),
         )
 
         with patch(
@@ -576,7 +597,7 @@ class DaemonCliTestCase(CliModuleTestCase):
         self.assertEqual(result.exit_code, 0)
         syncer.assert_called_once_with()
         mocked_loop.assert_called_once_with(
-            container.daemon_manager,
+            container.require(AppKey.DAEMON_MANAGER),
             poll_interval_seconds=1.25,
             service_set_keys=(),
             service_keys=(),
@@ -606,7 +627,7 @@ class DaemonCliTestCase(CliModuleTestCase):
                     "--service-key",
                     "host:browser:crxzipple",
                     "--service-key",
-                    "capability:chrome-mcp:user",
+                    "host:browser:user",
                     "--no-include-eager",
                     "--max-cycles",
                     "2",
@@ -616,10 +637,10 @@ class DaemonCliTestCase(CliModuleTestCase):
 
         self.assertEqual(result.exit_code, 0)
         mocked_loop.assert_called_once_with(
-            container.daemon_manager,
+            container.require(AppKey.DAEMON_MANAGER),
             poll_interval_seconds=5.0,
             service_set_keys=(),
-            service_keys=("host:browser:crxzipple", "capability:chrome-mcp:user"),
+            service_keys=("host:browser:crxzipple", "host:browser:user"),
             service_roles=(),
             service_groups=(),
             include_eager=False,
@@ -659,7 +680,7 @@ class DaemonCliTestCase(CliModuleTestCase):
 
         self.assertEqual(result.exit_code, 0)
         mocked_loop.assert_called_once_with(
-            container.daemon_manager,
+            container.require(AppKey.DAEMON_MANAGER),
             poll_interval_seconds=5.0,
             service_set_keys=("workers", "browser-stack"),
             service_keys=(),
@@ -832,7 +853,7 @@ class DaemonCliTestCase(CliModuleTestCase):
                         transport="process",
                     ),
                     SimpleNamespace(
-                        key="capability:chrome-mcp:user",
+                        key="host:browser:crxzipple",
                         managed_by="internal",
                         transport="process",
                     ),
@@ -853,14 +874,14 @@ class DaemonCliTestCase(CliModuleTestCase):
             result = self.runner.invoke(app, ["daemon", "stop-all"], env=self.env)
 
         self.assertEqual(result.exit_code, 0)
-        container.process_service.terminate_session.assert_called_once_with(process_id="proc-down")
+        container.require(AppKey.PROCESS_SERVICE).terminate_session.assert_called_once_with(process_id="proc-down")
         self.assertEqual(
             stop_calls,
             [
                 "worker:orchestration-scheduler",
                 "worker:orchestration",
                 "worker:tool",
-                "capability:chrome-mcp:user",
+                "host:browser:crxzipple",
             ],
         )
         payload = json.loads(result.stdout)
@@ -885,7 +906,7 @@ class DaemonCliTestCase(CliModuleTestCase):
                 },
                 {"service_key": "worker:orchestration", "stopped_instance_count": 1},
                 {"service_key": "worker:tool", "stopped_instance_count": 1},
-                {"service_key": "capability:chrome-mcp:user", "stopped_instance_count": 1},
+                {"service_key": "host:browser:crxzipple", "stopped_instance_count": 1},
             ],
         )
 

@@ -16,14 +16,13 @@ from tests.unit.tool_runtime_test_support import (
 
 class ToolBackgroundTestCase(ToolTestCaseBase):
     def test_scheduler_ignores_expired_online_workers(self) -> None:
-        self.container.tool_service.discover_local_tools()
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id="worker-expired",
         )
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id="worker-live",
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             worker = uow.tool_workers.get("worker-expired")
             assert worker is not None
             worker.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -32,7 +31,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             uow.commit()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "skip expired"},
@@ -41,7 +40,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
 
-        assigned = self.container.tool_scheduler_service.assign_next_available()
+        assigned = self.tool_scheduler_service.assign_next_available()
 
         self.assertIsNotNone(assigned)
         assert assigned is not None
@@ -49,9 +48,8 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(assigned.worker_id, "worker-live")
 
     def test_worker_registration_releases_terminal_assignment_slots(self) -> None:
-        self.container.tool_service.discover_local_tools()
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "stale slot"},
@@ -64,7 +62,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             worker_id="worker-stale-slot",
         )
         self.assertIsNotNone(claimed)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             run = uow.tool_runs.get(queued_run.id)
             assert run is not None
             run.fail("terminal before assignment cleanup")
@@ -72,22 +70,21 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             uow.collect(run)
             uow.commit()
 
-        worker = self.container.tool_worker_service.register_worker(
+        worker = self.tool_worker_service.register_worker(
             worker_id="worker-stale-slot",
         )
 
         self.assertEqual(worker.current_in_flight, 0)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             assignment = uow.tool_run_assignments.get_latest_for_run(queued_run.id)
         self.assertIsNotNone(assignment)
         assert assignment is not None
         self.assertEqual(assignment.status, ToolRunAssignmentStatus.EXPIRED)
 
     def test_background_run_tracks_assignment_and_worker_terminal_state(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "tracked hello"},
@@ -102,7 +99,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         )
         self.assertIsNotNone(claimed)
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             assignment = uow.tool_run_assignments.get_latest_for_run(queued_run.id)
             worker = uow.tool_workers.get("worker-tracked")
 
@@ -111,12 +108,12 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertIsNotNone(worker)
         self.assertEqual(worker.current_in_flight, 1)
 
-        finished = self.container.tool_worker_service.process_next_assigned_run(
+        finished = self.tool_worker_service.process_next_assigned_run(
             worker_id="worker-tracked",
         )
 
         self.assertEqual(finished.status, ToolRunStatus.SUCCEEDED)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             assignment = uow.tool_run_assignments.get_latest_for_run(queued_run.id)
             worker = uow.tool_workers.get("worker-tracked")
 
@@ -128,10 +125,9 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(worker.current_in_flight, 0)
 
     def test_recovered_background_run_expires_assignment_and_releases_worker(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "expire me"},
@@ -146,14 +142,14 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         )
         self.assertIsNotNone(claimed)
 
-        recovered = self.container.tool_worker_service.handle_recovered_dispatch_task(
+        recovered = self.tool_worker_service.handle_recovered_dispatch_task(
             tool_run_id=queued_run.id,
             reason="lease expired in test",
         )
 
         self.assertIsNotNone(recovered)
         self.assertEqual(recovered.status, ToolRunStatus.QUEUED)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             assignment = uow.tool_run_assignments.get_latest_for_run(queued_run.id)
             worker = uow.tool_workers.get("worker-expire")
 
@@ -164,10 +160,9 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(worker.current_in_flight, 0)
 
     def test_executes_local_background_async_tool_and_updates_lifecycle(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "background hello"},
@@ -177,7 +172,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         )
 
         self.assertEqual(queued_run.status, ToolRunStatus.QUEUED)
-        dispatch_task = self.container.dispatch_service.get_task(queued_run.id)
+        dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.QUEUED)
         self.assertEqual(dispatch_task.owner_kind, "tool_run")
 
@@ -189,7 +184,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                     self.container,
                     worker_id="worker-local",
                 )
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             if persisted.status is ToolRunStatus.SUCCEEDED:
                 break
             time.sleep(0.05)
@@ -202,20 +197,19 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(persisted.worker_id, "worker-local")
         self.assertIsNotNone(persisted.heartbeat_at)
         self.assertIsNone(persisted.lease_expires_at)
-        completed_dispatch_task = self.container.dispatch_service.get_task(queued_run.id)
+        completed_dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(completed_dispatch_task.status, DispatchTaskStatus.COMPLETED)
 
         event_names = [
             event.event_name
-            for event in self.container.event_bus.published_events
+            for event in self.event_bus.published_events
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.queued", event_names)
 
     def test_background_claim_and_heartbeat_keep_dispatch_lease_in_sync(self) -> None:
-        self.container.tool_service.discover_local_tools()
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "lease hello"},
@@ -231,18 +225,18 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
 
         self.assertIsNotNone(claimed)
         assert claimed is not None
-        dispatch_task = self.container.dispatch_service.get_task(queued_run.id)
+        dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.CLAIMED)
         self.assertIsNotNone(dispatch_task.lease_expires_at)
         initial_lease_expires_at = dispatch_task.lease_expires_at
         time.sleep(0.01)
 
-        self.container.tool_worker_service.heartbeat_run(
+        self.tool_worker_service.heartbeat_run(
             queued_run.id,
             worker_id="worker-lease",
         )
 
-        refreshed_task = self.container.dispatch_service.get_task(queued_run.id)
+        refreshed_task = self.dispatch_service.get_task(queued_run.id)
         self.assertIsNotNone(refreshed_task.lease_expires_at)
         assert refreshed_task.lease_expires_at is not None
         assert initial_lease_expires_at is not None
@@ -250,7 +244,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
 
         event_names = [
             event.event_name
-            for event in self.container.event_bus.published_events
+            for event in self.event_bus.published_events
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.heartbeated", event_names)
@@ -276,20 +270,18 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                 with lock:
                     active_runs -= 1
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="concurrent_echo",
-                name="Concurrent Echo",
-                description="Sleeps asynchronously before returning.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="concurrent_echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="concurrent_echo",
+            name="Concurrent Echo",
+            description="Sleeps asynchronously before returning.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="concurrent_echo",
         )
-        self.container.local_tool_catalog.register(tool, concurrent_echo)
+        self.local_runtime_registry.register(tool, concurrent_echo)
 
         queued_runs = tuple(
             asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="concurrent_echo",
                         arguments={"message": f"concurrent-{index}"},
@@ -300,22 +292,22 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             for index in range(2)
         )
         worker_id = "worker-concurrent"
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id=worker_id,
             max_in_flight=2,
         )
 
-        first_assignment = self.container.tool_scheduler_service.assign_next_available(
+        first_assignment = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
-        second_assignment = self.container.tool_scheduler_service.assign_next_available(
+        second_assignment = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
 
         self.assertIsNotNone(first_assignment)
         self.assertIsNotNone(second_assignment)
 
-        processed = self.container.tool_worker_service.run_until_stopped(
+        processed = self.tool_worker_service.run_until_stopped(
             worker_id=worker_id,
             poll_interval_seconds=0.01,
             max_runs=2,
@@ -326,7 +318,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(processed, 2)
         self.assertGreaterEqual(max_active_runs, 2)
         for queued_run in queued_runs:
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             self.assertEqual(persisted.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(persisted.worker_id, worker_id)
 
@@ -350,20 +342,18 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                 with lock:
                     active_runs -= 1
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="concurrent_openai_image",
-                name="Concurrent OpenAI Image",
-                description="Image-like async background tool.",
-                tags=("openai", "image", "generation"),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="concurrent_openai_image",
-            ),
+        tool = self.seed_tool(
+            tool_id="concurrent_openai_image",
+            name="Concurrent OpenAI Image",
+            description="Image-like async background tool.",
+            tags=("openai", "image", "generation"),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="concurrent_openai_image",
         )
-        self.container.local_tool_catalog.register(tool, concurrent_image)
+        self.local_runtime_registry.register(tool, concurrent_image)
         queued_runs = tuple(
             asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="concurrent_openai_image",
                         arguments={"message": f"image-{index}"},
@@ -374,17 +364,17 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             for index in range(2)
         )
         worker_id = "worker-concurrent-image"
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id=worker_id,
             max_in_flight=2,
         )
         for _ in queued_runs:
-            assigned = self.container.tool_scheduler_service.assign_next_available(
+            assigned = self.tool_scheduler_service.assign_next_available(
                 worker_id=worker_id,
             )
             self.assertIsNotNone(assigned)
 
-        processed = self.container.tool_worker_service.run_until_stopped(
+        processed = self.tool_worker_service.run_until_stopped(
             worker_id=worker_id,
             poll_interval_seconds=0.01,
             max_runs=2,
@@ -395,20 +385,19 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(processed, 2)
         self.assertGreaterEqual(max_active_runs, 2)
         for queued_run in queued_runs:
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             self.assertEqual(persisted.status, ToolRunStatus.SUCCEEDED)
             self.assertEqual(persisted.worker_id, worker_id)
 
     def test_scheduler_loop_fills_available_worker_inflight_slots(self) -> None:
-        self.container.tool_service.discover_local_tools()
         worker_id = "worker-scheduler-slots"
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id=worker_id,
             max_in_flight=2,
         )
         queued_runs = tuple(
             asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="echo",
                         arguments={"message": f"slot-{index}"},
@@ -419,14 +408,14 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             for index in range(2)
         )
 
-        assigned_count = self.container.tool_scheduler_service.run_until_stopped(
+        assigned_count = self.tool_scheduler_service.run_until_stopped(
             poll_interval_seconds=0.01,
             max_runs=2,
             max_idle_cycles=1,
         )
 
         self.assertEqual(assigned_count, 2)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             worker = uow.tool_workers.get(worker_id)
             assignments = [
                 uow.tool_run_assignments.get_latest_for_run(run.id)
@@ -446,24 +435,22 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         )
 
     def test_scheduler_allows_image_capability_to_fill_worker_slots(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="test_image_generate",
-                name="Test Image Generate",
-                description="Image-like async background tool.",
-                tags=("openai", "image", "generation"),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="test_image_generate",
-            ),
+        self.seed_tool(
+            tool_id="test_image_generate",
+            name="Test Image Generate",
+            description="Image-like async background tool.",
+            tags=("openai", "image", "generation"),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="test_image_generate",
         )
         worker_id = "worker-image-slots"
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id=worker_id,
             max_in_flight=2,
         )
         queued_runs = tuple(
             asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="test_image_generate",
                         arguments={"message": f"image-{index}"},
@@ -474,41 +461,39 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             for index in range(2)
         )
 
-        first = self.container.tool_scheduler_service.assign_next_available(
+        first = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
-        second = self.container.tool_scheduler_service.assign_next_available(
+        second = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
 
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         self.assertEqual({first.id, second.id}, {run.id for run in queued_runs})
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             worker = uow.tool_workers.get(worker_id)
         self.assertIsNotNone(worker)
         assert worker is not None
         self.assertEqual(worker.current_in_flight, 2)
 
     def test_scheduler_limits_shared_state_tool_assignments(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="test_browser_action",
-                name="Test Browser Action",
-                description="Browser-like shared state background tool.",
-                tags=("browser",),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="test_browser_action",
-            ),
+        self.seed_tool(
+            tool_id="test_browser_action",
+            name="Test Browser Action",
+            description="Browser-like shared state background tool.",
+            tags=("browser",),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="test_browser_action",
         )
         worker_id = "worker-browser-limited"
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id=worker_id,
             max_in_flight=2,
         )
         queued_runs = tuple(
             asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="test_browser_action",
                         arguments={"message": f"browser-{index}"},
@@ -519,16 +504,16 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             for index in range(2)
         )
 
-        first = self.container.tool_scheduler_service.assign_next_available(
+        first = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
-        second = self.container.tool_scheduler_service.assign_next_available(
+        second = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
 
         self.assertIsNotNone(first)
         self.assertIsNone(second)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             worker = uow.tool_workers.get(worker_id)
             first_assignment = uow.tool_run_assignments.get_latest_for_run(
                 queued_runs[0].id,
@@ -543,33 +528,29 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertIsNone(second_assignment)
 
     def test_scheduler_skips_blocked_shared_state_head_for_image_run(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="test_browser_snapshot",
-                name="Test Browser Snapshot",
-                description="Browser-like shared state background tool.",
-                tags=("browser",),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="test_browser_snapshot",
-            ),
+        self.seed_tool(
+            tool_id="test_browser_snapshot",
+            name="Test Browser Snapshot",
+            description="Browser-like shared state background tool.",
+            tags=("browser",),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="test_browser_snapshot",
         )
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="test_openai_image_generate",
-                name="Test OpenAI Image Generate",
-                description="Image-like async background tool.",
-                tags=("openai", "image", "generation"),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="test_openai_image_generate",
-            ),
+        self.seed_tool(
+            tool_id="test_openai_image_generate",
+            name="Test OpenAI Image Generate",
+            description="Image-like async background tool.",
+            tags=("openai", "image", "generation"),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="test_openai_image_generate",
         )
         worker_id = "worker-skip-blocked"
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id=worker_id,
             max_in_flight=2,
         )
         first_browser = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="test_browser_snapshot",
                     arguments={"message": "browser-active"},
@@ -578,7 +559,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
         queued_browser = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="test_browser_snapshot",
                     arguments={"message": "browser-blocked"},
@@ -587,7 +568,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
         queued_image = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="test_openai_image_generate",
                     arguments={"message": "image-can-run"},
@@ -596,10 +577,10 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
 
-        first = self.container.tool_scheduler_service.assign_next_available(
+        first = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
-        second = self.container.tool_scheduler_service.assign_next_available(
+        second = self.tool_scheduler_service.assign_next_available(
             worker_id=worker_id,
         )
 
@@ -609,43 +590,39 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         assert second is not None
         self.assertEqual(first.id, first_browser.id)
         self.assertEqual(second.id, queued_image.id)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             blocked_assignment = uow.tool_run_assignments.get_latest_for_run(
                 queued_browser.id,
             )
         self.assertIsNone(blocked_assignment)
 
     def test_scheduler_tries_next_worker_when_first_capability_group_is_full(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="test_browser_page_action",
-                name="Test Browser Page Action",
-                description="Browser-like shared state background tool.",
-                tags=("browser",),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="test_browser_page_action",
-            ),
+        self.seed_tool(
+            tool_id="test_browser_page_action",
+            name="Test Browser Page Action",
+            description="Browser-like shared state background tool.",
+            tags=("browser",),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="test_browser_page_action",
         )
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="test_image_variation",
-                name="Test Image Variation",
-                description="Image-like async background tool.",
-                tags=("openai", "image", "generation"),
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="test_image_variation",
-            ),
+        self.seed_tool(
+            tool_id="test_image_variation",
+            name="Test Image Variation",
+            description="Image-like async background tool.",
+            tags=("openai", "image", "generation"),
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="test_image_variation",
         )
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id="worker-cap-a",
             max_in_flight=2,
         )
-        self.container.tool_worker_service.register_worker(
+        self.tool_worker_service.register_worker(
             worker_id="worker-cap-b",
             max_in_flight=2,
         )
         first_browser = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="test_browser_page_action",
                     arguments={"message": "browser-active"},
@@ -654,7 +631,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
         first_image = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="test_image_variation",
                     arguments={"message": "image-active"},
@@ -663,10 +640,10 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
 
-        assigned_browser = self.container.tool_scheduler_service.assign_next_available(
+        assigned_browser = self.tool_scheduler_service.assign_next_available(
             worker_id="worker-cap-a",
         )
-        assigned_image = self.container.tool_scheduler_service.assign_next_available(
+        assigned_image = self.tool_scheduler_service.assign_next_available(
             worker_id="worker-cap-b",
         )
         self.assertIsNotNone(assigned_browser)
@@ -677,7 +654,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(assigned_image.id, first_image.id)
 
         queued_browser = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="test_browser_page_action",
                     arguments={"message": "browser-next-worker"},
@@ -686,7 +663,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
 
-        assigned = self.container.tool_scheduler_service.assign_next_available()
+        assigned = self.tool_scheduler_service.assign_next_available()
 
         self.assertIsNotNone(assigned)
         assert assigned is not None
@@ -701,21 +678,19 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                 details={"message": arguments.get("message")},
             )
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="blocking_echo",
-                name="Blocking Echo",
-                description="Blocks synchronously before returning.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="blocking_echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="blocking_echo",
+            name="Blocking Echo",
+            description="Blocks synchronously before returning.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="blocking_echo",
         )
-        self.container.local_tool_catalog.register(tool, blocking_echo)
-        self.container.tool_service.worker_lease_seconds = 1
-        self.container.tool_service.worker_heartbeat_seconds = 0.02
+        self.local_runtime_registry.register(tool, blocking_echo)
+        self.tool_service.worker_lease_seconds = 1
+        self.tool_service.worker_heartbeat_seconds = 0.02
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="blocking_echo",
                     arguments={"message": "keep alive"},
@@ -738,7 +713,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         deadline = time.monotonic() + 2
         initial_heartbeat_at = None
         while time.monotonic() < deadline:
-            current = self.container.tool_service.get_tool_run(queued_run.id)
+            current = self.tool_service.get_tool_run(queued_run.id)
             if current.status is ToolRunStatus.RUNNING:
                 initial_heartbeat_at = current.heartbeat_at
                 break
@@ -750,7 +725,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
 
         heartbeat_advanced = False
         while time.monotonic() < deadline:
-            current = self.container.tool_service.get_tool_run(queued_run.id)
+            current = self.tool_service.get_tool_run(queued_run.id)
             if (
                 current.status is ToolRunStatus.RUNNING
                 and current.heartbeat_at is not None
@@ -766,16 +741,15 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertFalse(thread.is_alive())
         self.assertTrue(heartbeat_advanced)
 
-        finished = self.container.tool_service.get_tool_run(queued_run.id)
+        finished = self.tool_service.get_tool_run(queued_run.id)
         self.assertEqual(finished.status, ToolRunStatus.SUCCEEDED)
         self.assertEqual(finished.output_payload["message"], "keep alive")
         self.assertIn("run", worker_result)
 
     def test_executes_local_background_thread_tool_and_updates_lifecycle(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "background thread hello"},
@@ -795,7 +769,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                     self.container,
                     worker_id="worker-thread-bg",
                 )
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             if persisted.status is ToolRunStatus.SUCCEEDED:
                 break
             time.sleep(0.05)
@@ -811,10 +785,9 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(persisted.worker_id, "worker-thread-bg")
 
     def test_executes_local_background_process_tool_and_updates_lifecycle(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "background process hello"},
@@ -834,7 +807,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                     self.container,
                     worker_id="worker-process-bg",
                 )
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             if persisted.status is ToolRunStatus.SUCCEEDED:
                 break
             time.sleep(0.05)
@@ -846,20 +819,18 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(persisted.worker_id, "worker-process-bg")
 
     def test_executes_remote_background_async_tool_and_updates_lifecycle(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="remote_echo",
-                name="Remote Echo",
-                description="Executes through the remote adapter.",
-                supported_modes=(ToolMode.INLINE, ToolMode.BACKGROUND),
-                supported_environments=(ToolEnvironment.REMOTE,),
-                source_kind=ToolSourceKind.REMOTE_REGISTRY,
-                runtime_key="remote.echo",
-            ),
+        self.seed_tool(
+            tool_id="remote_echo",
+            name="Remote Echo",
+            description="Executes through the remote adapter.",
+            supported_modes=(ToolMode.INLINE, ToolMode.BACKGROUND),
+            supported_environments=(ToolEnvironment.REMOTE,),
+            definition_origin=ToolDefinitionOrigin.REMOTE_DISCOVERY,
+            runtime_key="remote.echo",
         )
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="remote_echo",
                     arguments={"message": "remote hello"},
@@ -879,7 +850,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                     self.container,
                     worker_id="worker-remote",
                 )
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             if persisted.status is ToolRunStatus.SUCCEEDED:
                 break
             time.sleep(0.05)
@@ -893,19 +864,17 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         async def always_fail(arguments: dict[str, object]) -> dict[str, object]:
             raise RuntimeError(f"boom: {arguments.get('message')}")
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="always_fail",
-                name="Always Fail",
-                description="Fails every time.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="always_fail",
-            ),
+        tool = self.seed_tool(
+            tool_id="always_fail",
+            name="Always Fail",
+            description="Fails every time.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="always_fail",
         )
-        self.container.local_tool_catalog.register(tool, always_fail)
+        self.local_runtime_registry.register(tool, always_fail)
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="always_fail",
                     arguments={"message": "retry me"},
@@ -938,17 +907,16 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(final_attempt.attempt_count, 3)
         self.assertIn("boom: retry me", final_attempt.error_message)
 
-        persisted = self.container.tool_service.get_tool_run(queued_run.id)
+        persisted = self.tool_service.get_tool_run(queued_run.id)
         self.assertEqual(persisted.status, ToolRunStatus.FAILED)
         self.assertEqual(persisted.attempt_count, 3)
         self.assertEqual(persisted.max_attempts, 3)
-        dispatch_task = self.container.dispatch_service.get_task(queued_run.id)
+        dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.FAILED)
 
     def test_recovers_abandoned_background_run_when_lease_expires(self) -> None:
-        self.container.tool_service.discover_local_tools()
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "recover me"},
@@ -965,7 +933,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(claimed.status, ToolRunStatus.DISPATCHING)
         self.assertEqual(claimed.attempt_count, 1)
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             stale = uow.tool_runs.get(queued_run.id)
             dispatch_task = uow.dispatch_tasks.get(queued_run.id)
             self.assertIsNotNone(stale)
@@ -976,7 +944,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             uow.dispatch_tasks.add(dispatch_task)
             uow.commit()
 
-        recovered = self.container.dispatch_service.recover_abandoned_tasks(
+        recovered = self.dispatch_service.recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
                 owner_kind="tool_run",
                 reason="Worker lease expired before completion.",
@@ -984,20 +952,19 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         )
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0].status, DispatchTaskStatus.QUEUED)
-        self.assertIsNotNone(self.container.tool_runtime_event_service)
-        assert self.container.tool_runtime_event_service is not None
-        self.container.tool_runtime_event_service.process_available_events()
+        self.assertIsNotNone(self.tool_runtime_event_service)
+        assert self.tool_runtime_event_service is not None
+        self.tool_runtime_event_service.process_available_events()
 
-        persisted = self.container.tool_service.get_tool_run(queued_run.id)
+        persisted = self.tool_service.get_tool_run(queued_run.id)
         self.assertEqual(persisted.status, ToolRunStatus.QUEUED)
         self.assertEqual(persisted.error_message, "Worker lease expired before completion.")
-        dispatch_task = self.container.dispatch_service.get_task(queued_run.id)
+        dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.QUEUED)
 
     def test_can_cancel_queued_background_run(self) -> None:
-        self.container.tool_service.discover_local_tools()
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "cancel me"},
@@ -1006,11 +973,11 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
             ),
         )
 
-        cancelled = self.container.tool_service.cancel_tool_run(queued_run.id)
+        cancelled = self.tool_service.cancel_tool_run(queued_run.id)
 
         self.assertEqual(cancelled.status, ToolRunStatus.CANCELLED)
         self.assertIsNotNone(cancelled.cancel_requested_at)
-        dispatch_task = self.container.dispatch_service.get_task(queued_run.id)
+        dispatch_task = self.dispatch_service.get_task(queued_run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.CANCELLED)
         self.assertIsNone(
             process_next_background_tool_run(
@@ -1027,19 +994,17 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                 details={"message": arguments.get("message")},
             )
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="slow_echo",
-                name="Slow Echo",
-                description="Sleeps before returning.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="slow_echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="slow_echo",
+            name="Slow Echo",
+            description="Sleeps before returning.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="slow_echo",
         )
-        self.container.local_tool_catalog.register(tool, slow_echo)
+        self.local_runtime_registry.register(tool, slow_echo)
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="slow_echo",
                     arguments={"message": "cancel later"},
@@ -1061,21 +1026,21 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
 
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            current = self.container.tool_service.get_tool_run(queued_run.id)
+            current = self.tool_service.get_tool_run(queued_run.id)
             if current.status is ToolRunStatus.RUNNING:
                 break
             time.sleep(0.01)
         else:
             self.fail("Tool run never reached RUNNING state.")
 
-        requested = self.container.tool_service.cancel_tool_run(queued_run.id)
+        requested = self.tool_service.cancel_tool_run(queued_run.id)
         self.assertEqual(requested.status, ToolRunStatus.CANCEL_REQUESTED)
 
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
         self.assertIn("run", worker_result)
 
-        finished = self.container.tool_service.get_tool_run(queued_run.id)
+        finished = self.tool_service.get_tool_run(queued_run.id)
         self.assertEqual(finished.status, ToolRunStatus.CANCELLED)
         self.assertIsNotNone(finished.cancel_requested_at)
         self.assertEqual(finished.attempt_count, 1)

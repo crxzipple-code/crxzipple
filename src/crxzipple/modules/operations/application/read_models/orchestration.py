@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from crxzipple.modules.orchestration.application.ports import (
-    OrchestrationExecutorControlPort,
+    OrchestrationExecutorLeaseQueryPort,
     OrchestrationRunQueryPort,
 )
 from crxzipple.modules.orchestration.domain import (
@@ -92,17 +92,18 @@ class OrchestrationOperationsPage:
 @dataclass(slots=True)
 class OrchestrationOperationsReadModelProvider:
     run_query: OrchestrationRunQueryPort
-    executor_control: OrchestrationExecutorControlPort
+    executor_lease_query: OrchestrationExecutorLeaseQueryPort
     ingress_query: OrchestrationIngressRequestQueryPort | None = None
     scheduler_signal_query: OrchestrationSchedulerSignalQueryPort | None = None
     operations_observation: OperationsObservationReadPort | None = None
+    runtime_bootstrap_config: Any | None = None
     worker_lease_seconds: int | None = None
     worker_heartbeat_seconds: float | None = None
 
     def overview(self) -> OperationsModuleOverview:
         now = utcnow()
         runs = self.run_query.list_runs()
-        leases = self.executor_control.list_executor_leases(status=None)
+        leases = self.executor_lease_query.list_executor_leases(status=None)
         ingress_requests = _list_ingress_requests(self.ingress_query)
         pending_ingress_requests = _pending_ingress_requests(ingress_requests)
         visible_ingress_count = len(pending_ingress_requests)
@@ -243,7 +244,7 @@ class OrchestrationOperationsReadModelProvider:
     def page(self) -> OrchestrationOperationsPage:
         now = utcnow()
         runs = self.run_query.list_runs()
-        leases = self.executor_control.list_executor_leases(status=None)
+        leases = self.executor_lease_query.list_executor_leases(status=None)
         ingress_requests = _list_ingress_requests(self.ingress_query)
         scheduler_signals = _list_scheduler_signals(self.scheduler_signal_query)
         observed_events = _recent_operations_events(
@@ -487,6 +488,7 @@ class OrchestrationOperationsReadModelProvider:
                 capacity=capacity,
                 inflight=inflight,
                 available=available,
+                runtime_bootstrap_config=self.runtime_bootstrap_config,
                 worker_lease_seconds=self.worker_lease_seconds,
                 worker_heartbeat_seconds=self.worker_heartbeat_seconds,
             ),
@@ -1055,9 +1057,36 @@ def _policy_limits_section(
     capacity: int,
     inflight: int,
     available: int,
+    runtime_bootstrap_config: Any | None,
     worker_lease_seconds: int | None,
     worker_heartbeat_seconds: float | None,
 ) -> OperationsKeyValueSectionModel:
+    lease_seconds = _runtime_int(
+        runtime_bootstrap_config,
+        "orchestration_run_lease_seconds",
+        fallback=worker_lease_seconds,
+    )
+    heartbeat_seconds = _runtime_float(
+        runtime_bootstrap_config,
+        "orchestration_run_heartbeat_seconds",
+        fallback=worker_heartbeat_seconds,
+    )
+    executor_limit = _runtime_int(
+        runtime_bootstrap_config,
+        "orchestration_executor_max_concurrent_assignments",
+    )
+    compaction_enabled = _runtime_bool(
+        runtime_bootstrap_config,
+        "orchestration_auto_compaction_enabled",
+    )
+    compaction_reserve = _runtime_int(
+        runtime_bootstrap_config,
+        "orchestration_auto_compaction_reserve_tokens",
+    )
+    compaction_soft = _runtime_int(
+        runtime_bootstrap_config,
+        "orchestration_auto_compaction_soft_threshold_tokens",
+    )
     return OperationsKeyValueSectionModel(
         id="policy_limits",
         title="Policy & Limits",
@@ -1066,6 +1095,10 @@ def _policy_limits_section(
             OperationsKeyValueItemModel(
                 label="Global Run Concurrency",
                 value=str(max(capacity, inflight)),
+            ),
+            OperationsKeyValueItemModel(
+                label="Executor Max Assignments",
+                value=str(executor_limit) if executor_limit is not None else "-",
             ),
             OperationsKeyValueItemModel(
                 label="Worker Capacity (Online / Total)",
@@ -1077,8 +1110,8 @@ def _policy_limits_section(
             ),
             OperationsKeyValueItemModel(
                 label="Lease Timeout",
-                value=_duration_label(worker_lease_seconds or 0)
-                if worker_lease_seconds
+                value=_duration_label(round(lease_seconds))
+                if lease_seconds is not None
                 else "-",
             ),
             OperationsKeyValueItemModel(
@@ -1091,12 +1124,72 @@ def _policy_limits_section(
             ),
             OperationsKeyValueItemModel(
                 label="Heartbeat Interval",
-                value=_duration_label(round(worker_heartbeat_seconds or 0))
-                if worker_heartbeat_seconds
+                value=_duration_label(round(heartbeat_seconds))
+                if heartbeat_seconds is not None
                 else "-",
+            ),
+            OperationsKeyValueItemModel(
+                label="Auto Compaction",
+                value=_enabled_label(compaction_enabled),
+                tone="success" if compaction_enabled else "neutral",
+            ),
+            OperationsKeyValueItemModel(
+                label="Compaction Reserve / Soft",
+                value=_token_pair_label(compaction_reserve, compaction_soft),
             ),
         ),
     )
+
+
+def _runtime_int(
+    runtime_bootstrap_config: Any | None,
+    name: str,
+    *,
+    fallback: int | float | None = None,
+) -> int | None:
+    value = getattr(runtime_bootstrap_config, name, fallback)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _runtime_float(
+    runtime_bootstrap_config: Any | None,
+    name: str,
+    *,
+    fallback: int | float | None = None,
+) -> float | None:
+    value = getattr(runtime_bootstrap_config, name, fallback)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _runtime_bool(runtime_bootstrap_config: Any | None, name: str) -> bool | None:
+    value = getattr(runtime_bootstrap_config, name, None)
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _enabled_label(value: bool | None) -> str:
+    if value is None:
+        return "-"
+    return "enabled" if value else "disabled"
+
+
+def _token_pair_label(reserve_tokens: int | None, soft_threshold_tokens: int | None) -> str:
+    if reserve_tokens is None and soft_threshold_tokens is None:
+        return "-"
+    reserve = f"{reserve_tokens:,}" if reserve_tokens is not None else "-"
+    soft = f"{soft_threshold_tokens:,}" if soft_threshold_tokens is not None else "-"
+    return f"{reserve} / {soft} tokens"
 
 
 def _run_queue_section(

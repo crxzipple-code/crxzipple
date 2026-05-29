@@ -9,11 +9,12 @@ from crxzipple.shared.settings import MemoryConfig
 
 @dataclass(frozen=True, slots=True)
 class MemorySettingsBootstrapConfig:
+    storage_root: str = ".crxzipple/memory"
     retrieval_backend: str = "keyword"
     vector_provider: str = "local"
     vector_model: str | None = None
     vector_base_url: str | None = None
-    vector_credential_binding: str | None = None
+    vector_credential_binding_id: str | None = None
     vector_timeout_seconds: int = 30
     watch_interval_seconds: float = 300.0
 
@@ -26,6 +27,10 @@ def memory_bootstrap_config_from_settings(
     metadata = _mapping(payload.get("metadata"))
 
     return MemorySettingsBootstrapConfig(
+        storage_root=_optional_text(
+            _first_present(payload, defaults, metadata, key="storage_root"),
+        )
+        or ".crxzipple/memory",
         retrieval_backend=_normalized_choice(
             _first_present(payload, defaults, metadata, key="retrieval_backend"),
             default="keyword",
@@ -44,8 +49,8 @@ def memory_bootstrap_config_from_settings(
         vector_base_url=_optional_text(
             _first_present(defaults, payload, metadata, key="vector_base_url"),
         ),
-        vector_credential_binding=_optional_text(
-            _first_present(defaults, payload, metadata, key="vector_credential_binding"),
+        vector_credential_binding_id=_optional_text(
+            _first_present(defaults, payload, metadata, key="vector_credential_binding_id"),
         ),
         vector_timeout_seconds=_positive_int(
             _first_present(defaults, payload, metadata, key="vector_timeout_seconds"),

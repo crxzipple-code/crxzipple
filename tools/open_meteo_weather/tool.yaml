@@ -1,6 +1,8 @@
 kind: openapi
 namespace: open_meteo_weather
 description: Open-Meteo forecast API for current, hourly, and daily weather data.
+capabilities:
+  - bounded_network.http
 spec: openapi.json
 timeout_seconds: 10
 default_effect_ids:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
@@ -25,11 +25,13 @@ from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
 )
+from crxzipple.modules.operations.application.read_models.ports import (
+    OperationsToolQueryPort,
+)
 from crxzipple.modules.tool.application.concurrency import (
     ToolRunConcurrencyGroup,
     ToolRunConcurrencyPolicy,
 )
-from crxzipple.modules.tool.application.services import ToolApplicationService
 from crxzipple.modules.tool.domain import (
     Tool,
     ToolEnvironment,
@@ -39,11 +41,16 @@ from crxzipple.modules.tool.domain import (
     ToolRunAssignmentStatus,
     ToolRunStatus,
     ToolMode,
-    ToolSourceKind,
+    ToolDefinitionOrigin,
     ToolWorkerRegistration,
     ToolWorkerStatus,
 )
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
+from crxzipple.shared.event_contracts import (
+    TOOL_CLI_EVENT_NAMES,
+    TOOL_FUNCTION_EVENT_NAMES,
+    TOOL_SOURCE_EVENT_NAMES,
+)
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
 _LONG_RUNNING_SECONDS = 300
@@ -95,6 +102,9 @@ _TOOL_DIRECT_EVENT_TOPICS = (
     "events.named.tool.worker.stale",
     "events.named.tool.enabled",
     "events.named.tool.disabled",
+    *(f"events.named.{event_name}" for event_name in TOOL_SOURCE_EVENT_NAMES),
+    *(f"events.named.{event_name}" for event_name in TOOL_FUNCTION_EVENT_NAMES),
+    *(f"events.named.{event_name}" for event_name in TOOL_CLI_EVENT_NAMES),
     "tool.run.created",
     "tool.run.queued",
     "tool.run.dispatching",
@@ -120,6 +130,9 @@ _TOOL_DIRECT_EVENT_TOPICS = (
     "tool.worker.stale",
     "tool.enabled",
     "tool.disabled",
+    *TOOL_SOURCE_EVENT_NAMES,
+    *TOOL_FUNCTION_EVENT_NAMES,
+    *TOOL_CLI_EVENT_NAMES,
 )
 
 
@@ -158,6 +171,11 @@ class ToolOperationsPage:
     tool_waiting_io: OperationsTableSectionModel
     tool_runs: OperationsTableSectionModel
     tool_types: OperationsChartSectionModel
+    source_health: OperationsTableSectionModel
+    discovery_failures: OperationsTableSectionModel
+    function_catalog: OperationsTableSectionModel
+    provider_backend_health: OperationsTableSectionModel
+    cli_process_health: OperationsTableSectionModel
     auth_missing: OperationsTableSectionModel
     worker_pool: OperationsChartSectionModel
     workers: OperationsTableSectionModel
@@ -226,7 +244,7 @@ def find_tool_run_detail_payload(
 
 @dataclass(slots=True)
 class ToolOperationsReadModelProvider:
-    tool_service: ToolApplicationService
+    tool_service: OperationsToolQueryPort
     access_service: Any | None = None
     artifact_service: Any | None = None
     events_service: Any | None = None
@@ -234,6 +252,7 @@ class ToolOperationsReadModelProvider:
     operations_observation: Any | None = None
     runtime_metrics: Any | None = None
     runtime_registry: Any | None = None
+    runtime_bootstrap_config: Any | None = None
 
     def overview(self) -> OperationsModuleOverview:
         now = datetime.now(timezone.utc)
@@ -267,6 +286,7 @@ class ToolOperationsReadModelProvider:
                 failed_runs=failed_runs,
                 health=health,
                 workers=workers,
+                runtime_bootstrap_config=self.runtime_bootstrap_config,
                 now=now,
             ),
             queue=_queue_rows(
@@ -289,6 +309,18 @@ class ToolOperationsReadModelProvider:
         runs = self.tool_service.list_tool_runs()
         workers = self.tool_service.list_tool_workers()
         assignments = self.tool_service.list_tool_run_assignments()
+        sources = _safe_tool_sources(self.tool_service)
+        functions = _safe_tool_functions(self.tool_service)
+        provider_backends = _safe_tool_provider_backends(self.tool_service)
+        provider_backend_readiness = _safe_tool_provider_backend_readiness(
+            self.tool_service,
+            provider_backends,
+        )
+        discovery_runs_by_source = _safe_discovery_runs_by_source(
+            self.tool_service,
+            sources,
+            limit=5,
+        )
         assignment_by_run = _latest_assignment_by_run(assignments)
         active_runs = [run for run in runs if not run.is_terminal()]
         running_runs = [
@@ -374,10 +406,17 @@ class ToolOperationsReadModelProvider:
                 failed_runs=failed_runs,
                 health=health,
                 workers=workers,
+                runtime_bootstrap_config=self.runtime_bootstrap_config,
                 now=now,
             ),
             tabs=(
                 OperationsTabModel(id="runs", label="Tool Runs", count=len(runs)),
+                OperationsTabModel(
+                    id="sources",
+                    label="Sources",
+                    count=len(sources),
+                    tone=_source_tab_tone(sources, functions),
+                ),
                 OperationsTabModel(id="workers", label="Workers", count=len(workers)),
                 OperationsTabModel(id="queue", label="Queue", count=len(waiting_runs)),
                 OperationsTabModel(id="capabilities", label="Capabilities"),
@@ -452,9 +491,30 @@ class ToolOperationsReadModelProvider:
                 empty_state=_tool_runs_empty_state(query),
             ),
             tool_types=_tool_types_section(tools, runs),
+            source_health=_source_health_section(
+                sources,
+                functions=functions,
+                discovery_runs_by_source=discovery_runs_by_source,
+            ),
+            discovery_failures=_discovery_failures_section(
+                sources,
+                discovery_runs_by_source=discovery_runs_by_source,
+            ),
+            function_catalog=_function_catalog_section(functions),
+            provider_backend_health=_provider_backend_health_section(
+                provider_backends,
+                runs=runs,
+                readiness_by_backend_id=provider_backend_readiness,
+                now=now,
+            ),
+            cli_process_health=_cli_process_health_section(
+                sources,
+                functions=functions,
+            ),
             auth_missing=_auth_missing_section(
                 tools,
                 runs,
+                tool_service=self.tool_service,
                 access_service=self.access_service,
                 now=now,
             ),
@@ -590,6 +650,7 @@ def _metric_cards(
     health: str,
     workers: list[ToolWorkerRegistration],
     now: datetime,
+    runtime_bootstrap_config: Any | None = None,
 ) -> tuple[MetricCardModel, ...]:
     run_counts = Counter(run.status for run in runs)
     enabled_count = sum(1 for tool in tools if tool.enabled)
@@ -627,6 +688,7 @@ def _metric_cards(
         for worker in workers
         if _worker_is_online(worker, now=now)
     )
+    runtime_metrics = _runtime_default_metric_cards(runtime_bootstrap_config)
     return (
         MetricCardModel(
             id="health",
@@ -691,7 +753,125 @@ def _metric_cards(
             delta="tools with access requirements",
             tone="warning" if access_gated_count else "neutral",
         ),
+        *runtime_metrics,
     )
+
+
+def _runtime_default_metric_cards(
+    runtime_bootstrap_config: Any | None,
+) -> tuple[MetricCardModel, ...]:
+    max_in_flight = _runtime_int(runtime_bootstrap_config, "tool_worker_max_in_flight")
+    default_concurrency = _runtime_int(
+        runtime_bootstrap_config,
+        "tool_worker_default_run_concurrency",
+    )
+    image_concurrency = _runtime_int(
+        runtime_bootstrap_config,
+        "tool_worker_image_run_concurrency",
+    )
+    shared_state_concurrency = _runtime_int(
+        runtime_bootstrap_config,
+        "tool_worker_shared_state_run_concurrency",
+    )
+    max_attempts = _runtime_int(runtime_bootstrap_config, "tool_run_max_attempts")
+    lease_seconds = _runtime_float(runtime_bootstrap_config, "tool_run_lease_seconds")
+    heartbeat_seconds = _runtime_float(runtime_bootstrap_config, "tool_run_heartbeat_seconds")
+    remote_limit = _runtime_int(
+        runtime_bootstrap_config,
+        "tool_remote_default_max_concurrency",
+    )
+    if (
+        max_in_flight is None
+        and default_concurrency is None
+        and image_concurrency is None
+        and shared_state_concurrency is None
+        and max_attempts is None
+        and lease_seconds is None
+        and heartbeat_seconds is None
+        and remote_limit is None
+    ):
+        return ()
+    return (
+        MetricCardModel(
+            id="worker_policy",
+            label="Worker Policy",
+            value=str(max_in_flight) if max_in_flight is not None else "-",
+            delta=_worker_policy_delta(
+                default_concurrency,
+                image_concurrency,
+                shared_state_concurrency,
+            ),
+            tone="info",
+        ),
+        MetricCardModel(
+            id="retry_policy",
+            label="Retry Policy",
+            value=_retry_policy_value(
+                max_attempts=max_attempts,
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+            ),
+            delta=f"remote {_display_int(remote_limit)}",
+            tone="info",
+        ),
+    )
+
+
+def _runtime_int(runtime_bootstrap_config: Any | None, name: str) -> int | None:
+    value = getattr(runtime_bootstrap_config, name, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _runtime_float(runtime_bootstrap_config: Any | None, name: str) -> float | None:
+    value = getattr(runtime_bootstrap_config, name, None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _display_int(value: int | None) -> str:
+    return str(value) if value is not None else "-"
+
+
+def _worker_policy_delta(
+    default_concurrency: int | None,
+    image_concurrency: int | None,
+    shared_state_concurrency: int | None,
+) -> str:
+    return (
+        f"default {_display_int(default_concurrency)} / "
+        f"image {_display_int(image_concurrency)} / "
+        f"shared {_display_int(shared_state_concurrency)}"
+    )
+
+
+def _retry_policy_value(
+    *,
+    max_attempts: int | None,
+    lease_seconds: float | None,
+    heartbeat_seconds: float | None,
+) -> str:
+    if max_attempts is None and lease_seconds is None and heartbeat_seconds is None:
+        return "-"
+    return (
+        f"{_display_int(max_attempts)}x / "
+        f"{_duration_value(lease_seconds)} / "
+        f"{_duration_value(heartbeat_seconds)}"
+    )
+
+
+def _duration_value(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    return _duration_label(round(seconds))
 
 
 def _actions() -> tuple[RuntimeActionModel, ...]:
@@ -861,6 +1041,7 @@ def _tool_runs_section(
             ("tool", "Tool"),
             ("run_id", "Run ID"),
             ("source", "Source"),
+            ("browser", "Browser"),
             ("status", "Status"),
             ("assignment_status", "Assignment"),
             ("lease_state", "Lease"),
@@ -902,6 +1083,7 @@ def _active_tool_runs_section(
             ("run_id", "Tool Run ID"),
             ("tool", "Tool"),
             ("source", "Source"),
+            ("browser", "Browser"),
             ("worker", "Worker ID"),
             ("duration", "Duration"),
             ("progress", "Progress"),
@@ -936,6 +1118,7 @@ def _tool_run_row(
                 "provider": _tool_provider_key(tool).lower(),
                 "run_id": run.id,
                 "source": _source_label(run),
+                "browser": _browser_run_label(run),
                 "status": _status_label(run.status),
                 "assignment_status": _assignment_status_label(assignment),
                 "assignment_id": _assignment_id(assignment),
@@ -1285,10 +1468,546 @@ def _tool_call_share_segments(
     return tuple(segments)
 
 
+def _safe_tool_sources(tool_service: OperationsToolQueryPort) -> tuple[Any, ...]:
+    list_sources = getattr(tool_service, "list_sources", None)
+    if not callable(list_sources):
+        return ()
+    try:
+        return tuple(list_sources() or ())
+    except Exception:
+        return ()
+
+
+def _safe_tool_functions(tool_service: OperationsToolQueryPort) -> tuple[Any, ...]:
+    list_functions = getattr(tool_service, "list_functions", None)
+    if not callable(list_functions):
+        return ()
+    try:
+        return tuple(list_functions() or ())
+    except Exception:
+        return ()
+
+
+def _safe_tool_provider_backends(
+    tool_service: OperationsToolQueryPort,
+) -> tuple[Any, ...]:
+    list_provider_backends = getattr(tool_service, "list_provider_backends", None)
+    if not callable(list_provider_backends):
+        return ()
+    try:
+        return tuple(list_provider_backends() or ())
+    except Exception:
+        return ()
+
+
+def _safe_tool_provider_backend_readiness(
+    tool_service: OperationsToolQueryPort,
+    provider_backends: tuple[Any, ...],
+) -> dict[str, dict[str, Any]]:
+    check_readiness = getattr(tool_service, "check_provider_backend_readiness", None)
+    if not callable(check_readiness):
+        return {}
+    readiness_by_backend_id: dict[str, dict[str, Any]] = {}
+    for backend in provider_backends:
+        backend_id = _record_text(backend, "backend_id")
+        if not backend_id:
+            continue
+        try:
+            readiness = check_readiness(backend)
+        except Exception:
+            continue
+        payload = _readiness_payload(readiness)
+        if payload:
+            readiness_by_backend_id[backend_id] = payload
+    return readiness_by_backend_id
+
+
+def _safe_discovery_runs_by_source(
+    tool_service: OperationsToolQueryPort,
+    sources: tuple[Any, ...],
+    *,
+    limit: int,
+) -> dict[str, tuple[Any, ...]]:
+    list_runs = getattr(tool_service, "list_source_discovery_runs", None)
+    if not callable(list_runs):
+        return {}
+    result: dict[str, tuple[Any, ...]] = {}
+    for source in sources:
+        source_id = _record_text(source, "source_id")
+        if not source_id:
+            continue
+        try:
+            result[source_id] = tuple(list_runs(source_id, limit=limit) or ())
+        except Exception:
+            result[source_id] = ()
+    return result
+
+
+def _source_tab_tone(sources: tuple[Any, ...], functions: tuple[Any, ...]) -> str:
+    if any(_record_value(source, "status") == "error" for source in sources):
+        return "danger"
+    if any(
+        _record_value(function, "status") in {"stale", "deprecated"}
+        or not bool(getattr(function, "enabled", True))
+        for function in functions
+    ):
+        return "warning"
+    return "neutral"
+
+
+def _source_health_section(
+    sources: tuple[Any, ...],
+    *,
+    functions: tuple[Any, ...],
+    discovery_runs_by_source: dict[str, tuple[Any, ...]],
+) -> OperationsTableSectionModel:
+    function_totals = Counter(_record_text(function, "source_id") for function in functions)
+    active_totals = Counter(
+        _record_text(function, "source_id")
+        for function in functions
+        if _record_value(function, "status") == "active"
+        and bool(getattr(function, "enabled", True))
+    )
+    rows = []
+    for source in sorted(sources, key=lambda item: _record_text(item, "source_id")):
+        source_id = _record_text(source, "source_id")
+        latest_discovery = _first(discovery_runs_by_source.get(source_id, ()))
+        discovery_status = (
+            _record_value(source, "last_discovery_status")
+            or _record_value(latest_discovery, "status")
+        )
+        status = _record_value(source, "status") or "unknown"
+        rows.append(
+            OperationsTableRowModel(
+                id=source_id,
+                cells={
+                    "source": source_id,
+                    "kind": _title_label(_record_value(source, "kind") or "-"),
+                    "endpoint": _source_endpoint_label(source),
+                    "runtime": _source_runtime_dependency_label(source),
+                    "status": _title_label(status),
+                    "discovery": _title_label(discovery_status or "not_run"),
+                    "tools_list": _source_tools_list_label(
+                        source,
+                        discovery_status,
+                    ),
+                    "functions": f"{active_totals[source_id]}/{function_totals[source_id]}",
+                    "revision": str(getattr(source, "revision", "-")),
+                    "updated": _record_datetime_label(source, "updated_at"),
+                },
+                status=status,
+                tone=_source_health_tone(status, discovery_status),
+            ),
+        )
+    return OperationsTableSectionModel(
+        id="source_health",
+        title="Source Health",
+        columns=_columns(
+            ("source", "Source"),
+            ("kind", "Kind"),
+            ("endpoint", "Endpoint"),
+            ("runtime", "Runtime Dependency"),
+            ("status", "Status"),
+            ("discovery", "Discovery"),
+            ("tools_list", "Tools/List"),
+            ("functions", "Functions"),
+            ("revision", "Revision"),
+            ("updated", "Updated"),
+        ),
+        rows=tuple(rows),
+        total=len(rows),
+        empty_state="No Tool sources are registered.",
+    )
+
+
+def _source_endpoint_label(source: Any) -> str:
+    provider = _source_provider_config(source)
+    for key in ("endpoint_url", "base_url", "spec_location"):
+        endpoint = _optional_mapping_text(provider, key)
+        if endpoint:
+            return _truncate(endpoint, 72)
+    command = provider.get("command")
+    if isinstance(command, tuple | list) and command:
+        return _truncate(" ".join(str(item) for item in command), 72)
+    return "-"
+
+
+def _source_runtime_dependency_label(source: Any) -> str:
+    if _is_browser_source(source):
+        return "Browser profile context"
+    runtime_requirements = tuple(
+        str(item).strip()
+        for item in getattr(source, "runtime_requirements", ())
+        if str(item).strip()
+    )
+    return _truncate(", ".join(runtime_requirements), 72) if runtime_requirements else "-"
+
+
+def _is_browser_source(source: Any) -> bool:
+    if _record_text(source, "source_id") == "configured.browser":
+        return True
+    config = getattr(source, "config", None)
+    return isinstance(config, Mapping) and config.get("source") == "configured_browser"
+
+
+def _source_tools_list_label(source: Any, discovery_status: str | None) -> str:
+    if _record_value(source, "kind") != "mcp":
+        return "-"
+    if discovery_status == "completed":
+        return "Listed"
+    if discovery_status == "failed":
+        return "Failed"
+    return "Not Run"
+
+
+def _source_provider_config(source: Any) -> Mapping[str, Any]:
+    config = getattr(source, "config", None)
+    if not isinstance(config, Mapping):
+        return {}
+    provider = config.get("provider")
+    return provider if isinstance(provider, Mapping) else {}
+
+
+def _optional_mapping_text(mapping: Mapping[str, Any], key: str) -> str | None:
+    value = mapping.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _discovery_failures_section(
+    sources: tuple[Any, ...],
+    *,
+    discovery_runs_by_source: dict[str, tuple[Any, ...]],
+) -> OperationsTableSectionModel:
+    source_by_id = {_record_text(source, "source_id"): source for source in sources}
+    rows: list[OperationsTableRowModel] = []
+    for source_id, runs in discovery_runs_by_source.items():
+        for run in runs:
+            if _record_value(run, "status") != "failed":
+                continue
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"{source_id}:{_record_text(run, 'discovery_run_id')}",
+                    cells={
+                        "source": source_id,
+                        "kind": _title_label(
+                            _record_value(source_by_id.get(source_id), "kind") or "-",
+                        ),
+                        "time": _record_datetime_label(run, "discovered_at"),
+                        "error": _truncate(_record_text(run, "error_message") or "-", 120),
+                        "functions": str(getattr(run, "function_count", 0)),
+                        "backends": str(getattr(run, "provider_backend_count", 0)),
+                    },
+                    status="failed",
+                    tone="danger",
+                ),
+            )
+    return OperationsTableSectionModel(
+        id="discovery_failures",
+        title="Discovery Failures",
+        columns=_columns(
+            ("source", "Source"),
+            ("kind", "Kind"),
+            ("time", "Time"),
+            ("error", "Error"),
+            ("functions", "Functions"),
+            ("backends", "Backends"),
+        ),
+        rows=tuple(rows[:50]),
+        total=len(rows),
+        empty_state="No Tool discovery failures recorded.",
+    )
+
+
+def _function_catalog_section(functions: tuple[Any, ...]) -> OperationsTableSectionModel:
+    rows: list[OperationsTableRowModel] = []
+    for function in sorted(functions, key=lambda item: _record_text(item, "function_id")):
+        status = _record_value(function, "status") or "unknown"
+        enabled = bool(getattr(function, "enabled", True))
+        if status == "active" and enabled:
+            continue
+        rows.append(
+            OperationsTableRowModel(
+                id=_record_text(function, "function_id"),
+                cells={
+                    "function": _record_text(function, "function_id"),
+                    "source": _record_text(function, "source_id"),
+                    "kind": _title_label(_record_value(function, "runtime_kind") or "-"),
+                    "status": _title_label(status),
+                    "enabled": "Yes" if enabled else "No",
+                    "revision": str(getattr(function, "revision", "-")),
+                    "schema": _truncate(_record_text(function, "schema_hash") or "-", 14),
+                },
+                status=status,
+                tone="warning" if status in {"stale", "deprecated"} else "danger",
+            ),
+        )
+    return OperationsTableSectionModel(
+        id="function_catalog",
+        title="Function Catalog Risks",
+        columns=_columns(
+            ("function", "Function"),
+            ("source", "Source"),
+            ("kind", "Kind"),
+            ("status", "Status"),
+            ("enabled", "Enabled"),
+            ("revision", "Revision"),
+            ("schema", "Schema"),
+        ),
+        rows=tuple(rows[:80]),
+        total=len(rows),
+        empty_state="No stale, deprecated, disabled, or deleted functions.",
+    )
+
+
+def _provider_backend_health_section(
+    provider_backends: tuple[Any, ...],
+    *,
+    runs: list[ToolRun],
+    readiness_by_backend_id: Mapping[str, dict[str, Any]],
+    now: datetime,
+) -> OperationsTableSectionModel:
+    run_counts = _provider_backend_run_counts(runs, now=now)
+    rows = [
+        OperationsTableRowModel(
+            id=_record_text(backend, "backend_id"),
+            cells={
+                "backend": _record_text(backend, "display_name")
+                or _record_text(backend, "backend_id"),
+                "capability": _title_label(_record_value(backend, "capability")),
+                "credential": _provider_backend_credential_label(backend),
+                "readiness": _provider_backend_readiness_label(
+                    readiness_by_backend_id.get(_record_text(backend, "backend_id")),
+                ),
+                "calls_24h": str(
+                    run_counts.get(_record_text(backend, "backend_id"), {}).get(
+                        "calls_24h",
+                        0,
+                    ),
+                ),
+                "failures_24h": str(
+                    run_counts.get(_record_text(backend, "backend_id"), {}).get(
+                        "failures_24h",
+                        0,
+                    ),
+                ),
+                "runtime": _provider_backend_runtime_label(backend),
+                "status": _provider_backend_status_label(backend),
+            },
+            status=_record_value(backend, "status") or "unknown",
+            tone=_provider_backend_tone(
+                backend,
+                readiness_by_backend_id.get(_record_text(backend, "backend_id")),
+            ),
+        )
+        for backend in provider_backends
+        if _record_text(backend, "backend_id")
+    ]
+    return OperationsTableSectionModel(
+        id="provider_backend_health",
+        title="Provider Backend Health",
+        columns=_columns(
+            ("backend", "Backend"),
+            ("capability", "Capability"),
+            ("credential", "Credential"),
+            ("readiness", "Readiness"),
+            ("calls_24h", "Calls 24h"),
+            ("failures_24h", "Failures 24h"),
+            ("runtime", "Runtime"),
+            ("status", "Status"),
+        ),
+        rows=tuple(rows),
+        total=len(rows),
+        empty_state="No provider backends are registered.",
+    )
+
+
+def _provider_backend_run_counts(
+    runs: list[ToolRun],
+    *,
+    now: datetime,
+) -> dict[str, dict[str, int]]:
+    cutoff = now - timedelta(hours=24)
+    counts: dict[str, dict[str, int]] = {}
+    for run in runs:
+        backend_id = _run_provider_backend_id(run)
+        if backend_id is None:
+            continue
+        created_at = _run_created_at(run)
+        if created_at is None or created_at < cutoff:
+            continue
+        bucket = counts.setdefault(
+            backend_id,
+            {"calls_24h": 0, "failures_24h": 0},
+        )
+        bucket["calls_24h"] += 1
+        if run.status in {ToolRunStatus.FAILED, ToolRunStatus.TIMED_OUT}:
+            bucket["failures_24h"] += 1
+    return counts
+
+
+def _run_provider_backend_id(run: ToolRun) -> str | None:
+    value = run.metadata.get("provider_backend")
+    if not isinstance(value, Mapping):
+        return None
+    backend_id = str(value.get("backend_id") or "").strip()
+    return backend_id or None
+
+
+def _run_created_at(run: ToolRun) -> datetime | None:
+    created_at = getattr(run, "created_at", None)
+    return created_at if isinstance(created_at, datetime) else None
+
+
+def _provider_backend_status_label(backend: Any) -> str:
+    status = _record_value(backend, "status") or "unknown"
+    if not bool(getattr(backend, "enabled", True)):
+        return "Disabled"
+    return _title_label(status)
+
+
+def _provider_backend_credential_label(backend: Any) -> str:
+    bindings = _provider_backend_credential_bindings(backend)
+    if not bindings:
+        return "-"
+    return ", ".join(bindings)
+
+
+def _provider_backend_readiness_label(
+    readiness: Mapping[str, Any] | None,
+) -> str:
+    if readiness is None:
+        return "Unknown"
+    if bool(readiness.get("ready")):
+        return "Ready"
+    status = _title_label(readiness.get("status") or "unknown")
+    checks = readiness.get("checks")
+    if isinstance(checks, list) and checks:
+        ready = sum(
+            1
+            for check in checks
+            if isinstance(check, Mapping) and bool(check.get("ready"))
+        )
+        return f"{status} ({ready}/{len(checks)})"
+    return status
+
+
+def _provider_backend_tone(
+    backend: Any,
+    readiness: Mapping[str, Any] | None,
+) -> str:
+    status = _record_value(backend, "status")
+    if status in {"error", "deleted"}:
+        return "danger"
+    if status == "disabled" or not bool(getattr(backend, "enabled", True)):
+        return "warning"
+    if readiness is None:
+        return "warning"
+    return "success" if bool(readiness.get("ready")) else "warning"
+
+
+def _provider_backend_runtime_label(backend: Any) -> str:
+    runtime_ref = getattr(backend, "runtime_ref", None)
+    if not isinstance(runtime_ref, Mapping):
+        return "-"
+    runtime_kind = str(runtime_ref.get("runtime_kind") or "").strip()
+    ref = str(runtime_ref.get("ref") or "").strip()
+    if runtime_kind and ref:
+        return f"{runtime_kind}:{ref}"
+    return runtime_kind or ref or "-"
+
+
+def _provider_backend_credential_bindings(backend: Any) -> tuple[str, ...]:
+    return tuple(
+        binding_id
+        for binding_id, _expected_kind in _provider_backend_credential_bindings_with_kind(
+            backend,
+        )
+    )
+
+
+def _provider_backend_credential_bindings_with_kind(
+    backend: Any,
+) -> tuple[tuple[str, str | None], ...]:
+    pairs: list[tuple[str, str | None]] = []
+    for requirement_set in _sequence(getattr(backend, "credential_requirements", ())):
+        if not isinstance(requirement_set, Mapping):
+            continue
+        for requirement in _sequence(requirement_set.get("requirements")):
+            if not isinstance(requirement, Mapping):
+                continue
+            slot = requirement.get("slot")
+            if not isinstance(slot, Mapping):
+                continue
+            binding_id = str(slot.get("binding_id") or "").strip()
+            if not binding_id:
+                continue
+            expected_kind = str(slot.get("expected_kind") or "").strip() or None
+            pairs.append((binding_id, expected_kind))
+    return tuple(dict.fromkeys(pairs))
+
+
+def _cli_process_health_section(
+    sources: tuple[Any, ...],
+    *,
+    functions: tuple[Any, ...],
+) -> OperationsTableSectionModel:
+    cli_source_ids = {
+        _record_text(source, "source_id")
+        for source in sources
+        if _record_value(source, "kind") == "cli"
+    }
+    cli_source_ids.update(
+        _record_text(function, "source_id")
+        for function in functions
+        if _record_value(function, "runtime_kind") == "cli"
+    )
+    source_by_id = {_record_text(source, "source_id"): source for source in sources}
+    function_counts = Counter(
+        _record_text(function, "source_id")
+        for function in functions
+        if _record_text(function, "source_id") in cli_source_ids
+    )
+    rows = [
+        OperationsTableRowModel(
+            id=source_id,
+            cells={
+                "source": source_id,
+                "status": _title_label(_record_value(source_by_id.get(source_id), "status") or "unknown"),
+                "functions": str(function_counts[source_id]),
+                "policy": "Guided CLI",
+            },
+            status=_record_value(source_by_id.get(source_id), "status") or "unknown",
+            tone=_source_health_tone(
+                _record_value(source_by_id.get(source_id), "status") or "unknown",
+                _record_value(source_by_id.get(source_id), "last_discovery_status"),
+            ),
+        )
+        for source_id in sorted(cli_source_ids)
+        if source_id
+    ]
+    return OperationsTableSectionModel(
+        id="cli_process_health",
+        title="CLI Process Health",
+        columns=_columns(
+            ("source", "Source"),
+            ("status", "Status"),
+            ("functions", "Functions"),
+            ("policy", "Policy"),
+        ),
+        rows=tuple(rows),
+        total=len(rows),
+        empty_state="No CLI sources are registered.",
+    )
+
+
 def _auth_missing_section(
     tools: list[Tool],
     runs: list[ToolRun],
     *,
+    tool_service: OperationsToolQueryPort | None = None,
     access_service: Any | None,
     now: datetime,
 ) -> OperationsTableSectionModel:
@@ -1300,10 +2019,19 @@ def _auth_missing_section(
     )
     rows: list[OperationsTableRowModel] = []
     for tool in sorted(
-        [item for item in tools if item.access_requirement_sets],
+        [
+            item
+            for item in tools
+            if item.access_requirement_sets or item.credential_requirements
+            or item.runtime_requirement_sets
+        ],
         key=lambda item: item.id,
     ):
-        readiness = _tool_access_readiness(tool, access_service=access_service)
+        readiness = _tool_readiness_risk(
+            tool,
+            tool_service=tool_service,
+            access_service=access_service,
+        )
         if readiness["ready"]:
             continue
         rows.append(
@@ -1311,6 +2039,7 @@ def _auth_missing_section(
                 id=tool.id,
                 cells={
                     "tool": tool.id,
+                    "category": readiness["category"],
                     "status": readiness["status"],
                     "issue": readiness["reason"],
                     "required_access": readiness["requirements"],
@@ -1318,11 +2047,11 @@ def _auth_missing_section(
                     "affected_24h": str(recent_by_tool[tool.id]),
                     "access_failures": str(failed_by_tool[tool.id]),
                     "setup": readiness["setup"],
-                    "action": "Open Access",
-                    "route": "/operations/access",
+                    "action": readiness["action"],
+                    "route": readiness["route"],
                 },
                 status=readiness["status"],
-                tone="warning" if readiness["setup"] == "available" else "danger",
+                tone=_readiness_risk_tone(readiness),
             ),
         )
     known_tool_ids = {tool.id for tool in tools}
@@ -1363,6 +2092,7 @@ def _auth_missing_section(
         title="Runtime Risk / Access",
         columns=_columns(
             ("tool", "Tool"),
+            ("category", "Category"),
             ("status", "Status"),
             ("issue", "Issue"),
             ("required_access", "Required Access"),
@@ -1375,7 +2105,7 @@ def _auth_missing_section(
         rows=tuple(rows[:50]),
         total=len(rows),
         view_all_route="/operations/tool?tab=risk",
-        empty_state="No access or confirmation risks detected.",
+        empty_state="No access or runtime readiness risks detected.",
     )
 
 
@@ -2540,11 +3270,11 @@ def _tool_provider_key(tool: Tool | None) -> str:
         return f"provider:{provider_tag}"
     if runtime_key_lower.startswith("openai_") or tool.id.lower().startswith("openai_"):
         return "provider:openai"
-    if tool.source_kind is ToolSourceKind.LOCAL_DISCOVERY:
+    if tool.definition_origin is ToolDefinitionOrigin.LOCAL_DISCOVERY:
         return "local"
-    if tool.source_kind is ToolSourceKind.REMOTE_REGISTRY:
+    if tool.definition_origin is ToolDefinitionOrigin.REMOTE_DISCOVERY:
         return "remote"
-    return tool.source_kind.value or "manual"
+    return tool.definition_origin.value or "unknown"
 
 
 def _provider_history_label(provider_key: str) -> str:
@@ -2554,7 +3284,7 @@ def _provider_history_label(provider_key: str) -> str:
         return f"openapi / {provider_key.removeprefix('openapi:')}"
     if provider_key.startswith("mcp:"):
         return f"mcp / {provider_key.removeprefix('mcp:')}"
-    if provider_key in {"local", "manual", "remote", "unknown"}:
+    if provider_key in {"local", "remote", "unknown"}:
         return _title_label(provider_key)
     return provider_key
 
@@ -3013,13 +3743,20 @@ def _tool_lifecycle_events_section(
 ) -> OperationsTableSectionModel:
     tools_by_id = _tool_lookup(tools)
     runs_by_id = {run.id: run for run in runs}
+    visible_events = sorted(
+        events,
+        key=lambda event: (
+            _tool_lifecycle_display_priority(event.event_name),
+            -coerce_utc_datetime(event.occurred_at).timestamp(),
+        ),
+    )
     rows = tuple(
         _tool_lifecycle_event_row(
             event,
             tools_by_id=tools_by_id,
             runs_by_id=runs_by_id,
         )
-        for event in events[:50]
+        for event in visible_events[:80]
     )
     return OperationsTableSectionModel(
         id="tool_lifecycle_events",
@@ -3042,6 +3779,15 @@ def _tool_lifecycle_events_section(
         view_all_route="/operations/tool?tab=events",
         empty_state="No tool lifecycle events observed yet.",
     )
+
+
+def _tool_lifecycle_display_priority(event_name: str) -> int:
+    normalized = event_name.strip().lower()
+    if normalized.startswith(("tool.run.", "tool.assignment.", "tool.worker.")):
+        return 0
+    if normalized.startswith(("tool.source.", "tool.function.")):
+        return 1
+    return 2
 
 
 def _tool_lifecycle_event_row(
@@ -3643,6 +4389,7 @@ def _tool_run_detail_summary(
             value=_status_label(run.status),
             tone=_tone_for_status(run.status),
         ),
+        *_browser_profile_summary_items(run),
         OperationsKeyValueItemModel(label="Mode", value=run.target.mode.value),
         OperationsKeyValueItemModel(label="Strategy", value=run.target.strategy.value),
         OperationsKeyValueItemModel(
@@ -3675,6 +4422,109 @@ def _tool_run_detail_summary(
             value=_trace_id(run),
         ),
     )
+
+
+def _browser_profile_summary_items(run: ToolRun) -> tuple[OperationsKeyValueItemModel, ...]:
+    if not _is_browser_tool_run(run):
+        return ()
+    metadata = _result_metadata(run)
+    profile_name = _optional_metadata_text(metadata.get("profile_name"))
+    profile_source = _optional_metadata_text(metadata.get("profile_source"))
+    if profile_name is None:
+        profile_name = _optional_metadata_text(run.input_payload.get("profile"))
+    if profile_name is None:
+        profile_name = _optional_metadata_text(run.input_payload.get("profile_name"))
+    if profile_source is None and profile_name is not None:
+        profile_source = _input_profile_source(run) or "browser.default_profile"
+    items = [
+        OperationsKeyValueItemModel(
+            label="Browser Profile",
+            value=profile_name or "-",
+        ),
+        OperationsKeyValueItemModel(
+            label="Profile Source",
+            value=profile_source or "-",
+        ),
+    ]
+    for label, key in (
+        ("Browser Profile Pool", "browser_profile_pool"),
+        ("Browser Allocation", "browser_allocation_id"),
+        ("Host Service", "browser_host_service_key"),
+        ("Target Host", "browser_target_host"),
+        ("Host Generation", "browser_host_generation"),
+        ("Target", "browser_target_id"),
+        ("Page Generation", "browser_page_generation"),
+        ("Snapshot Generation", "browser_snapshot_generation"),
+        ("Ref Generation", "browser_current_ref_generation"),
+    ):
+        value = _optional_metadata_text(metadata.get(key))
+        if value is not None:
+            items.append(OperationsKeyValueItemModel(label=label, value=value))
+    return tuple(items)
+
+
+def _browser_run_label(run: ToolRun) -> str:
+    if not _is_browser_tool_run(run):
+        return "-"
+    metadata = _result_metadata(run)
+    profile_name = _optional_metadata_text(metadata.get("profile_name"))
+    if profile_name is None:
+        profile_name = _optional_metadata_text(run.input_payload.get("profile"))
+    if profile_name is None:
+        profile_name = _optional_metadata_text(run.input_payload.get("profile_name"))
+    pool_id = _optional_metadata_text(metadata.get("browser_profile_pool"))
+    if pool_id is None:
+        pool_id = _optional_metadata_text(run.input_payload.get("profile_pool"))
+    allocation_id = _optional_metadata_text(metadata.get("browser_allocation_id"))
+    target_host = _optional_metadata_text(metadata.get("browser_target_host"))
+    parts = [profile_name or "-"]
+    if pool_id is not None:
+        parts.append(f"pool:{pool_id}")
+    if allocation_id is not None:
+        parts.append(f"alloc:{_short_browser_identifier(allocation_id)}")
+    if target_host is not None:
+        parts.append(target_host)
+    return " · ".join(parts)
+
+
+def _is_browser_tool_run(run: ToolRun) -> bool:
+    metadata = _result_metadata(run)
+    result_tool = _optional_metadata_text(metadata.get("tool"))
+    return any(
+        value.startswith("browser.")
+        for value in (
+            run.tool_id,
+            run.function_id or "",
+            run.source_id or "",
+            result_tool or "",
+        )
+    ) or run.source_id == "configured.browser"
+
+
+def _result_metadata(run: ToolRun) -> dict[str, Any]:
+    payload = _result_payload(run)
+    metadata = payload.get("metadata")
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+
+def _optional_metadata_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _short_browser_identifier(value: str) -> str:
+    if len(value) <= 18:
+        return value
+    return f"{value[:10]}...{value[-6:]}"
+
+
+def _input_profile_source(run: ToolRun) -> str | None:
+    for key in ("profile", "profile_name"):
+        if _optional_metadata_text(run.input_payload.get(key)) is not None:
+            return f"input.{key}"
+    return None
 
 
 def _invocation_context_items(run: ToolRun) -> tuple[OperationsKeyValueItemModel, ...]:
@@ -3953,11 +4803,33 @@ def _run_reason(
     return run.status.value
 
 
+def _tool_readiness_risk(
+    tool: Tool,
+    *,
+    tool_service: OperationsToolQueryPort | None = None,
+    access_service: Any | None,
+) -> dict[str, Any]:
+    if tool_service is not None and hasattr(tool_service, "check_readiness"):
+        readiness = tool_service.check_readiness(tool.id)
+        if isinstance(readiness, dict):
+            return _tool_combined_readiness_payload(tool, readiness)
+    return _tool_access_readiness(
+        tool,
+        tool_service=tool_service,
+        access_service=access_service,
+    )
+
+
 def _tool_access_readiness(
     tool: Tool,
     *,
+    tool_service: OperationsToolQueryPort | None = None,
     access_service: Any | None,
 ) -> dict[str, Any]:
+    if tool_service is not None and hasattr(tool_service, "check_access_readiness"):
+        readiness = tool_service.check_access_readiness(tool.id)
+        if readiness is not None:
+            return _tool_access_readiness_payload(tool, readiness.to_payload())
     requirement_sets = tuple(
         tuple(requirement for requirement in item if requirement.strip())
         for item in tool.access_requirement_sets
@@ -3975,18 +4847,24 @@ def _tool_access_readiness(
             "ready": True,
             "status": "ready",
             "reason": "No access requirement declared",
+            "category": "-",
             "requirements": "-",
             "missing": "-",
             "setup": "-",
+            "action": "-",
+            "route": "-",
         }
     if access_service is None or not hasattr(access_service, "check_requirements"):
         return {
             "ready": False,
             "status": "unknown",
             "reason": "access readiness service is not connected",
+            "category": "Access",
             "requirements": _join_values(all_requirements),
             "missing": _join_values(all_requirements),
             "setup": "-",
+            "action": "Open Access",
+            "route": "/operations/access",
         }
 
     checked_sets: list[tuple[dict[str, Any], ...]] = []
@@ -4001,9 +4879,12 @@ def _tool_access_readiness(
                 "ready": True,
                 "status": "ready",
                 "reason": "All requirements are ready",
+                "category": "Access",
                 "requirements": _join_values(all_requirements),
                 "missing": "-",
                 "setup": "-",
+                "action": "-",
+                "route": "-",
             }
 
     missing = tuple(
@@ -4038,10 +4919,160 @@ def _tool_access_readiness(
         "ready": False,
         "status": "unsupported" if unsupported else "setup_needed",
         "reason": _join_values(reasons) if reasons else "access setup is required",
+        "category": "Access",
         "requirements": _join_values(all_requirements),
         "missing": _join_values(missing),
         "setup": "available" if setup_available else "unavailable",
+        "action": "Open Access",
+        "route": "/operations/access",
     }
+
+
+def _tool_combined_readiness_payload(
+    tool: Tool,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    checks = tuple(
+        dict(item)
+        for item in payload.get("checks", [])
+        if isinstance(item, dict)
+    )
+    blocked_checks = tuple(item for item in checks if not bool(item.get("ready")))
+    categories = tuple(
+        dict.fromkeys(
+            str(item.get("category") or "").strip()
+            for item in blocked_checks
+            if str(item.get("category") or "").strip()
+        ),
+    )
+    requirements = _readiness_requirements(checks=checks, tool=tool)
+    missing = tuple(
+        dict.fromkeys(
+            str(item.get("binding_id") or item.get("requirement") or "").strip()
+            for item in blocked_checks
+            if str(item.get("binding_id") or item.get("requirement") or "").strip()
+        ),
+    )
+    action, route = _readiness_action(categories)
+    return {
+        "ready": bool(payload.get("ready")),
+        "status": str(payload.get("status") or "unknown"),
+        "reason": str(payload.get("reason") or "tool readiness unknown"),
+        "category": _readiness_category_label(categories),
+        "requirements": _join_values(requirements) if requirements else "-",
+        "missing": _join_values(missing) if missing else "-",
+        "setup": "available" if bool(payload.get("setup_available")) else "unavailable",
+        "action": action,
+        "route": route,
+    }
+
+
+def _tool_access_readiness_payload(
+    tool: Tool,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    checks = tuple(
+        dict(item)
+        for item in payload.get("checks", [])
+        if isinstance(item, dict)
+    )
+    requirements = tuple(
+        dict.fromkeys(
+            str(item.get("binding_id") or item.get("requirement") or "").strip()
+            for item in checks
+            if str(item.get("binding_id") or item.get("requirement") or "").strip()
+        ),
+    )
+    missing = tuple(
+        dict.fromkeys(
+            str(item.get("binding_id") or item.get("requirement") or "").strip()
+            for item in checks
+            if not bool(item.get("ready"))
+            and str(item.get("binding_id") or item.get("requirement") or "").strip()
+        ),
+    )
+    if not requirements:
+        requirements = tuple(
+            dict.fromkeys(
+                requirement
+                for requirement_set in tool.access_requirement_sets
+                for requirement in requirement_set
+                if requirement.strip()
+            ),
+        )
+    return {
+        "ready": bool(payload.get("ready")),
+        "status": str(payload.get("status") or "unknown"),
+        "reason": str(payload.get("reason") or "access readiness unknown"),
+        "category": "Access",
+        "requirements": _join_values(requirements) if requirements else "-",
+        "missing": _join_values(missing) if missing else "-",
+        "setup": "available" if bool(payload.get("setup_available")) else "unavailable",
+        "action": "Open Access",
+        "route": "/operations/access",
+    }
+
+
+def _readiness_requirements(
+    *,
+    checks: tuple[dict[str, Any], ...],
+    tool: Tool,
+) -> tuple[str, ...]:
+    requirements = tuple(
+        dict.fromkeys(
+            str(item.get("binding_id") or item.get("requirement") or "").strip()
+            for item in checks
+            if str(item.get("binding_id") or item.get("requirement") or "").strip()
+        ),
+    )
+    if requirements:
+        return requirements
+    declared = (
+        *(
+            requirement
+            for requirement_set in tool.access_requirement_sets
+            for requirement in requirement_set
+            if requirement.strip()
+        ),
+        *(
+            requirement
+            for requirement_set in tool.runtime_requirement_sets
+            for requirement in requirement_set
+            if requirement.strip()
+        ),
+    )
+    return tuple(dict.fromkeys(declared))
+
+
+def _readiness_category_label(categories: tuple[str, ...]) -> str:
+    normalized = set(categories)
+    if not normalized:
+        return "-"
+    if normalized == {"access"}:
+        return "Access"
+    if normalized == {"runtime"}:
+        return "Runtime"
+    return "Mixed"
+
+
+def _readiness_action(categories: tuple[str, ...]) -> tuple[str, str]:
+    normalized = set(categories)
+    if normalized == {"runtime"}:
+        return "Open Daemon", "/operations/daemon"
+    if "access" in normalized:
+        return "Open Access", "/operations/access"
+    if "runtime" in normalized:
+        return "Open Daemon", "/operations/daemon"
+    return "Inspect Tool", "/operations/tool"
+
+
+def _readiness_risk_tone(readiness: dict[str, Any]) -> str:
+    status = str(readiness.get("status") or "")
+    if status in {"unsupported", "unknown"}:
+        return "danger"
+    if status == "degraded":
+        return "warning"
+    return "warning" if readiness.get("setup") == "available" else "danger"
 
 
 def _readiness_payload(readiness: Any) -> dict[str, Any]:
@@ -4074,6 +5105,16 @@ def _tool_risk_reason(tool: Tool) -> str:
             reasons.append(f"access: {' OR '.join(requirement_sets)}")
         else:
             reasons.append("access gated")
+    if tool.runtime_requirement_sets:
+        requirement_sets = [
+            "+".join(requirements)
+            for requirements in tool.runtime_requirement_sets
+            if requirements
+        ]
+        if requirement_sets:
+            reasons.append(f"runtime: {' OR '.join(requirement_sets)}")
+        else:
+            reasons.append("runtime gated")
     if tool.required_effect_ids:
         reasons.append(f"effects: {', '.join(tool.required_effect_ids)}")
     return ", ".join(reasons) or "standard"
@@ -4086,6 +5127,7 @@ def _risky_tools(tools: list[Tool]) -> list[Tool]:
         if tool.execution_policy.requires_confirmation
         or tool.execution_policy.mutates_state
         or tool.access_requirement_sets
+        or tool.runtime_requirement_sets
         or tool.required_effect_ids
     ]
 
@@ -4097,6 +5139,7 @@ def _overview_risky_tools(tools: list[Tool]) -> list[Tool]:
         if tool.execution_policy.requires_confirmation
         or tool.execution_policy.mutates_state
         or tool.access_requirement_sets
+        or tool.runtime_requirement_sets
     ]
 
 
@@ -4983,9 +6026,12 @@ def _looks_like_access_failure(run: ToolRun) -> bool:
 
 
 def _source_label(run: ToolRun) -> str:
-    run_id = _context_str(run, "run_id")
+    run_id = _metadata_str(run, "orchestration_run_id") or _context_str(run, "run_id")
+    tool_call_id = _metadata_str(run, "tool_call_id")
     step_id = _context_str(run, "step_id")
     turn_id = _context_str(run, "turn_id")
+    if run_id and tool_call_id:
+        return f"{run_id} / {tool_call_id}"
     if run_id and step_id:
         return f"{run_id} / {step_id}"
     if run_id and turn_id:
@@ -4994,7 +6040,7 @@ def _source_label(run: ToolRun) -> str:
 
 
 def _source_route(run: ToolRun) -> str:
-    run_id = _context_str(run, "run_id")
+    run_id = _metadata_str(run, "orchestration_run_id") or _context_str(run, "run_id")
     return f"/ui/workbench/runs/{run_id}" if run_id else "-"
 
 
@@ -5002,6 +6048,7 @@ def _trace_id(run: ToolRun) -> str:
     return (
         _context_str(run, "trace_id")
         or _context_str(run, "correlation_id")
+        or _metadata_str(run, "orchestration_run_id")
         or _context_str(run, "run_id")
         or run.id
     )
@@ -5014,6 +6061,14 @@ def _trace_route(run: ToolRun) -> str:
 def _context_str(run: ToolRun, key: str) -> str | None:
     context = run.invocation_context
     return context.get_str(key) if context is not None else None
+
+
+def _metadata_str(run: ToolRun, key: str) -> str | None:
+    value = run.metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _tool_lookup(tools: list[Tool]) -> dict[str, Tool]:
@@ -5061,6 +6116,39 @@ def _title_label(value: str) -> str:
     return value.replace("_", " ").replace("-", " ").title()
 
 
+def _first(values: tuple[Any, ...] | list[Any]) -> Any | None:
+    return values[0] if values else None
+
+
+def _record_value(record: Any | None, field_name: str) -> str:
+    if record is None:
+        return ""
+    value = getattr(record, field_name, None)
+    if value is None:
+        return ""
+    raw = getattr(value, "value", value)
+    return str(raw).strip()
+
+
+def _record_text(record: Any | None, field_name: str) -> str:
+    return _record_value(record, field_name)
+
+
+def _record_datetime_label(record: Any | None, field_name: str) -> str:
+    value = getattr(record, field_name, None) if record is not None else None
+    if isinstance(value, datetime):
+        return format_datetime_utc(value)
+    return _display(value)
+
+
+def _source_health_tone(status: str, discovery_status: str | None) -> str:
+    if status in {"error", "deleted"} or discovery_status == "failed":
+        return "danger"
+    if status == "disabled":
+        return "warning"
+    return "success" if status == "active" else "neutral"
+
+
 def _columns(*items: tuple[str, str]) -> tuple[OperationsTableColumnModel, ...]:
     return tuple(
         OperationsTableColumnModel(key=key, label=label) for key, label in items
@@ -5072,6 +6160,14 @@ def _optional_str(value: object | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _sequence(value: object) -> tuple[object, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, tuple | list):
+        return tuple(value)
+    return (value,)
 
 
 def _optional_int(value: object | None) -> int | None:

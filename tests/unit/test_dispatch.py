@@ -13,6 +13,7 @@ from crxzipple.modules.dispatch.application import (
     WaitDispatchTaskInput,
 )
 from crxzipple.modules.dispatch.domain import DispatchPolicy, DispatchTaskStatus
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
 
@@ -20,13 +21,15 @@ class DispatchTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = SqliteTestHarness()
         self.harness.initialize_schema()
-        self.container = self.harness.build_container()
+        self.container = self.harness.build_runtime_container()
+        self.dispatch_service = self.container.require(AppKey.DISPATCH_SERVICE)
+        self.uow_factory = self.container.require(AppKey.UNIT_OF_WORK_FACTORY)
 
     def tearDown(self) -> None:
         self.harness.close()
 
     def test_create_enqueue_claim_wait_requeue_and_complete_task(self) -> None:
-        task = self.container.dispatch_service.create_task(
+        task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-task-1",
                 owner_kind="orchestration_run",
@@ -39,28 +42,28 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(task.status, DispatchTaskStatus.CREATED)
         self.assertEqual(task.policy, DispatchPolicy.FIFO)
 
-        queued = self.container.dispatch_service.enqueue_task(
+        queued = self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=task.id),
         )
-        claimed = self.container.dispatch_service.claim_next_queued_task(
+        claimed = self.dispatch_service.claim_next_queued_task(
             worker_id="worker-1",
             claim_token="claim-1",
         )
-        waiting = self.container.dispatch_service.wait_task(
+        waiting = self.dispatch_service.wait_task(
             WaitDispatchTaskInput(task_id=task.id, reason="waiting_for_owner"),
         )
-        requeued = self.container.dispatch_service.requeue_task(
+        requeued = self.dispatch_service.requeue_task(
             RequeueDispatchTaskInput(
                 task_id=task.id,
                 policy=DispatchPolicy.RESUME_FIRST,
                 reason="owner_resumed",
             ),
         )
-        reclaimed = self.container.dispatch_service.claim_next_queued_task(
+        reclaimed = self.dispatch_service.claim_next_queued_task(
             worker_id="worker-1",
             claim_token="claim-2",
         )
-        completed = self.container.dispatch_service.complete_task(
+        completed = self.dispatch_service.complete_task(
             CompleteDispatchTaskInput(task_id=task.id),
         )
 
@@ -81,7 +84,7 @@ class DispatchTestCase(unittest.TestCase):
         self.assertIsNotNone(completed.completed_at)
 
     def test_claim_next_queued_task_skips_lane_blocked_by_active_task(self) -> None:
-        active = self.container.dispatch_service.create_task(
+        active = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-active",
                 owner_kind="orchestration_run",
@@ -90,7 +93,7 @@ class DispatchTestCase(unittest.TestCase):
                 priority=50,
             ),
         )
-        available = self.container.dispatch_service.create_task(
+        available = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-available",
                 owner_kind="orchestration_run",
@@ -99,7 +102,7 @@ class DispatchTestCase(unittest.TestCase):
                 priority=10,
             ),
         )
-        same_lane = self.container.dispatch_service.create_task(
+        same_lane = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-same-lane",
                 owner_kind="orchestration_run",
@@ -109,21 +112,21 @@ class DispatchTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=active.id),
         )
-        first = self.container.dispatch_service.claim_next_queued_task(
+        first = self.dispatch_service.claim_next_queued_task(
             worker_id="worker-1",
             claim_token="claim-1",
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=available.id),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=same_lane.id),
         )
 
-        second = self.container.dispatch_service.claim_next_queued_task(
+        second = self.dispatch_service.claim_next_queued_task(
             worker_id="worker-2",
             claim_token="claim-2",
         )
@@ -136,7 +139,7 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(second.id, available.id)
 
     def test_lane_jump_queue_does_not_jump_ahead_of_other_lane_heads(self) -> None:
-        other_lane_fifo = self.container.dispatch_service.create_task(
+        other_lane_fifo = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-other-lane-fifo",
                 owner_kind="orchestration_run",
@@ -145,7 +148,7 @@ class DispatchTestCase(unittest.TestCase):
                 priority=10,
             ),
         )
-        same_lane_fifo = self.container.dispatch_service.create_task(
+        same_lane_fifo = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-shared-lane-fifo",
                 owner_kind="orchestration_run",
@@ -154,7 +157,7 @@ class DispatchTestCase(unittest.TestCase):
                 priority=10,
             ),
         )
-        lane_jump = self.container.dispatch_service.create_task(
+        lane_jump = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-lane-jump",
                 owner_kind="orchestration_run",
@@ -165,17 +168,17 @@ class DispatchTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=other_lane_fifo.id),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=same_lane_fifo.id),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=lane_jump.id),
         )
 
-        claimed = self.container.dispatch_service.claim_next_queued_task(
+        claimed = self.dispatch_service.claim_next_queued_task(
             worker_id="worker-1",
             claim_token="claim-1",
         )
@@ -185,7 +188,7 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(claimed.id, other_lane_fifo.id)
 
     def test_resume_first_claims_before_jump_queue_and_fifo(self) -> None:
-        fifo = self.container.dispatch_service.create_task(
+        fifo = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-fifo",
                 owner_kind="orchestration_run",
@@ -194,7 +197,7 @@ class DispatchTestCase(unittest.TestCase):
                 priority=10,
             ),
         )
-        jump_queue = self.container.dispatch_service.create_task(
+        jump_queue = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-jump",
                 owner_kind="orchestration_run",
@@ -204,7 +207,7 @@ class DispatchTestCase(unittest.TestCase):
                 policy=DispatchPolicy.JUMP_QUEUE,
             ),
         )
-        resume_first = self.container.dispatch_service.create_task(
+        resume_first = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-resume",
                 owner_kind="orchestration_run",
@@ -215,17 +218,17 @@ class DispatchTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=fifo.id),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=jump_queue.id),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=resume_first.id),
         )
 
-        claimed = self.container.dispatch_service.claim_next_queued_task(
+        claimed = self.dispatch_service.claim_next_queued_task(
             worker_id="worker-1",
             claim_token="claim-1",
         )
@@ -235,7 +238,7 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(claimed.id, resume_first.id)
 
     def test_claim_uses_owner_filter_and_supports_lease_heartbeat_and_recovery(self) -> None:
-        orchestration_task = self.container.dispatch_service.create_task(
+        orchestration_task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-orchestration",
                 owner_kind="orchestration_run",
@@ -244,7 +247,7 @@ class DispatchTestCase(unittest.TestCase):
                 priority=50,
             ),
         )
-        tool_task = self.container.dispatch_service.create_task(
+        tool_task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-tool",
                 owner_kind="tool_run",
@@ -254,14 +257,14 @@ class DispatchTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=orchestration_task.id),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(task_id=tool_task.id),
         )
 
-        claimed = self.container.dispatch_service.claim_next_queued_task(
+        claimed = self.dispatch_service.claim_next_queued_task(
             owner_kind="orchestration_run",
             worker_id="worker-1",
             claim_token="claim-1",
@@ -277,7 +280,7 @@ class DispatchTestCase(unittest.TestCase):
         claimed_lease_expires_at = claimed.lease_expires_at
         assert claimed_lease_expires_at is not None
 
-        heartbeated = self.container.dispatch_service.heartbeat_task(
+        heartbeated = self.dispatch_service.heartbeat_task(
             HeartbeatDispatchTaskInput(
                 task_id=claimed.id,
                 worker_id="worker-1",
@@ -291,7 +294,7 @@ class DispatchTestCase(unittest.TestCase):
         assert heartbeated.lease_expires_at is not None
         self.assertGreater(heartbeated.lease_expires_at, claimed_lease_expires_at)
 
-        claimed_tool = self.container.dispatch_service.claim_next_queued_task(
+        claimed_tool = self.dispatch_service.claim_next_queued_task(
             owner_kind="tool_run",
             worker_id="worker-2",
             claim_token="claim-2",
@@ -302,7 +305,7 @@ class DispatchTestCase(unittest.TestCase):
         self.assertEqual(claimed_tool.id, tool_task.id)
 
         stale_now = datetime.now(timezone.utc) - timedelta(seconds=1)
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             stale_task = uow.dispatch_tasks.get(tool_task.id)
             self.assertIsNotNone(stale_task)
             assert stale_task is not None
@@ -310,7 +313,7 @@ class DispatchTestCase(unittest.TestCase):
             uow.dispatch_tasks.add(stale_task)
             uow.commit()
 
-        recovered = self.container.dispatch_service.recover_abandoned_tasks(
+        recovered = self.dispatch_service.recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
                 owner_kind="tool_run",
                 reason="lease_expired",

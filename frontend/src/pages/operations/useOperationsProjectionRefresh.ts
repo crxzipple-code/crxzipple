@@ -5,6 +5,7 @@ import type { OperationsRefreshEvent } from "./api";
 export type OperationsModuleId =
   | "orchestration"
   | "tool"
+  | "browser"
   | "llm"
   | "access"
   | "channels"

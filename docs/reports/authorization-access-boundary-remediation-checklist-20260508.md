@@ -1,9 +1,9 @@
 # Authorization / Access Boundary Remediation Checklist 2026-05-08
 
 本文档是 2026-05-08 之后处理内部授权与外部访问治理边界的权威任务清单。它取代
-`access-governance-redesign-checklist-20260506.md` 中关于
+`docs/archive/reports/access-governance-redesign-checklist-20260506.md` 中关于
 “Access owns authorization policy / temporary grant”的阶段性判断，也取代
-`settings-integration-dev-checklist-20260506.md` 中把 authorization policy 归入
+`docs/archive/reports/settings-integration-dev-checklist-20260506.md` 中把 authorization policy 归入
 Access Settings config 的旧口径。
 
 ## 结论

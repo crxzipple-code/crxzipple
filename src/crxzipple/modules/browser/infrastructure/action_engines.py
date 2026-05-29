@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import base64
 import calendar
+import hashlib
 from dataclasses import replace
 from dataclasses import dataclass
 from dataclasses import field
-from fnmatch import fnmatch
-import json
 import mimetypes
 from pathlib import Path
 import re
 import tempfile
-import time
 from typing import Any, Mapping
 
 from crxzipple.modules.browser.domain import (
@@ -25,18 +23,33 @@ from crxzipple.modules.browser.domain import (
     BrowserTab,
     BrowserValidationError,
 )
-from crxzipple.modules.browser.domain.value_objects import _normalize_optional_text
+from crxzipple.modules.browser.application.network_capture import (
+    BrowserNetworkCaptureService,
+)
+from crxzipple.modules.browser.domain.value_objects import (
+    BrowserNetworkBody,
+    BrowserNetworkCapture,
+    BrowserNetworkRequest,
+    BrowserNetworkRequestFilter,
+    _normalize_optional_text,
+)
 from crxzipple.modules.daemon import DaemonApplicationService
 
 from ..application.ports import BrowserActionEngine, BrowserRefStore
 from .cdp_urls import browser_ref_to_cdp_http_base
-from .chrome_mcp import ChromeMcpClientPool
 from .daemon_leases import host_daemon_lease
+from .diagnostics import BrowserDiagnosticsService
+from .environment_control import BrowserEnvironmentControlService
+from .network_capture import InMemoryBrowserNetworkCaptureStore
+from .network_cdp_capture import CdpNetworkCaptureController
+from .network_page_fetch import BrowserPageNetworkFetchService
 from .playwright import PlaywrightCdpSessionPool
+from .cdp_sessions import BrowserCdpSessionBroker
 from .role_snapshot import (
     build_role_snapshot,
     describe_role_locator,
 )
+from .storage_inspection import BrowserStorageInspectionService
 
 _LOCATOR_ACTION_KINDS = frozenset(
     {
@@ -67,42 +80,101 @@ _SUPPORTED_KINDS = frozenset(
         "pdf",
         "evaluate",
         "storage",
+        "storage-indexeddb-list",
+        "storage-indexeddb-get",
+        "storage-indexeddb-query",
+        "storage-cache-list",
+        "storage-cache-get",
+        "service-worker-list",
+        "service-worker-inspect",
+        "dom-inspect",
+        "dom-box-model",
+        "dom-computed-style",
+        "dom-clickability",
+        "dom-highlight",
+        "dom-mutation-wait",
+        "emulation-set",
+        "emulation-reset",
+        "permissions-grant",
+        "permissions-clear",
+        "geolocation-set",
+        "network-conditions-set",
+        "diagnostics-collect",
+        "performance-metrics",
+        "trace-start",
+        "trace-stop",
+        "trace-export",
+        "page-lifecycle",
+        "page-errors",
+        "network-inspect",
+        "network-start-capture",
+        "network-stop-capture",
+        "network-list-requests",
+        "network-get-request",
+        "network-get-response-body",
+        "network-get-request-body",
+        "network-fetch-as-page",
+        "network-replay-request",
+        "network-clear-capture",
+        "cdp-raw",
     }
 )
-_MCP_SUPPORTED_KINDS = frozenset(
+_DEEP_STORAGE_KINDS = frozenset(
     {
-        "batch",
-        "click",
-        "console",
-        "cookies",
-        "dialog",
-        "type",
-        "press",
-        "hover",
-        "drag",
-        "resize",
-        "scroll-into-view",
-        "select",
-        "fill",
-        "storage",
-        "upload",
-        "wait",
-        "snapshot",
-        "screenshot",
-        "evaluate",
+        "storage-indexeddb-list",
+        "storage-indexeddb-get",
+        "storage-indexeddb-query",
+        "storage-cache-list",
+        "storage-cache-get",
+        "service-worker-list",
+        "service-worker-inspect",
     }
 )
-_MCP_TARGETED_KINDS = frozenset(
+_DOM_INSPECTION_KINDS = frozenset(
     {
-        "click",
-        "type",
-        "hover",
-        "drag",
-        "select",
-        "fill",
+        "dom-inspect",
+        "dom-box-model",
+        "dom-computed-style",
+        "dom-clickability",
+        "dom-highlight",
+        "dom-mutation-wait",
     }
 )
-_MCP_INTERACTIVE_ROLES = frozenset(
+_ENVIRONMENT_CONTROL_KINDS = frozenset(
+    {
+        "emulation-set",
+        "emulation-reset",
+        "permissions-grant",
+        "permissions-clear",
+        "geolocation-set",
+        "network-conditions-set",
+    }
+)
+_DIAGNOSTIC_KINDS = frozenset(
+    {
+        "diagnostics-collect",
+        "performance-metrics",
+        "trace-start",
+        "trace-stop",
+        "trace-export",
+        "page-lifecycle",
+        "page-errors",
+    }
+)
+_NETWORK_CAPTURE_KINDS = frozenset(
+    {
+        "network-start-capture",
+        "network-stop-capture",
+        "network-list-requests",
+        "network-get-request",
+        "network-get-response-body",
+        "network-get-request-body",
+        "network-fetch-as-page",
+        "network-replay-request",
+        "network-clear-capture",
+    }
+)
+_COMMON_INTERACTIVE_ROLES = frozenset(
     {
         "button",
         "checkbox",
@@ -147,6 +219,7 @@ _HIGH_VALUE_INTERACTIVE_ROLES = frozenset(
         "button",
         "checkbox",
         "combobox",
+        "gridcell",
         "link",
         "menuitem",
         "option",
@@ -177,12 +250,40 @@ _BULK_SELECTION_MARKER = "__crxzipple_collect_bulk_selection_candidates__"
 _TEXT_MATCH_ORDINAL_MARKER = "__crxzipple_find_preferred_text_ordinal__"
 _TEXT_MATCH_DETAILS_MARKER = "__crxzipple_collect_text_match_details__"
 _STORAGE_MARKER = "__crxzipple_storage_access__"
-_MCP_STORAGE_MARKER = "__crxzipple_mcp_storage_access__"
-_MCP_COOKIES_MARKER = "__crxzipple_mcp_cookies_access__"
-_MCP_CONSOLE_MARKER = "__crxzipple_mcp_console_access__"
+_BROWSER_STORAGE_MARKER = "__crxzipple_browser_storage_access__"
+_BROWSER_COOKIES_MARKER = "__crxzipple_browser_cookies_access__"
+_BROWSER_CONSOLE_MARKER = "__crxzipple_browser_console_access__"
 _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
-(() => {{
+(rootSelector) => {{
   const {_INTERACTIVE_SNAPSHOT_MARKER} = true;
+  const normalizedRootSelector = typeof rootSelector === "string" ? rootSelector.trim() : "";
+  const rootsFor = (selector) => {{
+    if (!selector) return [document];
+    try {{
+      const root = document.querySelector(selector);
+      return root ? [root] : [document];
+    }} catch (_error) {{
+      return [document];
+    }}
+  }};
+  const queryAllDeep = (root, selector) => {{
+    const resolved = [];
+    const visit = (scope) => {{
+      if (!scope) return;
+      if (scope instanceof Element && scope.matches(selector)) {{
+        resolved.push(scope);
+      }}
+      if (typeof scope.querySelectorAll !== "function") return;
+      const matches = Array.from(scope.querySelectorAll(selector));
+      resolved.push(...matches);
+      const descendants = Array.from(scope.querySelectorAll("*"));
+      for (const descendant of descendants) {{
+        if (descendant.shadowRoot) visit(descendant.shadowRoot);
+      }}
+    }};
+    visit(root);
+    return resolved;
+  }};
   const selectorFor = (element) => {{
     if (!(element instanceof Element)) return null;
     if (element.id) return `#${{CSS.escape(element.id)}}`;
@@ -209,6 +310,48 @@ _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
   const textFor = (element) => {{
     const text = (element.innerText || element.textContent || "").trim().replace(/\\s+/g, " ");
     return text || null;
+  }};
+  const ownTextFor = (element) => {{
+    if (!(element instanceof Element)) return textFor(element);
+    const text = Array.from(element.childNodes || [])
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => (node.textContent || "").trim())
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\\s+/g, " ")
+      .trim();
+    return text || textFor(element);
+  }};
+  const classTextFor = (element) => {{
+    if (!(element instanceof Element)) return "";
+    return String(element.className || "").toLowerCase();
+  }};
+  const hasPickerAncestor = (element) => {{
+    if (!(element instanceof Element)) return false;
+    try {{
+      return !!element.closest(
+        "[class*='picker'],[class*='calendar'],[class*='datepicker'],[class*='date-picker'],[class*='time-picker']"
+      );
+    }} catch (_error) {{
+      return false;
+    }}
+  }};
+  const looksLikePickerChoice = (element) => {{
+    if (!(element instanceof Element)) return false;
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    if (["gridcell", "option", "menuitem"].includes(role)) return true;
+    if (element.hasAttribute("aria-selected")) return true;
+    const tag = element.tagName.toLowerCase();
+    const cls = classTextFor(element);
+    const pickerClass = /picker|calendar|datepicker|date-picker|time-picker|time-panel/.test(cls);
+    const cellClass = /cell|day|date|time|hour|minute|month|year/.test(cls);
+    if (pickerClass && cellClass) return true;
+    if (hasPickerAncestor(element) && ["td", "li", "span", "div", "button"].includes(tag)) {{
+      const ownText = ownTextFor(element);
+      const childCount = element.children ? element.children.length : 0;
+      return !!ownText && ownText.length <= 80 && (tag === "td" || tag === "li" || childCount <= 3 || cellClass);
+    }}
+    return false;
   }};
   const labelFor = (element) => {{
     const aria = element.getAttribute("aria-label");
@@ -240,6 +383,7 @@ _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
   const roleFor = (element) => {{
     const explicit = element.getAttribute("role");
     if (explicit && explicit.trim()) return explicit.trim().toLowerCase();
+    if (looksLikePickerChoice(element)) return "option";
     const tag = element.tagName.toLowerCase();
     if (tag === "button") return "button";
     if (tag === "a" && element.hasAttribute("href")) return "link";
@@ -253,6 +397,8 @@ _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
       if (type === "number") return "spinbutton";
       return "textbox";
     }}
+    if (element.hasAttribute("onclick")) return "button";
+    if (element.hasAttribute("tabindex")) return "button";
     return null;
   }};
   const isVisible = (element) => {{
@@ -291,18 +437,69 @@ _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
     "[role='textbox']",
     "[role='checkbox']",
     "[role='radio']",
-    "[tabindex]:not([tabindex='-1'])"
+    "[role='option']",
+    "[role='menuitem']",
+    "[role='gridcell']",
+    "[role='tab']",
+    "[role='switch']",
+    "[role='slider']",
+    "[role='spinbutton']",
+    "[aria-selected]",
+    "[onclick]",
+    "[tabindex]:not([tabindex='-1'])",
+    ".ant-picker-cell",
+    ".ant-picker-cell-inner",
+    ".ant-picker-time-panel-cell",
+    ".ant-picker-time-panel-cell-inner",
+    ".calendar-day",
+    ".datepicker-day",
+    ".date-picker td",
+    ".datepicker td",
+    ".calendar td",
+    ".el-date-table td",
+    ".el-picker-panel td",
+    "[class*='picker'] td",
+    "[class*='picker'] li",
+    "[class*='calendar'] td",
+    "[class*='datepicker'] td"
   ].join(",");
+  const scopedFallbackSelector = "td,li,button,a,input,select,textarea,[role],span,div";
   const seen = new Set();
-  return Array.from(document.querySelectorAll(selector)).map((element) => {{
+  const roots = rootsFor(normalizedRootSelector);
+  const elements = [];
+  for (const root of roots) {{
+    elements.push(...queryAllDeep(root, selector));
+    if (normalizedRootSelector) {{
+      elements.push(...queryAllDeep(root, scopedFallbackSelector));
+    }}
+  }}
+  return elements.map((element) => {{
     const css = selectorFor(element);
     if (!css || seen.has(css)) return null;
+    const tag = element.tagName.toLowerCase();
+    const label = labelFor(element);
+    const text = textFor(element);
+    const role = roleFor(element);
+    const ownText = ownTextFor(element);
+    const style = element instanceof HTMLElement ? window.getComputedStyle(element) : null;
+    const rootScopedFallback = !!normalizedRootSelector
+      && ["td", "li", "span", "div"].includes(tag)
+      && !!ownText
+      && ownText.length <= 80
+      && (
+        looksLikePickerChoice(element)
+        || element.hasAttribute("onclick")
+        || element.hasAttribute("aria-selected")
+        || (style && style.cursor === "pointer")
+      );
+    if (!role && !rootScopedFallback) return null;
     seen.add(css);
     return {{
       selector: css,
-      label: labelFor(element),
-      role: roleFor(element),
-      text: textFor(element),
+      scope_selector: normalizedRootSelector || null,
+      label,
+      role: role || "button",
+      text,
       tag: element.tagName.toLowerCase(),
       visible: isVisible(element),
       disabled: isDisabled(element),
@@ -312,7 +509,7 @@ _INTERACTIVE_SNAPSHOT_EXPRESSION = f"""
       ),
     }};
   }}).filter(Boolean);
-}})()
+}}
 """.strip()
 _BULK_SELECTION_EXPRESSION = f"""
 /*{_BULK_SELECTION_MARKER}*/
@@ -628,7 +825,8 @@ _ACTIVE_OVERLAY_SELECTOR_EXPRESSION = f"""
     if (role === "tooltip" || role === "tree" || role === "grid") total += 1500;
     const cls = element.className || "";
     if (typeof cls === "string") {{
-      if (/dropdown|popover|popup|modal|dialog|menu|autocomplete|picker|select/i.test(cls)) total += 1200;
+      if (/dropdown|popover|popup|modal|dialog|menu|autocomplete|picker|calendar-panel|datepicker|date-picker|time-picker|select/i.test(cls)) total += 1200;
+      if (/\\bshow\\b|\\bopen\\b|\\bactive\\b/i.test(cls)) total += 500;
     }}
     const style = window.getComputedStyle(element);
     if (style) {{
@@ -640,7 +838,7 @@ _ACTIVE_OVERLAY_SELECTOR_EXPRESSION = f"""
     return total;
   }};
   const candidates = Array.from(document.querySelectorAll(
-    "[role='dialog'],[role='alertdialog'],[role='listbox'],[role='menu'],[role='tooltip'],[role='tree'],[role='grid'],.ant-select-dropdown,.ant-picker-dropdown,.ant-dropdown,.ant-popover,.ant-modal,.autocomplete,.city-autocomplete-list,.popup,.modal,.menu,.dropdown"
+    "[role='dialog'],[role='alertdialog'],[role='listbox'],[role='menu'],[role='tooltip'],[role='tree'],[role='grid'],.ant-select-dropdown,.ant-picker-dropdown,.ant-dropdown,.ant-popover,.ant-modal,.autocomplete,.city-autocomplete-list,.calendar-panel.show,.calendar-panel,[class*='calendar-panel'],[class*='picker-panel'],[class*='picker-dropdown'],[class*='datepicker'],[class*='date-picker'],[class*='time-picker'],.popup,.modal,.menu,.dropdown"
   )).filter(isVisible);
   if (!candidates.length) return null;
   let best = null;
@@ -737,7 +935,7 @@ _ASSOCIATED_OVERLAY_SELECTOR_EXPRESSION = f"""
     return null;
   }};
   const candidates = Array.from(document.querySelectorAll(
-    "[role='dialog'],[role='alertdialog'],[role='listbox'],[role='menu'],[role='tooltip'],[role='tree'],[role='grid'],.ant-select-dropdown,.ant-picker-dropdown,.ant-dropdown,.ant-popover,.ant-modal,.autocomplete,.city-autocomplete-list,.popup,.modal,.menu,.dropdown"
+    "[role='dialog'],[role='alertdialog'],[role='listbox'],[role='menu'],[role='tooltip'],[role='tree'],[role='grid'],.ant-select-dropdown,.ant-picker-dropdown,.ant-dropdown,.ant-popover,.ant-modal,.autocomplete,.city-autocomplete-list,.calendar-panel.show,.calendar-panel,[class*='calendar-panel'],[class*='picker-panel'],[class*='picker-dropdown'],[class*='datepicker'],[class*='date-picker'],[class*='time-picker'],.popup,.modal,.menu,.dropdown"
   )).filter(isVisible);
   if (!candidates.length) return null;
   let best = null;
@@ -755,7 +953,7 @@ _ASSOCIATED_OVERLAY_SELECTOR_EXPRESSION = f"""
     if (overlayKind && inferredKind === overlayKind) score += 3500;
     else if (overlayKind && inferredKind && inferredKind !== overlayKind) score -= 1200;
     const cls = element.className || "";
-    if (typeof cls === "string" && /autocomplete|picker|dropdown|popover|popup|modal|dialog|menu|select/i.test(cls)) {{
+    if (typeof cls === "string" && /autocomplete|picker|calendar-panel|datepicker|date-picker|time-picker|dropdown|popover|popup|modal|dialog|menu|select/i.test(cls)) {{
       score += 400;
     }}
     if (score > bestScore) {{
@@ -794,6 +992,14 @@ _AUTOCOMPLETE_OVERLAY_STATUS_EXPRESSION = f"""
     ".ant-modal",
     ".autocomplete",
     ".city-autocomplete-list",
+    ".calendar-panel.show",
+    ".calendar-panel",
+    "[class*='calendar-panel']",
+    "[class*='picker-panel']",
+    "[class*='picker-dropdown']",
+    "[class*='datepicker']",
+    "[class*='date-picker']",
+    "[class*='time-picker']",
     ".popup",
     ".modal",
     ".menu",
@@ -979,7 +1185,7 @@ _AUTOCOMPLETE_OVERLAY_STATUS_EXPRESSION = f"""
         score -= 1200;
       }}
       const cls = element.className || "";
-      if (typeof cls === "string" && /autocomplete|picker|dropdown|popover|popup|modal|dialog|menu|select/i.test(cls)) {{
+      if (typeof cls === "string" && /autocomplete|picker|calendar-panel|datepicker|date-picker|time-picker|dropdown|popover|popup|modal|dialog|menu|select/i.test(cls)) {{
         score += 400;
       }}
       if (!activeOverlay && !explicitOverlaySelector && !sourceSelector && !sourceScopeSelector && matchedCount <= 0 && candidateStats.length <= 0) {{
@@ -1293,8 +1499,344 @@ _STORAGE_EXPRESSION = f"""
   throw new Error(`Unsupported storage operation: ${{operation}}`);
 }}
 """.strip()
-_MCP_STORAGE_EXPRESSION = f"""
-/*{_MCP_STORAGE_MARKER}*/
+_DOM_INSPECT_MARKER = "__crxzipple_dom_inspect__"
+_DOM_INSPECT_EXPRESSION = """
+/*__crxzipple_dom_inspect__*/
+(element, raw) => {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const includeStyles = input.include_styles !== false;
+  const styleProperties = Array.isArray(input.style_properties)
+    ? input.style_properties.map((item) => String(item || "").trim()).filter(Boolean)
+    : [
+      "display",
+      "visibility",
+      "opacity",
+      "pointer-events",
+      "position",
+      "z-index",
+      "overflow",
+      "cursor",
+      "color",
+      "background-color",
+      "font-size",
+    ];
+  const attrNames = Array.isArray(input.attributes)
+    ? input.attributes.map((item) => String(item || "").trim()).filter(Boolean)
+    : ["id", "class", "name", "type", "role", "aria-label", "aria-expanded", "aria-selected", "disabled", "readonly"];
+  const rect = element && element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+  const style = element && window.getComputedStyle ? window.getComputedStyle(element) : null;
+  const text = element ? String(element.innerText || element.textContent || "").trim().replace(/\\s+/g, " ") : "";
+  const tag = element && element.tagName ? element.tagName.toLowerCase() : null;
+  const role = element && element.getAttribute ? (element.getAttribute("role") || null) : null;
+  const label = element && element.getAttribute ? (element.getAttribute("aria-label") || element.getAttribute("title") || null) : null;
+  const value = element && "value" in element ? String(element.value || "") : null;
+  const attributes = {};
+  if (element && element.getAttribute) {
+    for (const name of attrNames) {
+      const value = element.getAttribute(name);
+      if (value !== null && value !== "") attributes[name] = value;
+    }
+  }
+  const box = rect ? {
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+    left: rect.left,
+  } : null;
+  const viewport = {
+    width: window.innerWidth || 0,
+    height: window.innerHeight || 0,
+  };
+  const visible = !!(
+    rect
+    && rect.width > 0
+    && rect.height > 0
+    && style
+    && style.visibility !== "hidden"
+    && style.display !== "none"
+    && Number(style.opacity || "1") > 0
+  );
+  const inViewport = !!(
+    rect
+    && rect.bottom >= 0
+    && rect.right >= 0
+    && rect.top <= viewport.height
+    && rect.left <= viewport.width
+  );
+  const disabled = !!(
+    element
+    && (
+      element.disabled === true
+      || element.getAttribute("aria-disabled") === "true"
+      || element.hasAttribute("disabled")
+    )
+  );
+  const readOnly = !!(
+    element
+    && (
+      element.readOnly === true
+      || element.getAttribute("aria-readonly") === "true"
+      || element.hasAttribute("readonly")
+    )
+  );
+  const center = rect ? {
+    x: Math.max(0, Math.min(viewport.width - 1, rect.left + rect.width / 2)),
+    y: Math.max(0, Math.min(viewport.height - 1, rect.top + rect.height / 2)),
+  } : null;
+  const hit = center && document.elementFromPoint ? document.elementFromPoint(center.x, center.y) : null;
+  const blocked = !!(hit && element && hit !== element && !element.contains(hit));
+  const summarize = (node) => {
+    if (!node || !node.tagName) return null;
+    const id = node.id ? `#${node.id}` : "";
+    const cls = node.className && typeof node.className === "string"
+      ? "." + node.className.trim().split(/\\s+/).filter(Boolean).slice(0, 3).join(".")
+      : "";
+    return {
+      tag: node.tagName.toLowerCase(),
+      selector_hint: `${node.tagName.toLowerCase()}${id}${cls}`,
+      text: String(node.innerText || node.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 120),
+    };
+  };
+  const computedStyle = {};
+  if (includeStyles && style) {
+    for (const name of styleProperties) computedStyle[name] = style.getPropertyValue(name);
+  }
+  const editable = !!(
+    element
+    && (
+      element.isContentEditable
+      || ["input", "textarea", "select"].includes(tag)
+      || role === "textbox"
+      || role === "combobox"
+    )
+  );
+  const clickable = visible && inViewport && !disabled && !blocked && !!(
+    element
+    && (
+      ["a", "button", "input", "select", "textarea", "option"].includes(tag)
+      || ["button", "link", "menuitem", "option", "tab", "checkbox", "radio", "switch", "combobox"].includes(role || "")
+      || element.hasAttribute("onclick")
+      || (style && style.cursor === "pointer")
+    )
+  );
+  const reasons = [];
+  if (!visible) reasons.push("not_visible");
+  if (!inViewport) reasons.push("out_of_viewport");
+  if (disabled) reasons.push("disabled");
+  if (blocked) reasons.push("blocked_by_overlay");
+  if (!clickable && !editable && reasons.length === 0) reasons.push("not_interactive");
+  return {
+    tag,
+    role,
+    label,
+    text,
+    value,
+    attributes,
+    box,
+    viewport,
+    visible,
+    in_viewport: inViewport,
+    disabled,
+    read_only: readOnly,
+    editable,
+    clickable,
+    click_point: center,
+    blocked_by: blocked ? summarize(hit) : null,
+    computed_style: computedStyle,
+    reasons,
+  };
+}
+""".strip()
+_DOM_HIGHLIGHT_MARKER = "__crxzipple_dom_highlight__"
+_DOM_HIGHLIGHT_EXPRESSION = """
+/*__crxzipple_dom_highlight__*/
+(element, raw) => {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const durationMs = Math.max(100, Math.min(10000, Number(input.duration_ms || input.durationMs || 1200)));
+  const color = typeof input.color === "string" && input.color.trim() ? input.color.trim() : "#3b82f6";
+  const label = typeof input.label === "string" && input.label.trim() ? input.label.trim().slice(0, 80) : "";
+  const rect = element && element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+  if (!rect) {
+    return {
+      highlighted: false,
+      reason: "no_box",
+      duration_ms: durationMs,
+      color,
+      label: label || null,
+    };
+  }
+  const overlay = document.createElement("div");
+  overlay.setAttribute("data-crxzipple-dom-highlight", "true");
+  overlay.style.position = "fixed";
+  overlay.style.left = `${rect.left}px`;
+  overlay.style.top = `${rect.top}px`;
+  overlay.style.width = `${rect.width}px`;
+  overlay.style.height = `${rect.height}px`;
+  overlay.style.border = `2px solid ${color}`;
+  overlay.style.boxShadow = `0 0 0 3px rgba(59, 130, 246, 0.22)`;
+  overlay.style.borderRadius = "4px";
+  overlay.style.pointerEvents = "none";
+  overlay.style.zIndex = "2147483647";
+  overlay.style.boxSizing = "border-box";
+  if (label) {
+    const badge = document.createElement("div");
+    badge.textContent = label;
+    badge.style.position = "absolute";
+    badge.style.left = "0";
+    badge.style.top = "-24px";
+    badge.style.maxWidth = "320px";
+    badge.style.padding = "2px 6px";
+    badge.style.borderRadius = "4px";
+    badge.style.background = color;
+    badge.style.color = "#fff";
+    badge.style.font = "12px/18px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+    badge.style.whiteSpace = "nowrap";
+    badge.style.overflow = "hidden";
+    badge.style.textOverflow = "ellipsis";
+    overlay.appendChild(badge);
+  }
+  document.documentElement.appendChild(overlay);
+  window.setTimeout(() => {
+    try {
+      overlay.remove();
+    } catch (_error) {
+      /* noop */
+    }
+  }, durationMs);
+  return {
+    highlighted: true,
+    duration_ms: durationMs,
+    color,
+    label: label || null,
+    box: {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      left: rect.left,
+    },
+  };
+}
+""".strip()
+_DOM_MUTATION_WAIT_MARKER = "__crxzipple_dom_mutation_wait__"
+_DOM_MUTATION_WAIT_EXPRESSION = """
+/*__crxzipple_dom_mutation_wait__*/
+(element, raw) => new Promise((resolve) => {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const timeoutMs = Math.max(1, Math.min(60000, Number(input.timeout_ms || input.timeoutMs || 5000)));
+  const quietMs = Math.max(0, Math.min(5000, Number(input.quiet_ms || input.quietMs || 100)));
+  const options = {
+    childList: input.child_list !== false && input.childList !== false,
+    subtree: input.subtree !== false,
+    attributes: input.attributes === true,
+    characterData: input.character_data === true || input.characterData === true,
+  };
+  if (!options.childList && !options.attributes && !options.characterData) {
+    options.childList = true;
+  }
+  if (Array.isArray(input.attribute_filter) || Array.isArray(input.attributeFilter)) {
+    const attributeFilter = (input.attribute_filter || input.attributeFilter)
+      .map((item) => String(item || "").trim())
+      .filter(Boolean);
+    if (attributeFilter.length) {
+      options.attributes = true;
+      options.attributeFilter = attributeFilter;
+    }
+  }
+  const start = performance.now();
+  let mutationCount = 0;
+  let quietTimer = null;
+  let settled = false;
+  let observer = null;
+  let timeoutTimer = null;
+  const finish = (changed, reason) => {
+    if (settled) return;
+    settled = true;
+    if (quietTimer !== null) window.clearTimeout(quietTimer);
+    if (timeoutTimer !== null) window.clearTimeout(timeoutTimer);
+    if (observer) observer.disconnect();
+    resolve({
+      changed,
+      reason,
+      mutation_count: mutationCount,
+      elapsed_ms: Math.round(performance.now() - start),
+      timeout_ms: timeoutMs,
+      quiet_ms: quietMs,
+      options,
+    });
+  };
+  observer = new MutationObserver((mutations) => {
+    mutationCount += mutations.length;
+    if (quietMs <= 0) {
+      finish(true, "mutation");
+      return;
+    }
+    if (quietTimer !== null) window.clearTimeout(quietTimer);
+    quietTimer = window.setTimeout(() => finish(true, "quiet"), quietMs);
+  });
+  try {
+    observer.observe(element, options);
+  } catch (error) {
+    finish(false, `observe_failed:${error && error.message ? error.message : "unknown"}`);
+    return;
+  }
+  timeoutTimer = window.setTimeout(
+    () => finish(mutationCount > 0, mutationCount > 0 ? "timeout_after_mutation" : "timeout"),
+    timeoutMs,
+  );
+})
+""".strip()
+_NETWORK_PERFORMANCE_MARKER = "__crxzipple_network_performance_entries__"
+_NETWORK_PERFORMANCE_EXPRESSION = """
+/*__crxzipple_network_performance_entries__*/
+(raw) => {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const limit = Math.max(1, Number(input.limit || 50));
+  const includeNavigation = input.include_navigation !== false && input.includeNavigation !== false;
+  const includeResources = input.include_resources !== false && input.includeResources !== false;
+  const entries = [];
+  const toNumber = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+  const pushEntry = (entry) => {
+    if (!entry || entries.length >= limit) return;
+    entries.push({
+      name: String(entry.name || ""),
+      entry_type: String(entry.entryType || ""),
+      initiator_type: entry.initiatorType == null ? null : String(entry.initiatorType),
+      start_time: toNumber(entry.startTime),
+      duration: toNumber(entry.duration),
+      transfer_size: toNumber(entry.transferSize),
+      encoded_body_size: toNumber(entry.encodedBodySize),
+      decoded_body_size: toNumber(entry.decodedBodySize),
+      next_hop_protocol: entry.nextHopProtocol == null ? null : String(entry.nextHopProtocol),
+      response_status: toNumber(entry.responseStatus),
+    });
+  };
+  if (includeNavigation && performance.getEntriesByType) {
+    for (const entry of performance.getEntriesByType("navigation")) pushEntry(entry);
+  }
+  if (includeResources && performance.getEntriesByType) {
+    for (const entry of performance.getEntriesByType("resource")) pushEntry(entry);
+  }
+  return {
+    url: String(window.location.href || ""),
+    entries,
+    entry_count: entries.length,
+    limit,
+  };
+}
+""".strip()
+_BROWSER_STORAGE_EXPRESSION = f"""
+/*{_BROWSER_STORAGE_MARKER}*/
 (raw) => {{
   const input = JSON.parse(String(raw || "{{}}"));
   const kind = input.kind === "session" ? "session" : "local";
@@ -1330,8 +1872,8 @@ _MCP_STORAGE_EXPRESSION = f"""
   throw new Error(`Unsupported storage operation: ${{operation}}`);
 }}
 """.strip()
-_MCP_COOKIES_EXPRESSION = f"""
-/*{_MCP_COOKIES_MARKER}*/
+_BROWSER_COOKIES_EXPRESSION = f"""
+/*{_BROWSER_COOKIES_MARKER}*/
 (raw) => {{
   const input = JSON.parse(String(raw || "{{}}"));
   const operation = String(input.operation || "get").toLowerCase();
@@ -1388,8 +1930,8 @@ _MCP_COOKIES_EXPRESSION = f"""
   throw new Error(`Unsupported cookie operation: ${{operation}}`);
 }}
 """.strip()
-_MCP_CONSOLE_EXPRESSION = f"""
-/*{_MCP_CONSOLE_MARKER}*/
+_BROWSER_CONSOLE_EXPRESSION = f"""
+/*{_BROWSER_CONSOLE_MARKER}*/
 (raw) => {{
   const input = JSON.parse(String(raw || "{{}}"));
   const normalizeLevel = (value) => {{
@@ -1482,7 +2024,7 @@ _MCP_CONSOLE_EXPRESSION = f"""
   return messages;
 }}
 """.strip()
-_MCP_SCROLL_INTO_VIEW_EXPRESSION = """
+_BROWSER_SCROLL_INTO_VIEW_EXPRESSION = """
 (uid) => {
   const targetUid = String(uid || "").trim();
   if (!targetUid) {
@@ -1831,6 +2373,18 @@ def _payload_number_any(
     return None
 
 
+def _click_coordinates(payload: Mapping[str, Any]) -> tuple[float, float] | None:
+    has_x = "x" in payload and payload.get("x") is not None
+    has_y = "y" in payload and payload.get("y") is not None
+    if not has_x and not has_y:
+        return None
+    x = _payload_number_any(payload, "x")
+    y = _payload_number_any(payload, "y")
+    if x is None or y is None:
+        raise BrowserValidationError("payload.x and payload.y must both be numbers for coordinate click.")
+    return x, y
+
+
 def _payload_value_any(
     payload: Mapping[str, Any],
     *keys: str,
@@ -2022,6 +2576,10 @@ def _normalize_batch_action(
         value = _payload_value_any(raw_action, *payload_keys)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             payload.setdefault(key, int(value))
+    for key in ("x", "y"):
+        value = _payload_value_any(raw_action, key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            payload.setdefault(key, float(value))
 
     if "arg" in raw_action:
         payload.setdefault("arg", raw_action.get("arg"))
@@ -2085,6 +2643,198 @@ def _drag_target_selector(payload: Mapping[str, Any]) -> str | None:
     )
 
 
+def _json_safe_payload(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_payload(item) for item in value]
+    return str(value)
+
+
+def _network_request_filter_from_payload(
+    payload: Mapping[str, Any],
+) -> BrowserNetworkRequestFilter:
+    raw_filters = payload.get("filters")
+    filters = dict(raw_filters) if isinstance(raw_filters, Mapping) else {}
+
+    def text(*keys: str) -> str | None:
+        return _payload_text_any(payload, *keys) or _payload_text_any(filters, *keys)
+
+    def integer(*keys: str, minimum: int = 0) -> int | None:
+        for source in (payload, filters):
+            value = _payload_value_any(source, *keys)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise BrowserValidationError(f"payload.{keys[0]} must be an integer.")
+            resolved = int(value)
+            if resolved < minimum:
+                raise BrowserValidationError(
+                    f"payload.{keys[0]} must be greater than or equal to {minimum}.",
+                )
+            return resolved
+        return None
+
+    return BrowserNetworkRequestFilter(
+        resource_type=text("resource_type", "resourceType"),
+        domain=text("domain"),
+        path=text("path"),
+        method=text("method"),
+        status=integer("status"),
+        status_min=integer("status_min", "statusMin"),
+        status_max=integer("status_max", "statusMax"),
+        initiator=text("initiator"),
+        mime_type=text("mime_type", "mimeType"),
+        keyword=text("keyword"),
+        limit=integer("limit", minimum=1),
+    )
+
+
+def _serialize_network_filters(filters: BrowserNetworkRequestFilter) -> dict[str, Any]:
+    return {
+        "resource_type": filters.resource_type,
+        "domain": filters.domain,
+        "path": filters.path,
+        "method": filters.method,
+        "status": filters.status,
+        "status_min": filters.status_min,
+        "status_max": filters.status_max,
+        "initiator": filters.initiator,
+        "mime_type": filters.mime_type,
+        "keyword": filters.keyword,
+        "limit": filters.limit,
+    }
+
+
+def _serialize_network_capture(capture: BrowserNetworkCapture) -> dict[str, Any]:
+    return {
+        "profile_name": capture.profile_name,
+        "target_id": capture.target_id,
+        "capture_id": capture.capture_id,
+        "status": capture.status,
+        "max_requests": capture.max_requests,
+        "max_body_bytes": capture.max_body_bytes,
+        "request_count": capture.request_count,
+        "started_at": capture.started_at.isoformat(),
+        "stopped_at": (
+            capture.stopped_at.isoformat()
+            if capture.stopped_at is not None
+            else None
+        ),
+        "metadata": dict(capture.metadata),
+    }
+
+
+def _serialize_network_request(request: BrowserNetworkRequest) -> dict[str, Any]:
+    return {
+        "request_id": request.request_id,
+        "capture_id": request.capture_id,
+        "profile_name": request.profile_name,
+        "target_id": request.target_id,
+        "frame_id": request.frame_id,
+        "loader_id": request.loader_id,
+        "url": request.url,
+        "method": request.method,
+        "resource_type": request.resource_type,
+        "request_headers": dict(request.request_headers),
+        "request_post_data_preview": request.request_post_data_preview,
+        "status": request.status,
+        "response_headers": dict(request.response_headers),
+        "mime_type": request.mime_type,
+        "timing": dict(request.timing),
+        "initiator": dict(request.initiator),
+        "body_ref": request.body_ref,
+        "request_body_ref": request.request_body_ref,
+        "failure_text": request.failure_text,
+        "encoded_data_length": request.encoded_data_length,
+        "created_at": request.created_at.isoformat(),
+        "completed_at": (
+            request.completed_at.isoformat()
+            if request.completed_at is not None
+            else None
+        ),
+    }
+
+
+def _serialize_network_body(body: BrowserNetworkBody) -> dict[str, Any]:
+    return {
+        "body_ref": body.body_ref,
+        "request_id": body.request_id,
+        "capture_id": body.capture_id,
+        "profile_name": body.profile_name,
+        "target_id": body.target_id,
+        "body_kind": body.kind,
+        "body": body.body,
+        "mime_type": body.mime_type,
+        "base64_encoded": body.base64_encoded,
+        "size_bytes": body.size_bytes,
+        "stored_size_bytes": body.stored_size_bytes,
+        "truncated": body.truncated,
+        "redacted": body.redacted,
+        "created_at": body.created_at.isoformat(),
+    }
+
+
+def _performance_request_id(entry: Mapping[str, Any], *, index: int) -> str:
+    seed = "|".join(
+        str(entry.get(key) or "")
+        for key in ("name", "entry_type", "initiator_type", "start_time")
+    )
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+    return f"perf-{index}-{digest}"
+
+
+def _performance_resource_type(entry: Mapping[str, Any]) -> str:
+    initiator = str(entry.get("initiator_type") or "").strip().lower()
+    entry_type = str(entry.get("entry_type") or "").strip().lower()
+    if entry_type == "navigation":
+        return "document"
+    if initiator in {"xmlhttprequest", "xhr"}:
+        return "xhr"
+    if initiator in {"fetch", "script", "img", "image", "css", "link"}:
+        return "stylesheet" if initiator in {"css", "link"} else initiator
+    return entry_type or initiator or "other"
+
+
+def _performance_status(entry: Mapping[str, Any]) -> int | None:
+    value = entry.get("response_status")
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    status = int(value)
+    return status if status > 0 else None
+
+
+def _performance_encoded_length(entry: Mapping[str, Any]) -> int | None:
+    for key in ("encoded_body_size", "transfer_size", "decoded_body_size"):
+        value = entry.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        numeric = int(value)
+        if numeric >= 0:
+            return numeric
+    return None
+
+
+def _new_page_cdp_session(page: Any) -> Any:
+    return BrowserCdpSessionBroker().open_command_session(page)
+
+
+def _send_cdp_session_command(
+    session: Any,
+    method: str,
+    params: Mapping[str, Any] | None = None,
+) -> Any:
+    return BrowserCdpSessionBroker().send_command(session, method, params)
+
+
+def _detach_cdp_session(session: Any) -> None:
+    BrowserCdpSessionBroker().detach(session)
+
+
 def _serialize_tab(tab: BrowserTab) -> dict[str, Any]:
     return {
         "target_id": tab.target_id,
@@ -2132,7 +2882,7 @@ def _role_snapshot_stats(
     interactive_refs = sum(
         1
         for ref in refs
-        if str(ref.role or "").strip().lower() in _HIGH_VALUE_INTERACTIVE_ROLES | _MCP_INTERACTIVE_ROLES
+        if str(ref.role or "").strip().lower() in _HIGH_VALUE_INTERACTIVE_ROLES | _COMMON_INTERACTIVE_ROLES
     )
     return {
         "lines": len(str(snapshot).splitlines()),
@@ -2303,10 +3053,10 @@ def _interactive_role_snapshot_is_too_sparse(
     root_selector: str | None,
     ref_count: int,
 ) -> bool:
-    if ref_count > 1:
-        return False
     if _normalize_optional_text(root_selector) is not None:
         return True
+    if ref_count > 1:
+        return False
     return snapshot_mode == "focused"
 
 
@@ -2473,6 +3223,72 @@ def _snapshot_item_semantic_key(item: Mapping[str, Any]) -> tuple[str, str] | No
     if not role or not name:
         return None
     return role, name
+
+
+def _snapshot_item_selector(item: Mapping[str, Any]) -> str | None:
+    selector = item.get("selector")
+    if not isinstance(selector, str):
+        return None
+    normalized = selector.strip()
+    return normalized or None
+
+
+def _snapshot_item_scope_selector(item: Mapping[str, Any]) -> str | None:
+    selector = item.get("scope_selector")
+    if not isinstance(selector, str):
+        return None
+    normalized = selector.strip()
+    return normalized or None
+
+
+def _selector_contains(parent_selector: str, child_selector: str) -> bool:
+    if parent_selector == child_selector:
+        return True
+    return (
+        child_selector.startswith(f"{parent_selector} > ")
+        or child_selector.startswith(f"{parent_selector}>")
+        or child_selector.startswith(f"{parent_selector} ")
+    )
+
+
+def _dedupe_nested_snapshot_candidates(
+    candidates: list[tuple[tuple[int, ...], dict[str, Any]]],
+) -> list[tuple[tuple[int, ...], dict[str, Any]]]:
+    resolved: list[tuple[tuple[int, ...], dict[str, Any]]] = []
+    for frame_path, item in candidates:
+        semantic_key = _snapshot_item_semantic_key(item)
+        selector = _snapshot_item_selector(item)
+        scope_selector = _snapshot_item_scope_selector(item)
+        if semantic_key is None or selector is None:
+            resolved.append((frame_path, item))
+            continue
+
+        replace_index: int | None = None
+        skip_item = False
+        for index, (existing_frame_path, existing_item) in enumerate(resolved):
+            if existing_frame_path != frame_path:
+                continue
+            if _snapshot_item_semantic_key(existing_item) != semantic_key:
+                continue
+            if _snapshot_item_scope_selector(existing_item) != scope_selector:
+                continue
+            existing_selector = _snapshot_item_selector(existing_item)
+            if existing_selector is None:
+                continue
+            if _selector_contains(existing_selector, selector):
+                skip_item = True
+                break
+            if _selector_contains(selector, existing_selector):
+                replace_index = index
+                break
+
+        if skip_item:
+            continue
+        if replace_index is not None:
+            resolved[replace_index] = (frame_path, item)
+        else:
+            resolved.append((frame_path, item))
+    return resolved
 
 
 def _main_frame(page):  # noqa: ANN001
@@ -2843,12 +3659,217 @@ def _bulk_allow_zero_selection(payload: Mapping[str, Any]) -> bool:
     return bool(allow_zero)
 
 
+def _host_lease_user_data_dir(
+    *,
+    plan: BrowserExecutionPlan,
+    runtime_state: BrowserProfileRuntimeState,
+) -> str | None:
+    runtime_user_data_dir = runtime_state.metadata.get("user_data_dir")
+    if isinstance(runtime_user_data_dir, str) and runtime_user_data_dir.strip():
+        return runtime_user_data_dir.strip()
+    return plan.profile.user_data_dir
+
+
+def _dom_inspection_result(
+    *,
+    kind: str,
+    locator,
+    selector: str | None,
+    payload: Mapping[str, Any],
+    command_timeout_ms: float | None = None,
+) -> dict[str, Any]:
+    include_styles = _payload_bool_any(payload, "include_styles", "includeStyles")
+    if include_styles is None:
+        include_styles = True
+    raw_result = locator.evaluate(
+        _DOM_INSPECT_EXPRESSION,
+        {
+            "include_styles": include_styles,
+            "style_properties": _payload_text_list(
+                payload,
+                "style_properties",
+                "styleProperties",
+                "properties",
+            ),
+            "attributes": _payload_text_list(payload, "attributes"),
+        },
+    )
+    if not isinstance(raw_result, Mapping):
+        raise BrowserValidationError("Browser DOM inspection returned an invalid result.")
+    result = _json_safe_payload(dict(raw_result))
+    if not isinstance(result, dict):
+        result = {}
+    common = {
+        "kind": kind,
+        "selector": selector,
+        "tag": result.get("tag"),
+        "role": result.get("role"),
+        "label": result.get("label"),
+        "text": result.get("text"),
+        "visible": bool(result.get("visible")),
+        "in_viewport": bool(result.get("in_viewport")),
+        "disabled": bool(result.get("disabled")),
+        "read_only": bool(result.get("read_only")),
+        "editable": bool(result.get("editable")),
+        "clickable": bool(result.get("clickable")),
+        "reasons": list(result.get("reasons") or ()),
+    }
+    if kind == "dom-box-model":
+        return {
+            **common,
+            "box": result.get("box"),
+            "viewport": result.get("viewport"),
+            "click_point": result.get("click_point"),
+        }
+    if kind == "dom-computed-style":
+        return {
+            **common,
+            "computed_style": result.get("computed_style") or {},
+        }
+    if kind == "dom-clickability":
+        return {
+            **common,
+            "box": result.get("box"),
+            "click_point": result.get("click_point"),
+            "blocked_by": result.get("blocked_by"),
+        }
+    if kind == "dom-highlight":
+        highlight_result = locator.evaluate(
+            _DOM_HIGHLIGHT_EXPRESSION,
+            {
+                "duration_ms": _payload_int_any(
+                    payload,
+                    "duration_ms",
+                    "durationMs",
+                    minimum=100,
+                )
+                or 1200,
+                "color": _payload_text_any(payload, "color"),
+                "label": _payload_text_any(payload, "label"),
+            },
+        )
+        if not isinstance(highlight_result, Mapping):
+            raise BrowserValidationError("Browser DOM highlight returned an invalid result.")
+        highlight_payload = _json_safe_payload(dict(highlight_result))
+        if not isinstance(highlight_payload, dict):
+            highlight_payload = {}
+        highlight_label = highlight_payload.get("label")
+        return {
+            **common,
+            **highlight_payload,
+            "label": common.get("label") or highlight_label,
+            "highlight_label": highlight_label,
+        }
+    if kind == "dom-mutation-wait":
+        timeout_ms = (
+            _payload_int_any(payload, "timeout_ms", "timeoutMs", minimum=1)
+            or (int(command_timeout_ms) if command_timeout_ms is not None else None)
+            or 5000
+        )
+        mutation_result = locator.evaluate(
+            _DOM_MUTATION_WAIT_EXPRESSION,
+            {
+                "timeout_ms": timeout_ms,
+                "quiet_ms": _payload_int_any(payload, "quiet_ms", "quietMs", minimum=0)
+                or 100,
+                "subtree": _payload_bool_any(payload, "subtree"),
+                "child_list": _payload_bool_any(payload, "child_list", "childList"),
+                "attributes": _payload_bool_any(payload, "attributes"),
+                "character_data": _payload_bool_any(
+                    payload,
+                    "character_data",
+                    "characterData",
+                ),
+                "attribute_filter": _payload_text_list(
+                    payload,
+                    "attribute_filter",
+                    "attributeFilter",
+                ),
+            },
+        )
+        if not isinstance(mutation_result, Mapping):
+            raise BrowserValidationError("Browser DOM mutation wait returned an invalid result.")
+        mutation_payload = _json_safe_payload(dict(mutation_result))
+        if not isinstance(mutation_payload, dict):
+            mutation_payload = {}
+        return {
+            **common,
+            **mutation_payload,
+        }
+    return {
+        **common,
+        "value": result.get("value"),
+        "attributes": result.get("attributes") or {},
+        "box": result.get("box"),
+        "viewport": result.get("viewport"),
+        "click_point": result.get("click_point"),
+        "blocked_by": result.get("blocked_by"),
+        "computed_style": result.get("computed_style") or {},
+    }
+
+
+def _payload_text_list(payload: Mapping[str, Any], *keys: str) -> list[str]:
+    raw_value = _payload_value_any(payload, *keys)
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        return [
+            item.strip()
+            for item in raw_value.split(",")
+            if item.strip()
+        ]
+    if isinstance(raw_value, (list, tuple)):
+        return [
+            str(item).strip()
+            for item in raw_value
+            if str(item).strip()
+        ]
+    raise BrowserValidationError("DOM inspection properties/attributes must be a string or list.")
+
+
 @dataclass(slots=True)
 class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
     session_pool: PlaywrightCdpSessionPool
     ref_store: BrowserRefStore
     daemon_service: DaemonApplicationService = field(repr=False)
+    cdp_session_broker: BrowserCdpSessionBroker = field(
+        default_factory=BrowserCdpSessionBroker,
+        repr=False,
+    )
+    network_capture_service: BrowserNetworkCaptureService = field(
+        default_factory=lambda: BrowserNetworkCaptureService(
+            capture_store=InMemoryBrowserNetworkCaptureStore(),
+        ),
+        repr=False,
+    )
+    network_capture_controller: CdpNetworkCaptureController | None = field(
+        default=None,
+        repr=False,
+    )
+    network_page_fetch_service: BrowserPageNetworkFetchService = field(
+        default_factory=BrowserPageNetworkFetchService,
+        repr=False,
+    )
+    storage_inspection_service: BrowserStorageInspectionService = field(
+        default_factory=BrowserStorageInspectionService,
+        repr=False,
+    )
+    environment_control_service: BrowserEnvironmentControlService = field(
+        default_factory=BrowserEnvironmentControlService,
+        repr=False,
+    )
+    diagnostics_service: BrowserDiagnosticsService = field(
+        default_factory=BrowserDiagnosticsService,
+        repr=False,
+    )
     family: BrowserActionFamily = "cdp-backed-playwright"
+
+    def __post_init__(self) -> None:
+        if self.network_capture_controller is None:
+            self.network_capture_controller = CdpNetworkCaptureController(
+                capture_service=self.network_capture_service,
+                cdp_session_broker=self.cdp_session_broker,
+            )
 
     def supports(
         self,
@@ -2870,7 +3891,10 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
         with host_daemon_lease(
             daemon_service=self.daemon_service,
             plan=plan,
-            user_data_dir=plan.profile.user_data_dir,
+            user_data_dir=_host_lease_user_data_dir(
+                plan=plan,
+                runtime_state=runtime_state,
+            ),
         ):
             cdp_url = self._runtime_cdp_url(plan=plan, runtime_state=runtime_state)
             max_attempts = (
@@ -2939,7 +3963,462 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
         *,
         profile_name: str,
     ) -> None:
+        if self.network_capture_controller is not None:
+            self.network_capture_controller.clear_profile(profile_name=profile_name)
         self.session_pool.clear_profile(profile_name=profile_name)
+
+    def _network_capture_action(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+        tab: BrowserTab,
+        page,
+        command: BrowserPageActionCommand,
+    ) -> dict[str, Any]:
+        profile_name = plan.profile.name
+        target_id = tab.target_id
+        if command.kind == "network-start-capture":
+            capture = self.network_capture_service.start_capture(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=_payload_text_any(
+                    command.payload,
+                    "capture_id",
+                    "captureId",
+                ),
+                max_requests=(
+                    _payload_int_any(command.payload, "max_requests", "maxRequests", minimum=1)
+                    or 200
+                ),
+                max_body_bytes=(
+                    _payload_int_any(command.payload, "max_body_bytes", "maxBodyBytes", minimum=0)
+                    or 262_144
+                ),
+                metadata={
+                    "source": "browser.network.start_capture",
+                    "target_url": tab.url,
+                },
+            )
+            errors: list[dict[str, str]] = []
+            if self.network_capture_controller is not None:
+                errors.extend(
+                    self.network_capture_controller.start_capture(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture.capture_id,
+                        page=page,
+                    )
+                )
+            return {
+                "kind": command.kind,
+                "capture": _serialize_network_capture(capture),
+                "requests": [],
+                "request_count": 0,
+                "errors": errors,
+            }
+
+        if command.kind == "network-fetch-as-page":
+            result = self.network_page_fetch_service.fetch_as_page(
+                page=page,
+                page_url=tab.url,
+                payload={
+                    **dict(command.payload),
+                    "profile_name": profile_name,
+                    "target_id": target_id,
+                },
+            )
+            return {
+                **result,
+                "profile_name": profile_name,
+                "target_id": target_id,
+                "errors": [],
+            }
+
+        capture_id = self._network_capture_id(
+            profile_name=profile_name,
+            target_id=target_id,
+            payload=command.payload,
+        )
+
+        if command.kind == "network-stop-capture":
+            if self.network_capture_controller is not None:
+                self.network_capture_controller.stop_capture(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                )
+            capture = self.network_capture_service.stop_capture(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+            )
+            return {
+                "kind": command.kind,
+                "capture": _serialize_network_capture(capture),
+                "requests": [],
+                "request_count": capture.request_count,
+                "errors": [],
+            }
+
+        if command.kind == "network-clear-capture":
+            if self.network_capture_controller is not None:
+                self.network_capture_controller.stop_capture(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                )
+            self.network_capture_service.clear(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+            )
+            return {
+                "kind": command.kind,
+                "capture_id": capture_id,
+                "profile": profile_name,
+                "target_id": target_id,
+                "cleared": True,
+                "errors": [],
+            }
+
+        if command.kind == "network-list-requests":
+            capture = self._network_capture(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+            )
+            errors: list[dict[str, str]] = []
+            subscribed = (
+                self.network_capture_controller is not None
+                and self.network_capture_controller.is_subscribed(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                )
+            )
+            if capture.status == "active" and not subscribed:
+                errors.extend(
+                    self._harvest_performance_network_entries(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                        page=page,
+                        payload=command.payload,
+                    )
+                )
+            filters = _network_request_filter_from_payload(command.payload)
+            requests = self.network_capture_service.list_requests(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+                filters=filters,
+            )
+            return {
+                "kind": command.kind,
+                "capture": _serialize_network_capture(
+                    self._network_capture(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                    )
+                ),
+                "requests": [
+                    _serialize_network_request(request)
+                    for request in requests
+                ],
+                "request_count": len(requests),
+                "total_count": len(requests),
+                "filters": _serialize_network_filters(filters),
+                "errors": errors,
+            }
+
+        if command.kind == "network-get-request":
+            request_id = _payload_text_any(
+                command.payload,
+                "request_id",
+                "requestId",
+            )
+            if request_id is None:
+                raise BrowserValidationError(
+                    "payload.request_id is required for network-get-request.",
+                )
+            request = self.network_capture_service.get_request(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+                request_id=request_id,
+            )
+            return {
+                "kind": command.kind,
+                "capture": _serialize_network_capture(
+                    self._network_capture(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                    )
+                ),
+                "request": _serialize_network_request(request),
+                **_serialize_network_request(request),
+                "errors": [],
+            }
+
+        if command.kind == "network-get-response-body":
+            request_id = _payload_text_any(
+                command.payload,
+                "request_id",
+                "requestId",
+            )
+            if request_id is None:
+                raise BrowserValidationError(
+                    "payload.request_id is required for network-get-response-body.",
+                )
+            request = self.network_capture_service.get_request(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+                request_id=request_id,
+            )
+            errors: list[dict[str, str]] = []
+            try:
+                body = self.network_capture_service.get_response_body(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                    request_id=request_id,
+                )
+            except BrowserValidationError:
+                if self.network_capture_controller is None:
+                    raise
+                errors.extend(
+                    self.network_capture_controller.fetch_response_body(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                        request_id=request_id,
+                        page=page,
+                    )
+                )
+                body = self.network_capture_service.get_response_body(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                    request_id=request_id,
+                )
+            return {
+                "kind": command.kind,
+                "capture": _serialize_network_capture(
+                    self._network_capture(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                    )
+                ),
+                "request": _serialize_network_request(request),
+                **_serialize_network_body(body),
+                "errors": errors,
+            }
+
+        if command.kind == "network-get-request-body":
+            request_id = _payload_text_any(
+                command.payload,
+                "request_id",
+                "requestId",
+            )
+            if request_id is None:
+                raise BrowserValidationError(
+                    "payload.request_id is required for network-get-request-body.",
+                )
+            request = self.network_capture_service.get_request(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+                request_id=request_id,
+            )
+            body = self.network_capture_service.get_request_body(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+                request_id=request_id,
+            )
+            return {
+                "kind": command.kind,
+                "capture": _serialize_network_capture(
+                    self._network_capture(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                    )
+                ),
+                "request": _serialize_network_request(request),
+                **_serialize_network_body(body),
+                "errors": [],
+            }
+
+        if command.kind == "network-replay-request":
+            request_id = _payload_text_any(
+                command.payload,
+                "request_id",
+                "requestId",
+            )
+            if request_id is None:
+                raise BrowserValidationError(
+                    "payload.request_id is required for network-replay-request.",
+                )
+            request = self.network_capture_service.get_request(
+                profile_name=profile_name,
+                target_id=target_id,
+                capture_id=capture_id,
+                request_id=request_id,
+            )
+            request_body = None
+            if request.request_body_ref is not None:
+                request_body = self.network_capture_service.get_request_body(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                    request_id=request_id,
+                )
+            result = self.network_page_fetch_service.replay_request(
+                page=page,
+                page_url=tab.url,
+                payload={
+                    **dict(command.payload),
+                    "profile_name": profile_name,
+                    "target_id": target_id,
+                },
+                request=request,
+                request_body=request_body,
+            )
+            return {
+                **result,
+                "capture": _serialize_network_capture(
+                    self._network_capture(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                    )
+                ),
+                "source_request": _serialize_network_request(request),
+                "profile_name": profile_name,
+                "target_id": target_id,
+                "errors": [],
+            }
+
+        raise BrowserValidationError(f"Unsupported browser network kind '{command.kind}'.")
+
+    def _network_capture_id(
+        self,
+        *,
+        profile_name: str,
+        target_id: str,
+        payload: Mapping[str, Any],
+    ) -> str:
+        capture_id = _payload_text_any(payload, "capture_id", "captureId")
+        if capture_id is not None:
+            return capture_id
+        captures = self.network_capture_service.list_captures(
+            profile_name=profile_name,
+            target_id=target_id,
+        )
+        active = [capture for capture in captures if capture.status == "active"]
+        candidates = active or list(captures)
+        if not candidates:
+            raise BrowserValidationError(
+                "payload.capture_id is required because no browser network capture is active.",
+            )
+        return candidates[-1].capture_id
+
+    def _network_capture(
+        self,
+        *,
+        profile_name: str,
+        target_id: str,
+        capture_id: str,
+    ) -> BrowserNetworkCapture:
+        for capture in self.network_capture_service.list_captures(
+            profile_name=profile_name,
+            target_id=target_id,
+        ):
+            if capture.capture_id == capture_id:
+                return capture
+        raise BrowserValidationError(
+            f"Browser network capture '{capture_id}' was not found.",
+        )
+
+    def _harvest_performance_network_entries(
+        self,
+        *,
+        profile_name: str,
+        target_id: str,
+        capture_id: str,
+        page,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, str]]:
+        limit = _payload_int_any(payload, "limit", minimum=1) or 50
+        errors: list[dict[str, str]] = []
+        try:
+            raw_entries = page.evaluate(
+                _NETWORK_PERFORMANCE_EXPRESSION,
+                {
+                    "limit": limit,
+                    "include_navigation": True,
+                    "include_resources": True,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - live browser variance
+            return [{"source": "performance_entries", "message": str(exc)}]
+        entries = raw_entries.get("entries") if isinstance(raw_entries, dict) else None
+        if not isinstance(entries, list):
+            return errors
+        for index, raw_entry in enumerate(entries):
+            if not isinstance(raw_entry, Mapping):
+                continue
+            url = _payload_text_any(raw_entry, "name")
+            if url is None:
+                continue
+            request_id = _performance_request_id(raw_entry, index=index)
+            try:
+                request = self.network_capture_service.record_request(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                    request_id=request_id,
+                    url=url,
+                    method="GET",
+                    resource_type=_performance_resource_type(raw_entry),
+                    timing=dict(raw_entry),
+                    initiator={
+                        "type": _payload_text_any(raw_entry, "initiator_type")
+                        or _payload_text_any(raw_entry, "entry_type")
+                        or "performance",
+                    },
+                )
+                status = _performance_status(raw_entry)
+                if status is not None:
+                    self.network_capture_service.record_response(
+                        profile_name=profile_name,
+                        target_id=target_id,
+                        capture_id=capture_id,
+                        request_id=request.request_id,
+                        status=status,
+                        timing=dict(raw_entry),
+                    )
+                encoded_length = _performance_encoded_length(raw_entry)
+                self.network_capture_service.record_loading_finished(
+                    profile_name=profile_name,
+                    target_id=target_id,
+                    capture_id=capture_id,
+                    request_id=request.request_id,
+                    encoded_data_length=encoded_length,
+                )
+            except BrowserValidationError as exc:
+                errors.append(
+                    {
+                        "source": "performance_entry",
+                        "message": str(exc),
+                    }
+                )
+        return errors
 
     def _execute_on_page(
         self,
@@ -2966,6 +4445,11 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                         selector=source_selector,
                     ),
                 )
+        coordinate_target = (
+            _click_coordinates(command.payload)
+            if command.kind == "click"
+            else None
+        )
         context, locator, resolved_selector, resolved_frame_path = self._locator(
             plan=plan,
             tab=tab,
@@ -2973,8 +4457,9 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
             runtime_state=runtime_state,
             command=effective_command,
             required=(
-                command.kind in _LOCATOR_ACTION_KINDS
+                (command.kind in _LOCATOR_ACTION_KINDS or command.kind in _DOM_INSPECTION_KINDS)
                 and not bool(fill_fields)
+                and coordinate_target is None
             ),
         )
 
@@ -2987,6 +4472,95 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                     runtime_state=runtime_state,
                     command=command,
                     batch_depth=batch_depth,
+                ),
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind in _NETWORK_CAPTURE_KINDS:
+            return (
+                self._network_capture_action(
+                    plan=plan,
+                    tab=tab,
+                    page=page,
+                    command=command,
+                ),
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind in _DOM_INSPECTION_KINDS:
+            if locator is None:
+                raise BrowserValidationError(
+                    f"Browser action '{command.kind}' requires ref or selector targeting.",
+                )
+            return (
+                _dom_inspection_result(
+                    kind=command.kind,
+                    locator=locator,
+                    selector=resolved_selector,
+                    payload=command.payload,
+                    command_timeout_ms=timeout,
+                ),
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind in _DEEP_STORAGE_KINDS:
+            return (
+                self.storage_inspection_service.execute(
+                    page=page,
+                    kind=command.kind,
+                    payload=command.payload,
+                ),
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind in _ENVIRONMENT_CONTROL_KINDS:
+            return (
+                self.environment_control_service.execute(
+                    page=page,
+                    kind=command.kind,
+                    payload=command.payload,
+                    profile_name=plan.profile.name,
+                    target_id=tab.target_id,
+                    page_url=tab.url,
+                ),
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind in _DIAGNOSTIC_KINDS:
+            console_messages = self.session_pool.get_console_messages(
+                page=page,
+                level=None,
+                limit=_payload_int_any(command.payload, "console_limit", minimum=1) or 100,
+                clear=False,
+            )
+            page_errors: list[dict[str, Any]] = []
+            get_page_errors = getattr(self.session_pool, "get_page_errors", None)
+            if callable(get_page_errors):
+                page_errors = get_page_errors(
+                    page=page,
+                    limit=_payload_int_any(
+                        command.payload,
+                        "error_limit",
+                        "page_error_limit",
+                        minimum=1,
+                    ) or 100,
+                    clear=False,
+                )
+            return (
+                self.diagnostics_service.execute(
+                    page=page,
+                    kind=command.kind,
+                    payload=command.payload,
+                    console_messages=console_messages,
+                    page_errors=page_errors,
+                    profile_name=plan.profile.name,
+                    target_id=tab.target_id,
+                    page_url=tab.url,
                 ),
                 resolved_selector,
                 resolved_frame_path,
@@ -3042,7 +4616,9 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                 if isinstance(raw_cookies, list):
                     for item in raw_cookies:
                         if isinstance(item, dict):
-                            cookies.append({str(key): item[key] for key in item})
+                            cookies.append(
+                                self.storage_inspection_service.redact_cookie(item),
+                            )
                 return (
                     {
                         "kind": "cookies",
@@ -3119,7 +4695,9 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                     "kind": "cookies",
                     "operation": "set",
                     "count": 1,
-                    "cookies": [cookie_payload],
+                    "cookies": [
+                        self.storage_inspection_service.redact_cookie(cookie_payload),
+                    ],
                 },
                 resolved_selector,
                 resolved_frame_path,
@@ -3187,6 +4765,138 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                 resolved_frame_path,
             )
 
+        if command.kind == "network-inspect":
+            limit = _payload_int_any(command.payload, "limit", minimum=1) or 50
+            include_navigation = _payload_bool_any(
+                command.payload,
+                "include_navigation",
+                "includeNavigation",
+            )
+            include_resources = _payload_bool_any(
+                command.payload,
+                "include_resources",
+                "includeResources",
+            )
+            include_cdp_tree = _payload_bool_any(
+                command.payload,
+                "include_cdp_tree",
+                "includeCdpTree",
+            )
+            include_performance_metrics = _payload_bool_any(
+                command.payload,
+                "include_performance_metrics",
+                "includePerformanceMetrics",
+            )
+            if include_navigation is None:
+                include_navigation = True
+            if include_resources is None:
+                include_resources = True
+            if include_cdp_tree is None:
+                include_cdp_tree = True
+            if include_performance_metrics is None:
+                include_performance_metrics = True
+            errors: list[dict[str, str]] = []
+            performance_entries: dict[str, Any] = {}
+            try:
+                raw_performance_entries = page.evaluate(
+                    _NETWORK_PERFORMANCE_EXPRESSION,
+                    {
+                        "limit": limit,
+                        "include_navigation": include_navigation,
+                        "include_resources": include_resources,
+                    },
+                )
+                if isinstance(raw_performance_entries, dict):
+                    performance_entries = dict(raw_performance_entries)
+            except Exception as exc:  # pragma: no cover - exercised by live browser variance
+                errors.append(
+                    {
+                        "source": "performance_entries",
+                        "message": str(exc),
+                    }
+                )
+
+            cdp_payload: dict[str, Any] = {}
+            if include_cdp_tree or include_performance_metrics:
+                session = None
+                try:
+                    session = _new_page_cdp_session(page)
+                    if include_performance_metrics:
+                        try:
+                            _send_cdp_session_command(session, "Performance.enable", {})
+                            cdp_payload["metrics"] = _json_safe_payload(
+                                _send_cdp_session_command(
+                                    session,
+                                    "Performance.getMetrics",
+                                    {},
+                                )
+                            )
+                        except Exception as exc:  # pragma: no cover - CDP support varies by target
+                            errors.append(
+                                {
+                                    "source": "Performance.getMetrics",
+                                    "message": str(exc),
+                                }
+                            )
+                    if include_cdp_tree:
+                        try:
+                            cdp_payload["resource_tree"] = _json_safe_payload(
+                                _send_cdp_session_command(session, "Page.getResourceTree", {})
+                            )
+                        except Exception as exc:  # pragma: no cover - CDP support varies by target
+                            errors.append(
+                                {
+                                    "source": "Page.getResourceTree",
+                                    "message": str(exc),
+                                }
+                            )
+                except Exception as exc:  # pragma: no cover - CDP support varies by target
+                    errors.append(
+                        {
+                            "source": "cdp_session",
+                            "message": str(exc),
+                        }
+                    )
+                finally:
+                    if session is not None:
+                        _detach_cdp_session(session)
+            return (
+                {
+                    "kind": "network-inspect",
+                    "url": _payload_text_any(performance_entries, "url") or getattr(page, "url", None),
+                    "limit": limit,
+                    "performance": _json_safe_payload(performance_entries),
+                    "cdp": cdp_payload,
+                    "errors": errors,
+                },
+                resolved_selector,
+                resolved_frame_path,
+            )
+
+        if command.kind == "cdp-raw":
+            method = _payload_text_any(command.payload, "method")
+            if method is None:
+                raise BrowserValidationError("payload.method is required for cdp-raw.")
+            params = command.payload.get("params")
+            if params is None:
+                params = {}
+            if not isinstance(params, Mapping):
+                raise BrowserValidationError("payload.params must be an object.")
+            session = _new_page_cdp_session(page)
+            try:
+                raw_result = _send_cdp_session_command(session, method, params)
+            finally:
+                _detach_cdp_session(session)
+            return (
+                {
+                    "kind": "cdp-raw",
+                    "method": method,
+                    "result": _json_safe_payload(raw_result),
+                },
+                resolved_selector,
+                resolved_frame_path,
+            )
+
         if command.kind == "dialog":
             wait_for_event = getattr(page, "wait_for_event", None)
             if not callable(wait_for_event):
@@ -3225,6 +4935,15 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
 
         if command.kind == "click":
             button = command.payload.get("button")
+            if locator is None and coordinate_target is not None:
+                click_result = self._coordinate_click(
+                    page=page,
+                    x=coordinate_target[0],
+                    y=coordinate_target[1],
+                    button=button,
+                    double_click=bool(command.payload.get("double_click", False)),
+                )
+                return click_result, resolved_selector, resolved_frame_path
             click_mode = self._click(
                 locator=locator,
                 timeout=timeout,
@@ -3987,6 +5706,36 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
 
         method(**kwargs, **_timeout_kwargs(timeout), force=True)
         return "force"
+
+    def _coordinate_click(
+        self,
+        *,
+        page,
+        x: float,
+        y: float,
+        button: Any,
+        double_click: bool,
+    ) -> dict[str, Any]:
+        mouse = getattr(page, "mouse", None)
+        click = getattr(mouse, "click", None)
+        if not callable(click):
+            raise BrowserValidationError(
+                "Playwright page does not support coordinate mouse clicks.",
+            )
+        kwargs: dict[str, Any] = {}
+        if isinstance(button, str) and button.strip():
+            kwargs["button"] = button.strip()
+        if double_click:
+            kwargs["click_count"] = 2
+        click(x, y, **kwargs)
+        return {
+            "kind": "click",
+            "mode": "coordinate",
+            "x": x,
+            "y": y,
+            "button": kwargs.get("button"),
+            "double_click": double_click,
+        }
 
     def _locator(
         self,
@@ -5266,13 +7015,12 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
     ) -> str:
         if not refs:
             return "(no interactive elements)"
-        default_scope = _normalize_optional_text(root_selector)
         grouped_refs: dict[str, list[BrowserStoredRef]] = {}
         scope_order: list[str] = []
         ungrouped_refs: list[BrowserStoredRef] = []
         for item in refs:
             scope_selector = _normalize_optional_text(item.scope_selector)
-            if scope_selector is None or scope_selector == default_scope:
+            if scope_selector is None:
                 ungrouped_refs.append(item)
                 continue
             if scope_selector not in grouped_refs:
@@ -5369,7 +7117,15 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
             frame_selector=frame_selector,
             root_selector=root_selector,
         ):
-            raw_items = frame.evaluate(_INTERACTIVE_SNAPSHOT_EXPRESSION, root_selector)
+            try:
+                raw_items = frame.evaluate(
+                    _INTERACTIVE_SNAPSHOT_EXPRESSION,
+                    root_selector,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if frame_path and _is_transient_page_context_error(exc):
+                    continue
+                raise
             if not isinstance(raw_items, list):
                 raise BrowserValidationError(
                     "Interactive snapshot did not return a list of elements.",
@@ -5405,6 +7161,7 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
                 break
 
         semantic_counts: dict[tuple[str, str], int] = {}
+        snapshot_candidates = _dedupe_nested_snapshot_candidates(snapshot_candidates)
         for _frame_path, item in snapshot_candidates:
             semantic_key = _snapshot_item_semantic_key(item)
             if semantic_key is None:
@@ -5480,1077 +7237,3 @@ class CdpBackedPlaywrightActionEngine(BrowserActionEngine):
             ),
             "stats": _role_snapshot_stats(snapshot=combined_snapshot, refs=refs_tuple),
         }, len(refs_tuple), len(grouped_frames), generation
-
-
-@dataclass(slots=True)
-class McpBackedActionEngine(BrowserActionEngine):
-    mcp_pool: ChromeMcpClientPool
-    ref_store: BrowserRefStore
-    family: BrowserActionFamily = "mcp-backed"
-    wait_poll_interval_s: float = 0.1
-    monotonic: Any = time.monotonic
-    sleep: Any = time.sleep
-
-    def supports(
-        self,
-        *,
-        command: BrowserPageActionCommand,
-    ) -> bool:
-        return command.kind in _MCP_SUPPORTED_KINDS
-
-    def execute(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        tab: BrowserTab | None,
-        command: BrowserPageActionCommand,
-    ) -> BrowserActionResult:
-        if tab is None:
-            raise BrowserValidationError("mcp-backed actions require a tab.")
-
-        result_value, resolved_uid = self._execute_on_tab(
-            plan=plan,
-            tab=tab,
-            runtime_state=runtime_state,
-            command=command,
-        )
-        if command.kind == "snapshot" and isinstance(result_value, dict):
-            runtime_state.remember_page_snapshot(
-                target_id=tab.target_id,
-                generation=int(result_value.get("generation") or 1),
-                snapshot_format=str(result_value.get("format") or "snapshot"),
-                ref_count=int(result_value.get("ref_count") or 0),
-                frame_count=int(result_value.get("frame_count") or 0),
-            )
-        else:
-            runtime_state.remember_page_action(
-                target_id=tab.target_id,
-                action_kind=command.kind,
-            )
-        return BrowserActionResult(
-            command=command,
-            ok=True,
-            target_id=tab.target_id,
-            value={
-                "engine": self.family,
-                "control_family": plan.control_family,
-                "profile": plan.profile.name,
-                "tab": _serialize_tab(tab),
-                "ref": command.target.ref,
-                "selector": command.target.selector,
-                "uid": resolved_uid,
-                "payload": dict(command.payload),
-                "result": result_value,
-            },
-            message=f"Executed {command.kind} via mcp-backed.",
-        )
-
-    def clear_profile(
-        self,
-        *,
-        profile_name: str,
-    ) -> None:
-        del profile_name
-
-    def _execute_on_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        runtime_state: BrowserProfileRuntimeState,
-        command: BrowserPageActionCommand,
-    ) -> tuple[Any, str | None]:
-        timeout_ms = command.timeout_ms
-        uid = self._resolve_uid(
-            plan=plan,
-            tab=tab,
-            runtime_state=runtime_state,
-            command=command,
-        )
-
-        if command.kind == "batch":
-            return self._batch(
-                plan=plan,
-                tab=tab,
-                runtime_state=runtime_state,
-                command=command,
-                batch_depth=0,
-            ), uid
-
-        if command.kind == "click":
-            self.mcp_pool.click_element(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                uid=uid or self._require_ref(command),
-                user_data_dir=plan.profile.user_data_dir,
-                double_click=bool(command.payload.get("double_click", False)),
-            )
-            return {"kind": "click"}, uid
-
-        if command.kind == "dialog":
-            accept = command.payload.get("accept")
-            if accept is None:
-                accept = True
-            prompt_text = _payload_text_any(command.payload, "prompt_text", "promptText")
-            action = "accept" if bool(accept) else "dismiss"
-            self.mcp_pool.handle_dialog(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                action=action,
-                prompt_text=prompt_text if action == "accept" else None,
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            result = _serialize_dialog(None)
-            result["handled_as"] = action
-            if prompt_text is not None and action == "accept":
-                result["prompt_text"] = prompt_text
-            return result, uid
-
-        if command.kind == "console":
-            level = _payload_text_any(command.payload, "level")
-            clear = bool(command.payload.get("clear", False))
-            limit = _payload_int_any(command.payload, "limit", minimum=1)
-            raw_messages = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn=_MCP_CONSOLE_EXPRESSION,
-                user_data_dir=plan.profile.user_data_dir,
-                args=[
-                    json.dumps(
-                        {
-                            "level": level,
-                            "clear": clear,
-                            "limit": limit,
-                        }
-                    )
-                ],
-            )
-            messages: list[dict[str, Any]] = []
-            if isinstance(raw_messages, list):
-                for item in raw_messages:
-                    if not isinstance(item, Mapping):
-                        continue
-                    location = item.get("location")
-                    normalized_location = None
-                    if isinstance(location, Mapping):
-                        normalized_location = {
-                            "url": (
-                                str(location.get("url")).strip()
-                                if location.get("url") is not None
-                                else None
-                            ),
-                            "line_number": int(location.get("line_number"))
-                            if isinstance(location.get("line_number"), (int, float))
-                            else None,
-                            "column_number": int(location.get("column_number"))
-                            if isinstance(location.get("column_number"), (int, float))
-                            else None,
-                        }
-                    messages.append(
-                        {
-                            "level": _payload_text_any(item, "level") or "log",
-                            "text": _payload_text_any(item, "text") or "",
-                            "location": normalized_location,
-                            "captured_at_ms": int(item.get("captured_at_ms"))
-                            if isinstance(item.get("captured_at_ms"), (int, float))
-                            else None,
-                        }
-                    )
-            return {
-                "kind": "console",
-                "messages": messages,
-                "count": len(messages),
-                "level": level,
-                "limit": limit,
-                "cleared": clear,
-            }, uid
-
-        if command.kind in {"type", "fill"}:
-            if command.kind == "fill":
-                fields = _normalize_form_fields(command.payload.get("fields"))
-                if fields:
-                    filled: list[dict[str, Any]] = []
-                    for field in fields:
-                        resolved_uid = self._resolve_secondary_uid(
-                            plan=plan,
-                            tab=tab,
-                            runtime_state=runtime_state,
-                            raw_ref=str(field["ref"]),
-                        )
-                        value_repr = (
-                            field["value"]
-                            if isinstance(field["value"], str)
-                            else str(field["value"]).lower()
-                            if isinstance(field["value"], bool)
-                            else str(field["value"])
-                        )
-                        self.mcp_pool.fill_element(
-                            profile_name=plan.profile.name,
-                            system=plan.system,
-                            target_id=tab.target_id,
-                            uid=resolved_uid,
-                            value=value_repr,
-                            user_data_dir=plan.profile.user_data_dir,
-                        )
-                        filled.append(
-                            {
-                                "ref": field["ref"],
-                                "uid": resolved_uid,
-                                "type": field["type"],
-                                "value": value_repr,
-                            }
-                        )
-                    return {"kind": "fill", "fields": filled}, uid
-
-            text = _payload_text(command.payload, key="text")
-            self.mcp_pool.fill_element(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                uid=uid or self._require_ref(command),
-                value=text,
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {"kind": command.kind, "text": text}, uid
-
-        if command.kind == "upload":
-            upload_paths = _normalize_text_payload(command.payload.get("paths"))
-            if not upload_paths:
-                raise BrowserValidationError("payload.paths is required for upload.")
-            if len(upload_paths) != 1:
-                raise BrowserValidationError(
-                    "mcp-backed upload currently supports exactly one file path.",
-                )
-            self.mcp_pool.upload_file(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                uid=uid or self._require_ref(command),
-                file_path=upload_paths[0],
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {"kind": "upload", "paths": upload_paths}, uid
-
-        if command.kind == "press":
-            key = _payload_text(command.payload, key="key")
-            self.mcp_pool.press_key(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                key=key,
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {"kind": "press", "key": key}, uid
-
-        if command.kind == "hover":
-            self.mcp_pool.hover_element(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                uid=uid or self._require_ref(command),
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {"kind": "hover"}, uid
-
-        if command.kind == "drag":
-            source_ref = _drag_source_ref(command)
-            if source_ref is None:
-                raise BrowserValidationError(
-                    "mcp-backed drag requires start_ref/end_ref style ref targeting.",
-                )
-            target_uid = self._resolve_secondary_uid(
-                plan=plan,
-                tab=tab,
-                runtime_state=runtime_state,
-                raw_ref=_drag_target_ref(command.payload) or _payload_text(command.payload, key="target_ref", required=False)
-                or _payload_text(command.payload, key="to_ref", required=True),
-            )
-            self.mcp_pool.drag_element(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                from_uid=self._resolve_secondary_uid(
-                    plan=plan,
-                    tab=tab,
-                    runtime_state=runtime_state,
-                    raw_ref=source_ref,
-                ),
-                to_uid=target_uid,
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {
-                "kind": "drag",
-                "start_ref": source_ref,
-                "target_uid": target_uid,
-            }, uid
-
-        if command.kind == "resize":
-            width = int(_payload_number_any(command.payload, "width") or 0)
-            height = int(_payload_number_any(command.payload, "height") or 0)
-            if width < 1 or height < 1:
-                raise BrowserValidationError("payload.width and payload.height are required.")
-            self.mcp_pool.resize_page(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                width=width,
-                height=height,
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {
-                "kind": "resize",
-                "width": width,
-                "height": height,
-            }, uid
-
-        if command.kind == "scroll-into-view":
-            resolved_uid = uid or self._require_ref(command)
-            result = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn=_MCP_SCROLL_INTO_VIEW_EXPRESSION,
-                user_data_dir=plan.profile.user_data_dir,
-                args=[resolved_uid],
-            )
-            if not bool(result):
-                raise BrowserValidationError(
-                    f"mcp-backed action 'scroll-into-view' could not resolve uid '{resolved_uid}'.",
-                )
-            return {"kind": "scroll-into-view"}, uid
-
-        if command.kind == "select":
-            values = command.payload.get("values")
-            if isinstance(values, (list, tuple)):
-                normalized_values = [str(item).strip() for item in values if str(item).strip()]
-                if len(normalized_values) != 1:
-                    raise BrowserValidationError(
-                        "mcp-backed select currently supports exactly one value.",
-                    )
-                value = normalized_values[0]
-            else:
-                value = _payload_text(command.payload, key="value")
-            self.mcp_pool.fill_element(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                uid=uid or self._require_ref(command),
-                value=value,
-                user_data_dir=plan.profile.user_data_dir,
-            )
-            return {"kind": "select", "selected": [value]}, uid
-
-        if command.kind == "storage":
-            storage_kind = (_payload_text_any(
-                command.payload,
-                "storage_kind",
-                "storageKind",
-                "storage",
-            ) or "local").strip().lower()
-            if storage_kind not in {"local", "session"}:
-                raise BrowserValidationError(
-                    "payload.storage_kind must be either local or session.",
-                )
-            storage_operation = (_payload_text_any(
-                command.payload,
-                "storage_operation",
-                "storageOperation",
-                "operation",
-            ) or "get").strip().lower()
-            if storage_operation not in {"get", "set", "clear"}:
-                raise BrowserValidationError(
-                    "payload.storage_operation must be one of get, set, or clear.",
-                )
-            storage_key = _payload_text_any(
-                command.payload,
-                "storage_key",
-                "storageKey",
-                "key",
-            )
-            raw_storage_value = _payload_value_any(
-                command.payload,
-                "storage_value",
-                "storageValue",
-                "value",
-            )
-            if storage_operation == "set" and storage_key is None:
-                raise BrowserValidationError("payload.storage_key is required for storage set.")
-            values = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn=_MCP_STORAGE_EXPRESSION,
-                user_data_dir=plan.profile.user_data_dir,
-                args=[
-                    json.dumps(
-                        {
-                            "kind": storage_kind,
-                            "operation": storage_operation,
-                            "key": storage_key,
-                            "value": (None if raw_storage_value is None else str(raw_storage_value)),
-                        }
-                    )
-                ],
-            )
-            if not isinstance(values, dict):
-                values = {}
-            return {
-                "kind": "storage",
-                "storage_kind": storage_kind,
-                "operation": storage_operation,
-                "key": storage_key,
-                "values": {
-                    str(key): str(value)
-                    for key, value in values.items()
-                    if value is not None
-                },
-            }, uid
-
-        if command.kind == "cookies":
-            cookies_operation = (_payload_text_any(
-                command.payload,
-                "cookies_operation",
-                "cookiesOperation",
-                "operation",
-            ) or "get").strip().lower()
-            if cookies_operation not in {"get", "set", "clear"}:
-                raise BrowserValidationError(
-                    "payload.cookies_operation must be one of get, set, or clear.",
-                )
-            raw_cookie = _payload_value_any(command.payload, "cookie")
-            cookie_payload: dict[str, Any] | None = None
-            if cookies_operation == "set":
-                if not isinstance(raw_cookie, Mapping):
-                    raise BrowserValidationError("payload.cookie is required for cookies set.")
-                cookie_name = _payload_text_any(raw_cookie, "name")
-                cookie_value = _payload_text_any(raw_cookie, "value")
-                if cookie_name is None or cookie_value is None:
-                    raise BrowserValidationError("payload.cookie.name and payload.cookie.value are required.")
-                http_only = _payload_bool_any(raw_cookie, "httpOnly", "http_only")
-                if http_only:
-                    raise BrowserValidationError(
-                        "mcp-backed cookies set does not support httpOnly cookies.",
-                    )
-                cookie_payload = {
-                    "name": cookie_name,
-                    "value": cookie_value,
-                }
-                for source_key, target_key in (
-                    ("domain", "domain"),
-                    ("path", "path"),
-                    ("sameSite", "sameSite"),
-                    ("same_site", "sameSite"),
-                ):
-                    resolved = _payload_text_any(raw_cookie, source_key)
-                    if resolved is not None:
-                        cookie_payload[target_key] = resolved
-                expires = _payload_number_any(raw_cookie, "expires")
-                if expires is not None:
-                    cookie_payload["expires"] = expires
-                secure = _payload_bool_any(raw_cookie, "secure")
-                if secure is not None:
-                    cookie_payload["secure"] = secure
-            raw_cookies = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn=_MCP_COOKIES_EXPRESSION,
-                user_data_dir=plan.profile.user_data_dir,
-                args=[
-                    json.dumps(
-                        {
-                            "operation": cookies_operation,
-                            "cookie": cookie_payload,
-                        }
-                    )
-                ],
-            )
-            cookies: list[dict[str, Any]] = []
-            if isinstance(raw_cookies, list):
-                for item in raw_cookies:
-                    if isinstance(item, Mapping):
-                        cookies.append({str(key): item[key] for key in item})
-            return {
-                "kind": "cookies",
-                "operation": cookies_operation,
-                "count": len(cookies),
-                "cookies": cookies,
-            }, uid
-
-        if command.kind == "wait":
-            return self._wait(plan=plan, tab=tab, command=command, timeout_ms=timeout_ms), uid
-
-        if command.kind == "snapshot":
-            return self._snapshot(
-                plan=plan,
-                tab=tab,
-                runtime_state=runtime_state,
-                command=command,
-            ), uid
-
-        if command.kind == "screenshot":
-            image_type = _payload_text(command.payload, key="type", required=False) or "png"
-            screenshot = self.mcp_pool.take_screenshot(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                user_data_dir=plan.profile.user_data_dir,
-                uid=uid,
-                full_page=bool(command.payload.get("full_page", False)),
-                image_format=image_type,
-            )
-            return {
-                "kind": "screenshot",
-                "content_type": f"image/{image_type}",
-                "encoding": "base64",
-                "data": base64.b64encode(screenshot).decode("ascii"),
-            }, uid
-
-        if command.kind == "evaluate":
-            expression = _payload_text_any(command.payload, "expression", "fn")
-            if expression is None:
-                raise BrowserValidationError("payload.expression or payload.fn is required.")
-            args = command.payload.get("args")
-            normalized_args = [str(item) for item in args] if isinstance(args, list) else None
-            if "arg" in command.payload:
-                normalized_args = [json.dumps(command.payload.get("arg"))]
-            if command.target.ref is not None:
-                resolved_uid = uid or self._require_ref(command)
-                normalized_args = [resolved_uid, *(normalized_args or [])]
-            result = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn=expression,
-                user_data_dir=plan.profile.user_data_dir,
-                args=normalized_args,
-            )
-            return {
-                "kind": "evaluate",
-                "expression": expression,
-                "value": result,
-            }, uid
-
-        raise BrowserValidationError(
-            f"Action engine '{self.family}' does not support '{command.kind}'.",
-        )
-
-    def _batch(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        runtime_state: BrowserProfileRuntimeState,
-        command: BrowserPageActionCommand,
-        batch_depth: int,
-    ) -> dict[str, Any]:
-        if batch_depth > _MAX_BATCH_DEPTH:
-            raise BrowserValidationError(
-                f"Batch nesting depth exceeds maximum of {_MAX_BATCH_DEPTH}.",
-            )
-        raw_actions = command.payload.get("actions")
-        if not isinstance(raw_actions, (list, tuple)) or not raw_actions:
-            raise BrowserValidationError("batch requires actions.")
-        if _count_batch_actions(raw_actions) > _MAX_BATCH_ACTIONS:
-            raise BrowserValidationError(f"Batch exceeds maximum of {_MAX_BATCH_ACTIONS} actions.")
-
-        actions: list[BrowserPageActionCommand] = []
-        for raw_action in raw_actions:
-            if not isinstance(raw_action, Mapping):
-                raise BrowserValidationError("batch actions must be objects.")
-            actions.append(
-                _normalize_batch_action(
-                    raw_action=raw_action,
-                    profile_name=plan.profile.name,
-                    inherited_target_id=tab.target_id,
-                    inherited_timeout_ms=command.timeout_ms,
-                    depth=batch_depth + 1,
-                )
-            )
-        if not actions:
-            raise BrowserValidationError("batch requires actions.")
-        stop_on_error = command.payload.get("stop_on_error")
-        if not isinstance(stop_on_error, bool):
-            stop_on_error = True
-
-        results: list[dict[str, Any]] = []
-        for action in actions:
-            try:
-                result_value, _resolved_uid = self._execute_on_tab(
-                    plan=plan,
-                    tab=tab,
-                    runtime_state=runtime_state,
-                    command=action,
-                )
-                if action.kind == "snapshot" and isinstance(result_value, dict):
-                    runtime_state.remember_page_snapshot(
-                        target_id=tab.target_id,
-                        generation=int(result_value.get("generation") or 1),
-                        snapshot_format=str(result_value.get("format") or "snapshot"),
-                        ref_count=int(result_value.get("ref_count") or 0),
-                        frame_count=int(result_value.get("frame_count") or 0),
-                    )
-                else:
-                    runtime_state.remember_page_action(
-                        target_id=tab.target_id,
-                        action_kind=action.kind,
-                    )
-                results.append(
-                    {
-                        "ok": True,
-                        "kind": action.kind,
-                        "result": result_value,
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                results.append(
-                    {
-                        "ok": False,
-                        "kind": action.kind,
-                        "error": str(exc),
-                    }
-                )
-                if stop_on_error:
-                    break
-        return {
-            "kind": "batch",
-            "stop_on_error": stop_on_error,
-            "results": results,
-        }
-
-    def _resolve_uid(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        runtime_state: BrowserProfileRuntimeState,
-        command: BrowserPageActionCommand,
-    ) -> str | None:
-        if command.target.ref is None:
-            if command.target.selector is not None and command.kind in _MCP_TARGETED_KINDS:
-                raise BrowserValidationError(
-                    f"mcp-backed action '{command.kind}' requires ref targeting; selectors are not supported.",
-                )
-            return None
-        for item in self.ref_store.get_tab_refs(
-            profile_name=plan.profile.name,
-            target_id=tab.target_id,
-        ):
-            if item.ref == command.target.ref:
-                page_state = runtime_state.page_state(target_id=tab.target_id) or {}
-                current_generation = int(page_state.get("current_ref_generation") or 0)
-                if current_generation and item.generation != current_generation:
-                    raise BrowserValidationError(
-                        f"Browser ref '{command.target.ref}' is stale for tab '{tab.target_id}'.",
-                    )
-                return item.uid or item.ref
-        return command.target.ref
-
-    @staticmethod
-    def _require_ref(command: BrowserPageActionCommand) -> str:
-        if command.target.ref is None:
-            raise BrowserValidationError(
-                f"mcp-backed action '{command.kind}' requires ref targeting.",
-            )
-        return command.target.ref
-
-    def _resolve_secondary_uid(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        runtime_state: BrowserProfileRuntimeState,
-        raw_ref: str,
-    ) -> str:
-        for item in self.ref_store.get_tab_refs(
-            profile_name=plan.profile.name,
-            target_id=tab.target_id,
-        ):
-            if item.ref == raw_ref:
-                page_state = runtime_state.page_state(target_id=tab.target_id) or {}
-                current_generation = int(page_state.get("current_ref_generation") or 0)
-                if current_generation and item.generation != current_generation:
-                    raise BrowserValidationError(
-                        f"Browser ref '{raw_ref}' is stale for tab '{tab.target_id}'.",
-                    )
-                return item.uid or item.ref
-        return raw_ref
-
-    def _wait(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        command: BrowserPageActionCommand,
-        timeout_ms: int | None,
-    ) -> dict[str, Any]:
-        selector = command.target.selector
-        if selector is not None:
-            state = _payload_text_any(command.payload, "state") or "visible"
-            self._poll_until(
-                timeout_ms=timeout_ms,
-                predicate=lambda: self.mcp_pool.evaluate_script(
-                    profile_name=plan.profile.name,
-                    system=plan.system,
-                    target_id=tab.target_id,
-                    fn=self._selector_wait_expression(selector=selector, state=state),
-                    user_data_dir=plan.profile.user_data_dir,
-                ),
-                satisfied=lambda value: bool(value),
-                label=f"selector '{selector}' in state '{state}'",
-            )
-            return {"kind": "wait", "selector": selector, "state": state}
-
-        text_values = _normalize_text_payload(_payload_value_any(command.payload, "text"))
-        if text_values:
-            self.mcp_pool.wait_for_text(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                text=text_values,
-                user_data_dir=plan.profile.user_data_dir,
-                timeout_ms=timeout_ms,
-            )
-            return {"kind": "wait", "text": text_values}
-
-        text_gone_values = _normalize_text_payload(
-            _payload_value_any(command.payload, "text_gone", "textGone"),
-        )
-        if text_gone_values:
-            target_text = text_gone_values[0]
-            self._poll_until(
-                timeout_ms=timeout_ms,
-                predicate=lambda: self.mcp_pool.evaluate_script(
-                    profile_name=plan.profile.name,
-                    system=plan.system,
-                    target_id=tab.target_id,
-                    fn="() => document.body.innerText || ''",
-                    user_data_dir=plan.profile.user_data_dir,
-                ),
-                satisfied=lambda value: isinstance(value, str) and target_text not in value,
-                label=f"text '{target_text}' to disappear",
-            )
-            return {"kind": "wait", "text_gone": text_gone_values}
-
-        url_pattern = _payload_text_any(command.payload, "url")
-        if url_pattern is not None:
-            self._poll_until(
-                timeout_ms=timeout_ms,
-                predicate=lambda: self._current_url(
-                    plan=plan,
-                    tab=tab,
-                ),
-                satisfied=lambda value: isinstance(value, str)
-                and (
-                    fnmatch(value, url_pattern)
-                    if any(char in url_pattern for char in "*?[]")
-                    else value == url_pattern
-                ),
-                label=f"url '{url_pattern}'",
-            )
-            return {"kind": "wait", "url": url_pattern}
-
-        load_state = _payload_text_any(command.payload, "load_state", "loadState")
-        if load_state is not None:
-            normalized_state = load_state.strip().lower()
-            if normalized_state == "networkidle":
-                raise BrowserValidationError(
-                    "mcp-backed wait does not support load_state=networkidle yet.",
-                )
-            self._poll_until(
-                timeout_ms=timeout_ms,
-                predicate=lambda: self.mcp_pool.evaluate_script(
-                    profile_name=plan.profile.name,
-                    system=plan.system,
-                    target_id=tab.target_id,
-                    fn="() => document.readyState",
-                    user_data_dir=plan.profile.user_data_dir,
-                ),
-                satisfied=lambda value: self._ready_state_satisfied(
-                    ready_state=value,
-                    load_state=normalized_state,
-                ),
-                label=f"load_state '{normalized_state}'",
-            )
-            return {"kind": "wait", "load_state": normalized_state}
-
-        expression = _payload_text_any(command.payload, "expression", "fn")
-        if expression is not None:
-            self._poll_until(
-                timeout_ms=timeout_ms,
-                predicate=lambda: self.mcp_pool.evaluate_script(
-                    profile_name=plan.profile.name,
-                    system=plan.system,
-                    target_id=tab.target_id,
-                    fn=expression,
-                    user_data_dir=plan.profile.user_data_dir,
-                ),
-                satisfied=lambda value: bool(value),
-                label="expression",
-            )
-            return {"kind": "wait", "expression": expression}
-
-        delay_ms = _payload_number_any(command.payload, "delay_ms", "time_ms", "timeMs")
-        if delay_ms is not None:
-            self.sleep(float(delay_ms) / 1000.0)
-            return {"kind": "wait", "delay_ms": float(delay_ms)}
-
-        raise BrowserValidationError(
-            "wait requires selector, payload.text, payload.text_gone, payload.url, payload.load_state, payload.expression/payload.fn, or payload.delay_ms.",
-        )
-
-    @staticmethod
-    def _selector_wait_expression(*, selector: str, state: str) -> str:
-        selector_json = json.dumps(selector)
-        normalized_state = state.strip().lower()
-        if normalized_state == "attached":
-            return f"() => Boolean(document.querySelector({selector_json}))"
-        if normalized_state in {"hidden", "detached"}:
-            return (
-                "() => {"
-                f" const el = document.querySelector({selector_json});"
-                " if (!el) return true;"
-                " const style = window.getComputedStyle(el);"
-                " if (!style) return false;"
-                " const rect = el.getBoundingClientRect();"
-                " return el.hidden || el.getAttribute('aria-hidden') === 'true' || "
-                "style.display === 'none' || style.visibility === 'hidden' || "
-                "style.visibility === 'collapse' || Number(style.opacity || '1') === 0 || "
-                "(rect.width === 0 && rect.height === 0);"
-                " }"
-            )
-        return (
-            "() => {"
-            f" const el = document.querySelector({selector_json});"
-            " if (!el) return false;"
-            " const style = window.getComputedStyle(el);"
-            " if (!style) return true;"
-            " const rect = el.getBoundingClientRect();"
-            " return !el.hidden && el.getAttribute('aria-hidden') !== 'true' && "
-            "style.display !== 'none' && style.visibility !== 'hidden' && "
-            "style.visibility !== 'collapse' && Number(style.opacity || '1') !== 0 && "
-            "(rect.width > 0 || rect.height > 0);"
-            " }"
-        )
-
-    @staticmethod
-    def _ready_state_satisfied(*, ready_state: Any, load_state: str) -> bool:
-        normalized = str(ready_state or "").strip().lower()
-        if load_state == "domcontentloaded":
-            return normalized in {"interactive", "complete"}
-        if load_state == "load":
-            return normalized == "complete"
-        return False
-
-    def _snapshot(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        runtime_state: BrowserProfileRuntimeState,
-        command: BrowserPageActionCommand,
-    ) -> dict[str, Any]:
-        snapshot_format = (
-            _payload_text(command.payload, key="format", required=False) or "interactive"
-        ).lower()
-        if command.target.selector is not None or _snapshot_frame_selector(command.payload) is not None:
-            raise BrowserValidationError(
-                "mcp-backed snapshots do not support selector/frame scoped snapshots yet; snapshot the whole page and use refs.",
-            )
-        ref_count = 0
-        frame_count = 0
-        generation = 0
-        if snapshot_format == "html":
-            value = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn="() => document.documentElement?.outerHTML ?? ''",
-                user_data_dir=plan.profile.user_data_dir,
-            )
-        elif snapshot_format == "text":
-            value = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn="() => document.body?.innerText ?? ''",
-                user_data_dir=plan.profile.user_data_dir,
-            )
-        elif snapshot_format == "title":
-            value = self.mcp_pool.evaluate_script(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                target_id=tab.target_id,
-                fn="() => document.title",
-                user_data_dir=plan.profile.user_data_dir,
-            )
-        elif snapshot_format == "url":
-            value = self._current_url(plan=plan, tab=tab)
-        elif snapshot_format == "interactive":
-            value, ref_count, frame_count, generation = self._interactive_snapshot(
-                plan=plan,
-                tab=tab,
-                runtime_state=runtime_state,
-                snapshot_format=snapshot_format,
-                payload=command.payload,
-                limit=command.payload.get("limit"),
-            )
-        else:
-            raise BrowserValidationError(
-                f"Unsupported mcp-backed snapshot format '{snapshot_format}'.",
-            )
-        return {
-            "kind": "snapshot",
-            "format": snapshot_format,
-            "generation": generation,
-            "value": value,
-            "ref_count": ref_count,
-            "frame_count": frame_count,
-        }
-
-    def _interactive_snapshot(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-        runtime_state: BrowserProfileRuntimeState,
-        snapshot_format: str,
-        payload: Mapping[str, Any],
-        limit: Any,
-    ) -> tuple[list[dict[str, Any]], int, int, int]:
-        root = self.mcp_pool.take_snapshot(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            target_id=tab.target_id,
-            user_data_dir=plan.profile.user_data_dir,
-        )
-        max_items = _interactive_snapshot_limit(payload, snapshot_format, limit)
-        generation = runtime_state.next_ref_generation(target_id=tab.target_id)
-        refs = self._build_refs_from_snapshot(
-            root=root,
-            limit=max_items,
-            generation=generation,
-            snapshot_format=snapshot_format,
-        )
-        self.ref_store.save_tab_refs(
-            profile_name=plan.profile.name,
-            target_id=tab.target_id,
-            refs=refs,
-        )
-        return [
-            {
-                "ref": item.ref,
-                "selector": item.selector,
-                "scope_selector": item.scope_selector,
-                "uid": item.uid,
-                "nth": item.nth,
-                "generation": item.generation,
-                "frame_path": list(item.frame_path),
-                "label": item.label,
-                "role": item.role,
-                "text": item.text,
-                "tag": item.tag,
-                "format": snapshot_format,
-            }
-            for item in refs
-        ], len(refs), len({item.frame_path for item in refs}) if refs else 0, generation
-
-    def _build_refs_from_snapshot(
-        self,
-        *,
-        root: dict[str, Any],
-        limit: int | None,
-        generation: int,
-        snapshot_format: str,
-    ) -> tuple[BrowserStoredRef, ...]:
-        resolved: list[BrowserStoredRef] = []
-
-        def _visit(node: dict[str, Any]) -> None:
-            if limit is not None and len(resolved) >= limit:
-                return
-            normalized = _normalize_snapshot_node(node)
-            if normalized is None:
-                return
-            uid = normalized.get("id")
-            role_raw = normalized.get("role")
-            role = str(role_raw).strip().lower() if role_raw is not None else ""
-            name = (
-                str(normalized.get("name")).strip()
-                if normalized.get("name") is not None
-                else None
-            )
-            value = (
-                str(normalized.get("value")).strip()
-                if normalized.get("value") is not None
-                else None
-            )
-            description = (
-                str(normalized.get("description")).strip()
-                if normalized.get("description") is not None
-                else None
-            )
-            if isinstance(uid, str) and uid.strip() and role in _MCP_INTERACTIVE_ROLES:
-                resolved.append(
-                    BrowserStoredRef(
-                        ref=f"r{len(resolved) + 1}",
-                        uid=uid.strip(),
-                        scope_selector=None,
-                        generation=generation,
-                        snapshot_format=snapshot_format,
-                        label=name,
-                        role=role,
-                        text=value or description or name,
-                        tag=role,
-                    )
-                )
-                if limit is not None and len(resolved) >= limit:
-                    return
-
-            children = normalized.get("children")
-            if isinstance(children, list):
-                for child in children:
-                    if not isinstance(child, dict):
-                        continue
-                    _visit(child)
-                    if limit is not None and len(resolved) >= limit:
-                        return
-
-        _visit(root)
-        return tuple(resolved)
-
-    def _current_url(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        tab: BrowserTab,
-    ) -> Any:
-        return self.mcp_pool.evaluate_script(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            target_id=tab.target_id,
-            fn="() => window.location.href",
-            user_data_dir=plan.profile.user_data_dir,
-        )
-
-    def _poll_until(
-        self,
-        *,
-        timeout_ms: int | None,
-        predicate,
-        satisfied,
-        label: str,
-    ) -> Any:
-        deadline = None
-        if timeout_ms is not None:
-            deadline = self.monotonic() + (float(timeout_ms) / 1000.0)
-        while True:
-            value = predicate()
-            if satisfied(value):
-                return value
-            if deadline is not None and self.monotonic() >= deadline:
-                raise BrowserValidationError(f"Timed out while waiting for {label}.")
-            self.sleep(self.wait_poll_interval_s)

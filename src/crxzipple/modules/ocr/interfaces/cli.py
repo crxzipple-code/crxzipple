@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.ocr.domain import OcrExecutionError, OcrValidationError
@@ -17,7 +17,7 @@ def build_cli() -> typer.Typer:
     def health(ctx: typer.Context) -> None:
         container = ensure_container(ctx)
         try:
-            echo_data(container.ocr_service.health())
+            echo_data(container.require(AppKey.OCR_SERVICE).health())
         except (OcrValidationError, OcrExecutionError) as exc:
             raise typer.BadParameter(str(exc)) from exc
 
@@ -49,7 +49,7 @@ def build_cli() -> typer.Typer:
                 "variant must be one of: original, preview, llm.",
             ) from exc
         try:
-            result = container.ocr_service.analyze_artifact(
+            result = container.require(AppKey.OCR_SERVICE).analyze_artifact(
                 artifact_id=artifact_id,
                 variant=resolved_variant,
                 language=language,
@@ -57,7 +57,7 @@ def build_cli() -> typer.Typer:
             )
         except (OcrValidationError, OcrExecutionError) as exc:
             raise typer.BadParameter(str(exc)) from exc
-        echo_data(container.ocr_result_serializer.serialize(result))
+        echo_data(container.require(AppKey.OCR_RESULT_SERIALIZER).serialize(result))
 
     @host_app.command("run")
     def run_host(
@@ -68,7 +68,7 @@ def build_cli() -> typer.Typer:
         use_gpu: bool | None = typer.Option(None, "--use-gpu/--no-use-gpu", help="Enable GPU acceleration when supported."),
     ) -> None:
         container = ensure_container(ctx)
-        settings = container.settings
+        settings = container.require(AppKey.CORE_SETTINGS)
         app = create_ocr_host_app(
             default_language=language or settings.ocr_language,
             use_gpu=settings.ocr_use_gpu if use_gpu is None else use_gpu,

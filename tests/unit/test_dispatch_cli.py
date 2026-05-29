@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from tests.unit.cli_test_support import *
+from crxzipple.interfaces.runtime_container import AppKey
+from tests.unit.cli_test_support import (
+    CliModuleTestCase,
+    CreateDispatchTaskInput,
+    EnqueueDispatchTaskInput,
+    app,
+    json,
+    unittest,
+)
 
 
 class DispatchCliTestCase(CliModuleTestCase):
@@ -144,34 +152,36 @@ class DispatchCliTestCase(CliModuleTestCase):
             self.assertEqual(json.loads(complete_result.stdout)["status"], "completed")
 
     def test_dispatch_cli_recovers_abandoned_tasks_with_owner_filter(self) -> None:
-            container = self.harness.build_container()
-            first = container.dispatch_service.create_task(
+            container = self.harness.build_runtime_container()
+            dispatch_service = container.require(AppKey.DISPATCH_SERVICE)
+            uow_factory = container.require(AppKey.UNIT_OF_WORK_FACTORY)
+            first = dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="dispatch-cli-tool",
                     owner_kind="tool_run",
                     owner_id="tool-run-cli",
                 ),
             )
-            second = container.dispatch_service.create_task(
+            second = dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="dispatch-cli-orch",
                     owner_kind="orchestration_run",
                     owner_id="orch-run-cli",
                 ),
             )
-            container.dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=first.id))
-            container.dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=second.id))
-            container.dispatch_service.claim_next_queued_task(
+            dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=first.id))
+            dispatch_service.enqueue_task(EnqueueDispatchTaskInput(task_id=second.id))
+            dispatch_service.claim_next_queued_task(
                 owner_kind="tool_run",
                 worker_id="tool-worker",
                 lease_seconds=5,
             )
-            container.dispatch_service.claim_next_queued_task(
+            dispatch_service.claim_next_queued_task(
                 owner_kind="orchestration_run",
                 worker_id="orch-worker",
                 lease_seconds=5,
             )
-            with container.uow_factory() as uow:
+            with uow_factory() as uow:
                 tool_task = uow.dispatch_tasks.get(first.id)
                 orch_task = uow.dispatch_tasks.get(second.id)
                 assert tool_task is not None

@@ -3,7 +3,7 @@ from __future__ import annotations
 from inspect import signature
 from types import SimpleNamespace
 
-from crxzipple.bootstrap import build_container
+from crxzipple.interfaces.runtime_container import build_runtime_container
 from crxzipple.modules.orchestration.application.turn_submission import (
     build_submission_options,
     submit_turn,
@@ -79,16 +79,16 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(signal.id, "tool-terminal:tool-runtime-1")
         self.assertIs(signal, state["signal"])
 
-    def test_build_container_has_no_implicit_runtime_event_subscriber_switch(self) -> None:
-        parameters = signature(build_container).parameters
+    def test_runtime_container_has_no_implicit_runtime_event_subscriber_switch(self) -> None:
+        parameters = signature(build_runtime_container).parameters
 
         self.assertNotIn("enable_runtime_event_subscribers", parameters)
 
     def test_orchestration_runtime_services_split_scheduler_and_operations_observer(
         self,
     ) -> None:
-        scheduler_runtime = self.container.orchestration_scheduler_runtime_event_service
-        operations_runtime = self.container.operations_observer_runtime_event_service
+        scheduler_runtime = self.orchestration_scheduler_runtime_event_service
+        operations_runtime = self.operations_observer_runtime_event_service
 
         self.assertIsNotNone(scheduler_runtime)
         self.assertIsNotNone(operations_runtime)
@@ -129,12 +129,12 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
     ) -> None:
         custom_harness = SqliteTestHarness()
         try:
-            container = custom_harness.build_container()
-            runtime = container.orchestration_scheduler_runtime_event_service
+            container = custom_harness.build_runtime_container()
+            runtime = container.require(AppKey.ORCHESTRATION_SCHEDULER_RUNTIME_EVENT_SERVICE)
             self.assertIsNotNone(runtime)
 
             topic = named_event_topic("tool.run.succeeded")
-            container.events_service.publish(
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     name="tool.run.succeeded",
                     payload={
@@ -145,18 +145,18 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             )
 
             processed_count = (
-                container.orchestration_scheduler_service.process_runtime_events(
+                container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
                     limit_per_subscription=10,
                 )
             )
 
             self.assertGreaterEqual(processed_count, 1)
-            cursor = container.events_service.get_subscription_cursor(
+            cursor = container.require(AppKey.EVENTS_SERVICE).get_subscription_cursor(
                 "orchestration.runtime.tool-terminal.tool.run.succeeded",
                 source_topic=topic,
             )
             self.assertIsNotNone(cursor)
-            with container.uow_factory() as uow:
+            with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
                 signal = uow.orchestration_scheduler_signals.get(
                     "tool-terminal:tool-runtime-1",
                 )
@@ -171,9 +171,9 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
     ) -> None:
         custom_harness = SqliteTestHarness()
         try:
-            container = custom_harness.build_container()
+            container = custom_harness.build_runtime_container()
 
-            container.events_service.publish(
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     name="tool.run.succeeded",
                     payload={
@@ -184,13 +184,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             )
 
             processed_count = (
-                container.orchestration_scheduler_service.process_runtime_events(
+                container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
                     limit_per_subscription=10,
                 )
             )
 
             self.assertGreaterEqual(processed_count, 1)
-            with container.uow_factory() as uow:
+            with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
                 signal = uow.orchestration_scheduler_signals.get(
                     "tool-terminal:inline-tool-runtime-1",
                 )
@@ -227,7 +227,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(scheduler.queued_tool_run_ids, [])
 
     def test_accept_prepare_session_queue_and_claim_assignment(self) -> None:
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-1",
                 inbound_instruction=InboundInstruction(
@@ -247,7 +247,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(run.status, OrchestrationRunStatus.ACCEPTED)
         self.assertEqual(run.stage, OrchestrationRunStage.ACCEPTED)
 
-        prepared = self.container.orchestration_intake_service.prepare_session_run(
+        prepared = self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -261,7 +261,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 priority=10,
             ),
         )
-        enqueued = self.container.orchestration_intake_service.enqueue(
+        enqueued = self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         claimed_assignment = assign_next_orchestration_assignment(self.container,
@@ -284,21 +284,21 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             "agent:writer:main",
         )
         self.assertEqual(claimed_assignment.metadata["session_kind"], "main")
-        dispatch_task = self.container.dispatch_service.get_task(run.id)
+        dispatch_task = self.dispatch_service.get_task(run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.CLAIMED)
         self.assertEqual(dispatch_task.policy, DispatchPolicy.FIFO)
         self.assertEqual(dispatch_task.claimed_by, "worker-1")
         self.assertIsNotNone(dispatch_task.lease_expires_at)
 
     def test_scheduler_assign_next_assignment_prefers_lower_priority(self) -> None:
-        low_priority = self.container.orchestration_intake_service.accept(
+        low_priority = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-low",
                 inbound_instruction=InboundInstruction(source="cli", content="first"),
                 priority=50,
             ),
         )
-        high_priority = self.container.orchestration_intake_service.accept(
+        high_priority = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-high",
                 inbound_instruction=InboundInstruction(source="cli", content="second"),
@@ -306,24 +306,24 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=low_priority.id,
                 agent_id="writer",
                 lane_key="session:one",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=high_priority.id,
                 agent_id="writer",
                 lane_key="session:two",
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=low_priority.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=high_priority.id),
         )
 
@@ -336,7 +336,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(claimed.id, high_priority.id)
 
     def test_scheduler_assign_next_assignment_skips_blocked_lane(self) -> None:
-        active = self.container.orchestration_intake_service.accept(
+        active = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-active",
                 inbound_instruction=InboundInstruction(source="cli", content="active"),
@@ -344,7 +344,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=active.id,
                 agent_id="writer",
@@ -352,21 +352,21 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=active.id),
         )
         first = assign_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
 
-        blocked = self.container.orchestration_intake_service.accept(
+        blocked = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-blocked",
                 inbound_instruction=InboundInstruction(source="cli", content="blocked"),
                 priority=1,
             ),
         )
-        available = self.container.orchestration_intake_service.accept(
+        available = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-available",
                 inbound_instruction=InboundInstruction(source="cli", content="available"),
@@ -374,24 +374,24 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=blocked.id,
                 agent_id="writer",
                 lane_key="session:lane-a",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=available.id,
                 agent_id="writer",
                 lane_key="session:lane-b",
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=blocked.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=available.id),
         )
 
@@ -407,7 +407,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(second.id, available.id)
 
     def test_scheduler_assign_next_assignment_blocks_lane_while_waiting(self) -> None:
-        waiting = self.container.orchestration_intake_service.accept(
+        waiting = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-waiting",
                 inbound_instruction=InboundInstruction(source="cli", content="waiting"),
@@ -415,7 +415,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=waiting.id,
                 agent_id="writer",
@@ -423,7 +423,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=waiting.id),
         )
 
@@ -431,28 +431,28 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-1",
         )
         assert claimed is not None
-        self.container.orchestration_executor_service.wait_assignment_on_tool(
+        self.orchestration_executor_service.wait_assignment_on_tool(
             run_id=waiting.id,
             worker_id="worker-1",
             pending_tool_run_ids=("tool-run-1",),
             reason="tool_background_wait",
         )
 
-        queued = self.container.orchestration_intake_service.accept(
+        queued = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-same-lane",
                 inbound_instruction=InboundInstruction(source="cli", content="queued"),
                 priority=1,
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=queued.id,
                 agent_id="writer",
                 lane_key="session:lane-wait",
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=queued.id),
         )
 
@@ -464,10 +464,10 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
     def test_process_assignment_inline_prefers_requested_run(self) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
 
         first = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="first requested run",
             options=build_submission_options(
                 profile=profile,
@@ -488,7 +488,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             inline_worker_id=None,
         )
         second = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="second requested run",
             options=build_submission_options(
                 profile=profile,
@@ -509,11 +509,11 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             inline_worker_id=None,
         )
 
-        queued_first = self.container.orchestration_scheduler_service.process_run_request(
+        queued_first = self.orchestration_scheduler_service.process_run_request(
             run_id=first.id,
             worker_id="scheduler-inline-first",
         )
-        queued_second = self.container.orchestration_scheduler_service.process_run_request(
+        queued_second = self.orchestration_scheduler_service.process_run_request(
             run_id=second.id,
             worker_id="scheduler-inline-second",
         )
@@ -521,29 +521,29 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(queued_first)
         self.assertIsNotNone(queued_second)
 
-        completed_first = self.container.orchestration_executor_service.process_assignment_inline(
+        completed_first = self.orchestration_executor_service.process_assignment_inline(
             run_id=first.id,
             worker_id="worker-inline-first",
         )
 
         self.assertEqual(completed_first.id, first.id)
 
-        first_after = self.container.orchestration_run_query_service.get_run(first.id)
-        second_after = self.container.orchestration_run_query_service.get_run(second.id)
+        first_after = self.orchestration_run_query_service.get_run(first.id)
+        second_after = self.orchestration_run_query_service.get_run(second.id)
         self.assertNotEqual(first_after.status, OrchestrationRunStatus.QUEUED)
         self.assertEqual(second_after.status, OrchestrationRunStatus.QUEUED)
 
     def test_scheduler_assign_next_assignment_ignores_foreign_dispatch_owner_kind(self) -> None:
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-owner-filter",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 priority=50,
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -553,11 +553,11 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        foreign_task = self.container.dispatch_service.create_task(
+        foreign_task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="foreign-tool-task",
                 owner_kind="tool_run",
@@ -565,7 +565,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 priority=1,
             ),
         )
-        self.container.dispatch_service.enqueue_task(
+        self.dispatch_service.enqueue_task(
             EnqueueDispatchTaskInput(
                 task_id=foreign_task.id,
                 priority=1,
@@ -580,19 +580,19 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         assert claimed is not None
         self.assertEqual(claimed.id, run.id)
 
-        still_queued = self.container.dispatch_service.get_task(foreign_task.id)
+        still_queued = self.dispatch_service.get_task(foreign_task.id)
         self.assertEqual(still_queued.status, DispatchTaskStatus.QUEUED)
 
     def test_heartbeat_assignment_extends_dispatch_lease(self) -> None:
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-heartbeat",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -602,22 +602,22 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         claimed = assign_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert claimed is not None
-        first_task = self.container.dispatch_service.get_task(run.id)
+        first_task = self.dispatch_service.get_task(run.id)
         assert first_task.lease_expires_at is not None
 
         time.sleep(0.01)
-        heartbeated = self.container.orchestration_executor_service.heartbeat_assignment(
+        heartbeated = self.orchestration_executor_service.heartbeat_assignment(
             run_id=run.id,
             worker_id="worker-1",
         )
-        updated_task = self.container.dispatch_service.get_task(run.id)
+        updated_task = self.dispatch_service.get_task(run.id)
 
         self.assertEqual(heartbeated.status, OrchestrationRunStatus.RUNNING)
         assert updated_task.lease_expires_at is not None
@@ -626,13 +626,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
     def test_recovered_dispatch_task_fails_running_orchestration_run(self) -> None:
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-recover-fail",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -642,7 +642,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         claimed = assign_next_orchestration_assignment(self.container,
@@ -650,9 +650,9 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
         assert claimed is not None
 
-        dispatch_task = self.container.dispatch_service.get_task(run.id)
+        dispatch_task = self.dispatch_service.get_task(run.id)
         assert dispatch_task.lease_expires_at is not None
-        recovered = self.container.dispatch_service.recover_abandoned_tasks(
+        recovered = self.dispatch_service.recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
                 owner_kind="orchestration_run",
                 reason="Orchestration worker lease expired before completion.",
@@ -661,11 +661,11 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
 
         self.assertEqual([task.id for task in recovered], [run.id])
-        processed_events = self.container.orchestration_scheduler_service.process_runtime_events(
+        processed_events = self.orchestration_scheduler_service.process_runtime_events(
             limit_per_subscription=10,
         )
-        failed_run = self.container.orchestration_run_query_service.get_run(run.id)
-        failed_task = self.container.dispatch_service.get_task(run.id)
+        failed_run = self.orchestration_run_query_service.get_run(run.id)
+        failed_task = self.dispatch_service.get_task(run.id)
 
         self.assertGreaterEqual(processed_events, 1)
         self.assertEqual(failed_run.status, OrchestrationRunStatus.FAILED)
@@ -675,13 +675,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(failed_task.status, DispatchTaskStatus.FAILED)
 
     def test_run_lifecycle_can_advance_wait_resume_and_complete(self) -> None:
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-lifecycle",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -691,7 +691,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -700,19 +700,19 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
         assert claimed is not None
 
-        advanced = self.container.orchestration_executor_service.advance_assignment(
+        advanced = self.orchestration_executor_service.advance_assignment(
             run_id=run.id,
             worker_id="worker-1",
             stage=OrchestrationRunStage.LLM,
             step_increment=1,
         )
-        waiting = self.container.orchestration_executor_service.wait_assignment_on_tool(
+        waiting = self.orchestration_executor_service.wait_assignment_on_tool(
             run_id=run.id,
             worker_id="worker-1",
             pending_tool_run_ids=("tool-run-1", "tool-run-2"),
             reason="tool_background_wait",
         )
-        resumed = self.container.orchestration_scheduler_service.resume_run(
+        resumed = self.orchestration_scheduler_service.resume_run(
             ResumeOrchestrationRunInput(
                 run_id=run.id,
                 reason="tool_results_ready",
@@ -722,7 +722,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-1",
         )
         assert reclaimed is not None
-        completed = self.container.orchestration_executor_service.complete_assignment(
+        completed = self.orchestration_executor_service.complete_assignment(
             run_id=run.id,
             worker_id="worker-1",
             result_payload={"output": "done"},
@@ -742,26 +742,26 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(completed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(completed.result_payload, {"output": "done"})
-        dispatch_task = self.container.dispatch_service.get_task(run.id)
+        dispatch_task = self.dispatch_service.get_task(run.id)
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.COMPLETED)
 
     def test_complete_run_skips_lark_legacy_runtime_topic_publication(self) -> None:
         self._register_agent_and_llm()
-        self.container.channel_runtime_manager.register_runtime(
+        self.channel_runtime_manager.register_runtime(
             ChannelRuntimeRegistration(
                 runtime_id="lark-runtime-1",
                 channel_type="lark",
                 service_key="channel:lark",
             ),
         )
-        self.container.channel_runtime_manager.bind_account(
+        self.channel_runtime_manager.bind_account(
             ChannelAccountRuntimeBinding(
                 channel_type="lark",
                 channel_account_id="default",
                 runtime_id="lark-runtime-1",
             ),
         )
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -779,7 +779,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             max_steps=None,
         )
         run = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="hello from lark",
             options=options,
             inline_worker_id="scheduler-inline",
@@ -804,18 +804,18 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-lark-1",
         )
         self.assertIsNotNone(claimed)
-        legacy_cursor = self.container.events_service.snapshot_event_topic(
+        legacy_cursor = self.events_service.snapshot_event_topic(
             _legacy_runtime_outbound_topic("lark-runtime-1"),
         )
 
-        completed = self.container.orchestration_executor_service.complete_assignment(
+        completed = self.orchestration_executor_service.complete_assignment(
             run_id=run.id,
             worker_id="worker-lark-1",
             result_payload={"output_text": "done without legacy runtime topic"},
         )
 
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
-        legacy_records = self.container.events_service.read_event_topic(
+        legacy_records = self.events_service.read_event_topic(
             _legacy_runtime_outbound_topic("lark-runtime-1"),
             after_cursor=legacy_cursor,
             limit=10,
@@ -824,7 +824,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
     def test_submit_turn_sets_reply_target(self) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -843,7 +843,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
 
         run = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="reply target alias test",
             options=options,
             reply_interface="webhook",
@@ -871,10 +871,10 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
     def test_submit_turn_routes_through_ingress_before_queueing_run(self) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
 
         run = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="hello through ingress",
             options=build_submission_options(
                 profile=profile,
@@ -902,7 +902,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(run.stage, OrchestrationRunStage.QUEUED)
         self.assertEqual(run.session_key, "agent:assistant:webhook:dm:user-ingress-1")
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             request = uow.orchestration_ingress_requests.get_by_run_id(run.id)
 
         self.assertIsNotNone(request)
@@ -913,7 +913,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
     def test_scheduler_service_processes_pending_ingress_request(self) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -930,7 +930,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             priority=50,
             max_steps=None,
         )
-        run = self.container.orchestration_scheduler_service.submit_turn(
+        run = self.orchestration_scheduler_service.submit_turn(
             SubmitOrchestrationTurnInput(
                 accept_input=build_accept_run_input(
                     source=options.source,
@@ -960,14 +960,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(run.status, OrchestrationRunStatus.ACCEPTED)
         self.assertIsNone(run.session_key)
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             pending = uow.orchestration_ingress_requests.get_by_run_id(run.id)
 
         self.assertIsNotNone(pending)
         assert pending is not None
         self.assertEqual(pending.status.value, "queued")
 
-        processed = self.container.orchestration_scheduler_service.process_run_request(
+        processed = self.orchestration_scheduler_service.process_run_request(
             run_id=run.id,
             worker_id="scheduler-1",
         )
@@ -977,7 +977,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.status, OrchestrationRunStatus.QUEUED)
         self.assertEqual(processed.session_key, "agent:assistant:main")
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             completed = uow.orchestration_ingress_requests.get_by_run_id(run.id)
 
         self.assertIsNotNone(completed)
@@ -988,7 +988,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self,
     ) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -1005,7 +1005,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             priority=40,
             max_steps=None,
         )
-        run = self.container.orchestration_scheduler_service.ingress_coordinator.submit_turn(
+        run = self.orchestration_scheduler_service.ingress_coordinator.submit_turn(
             SubmitOrchestrationTurnInput(
                 accept_input=build_accept_run_input(
                     source=options.source,
@@ -1032,7 +1032,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             claimed_worker_id="inline-ingress-reserved",
         )
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             request = uow.orchestration_ingress_requests.get_by_run_id(run.id)
 
         self.assertIsNotNone(request)
@@ -1041,14 +1041,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(request.worker_id, "inline-ingress-reserved")
         self.assertIsNotNone(request.claimed_at)
         self.assertIsNone(
-            self.container.orchestration_scheduler_service.process_next_request(
+            self.orchestration_scheduler_service.process_next_request(
                 worker_id="scheduler-daemon-1",
             ),
         )
 
     def test_claim_for_run_returns_none_once_request_is_already_processing(self) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -1065,7 +1065,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             priority=30,
             max_steps=None,
         )
-        run = self.container.orchestration_scheduler_service.ingress_coordinator.submit_turn(
+        run = self.orchestration_scheduler_service.ingress_coordinator.submit_turn(
             SubmitOrchestrationTurnInput(
                 accept_input=build_accept_run_input(
                     source=options.source,
@@ -1093,7 +1093,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
 
         claimed_again = (
-            self.container.orchestration_scheduler_service.ingress_coordinator.claim_request_for_run(
+            self.orchestration_scheduler_service.ingress_coordinator.claim_request_for_run(
                 run_id=run.id,
                 worker_id="scheduler-daemon-claimed",
             )
@@ -1102,13 +1102,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertIsNone(claimed_again)
 
     def test_scheduler_service_processes_pending_bound_ingress_request(self) -> None:
-        target = self.container.session_service.ensure_session(
+        target = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
             ),
         )
-        run = self.container.orchestration_scheduler_service.submit_bound_turn(
+        run = self.orchestration_scheduler_service.submit_bound_turn(
             SubmitBoundOrchestrationTurnInput(
                 accept_input=build_accept_run_input(
                     source="sessions_send",
@@ -1138,7 +1138,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             pending = uow.orchestration_ingress_requests.get_by_run_id(run.id)
 
         self.assertIsNotNone(pending)
@@ -1152,7 +1152,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             target.active_session_id,
         )
 
-        queued = self.container.orchestration_scheduler_service.process_run_request(
+        queued = self.orchestration_scheduler_service.process_run_request(
             run_id=run.id,
             worker_id="scheduler-bound-ingress-1",
         )
@@ -1164,7 +1164,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(queued.active_session_id, target.active_session_id)
         self.assertEqual(queued.lane_key, f"session:{target.id}")
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             completed = uow.orchestration_ingress_requests.get_by_run_id(run.id)
 
         self.assertIsNotNone(completed)
@@ -1175,7 +1175,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self,
     ) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -1192,7 +1192,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             priority=50,
             max_steps=None,
         )
-        run = self.container.orchestration_scheduler_service.submit_turn(
+        run = self.orchestration_scheduler_service.submit_turn(
             SubmitOrchestrationTurnInput(
                 accept_input=build_accept_run_input(
                     source=options.source,
@@ -1226,7 +1226,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             )
         )
 
-        queued = self.container.orchestration_scheduler_service.process_run_request(
+        queued = self.orchestration_scheduler_service.process_run_request(
             run_id=run.id,
             worker_id="scheduler-no-ingress-claim",
         )
@@ -1241,7 +1241,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
     def test_scheduler_service_backfills_channel_interaction_binding_by_run_id(self) -> None:
         self._register_agent_and_llm()
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -1259,7 +1259,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             max_steps=None,
         )
         run = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content={"blocks": [{"type": "text", "text": "hello ingress callback"}]},
             options=options,
             inline_worker_id=None,
@@ -1280,7 +1280,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             },
         )
 
-        interaction = self.container.channel_interaction_service.upsert_interaction(
+        interaction = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id=f"webhook:default:run:{run.id}",
                 channel_type="webhook",
@@ -1296,7 +1296,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertIsNone(interaction.session_key)
         self.assertEqual(interaction.status, "accepted")
 
-        processed = self.container.orchestration_scheduler_service.process_run_request(
+        processed = self.orchestration_scheduler_service.process_run_request(
             run_id=run.id,
             worker_id="scheduler-bind-run-id-1",
         )
@@ -1308,7 +1308,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             isinstance(processed.session_key, str) and processed.session_key.strip(),
         )
 
-        rebound = self.container.channel_interaction_service.get_interaction_by_run_id(
+        rebound = self.channel_interaction_service.get_interaction_by_run_id(
             run.id,
         )
         self.assertIsNotNone(rebound)
@@ -1325,21 +1325,21 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
     def test_complete_run_skips_web_legacy_runtime_topic_publication(self) -> None:
         self._register_agent_and_llm()
-        self.container.channel_runtime_manager.register_runtime(
+        self.channel_runtime_manager.register_runtime(
             ChannelRuntimeRegistration(
                 runtime_id="web-runtime-1",
                 channel_type="web",
                 service_key="channel:web",
             ),
         )
-        self.container.channel_runtime_manager.bind_account(
+        self.channel_runtime_manager.bind_account(
             ChannelAccountRuntimeBinding(
                 channel_type="web",
                 channel_account_id="default",
                 runtime_id="web-runtime-1",
             ),
         )
-        profile = self.container.agent_service.get_profile("assistant")
+        profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
             profile=profile,
             llm_id=None,
@@ -1357,7 +1357,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             max_steps=None,
         )
         run = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="hello from web",
             options=options,
             inline_worker_id="scheduler-inline",
@@ -1377,18 +1377,18 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-web-1",
         )
         self.assertIsNotNone(claimed)
-        legacy_cursor = self.container.events_service.snapshot_event_topic(
+        legacy_cursor = self.events_service.snapshot_event_topic(
             _legacy_runtime_outbound_topic("web-runtime-1"),
         )
 
-        completed = self.container.orchestration_executor_service.complete_assignment(
+        completed = self.orchestration_executor_service.complete_assignment(
             run_id=run.id,
             worker_id="worker-web-1",
             result_payload={"output_text": "done without web legacy runtime topic"},
         )
 
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
-        legacy_records = self.container.events_service.read_event_topic(
+        legacy_records = self.events_service.read_event_topic(
             _legacy_runtime_outbound_topic("web-runtime-1"),
             after_cursor=legacy_cursor,
             limit=10,
@@ -1396,14 +1396,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(legacy_records, ())
 
     def test_resume_first_queue_policy_claims_before_fifo_with_same_priority(self) -> None:
-        waiting = self.container.orchestration_intake_service.accept(
+        waiting = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-resume-first",
                 inbound_instruction=InboundInstruction(source="cli", content="resume me"),
                 priority=10,
             ),
         )
-        fifo = self.container.orchestration_intake_service.accept(
+        fifo = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-fifo",
                 inbound_instruction=InboundInstruction(source="cli", content="fifo"),
@@ -1411,14 +1411,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=waiting.id,
                 agent_id="writer",
                 lane_key="session:resume",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=fifo.id,
                 agent_id="writer",
@@ -1426,23 +1426,23 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=waiting.id),
         )
         claimed = assign_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert claimed is not None
-        self.container.orchestration_executor_service.wait_assignment_on_tool(
+        self.orchestration_executor_service.wait_assignment_on_tool(
             run_id=waiting.id,
             worker_id="worker-1",
             pending_tool_run_ids=("tool-run-1",),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=fifo.id),
         )
-        resumed = self.container.orchestration_scheduler_service.resume_run(
+        resumed = self.orchestration_scheduler_service.resume_run(
             ResumeOrchestrationRunInput(
                 run_id=waiting.id,
                 queue_policy=OrchestrationQueuePolicy.RESUME_FIRST,
@@ -1462,14 +1462,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(next_claimed.id, waiting.id)
 
     def test_jump_queue_claims_before_fifo_with_same_priority(self) -> None:
-        fifo = self.container.orchestration_intake_service.accept(
+        fifo = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-fifo",
                 inbound_instruction=InboundInstruction(source="cli", content="fifo"),
                 priority=10,
             ),
         )
-        jump_queue = self.container.orchestration_intake_service.accept(
+        jump_queue = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-jump-queue",
                 inbound_instruction=InboundInstruction(
@@ -1481,14 +1481,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=fifo.id,
                 agent_id="writer",
                 lane_key="session:fifo",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=jump_queue.id,
                 agent_id="writer",
@@ -1496,10 +1496,10 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=fifo.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=jump_queue.id),
         )
 
@@ -1512,7 +1512,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(claimed.id, jump_queue.id)
 
     def test_resume_first_claims_before_jump_queue_with_same_priority(self) -> None:
-        resume_first = self.container.orchestration_intake_service.accept(
+        resume_first = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-resume-first-priority",
                 inbound_instruction=InboundInstruction(
@@ -1523,7 +1523,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 queue_policy=OrchestrationQueuePolicy.RESUME_FIRST,
             ),
         )
-        jump_queue = self.container.orchestration_intake_service.accept(
+        jump_queue = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-jump-queue-priority",
                 inbound_instruction=InboundInstruction(
@@ -1535,14 +1535,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=resume_first.id,
                 agent_id="writer",
                 lane_key="session:resume-first",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=jump_queue.id,
                 agent_id="writer",
@@ -1550,10 +1550,10 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=jump_queue.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=resume_first.id),
         )
 
@@ -1566,14 +1566,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(claimed.id, resume_first.id)
 
     def test_lane_jump_queue_claims_before_fifo_with_same_priority_in_same_lane(self) -> None:
-        fifo = self.container.orchestration_intake_service.accept(
+        fifo = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-lane-fifo",
                 inbound_instruction=InboundInstruction(source="cli", content="fifo"),
                 priority=10,
             ),
         )
-        lane_jump_queue = self.container.orchestration_intake_service.accept(
+        lane_jump_queue = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-lane-jump",
                 inbound_instruction=InboundInstruction(
@@ -1585,14 +1585,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=fifo.id,
                 agent_id="writer",
                 lane_key="session:lane-shared",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=lane_jump_queue.id,
                 agent_id="writer",
@@ -1600,10 +1600,10 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=fifo.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=lane_jump_queue.id),
         )
 
@@ -1616,7 +1616,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(claimed.id, lane_jump_queue.id)
 
     def test_lane_jump_queue_does_not_jump_ahead_of_other_lane_heads(self) -> None:
-        other_lane_fifo = self.container.orchestration_intake_service.accept(
+        other_lane_fifo = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-other-lane-fifo",
                 inbound_instruction=InboundInstruction(
@@ -1626,7 +1626,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 priority=10,
             ),
         )
-        same_lane_fifo = self.container.orchestration_intake_service.accept(
+        same_lane_fifo = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-shared-lane-fifo",
                 inbound_instruction=InboundInstruction(
@@ -1636,7 +1636,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 priority=10,
             ),
         )
-        lane_jump_queue = self.container.orchestration_intake_service.accept(
+        lane_jump_queue = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-shared-lane-jump",
                 inbound_instruction=InboundInstruction(
@@ -1648,21 +1648,21 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=other_lane_fifo.id,
                 agent_id="writer",
                 lane_key="session:lane-a",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=same_lane_fifo.id,
                 agent_id="writer",
                 lane_key="session:lane-b",
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=lane_jump_queue.id,
                 agent_id="writer",
@@ -1670,13 +1670,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=other_lane_fifo.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=same_lane_fifo.id),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=lane_jump_queue.id),
         )
 
@@ -1689,13 +1689,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(claimed.id, other_lane_fifo.id)
 
     def test_waiting_run_can_fail_without_reclaim(self) -> None:
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-fail",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -1705,20 +1705,20 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         claimed = assign_next_orchestration_assignment(self.container,
             worker_id="worker-1",
         )
         assert claimed is not None
-        self.container.orchestration_executor_service.wait_assignment_on_tool(
+        self.orchestration_executor_service.wait_assignment_on_tool(
             run_id=run.id,
             worker_id="worker-1",
             pending_tool_run_ids=("tool-run-1",),
         )
 
-        failed = self.container.orchestration_executor_service.fail_assignment(
+        failed = self.orchestration_executor_service.fail_assignment(
             run_id=run.id,
             worker_id=None,
             message="tool background failed",
@@ -1736,7 +1736,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
 
     def test_orchestration_resolves_session_bundle_via_session_resolution_service(self) -> None:
-        bundle = self.container.session_resolution_service.resolve(
+        bundle = self.session_resolution_service.resolve(
             ResolveSessionInput(
                 context=SessionRouteContext(
                     agent_id="assistant",
@@ -1764,24 +1764,24 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(bundle.active_instance.kind.value, "main")
 
     def test_cancel_run_keeps_it_out_of_queue(self) -> None:
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-cancel",
                 inbound_instruction=InboundInstruction(source="http", content="stop"),
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=run.id,
                 agent_id="writer",
                 lane_key="session:cancel",
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
-        cancelled = self.container.orchestration_cancellation_service.cancel_run(
+        cancelled = self.orchestration_cancellation_service.cancel_run(
             run.id,
             reason="user_cancelled",
         )

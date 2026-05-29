@@ -4,13 +4,16 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
-from typing import Any, Protocol
+from typing import Any
 
-from crxzipple.modules.llm.application.services import LlmApplicationService
 from crxzipple.modules.llm.domain import LlmInvocation, LlmInvocationStatus, LlmProfile
 from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
+)
+from crxzipple.modules.operations.application.read_models.ports import (
+    OperationsLlmQueryPort,
+    OperationsObservationReadPort,
 )
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
@@ -59,12 +62,6 @@ _LLM_RESOLVER_EVENT_TOPICS = (
     "events.named.orchestration.llm_resolved",
     "orchestration.llm_resolved",
 )
-
-
-class OperationsObservationReadPort(Protocol):
-    def get_module_observation(self, module: str) -> Any | None: ...
-
-    def snapshot(self) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +150,7 @@ class LlmOperationsPage:
 
 @dataclass(slots=True)
 class LlmOperationsReadModelProvider:
-    llm_service: LlmApplicationService
+    llm_service: OperationsLlmQueryPort
     access_service: Any | None = None
     run_query: Any | None = None
     events_service: Any | None = None
@@ -726,7 +723,7 @@ def _provider_access_health_section(
                     "provider": profile.provider.value,
                     "model": profile.model_name,
                     "api_family": profile.api_family.value,
-                    "credential": _credential_label(profile.credential_binding),
+                    "credential": _credential_label(profile.credential_binding_id),
                     "status": _availability_label(profile, readiness),
                     "invocations": str(invocation_counts[profile.id]),
                     "last_invocation": (
@@ -776,7 +773,7 @@ def _provider_auth_blocked_section(
                 cells={
                     "profile": profile.id,
                     "provider": profile.provider.value,
-                    "credential": _credential_label(profile.credential_binding),
+                    "credential": _credential_label(profile.credential_binding_id),
                     "issue": readiness["reason"],
                     "affected_invocations": str(invocation_counts[profile.id]),
                     "action": "Open Access",
@@ -1496,7 +1493,7 @@ def _model_availability_section(
                         if profile.max_concurrency is not None
                         else "-"
                     ),
-                    "credential": _credential_label(profile.credential_binding),
+                    "credential": _credential_label(profile.credential_binding_id),
                     "capabilities": _capability_label(profile),
                 },
                 status=readiness["status"],
@@ -2255,7 +2252,7 @@ def _profile_access_readiness(
             "status": "disabled",
             "reason": "profile is disabled",
         }
-    if not profile.credential_binding:
+    if not profile.credential_binding_id:
         if profile.provider.value == "ollama":
             return {
                 "ready": True,
@@ -2265,7 +2262,7 @@ def _profile_access_readiness(
         return {
             "ready": False,
             "status": "setup_needed",
-            "reason": "profile has no credential binding",
+            "reason": "profile has no access credential binding id",
         }
     if access_service is None or not hasattr(access_service, "check_credential_binding"):
         return {
@@ -2274,7 +2271,7 @@ def _profile_access_readiness(
             "reason": "access readiness service is not connected",
         }
     try:
-        readiness = access_service.check_credential_binding(profile.credential_binding)
+        readiness = access_service.check_credential_binding(profile.credential_binding_id)
     except Exception as exc:
         return {
             "ready": False,
@@ -2552,13 +2549,7 @@ def _provider_model_label(profile: LlmProfile | None) -> str:
 def _credential_label(value: str | None) -> str:
     if value is None or not value.strip():
         return "-"
-    if value.startswith("env:"):
-        return f"env:{value.removeprefix('env:')}"
-    if value.startswith("file:"):
-        return "file credential"
-    if value.lower().startswith("codex"):
-        return "codex auth"
-    return "credential binding"
+    return value.strip()
 
 
 def _duration_seconds(invocation: LlmInvocation) -> float | None:

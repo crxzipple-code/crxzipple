@@ -61,6 +61,11 @@ class SessionBoundWorkspaceResolver:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceToolDeps:
+    session_workspace_lookup: Callable[[str], str | None]
+
+
+@dataclass(frozen=True, slots=True)
 class RenderedWorkspaceRead:
     content: str
     rendered_end_line: int
@@ -92,13 +97,29 @@ class RenderedWorkspaceApplyPatch:
     content: str
 
 
-def workspace_list(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
+def _coerce_workspace_deps(value: WorkspaceToolDeps | Any) -> WorkspaceToolDeps | None:
+    if isinstance(value, WorkspaceToolDeps):
+        return value
+    session_workspace_lookup = getattr(value, "session_workspace_lookup", None)
     if session_workspace_lookup is None:
         return None
+    return WorkspaceToolDeps(session_workspace_lookup=session_workspace_lookup)
+
+
+def _workspace_resolver(deps: WorkspaceToolDeps | Any) -> SessionBoundWorkspaceResolver | None:
+    resolved = _coerce_workspace_deps(deps)
+    if resolved is None:
+        return None
     workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
+        session_workspace_lookup=resolved.session_workspace_lookup,
     )
+    return workspace_resolver
+
+
+def workspace_list(deps: WorkspaceToolDeps | Any):
+    workspace_resolver = _workspace_resolver(deps)
+    if workspace_resolver is None:
+        return None
 
     async def handler(
         arguments: dict[str, Any],
@@ -141,13 +162,10 @@ def workspace_list(container: Any):
     return handler
 
 
-def workspace_search(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    if session_workspace_lookup is None:
+def workspace_search(deps: WorkspaceToolDeps | Any):
+    workspace_resolver = _workspace_resolver(deps)
+    if workspace_resolver is None:
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
-    )
 
     async def handler(
         arguments: dict[str, Any],
@@ -199,13 +217,10 @@ def workspace_search(container: Any):
     return handler
 
 
-def read(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    if session_workspace_lookup is None:
+def read(deps: WorkspaceToolDeps | Any):
+    workspace_resolver = _workspace_resolver(deps)
+    if workspace_resolver is None:
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
-    )
 
     async def handler(
         arguments: dict[str, Any],
@@ -249,13 +264,10 @@ def read(container: Any):
     return handler
 
 
-def write(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    if session_workspace_lookup is None:
+def write(deps: WorkspaceToolDeps | Any):
+    workspace_resolver = _workspace_resolver(deps)
+    if workspace_resolver is None:
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
-    )
 
     async def handler(
         arguments: dict[str, Any],
@@ -285,13 +297,10 @@ def write(container: Any):
     return handler
 
 
-def edit(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    if session_workspace_lookup is None:
+def edit(deps: WorkspaceToolDeps | Any):
+    workspace_resolver = _workspace_resolver(deps)
+    if workspace_resolver is None:
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
-    )
 
     async def handler(
         arguments: dict[str, Any],
@@ -335,13 +344,10 @@ def edit(container: Any):
     return handler
 
 
-def apply_patch(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    if session_workspace_lookup is None:
+def apply_patch(deps: WorkspaceToolDeps | Any):
+    workspace_resolver = _workspace_resolver(deps)
+    if workspace_resolver is None:
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
-    )
 
     async def handler(
         arguments: dict[str, Any],

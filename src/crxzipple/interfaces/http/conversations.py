@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.orchestration.application.ports import OrchestrationRunQueryPort
 from crxzipple.modules.orchestration.interfaces.dto import OrchestrationRunDTO
@@ -186,7 +186,7 @@ class ConversationResponse(BaseModel):
 
 
 def _run_query_port(container: AppContainer) -> OrchestrationRunQueryPort:
-    return container.orchestration_run_query_service
+    return container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE)
 
 
 def _latest_run_by_session_key(run_query: OrchestrationRunQueryPort) -> dict[str, object]:
@@ -226,7 +226,7 @@ def _display_run_by_session_key(run_query: OrchestrationRunQueryPort) -> dict[st
 
 def _last_message_preview(container: AppContainer, *, session_key: str) -> str | None:
     try:
-        items = container.session_service.list_messages(
+        items = container.require(AppKey.SESSION_SERVICE).list_messages(
             ListSessionMessagesInput(
                 session_key=session_key,
                 include_archived=False,
@@ -239,7 +239,7 @@ def _last_message_preview(container: AppContainer, *, session_key: str) -> str |
         if preview is not None:
             return preview
     try:
-        all_items = container.session_service.list_messages(
+        all_items = container.require(AppKey.SESSION_SERVICE).list_messages(
             ListSessionMessagesInput(
                 session_key=session_key,
                 include_archived=True,
@@ -265,7 +265,7 @@ def _message_preview_text(message: SessionMessageDTO) -> str | None:
 
 
 def _conversation_title(container: AppContainer, *, session_key: str) -> str | None:
-    session = container.session_service.get_session(session_key)
+    session = container.require(AppKey.SESSION_SERVICE).get_session(session_key)
     explicit_title = _normalize_preview_text(session.origin.label)
     if explicit_title is not None:
         return _truncate_title(explicit_title)
@@ -275,7 +275,7 @@ def _conversation_title(container: AppContainer, *, session_key: str) -> str | N
         if normalized_metadata_title is not None:
             return _truncate_title(normalized_metadata_title)
     try:
-        items = container.session_service.list_messages(
+        items = container.require(AppKey.SESSION_SERVICE).list_messages(
             ListSessionMessagesInput(
                 session_key=session_key,
                 include_archived=True,
@@ -318,7 +318,7 @@ def _build_conversation_summary(
     latest_run,  # noqa: ANN001
     display_run,  # noqa: ANN001
 ) -> ConversationSummaryDTO:
-    session = container.session_service.get_session(session_key)
+    session = container.require(AppKey.SESSION_SERVICE).get_session(session_key)
     binding = session.runtime_binding()
     return ConversationSummaryDTO(
         session_key=session_key,
@@ -381,7 +381,7 @@ def get_conversation(
     run_query = _run_query_port(container)
     latest_run = _latest_run_by_session_key(run_query).get(session_key)
     try:
-        container.session_service.get_session(session_key)
+        container.require(AppKey.SESSION_SERVICE).get_session(session_key)
         dto = _build_conversation_summary(
             container,
             session_key=session_key,
@@ -402,7 +402,7 @@ def list_conversation_runs(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[OrchestrationRunResponse]:
     try:
-        container.session_service.get_session(session_key)
+        container.require(AppKey.SESSION_SERVICE).get_session(session_key)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
 
@@ -432,7 +432,7 @@ def list_conversation_messages(
     before_sequence_no: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[SessionMessageResponse]:
     try:
-        items = container.session_service.list_messages(
+        items = container.require(AppKey.SESSION_SERVICE).list_messages(
             ListSessionMessagesInput(
                 session_key=session_key,
                 limit=limit,

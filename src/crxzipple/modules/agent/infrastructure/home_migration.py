@@ -9,9 +9,8 @@ _FILE_MAPPINGS: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
     (("SOUL.md",), ("SOUL.md",), "SOUL.md"),
     (("USER.md",), ("USER.md",), "USER.md"),
     (("IDENTITY.md",), ("IDENTITY.md",), "IDENTITY.md"),
-    (("MEMORY.md", "memory.md"), ("MEMORY.md", "memory.md"), "MEMORY.md"),
 )
-_DIRECTORY_MAPPINGS: tuple[str, ...] = ("memory", "skills", ".state")
+_DIRECTORY_MAPPINGS: tuple[str, ...] = ("skills", ".state")
 
 
 def migrate_agent_home_contents(

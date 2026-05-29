@@ -1,5 +1,16 @@
 kind: local_package
 namespace: command
+capabilities:
+  - workspace.lookup
+  - process.spawn
+  - process.manage
+dependencies:
+  - id: session_workspace_lookup
+    kind: service_dependency
+    description: Resolves session keys to their bound workspace directories.
+  - id: process_service
+    kind: service_dependency
+    description: Process application service used for background command sessions.
 local_tools:
   - id: exec
     name: Workspace Exec

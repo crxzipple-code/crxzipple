@@ -21,6 +21,12 @@ from crxzipple.modules.session.application.services import (
     SyncRoutedSessionInput,
     SessionUnitOfWork,
 )
+from crxzipple.modules.session.application.runtime import (
+    SessionRuntimeControlPort,
+    SessionRuntimeRunRecord,
+    SubmitSessionBoundTurnInput,
+    SubmitSessionSpawnTurnInput,
+)
 
 __all__ = [
     "ArchiveSessionMessagesInput",
@@ -39,7 +45,11 @@ __all__ = [
     "SessionMessagesBundle",
     "SessionResolutionService",
     "SessionResolutionResult",
+    "SessionRuntimeControlPort",
+    "SessionRuntimeRunRecord",
     "SessionRoutingDecision",
     "SyncRoutedSessionInput",
     "SessionUnitOfWork",
+    "SubmitSessionBoundTurnInput",
+    "SubmitSessionSpawnTurnInput",
 ]

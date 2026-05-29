@@ -44,6 +44,45 @@ class _FakeJsonResponse:
 
 
 class ChannelsHttpTestCase(HttpModuleTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._credential_env_backup = {
+            key: os.environ.get(key)
+            for key in (
+                "LARK_APP_ID",
+                "LARK_APP_SECRET",
+                "LARK_VERIFICATION_TOKEN",
+                "LARK_ENCRYPT_KEY",
+                "LARK_BOT_OPEN_ID",
+                "WEBHOOK_SECRET",
+            )
+        }
+        self._set_lark_access_env()
+        self.client.app.state.container.require(AppKey.LLM_SERVICE).credential_provider = None
+
+    def tearDown(self) -> None:
+        super().tearDown()
+        for key, value in self._credential_env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    @staticmethod
+    def _set_lark_access_env(
+        *,
+        token: str = "token-123",
+        encrypt_key: str = "encrypt-123",
+        bot_open_id: str = "ou_bot_1",
+        app_id: str = "cli_a",
+        app_secret: str = "secret_a",
+    ) -> None:
+        os.environ["LARK_APP_ID"] = app_id
+        os.environ["LARK_APP_SECRET"] = app_secret
+        os.environ["LARK_VERIFICATION_TOKEN"] = token
+        os.environ["LARK_ENCRYPT_KEY"] = encrypt_key
+        os.environ["LARK_BOT_OPEN_ID"] = bot_open_id
+
     @staticmethod
     def _webhook_signature(secret: str, payload: dict[str, object]) -> str:
         raw = json.dumps(payload).encode("utf-8")
@@ -102,7 +141,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(disabled.status_code, 200)
         self.assertFalse(disabled.json()["enabled"])
         container = self.client.app.state.container
-        stored = container.channel_profile_service.get_profile("web")
+        stored = container.require(AppKey.CHANNEL_PROFILE_SERVICE).get_profile("web")
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertFalse(stored.enabled)
@@ -117,7 +156,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_disabled_lark_profile_rejects_inbound_before_settings_materialization(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 enabled=False,
@@ -142,14 +181,16 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_lark_events_endpoint_handles_url_verification(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={"lark_verification_token": "token-123"},
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                        },
                     ),
                 ),
             ),
@@ -169,16 +210,16 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_lark_events_endpoint_accepts_encrypted_url_verification(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_verification_token": "token-123",
-                            "lark_encrypt_key": "encrypt-123",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                            "lark_encrypt_key": "access-binding:lark-encrypt-key",
                         },
                     ),
                 ),
@@ -215,22 +256,22 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
     def test_lark_events_endpoint_accepts_encrypted_url_verification_with_bindings(
         self,
     ) -> None:
-        previous_token = os.environ.get("LARK_TEST_VERIFICATION_TOKEN")
-        previous_encrypt_key = os.environ.get("LARK_TEST_ENCRYPT_KEY")
-        os.environ["LARK_TEST_VERIFICATION_TOKEN"] = "token-123-binding"
-        os.environ["LARK_TEST_ENCRYPT_KEY"] = "encrypt-123-binding"
+        previous_token = os.environ.get("LARK_VERIFICATION_TOKEN")
+        previous_encrypt_key = os.environ.get("LARK_ENCRYPT_KEY")
+        os.environ["LARK_VERIFICATION_TOKEN"] = "token-123-binding"
+        os.environ["LARK_ENCRYPT_KEY"] = "encrypt-123-binding"
         try:
             container = self.client.app.state.container
-            container.channel_profile_service.upsert_profile(
+            container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
                 ChannelProfile(
                     channel_type="lark",
                     accounts=(
                         ChannelAccountProfile(
                             account_id="default",
                             transport_mode="webhook",
-                            metadata={
-                                "lark_verification_token_binding": "env:LARK_TEST_VERIFICATION_TOKEN",
-                                "lark_encrypt_key_binding": "env:LARK_TEST_ENCRYPT_KEY",
+                            credential_bindings={
+                                "lark_verification_token": "access-binding:lark-verification-token",
+                                "lark_encrypt_key": "access-binding:lark-encrypt-key",
                             },
                         ),
                     ),
@@ -272,26 +313,26 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(response.json()["challenge"], "encrypted-binding-challenge")
         finally:
             if previous_token is None:
-                os.environ.pop("LARK_TEST_VERIFICATION_TOKEN", None)
+                os.environ.pop("LARK_VERIFICATION_TOKEN", None)
             else:
-                os.environ["LARK_TEST_VERIFICATION_TOKEN"] = previous_token
+                os.environ["LARK_VERIFICATION_TOKEN"] = previous_token
             if previous_encrypt_key is None:
-                os.environ.pop("LARK_TEST_ENCRYPT_KEY", None)
+                os.environ.pop("LARK_ENCRYPT_KEY", None)
             else:
-                os.environ["LARK_TEST_ENCRYPT_KEY"] = previous_encrypt_key
+                os.environ["LARK_ENCRYPT_KEY"] = previous_encrypt_key
 
     def test_lark_events_endpoint_rejects_invalid_encrypted_signature(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_verification_token": "token-123",
-                            "lark_encrypt_key": "encrypt-123",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                            "lark_encrypt_key": "access-binding:lark-encrypt-key",
                         },
                     ),
                 ),
@@ -323,11 +364,11 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_lark_events_endpoint_queues_message_receive_event(self) -> None:
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("lark answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark",
                 provider=LlmProviderKind.OPENAI,
@@ -335,7 +376,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark",
                 name="Assistant Lark",
@@ -346,16 +387,18 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                        },
                         metadata={
                             "agent_id": "assistant-lark",
-                            "lark_verification_token": "token-123",
                         },
                     ),
                 ),
@@ -392,7 +435,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         payload = response.json()
         self.assertEqual(payload["code"], 0)
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run)
         assert run is not None
         self.assertIsNotNone(run.reply_target)
@@ -417,12 +460,13 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         )
 
     def test_lark_events_endpoint_ignores_group_message_without_bot_mention(self) -> None:
+        self._set_lark_access_env(token="token-group-ignore", bot_open_id="ou_bot_1")
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("group answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark-group-ignore",
                 provider=LlmProviderKind.OPENAI,
@@ -430,7 +474,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark-group-ignore",
                 name="Assistant Lark Group Ignore",
@@ -443,18 +487,20 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                            "lark_bot_open_id": "access-binding:lark-bot-open-id",
+                        },
                         metadata={
                             "agent_id": "assistant-lark-group-ignore",
-                            "lark_verification_token": "token-group-ignore",
                             "lark_group_require_bot_mention": True,
-                            "lark_bot_open_id": "ou_bot_1",
                         },
                     ),
                 ),
@@ -502,12 +548,13 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         )
 
     def test_lark_events_endpoint_accepts_group_message_when_bot_is_mentioned(self) -> None:
+        self._set_lark_access_env(token="token-group-mention", bot_open_id="ou_bot_1")
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("group mention answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark-group-mention",
                 provider=LlmProviderKind.OPENAI,
@@ -515,7 +562,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark-group-mention",
                 name="Assistant Lark Group Mention",
@@ -528,18 +575,20 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                            "lark_bot_open_id": "access-binding:lark-bot-open-id",
+                        },
                         metadata={
                             "agent_id": "assistant-lark-group-mention",
-                            "lark_verification_token": "token-group-mention",
                             "lark_group_require_bot_mention": True,
-                            "lark_bot_open_id": "ou_bot_1",
                         },
                     ),
                 ),
@@ -588,7 +637,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(run.reply_target.interface_name, "lark")
@@ -604,12 +653,17 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
     def test_lark_events_endpoint_resolves_bot_open_id_automatically_for_group_gating(
         self,
     ) -> None:
+        self._set_lark_access_env(
+            token="token-group-resolved",
+            app_id="cli_group_resolved",
+            app_secret="secret_group_resolved",
+        )
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("group resolved answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark-group-resolved",
                 provider=LlmProviderKind.OPENAI,
@@ -617,7 +671,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark-group-resolved",
                 name="Assistant Lark Group Resolved",
@@ -630,19 +684,21 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
+                        },
                         metadata={
                             "agent_id": "assistant-lark-group-resolved",
-                            "lark_verification_token": "token-group-resolved",
                             "lark_group_require_bot_mention": True,
-                            "lark_app_id": "cli_group_resolved",
-                            "lark_app_secret": "secret_group_resolved",
                         },
                     ),
                 ),
@@ -719,18 +775,19 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(run.reply_target.interface_name, "lark")
 
     def test_lark_events_endpoint_normalizes_non_text_message_with_placeholder(self) -> None:
+        self._set_lark_access_env(token="token-image")
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("image message answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark-image",
                 provider=LlmProviderKind.OPENAI,
@@ -738,7 +795,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark-image",
                 name="Assistant Lark Image",
@@ -749,16 +806,18 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                        },
                         metadata={
                             "agent_id": "assistant-lark-image",
-                            "lark_verification_token": "token-image",
                         },
                     ),
                 ),
@@ -794,7 +853,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(
@@ -807,12 +866,13 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         )
 
     def test_lark_events_endpoint_normalizes_file_message_with_name(self) -> None:
+        self._set_lark_access_env(token="token-file")
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("file message answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark-file",
                 provider=LlmProviderKind.OPENAI,
@@ -820,7 +880,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark-file",
                 name="Assistant Lark File",
@@ -831,16 +891,18 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                        },
                         metadata={
                             "agent_id": "assistant-lark-file",
-                            "lark_verification_token": "token-file",
                         },
                     ),
                 ),
@@ -881,7 +943,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(
@@ -898,12 +960,13 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         )
 
     def test_lark_events_endpoint_normalizes_post_message_into_readable_text(self) -> None:
+        self._set_lark_access_env(token="token-post")
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("post message answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-lark-post",
                 provider=LlmProviderKind.OPENAI,
@@ -911,7 +974,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant-lark-post",
                 name="Assistant Lark Post",
@@ -922,16 +985,18 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                        },
                         metadata={
                             "agent_id": "assistant-lark-post",
-                            "lark_verification_token": "token-post",
                         },
                     ),
                 ),
@@ -982,7 +1047,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(
@@ -1000,11 +1065,11 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_webhook_inbound_endpoint_accepts_turn_with_callback_reply_target(self) -> None:
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("webhook callback answer"),
         )
-        container.llm_service.register_profile(
+        container.require(AppKey.LLM_SERVICE).register_profile(
             RegisterLlmProfileInput(
                 id="test-llm",
                 provider=LlmProviderKind.OPENAI,
@@ -1012,7 +1077,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        container.agent_service.register_profile(
+        container.require(AppKey.AGENT_SERVICE).register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -1038,7 +1103,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "accepted")
-        run = container.orchestration_run_query_service.get_run(payload["run_id"])
+        run = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(payload["run_id"])
         self.assertIsNotNone(run.reply_target)
         assert run.reply_target is not None
         self.assertEqual(run.reply_target.interface_name, "webhook")
@@ -1059,7 +1124,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
             run.reply_target.metadata["reply_address"]["metadata"]["observation_enabled"],
             True,
         )
-        interaction = container.channel_interaction_service.get_interaction(
+        interaction = container.require(AppKey.CHANNEL_INFRASTRUCTURE).interaction_service.get_interaction(
             f"webhook:default:run:{run.id}",
         )
         self.assertIsNotNone(interaction)
@@ -1073,125 +1138,187 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         )
 
     def test_webhook_inbound_endpoint_validates_signature_when_configured(self) -> None:
+        previous_secret = os.environ.get("WEBHOOK_SECRET")
+        os.environ["WEBHOOK_SECRET"] = "top-secret"
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
-            ChannelProfile(
-                channel_type="webhook",
-                accounts=(
-                    ChannelAccountProfile(
-                        account_id="default",
-                        transport_mode="webhook",
-                        metadata={
-                            "webhook_signing_secret": "top-secret",
-                        },
+        try:
+            container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
+                ChannelProfile(
+                    channel_type="webhook",
+                    accounts=(
+                        ChannelAccountProfile(
+                            account_id="default",
+                            transport_mode="webhook",
+                            credential_bindings={
+                                "webhook_signing_secret": "access-binding:webhook-secret",
+                            },
+                        ),
                     ),
                 ),
-            ),
-        )
-        container.llm_adapter_registry.register(
-            LlmApiFamily.OPENAI_RESPONSES,
-            _SequentialTextAdapter("signed webhook callback answer"),
-        )
-        container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id="test-llm-signed",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-        container.agent_service.register_profile(
-            RegisterAgentProfileInput(
-                id="assistant-signed",
-                name="Assistant Signed",
-                instruction_policy=AgentInstructionPolicy(
-                    system_prompt="Be helpful.",
+            )
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+                LlmApiFamily.OPENAI_RESPONSES,
+                _SequentialTextAdapter("signed webhook callback answer"),
+            )
+            container.require(AppKey.LLM_SERVICE).register_profile(
+                RegisterLlmProfileInput(
+                    id="test-llm-signed",
+                    provider=LlmProviderKind.OPENAI,
+                    api_family=LlmApiFamily.OPENAI_RESPONSES,
+                    model_name="gpt-5.4-mini",
                 ),
-                llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id="test-llm-signed"),
-                runtime_preferences=AgentRuntimePreferences(),
-            ),
-        )
-        payload = {
-            "content": {"blocks": [{"type": "text", "text": "hello signed webhook"}]},
-            "callback_url": "https://example.test/callback",
-            "agent_id": "assistant-signed",
-            "conversation_id": "ext-conv-signed-1",
-            "peer_id": "ext-user-signed-1",
-        }
-
-        response = self.client.post(
-            "/channels/webhook/inbound/default",
-            content=json.dumps(payload),
-            headers={
-                "content-type": "application/json",
-                "X-Crx-Webhook-Signature": self._webhook_signature(
-                    "top-secret",
-                    payload,
+            )
+            container.require(AppKey.AGENT_SERVICE).register_profile(
+                RegisterAgentProfileInput(
+                    id="assistant-signed",
+                    name="Assistant Signed",
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt="Be helpful.",
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id="test-llm-signed"),
+                    runtime_preferences=AgentRuntimePreferences(),
                 ),
-            },
-        )
+            )
+            payload = {
+                "content": {"blocks": [{"type": "text", "text": "hello signed webhook"}]},
+                "callback_url": "https://example.test/callback",
+                "agent_id": "assistant-signed",
+                "conversation_id": "ext-conv-signed-1",
+                "peer_id": "ext-user-signed-1",
+            }
 
-        self.assertEqual(response.status_code, 200)
+            response = self.client.post(
+                "/channels/webhook/inbound/default",
+                content=json.dumps(payload),
+                headers={
+                    "content-type": "application/json",
+                    "X-Crx-Webhook-Signature": self._webhook_signature(
+                        "top-secret",
+                        payload,
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+        finally:
+            if previous_secret is None:
+                os.environ.pop("WEBHOOK_SECRET", None)
+            else:
+                os.environ["WEBHOOK_SECRET"] = previous_secret
 
     def test_webhook_inbound_endpoint_rejects_invalid_signature_when_configured(self) -> None:
+        previous_secret = os.environ.get("WEBHOOK_SECRET")
+        os.environ["WEBHOOK_SECRET"] = "top-secret"
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
-            ChannelProfile(
-                channel_type="webhook",
-                accounts=(
-                    ChannelAccountProfile(
-                        account_id="default",
-                        transport_mode="webhook",
-                        metadata={
-                            "webhook_signing_secret": "top-secret",
-                        },
+        try:
+            container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
+                ChannelProfile(
+                    channel_type="webhook",
+                    accounts=(
+                        ChannelAccountProfile(
+                            account_id="default",
+                            transport_mode="webhook",
+                            credential_bindings={
+                                "webhook_signing_secret": "access-binding:webhook-secret",
+                            },
+                        ),
                     ),
                 ),
-            ),
-        )
-        container.agent_service.register_profile(
-            RegisterAgentProfileInput(
-                id="assistant-invalid-signed",
-                name="Assistant Invalid Signed",
-                instruction_policy=AgentInstructionPolicy(
-                    system_prompt="Be helpful.",
+            )
+            container.require(AppKey.AGENT_SERVICE).register_profile(
+                RegisterAgentProfileInput(
+                    id="assistant-invalid-signed",
+                    name="Assistant Invalid Signed",
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt="Be helpful.",
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id="missing-llm-is-fine"),
+                    runtime_preferences=AgentRuntimePreferences(),
                 ),
-                llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id="missing-llm-is-fine"),
-                runtime_preferences=AgentRuntimePreferences(),
-            ),
-        )
-        payload = {
-            "content": {"blocks": [{"type": "text", "text": "hello signed webhook"}]},
-            "callback_url": "https://example.test/callback",
-            "agent_id": "assistant-invalid-signed",
-            "conversation_id": "ext-conv-signed-2",
-            "peer_id": "ext-user-signed-2",
-        }
+            )
+            payload = {
+                "content": {"blocks": [{"type": "text", "text": "hello signed webhook"}]},
+                "callback_url": "https://example.test/callback",
+                "agent_id": "assistant-invalid-signed",
+                "conversation_id": "ext-conv-signed-2",
+                "peer_id": "ext-user-signed-2",
+            }
 
-        response = self.client.post(
-            "/channels/webhook/inbound/default",
-            content=json.dumps(payload),
-            headers={
-                "content-type": "application/json",
-                "X-Crx-Webhook-Signature": "sha256=not-valid",
-            },
-        )
+            response = self.client.post(
+                "/channels/webhook/inbound/default",
+                content=json.dumps(payload),
+                headers={
+                    "content-type": "application/json",
+                    "X-Crx-Webhook-Signature": "sha256=not-valid",
+                },
+            )
 
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["detail"], "Invalid webhook signature.")
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json()["detail"], "Invalid webhook signature.")
+        finally:
+            if previous_secret is None:
+                os.environ.pop("WEBHOOK_SECRET", None)
+            else:
+                os.environ["WEBHOOK_SECRET"] = previous_secret
+
+    def test_webhook_inbound_endpoint_reports_access_readiness_failure(self) -> None:
+        previous_secret = os.environ.get("WEBHOOK_SECRET")
+        os.environ.pop("WEBHOOK_SECRET", None)
+        container = self.client.app.state.container
+        try:
+            container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
+                ChannelProfile(
+                    channel_type="webhook",
+                    accounts=(
+                        ChannelAccountProfile(
+                            account_id="default",
+                            transport_mode="webhook",
+                            credential_bindings={
+                                "webhook_signing_secret": "access-binding:webhook-secret",
+                            },
+                        ),
+                    ),
+                ),
+            )
+            payload = {
+                "content": {"blocks": [{"type": "text", "text": "hello signed webhook"}]},
+                "callback_url": "https://example.test/callback",
+                "agent_id": "assistant",
+                "conversation_id": "ext-conv-signed-missing",
+                "peer_id": "ext-user-signed-missing",
+            }
+
+            response = self.client.post(
+                "/channels/webhook/inbound/default",
+                content=json.dumps(payload),
+                headers={
+                    "content-type": "application/json",
+                    "X-Crx-Webhook-Signature": "sha256=not-used",
+                },
+            )
+
+            self.assertEqual(response.status_code, 503)
+            detail = response.json()["detail"]
+            self.assertEqual(detail["code"], "access_not_ready")
+            self.assertEqual(detail["binding_id"], "access-binding:webhook-secret")
+        finally:
+            if previous_secret is None:
+                os.environ.pop("WEBHOOK_SECRET", None)
+            else:
+                os.environ["WEBHOOK_SECRET"] = previous_secret
 
     def test_channel_runtimes_endpoint_lists_runtime_ownership(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-http-1",
         )
-        container.web_channel_runtime_service.bind_connection(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).bind_connection(
             connection_id="web-http-conn-1",
             channel_account_id="default",
             conversation_id="conv-http-1",
@@ -1213,16 +1340,16 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_channel_runtime_endpoint_returns_runtime_detail(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-http-detail-1",
         )
-        container.web_channel_runtime_service.bind_connection(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).bind_connection(
             connection_id="web-http-conn-detail-1",
             channel_account_id="default",
             conversation_id="conv-http-detail-1",
@@ -1250,16 +1377,16 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_web_channel_subscription_endpoint_updates_observe_subscription(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-http-subscription-1",
         )
-        container.web_channel_runtime_service.bind_connection(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).bind_connection(
             connection_id="web-http-conn-subscription-1",
             channel_account_id="default",
             conversation_id="agent:demo:old",
@@ -1268,7 +1395,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "observe_cursor": "18",
             },
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=turn_session_topic("agent:demo:new"),
                 kind="observe_fact",
@@ -1281,7 +1408,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 },
             ),
         )
-        seeded_cursor = container.events_service.snapshot_event_topic(
+        seeded_cursor = container.require(AppKey.EVENTS_SERVICE).snapshot_event_topic(
             turn_session_topic("agent:demo:new"),
         )
 
@@ -1296,7 +1423,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["conversation_id"], "agent:demo:new")
         self.assertEqual(payload["metadata"]["observe_cursor"], seeded_cursor)
         self.assertEqual(payload["conversation_id"], "agent:demo:new")
-        binding = container.channel_runtime_manager.resolve_connection_binding(
+        binding = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
             channel_type="web",
             connection_id="web-http-conn-subscription-1",
         )
@@ -1307,13 +1434,13 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_web_channel_subscription_endpoint_rebinds_missing_connection(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-http-rebind-1",
         )
 
@@ -1330,7 +1457,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["connection_id"], "web-http-conn-rebind-1")
         self.assertEqual(payload["channel_account_id"], "default")
         self.assertEqual(payload["conversation_id"], "agent:demo:rebound")
-        binding = container.channel_runtime_manager.resolve_connection_binding(
+        binding = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
             channel_type="web",
             connection_id="web-http-conn-rebind-1",
         )
@@ -1341,16 +1468,16 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_web_channel_events_endpoint_preserves_existing_subscription_on_reconnect(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-http-reconnect-1",
         )
-        container.web_channel_runtime_service.bind_connection(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).bind_connection(
             connection_id="web-channel-conn-reconnect-1",
             channel_account_id="default",
             conversation_id="agent:demo:preserved",
@@ -1361,7 +1488,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.05,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-reconnect-1",
                     "conversation_id": "agent:demo:stale",
@@ -1374,16 +1501,16 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_web_channel_events_endpoint_seeds_observe_cursor_without_replaying_history(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-http-backfill-1",
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=turn_session_topic("agent:demo:rebound"),
                 kind="fact",
@@ -1401,7 +1528,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.05,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-backfill-1",
                     "conversation_id": "agent:demo:rebound",
@@ -1411,14 +1538,14 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("event: observe", body)
-        seeded_cursor = container.events_service.snapshot_event_topic(
+        seeded_cursor = container.require(AppKey.EVENTS_SERVICE).snapshot_event_topic(
             turn_session_topic("agent:demo:rebound"),
         )
         self.assertIn(f'"observe_cursor": "{seeded_cursor}"', body)
 
     def test_web_channel_events_endpoint_wakes_on_subscription_update_without_polling(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
@@ -1427,7 +1554,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         update_status: dict[str, int] = {}
 
         def _update_subscription_and_publish() -> None:
-            time.sleep(0.1)
+            time.sleep(0.02)
             response = self.client.post(
                 "/channels/web/connections/web-channel-conn-subscribe-wake-1/subscription",
                 json={
@@ -1436,8 +1563,8 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 },
             )
             update_status["status_code"] = response.status_code
-            time.sleep(0.05)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic=turn_session_topic("agent:demo:observe-wake"),
                     kind="fact",
@@ -1459,7 +1586,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.2,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-subscribe-wake-1",
                 },
@@ -1477,7 +1604,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_channel_dead_letters_endpoint_lists_runtime_dead_letters(self) -> None:
         container = self.client.app.state.container
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=channel_dead_letter_topic(
                     "webhook",
@@ -1530,7 +1657,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_channel_dead_letters_replay_endpoint_replays_webhook_directly(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="webhook",
                 accounts=(
@@ -1541,7 +1668,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 ),
             ),
         )
-        container.webhook_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="webhook-runtime-http-replay-1",
         )
         callback_server = _CallbackCaptureServer()
@@ -1590,7 +1717,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "callback_url": f"{callback_server.base_url}/replay",
             },
         )
-        container.events_service.publish(dead_letter_event)
+        container.require(AppKey.EVENTS_SERVICE).publish(dead_letter_event)
 
         response = self.client.post(
             "/channels/dead-letters/webhook/replay",
@@ -1658,7 +1785,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "attempt_count": 1,
             },
         )
-        container.events_service.publish(dead_letter_event)
+        container.require(AppKey.EVENTS_SERVICE).publish(dead_letter_event)
 
         response = self.client.post(
             "/channels/dead-letters/web/replay",
@@ -1675,8 +1802,8 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         def _deliver_later() -> None:
-            time.sleep(0.1)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic="delivery.runtime.web-runtime-1",
                     kind="fact",
@@ -1722,7 +1849,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.2,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-1",
                     "conversation_id": "agent:demo:main",
@@ -1745,7 +1872,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         self.assertNotIn("hello from legacy web outbound topic", body)
         self.assertIn("event: timeout", body)
         self.assertIsNone(
-            container.channel_runtime_manager.resolve_connection_binding(
+            container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
                 channel_type="web",
                 connection_id="web-channel-conn-1",
             ),
@@ -1755,8 +1882,8 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         def _broadcast_later() -> None:
-            time.sleep(0.1)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic=channel_broadcast_topic(
                         "web",
@@ -1784,7 +1911,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.2,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-2",
                 },
@@ -1806,8 +1933,8 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         def _observe_later() -> None:
-            time.sleep(0.1)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic=turn_session_topic("agent:demo:observe-http"),
                     kind="fact",
@@ -1829,7 +1956,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.2,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-observe-1",
                     "conversation_id": "agent:demo:observe-http",
@@ -1851,13 +1978,13 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
 
     def test_web_channel_events_endpoint_routes_observe_from_direct_session_source(self) -> None:
         container = self.client.app.state.container
-        container.web_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="web-runtime-1",
         )
 
         def _observe_later() -> None:
-            time.sleep(0.1)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic=turn_session_topic("agent:demo:observe-active-http"),
                     kind="fact",
@@ -1879,7 +2006,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.2,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-observe-active-1",
                     "conversation_id": "agent:demo:observe-active-http",
@@ -1898,8 +2025,8 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         def _live_later() -> None:
-            time.sleep(0.1)
-            container.events_service.publish(
+            time.sleep(0.02)
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     topic=turn_session_live_topic("agent:demo:live-http"),
                     kind="live",
@@ -1921,7 +2048,7 @@ class ChannelsHttpTestCase(HttpModuleTestCase):
                 "GET",
                 "/channels/web/events",
                 params={
-                    "timeout_seconds": 1.0,
+                    "timeout_seconds": 0.2,
                     "channel_account_id": "default",
                     "connection_id": "web-channel-conn-live-1",
                     "conversation_id": "agent:demo:live-http",

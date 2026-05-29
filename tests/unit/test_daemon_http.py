@@ -10,7 +10,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_service),
+            type(container.require(AppKey.DAEMON_SERVICE)),
             "list_leases",
             autospec=True,
             return_value=(
@@ -55,7 +55,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_service),
+            type(container.require(AppKey.DAEMON_SERVICE)),
             "get_service_spec",
             autospec=True,
             return_value=SimpleNamespace(
@@ -74,7 +74,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
                 metadata={"cdp_port": 18800},
             ),
         ), patch.object(
-            type(container.daemon_manager),
+            type(container.require(AppKey.DAEMON_MANAGER)),
             "list_instances",
             autospec=True,
             return_value=(
@@ -99,7 +99,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
                 ),
             ),
         ), patch.object(
-            type(container.daemon_service),
+            type(container.require(AppKey.DAEMON_SERVICE)),
             "list_leases",
             autospec=True,
             return_value=(
@@ -137,7 +137,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_service),
+            type(container.require(AppKey.DAEMON_SERVICE)),
             "list_service_sets",
             autospec=True,
             return_value=(
@@ -162,7 +162,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_service),
+            type(container.require(AppKey.DAEMON_SERVICE)),
             "list_service_specs",
             autospec=True,
             return_value=(
@@ -194,7 +194,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_manager),
+            type(container.require(AppKey.DAEMON_MANAGER)),
             "ensure_service",
             autospec=True,
             return_value=(
@@ -228,7 +228,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_manager),
+            type(container.require(AppKey.DAEMON_MANAGER)),
             "healthcheck_service",
             autospec=True,
             return_value=(
@@ -257,7 +257,7 @@ class DaemonHttpTestCase(HttpModuleTestCase):
         container = self.client.app.state.container
 
         with patch.object(
-            type(container.daemon_manager),
+            type(container.require(AppKey.DAEMON_MANAGER)),
             "reconcile_service",
             autospec=True,
             return_value=(

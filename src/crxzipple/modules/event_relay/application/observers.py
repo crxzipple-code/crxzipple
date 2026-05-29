@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationRunLookupPort,
     ToolExecutionPort,
@@ -24,13 +23,14 @@ from .events import (
     workbench_session_topic,
     workbench_steps_topic,
 )
+from .ports import EventRelayPublishPort
 
 logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
 class WorkbenchEventRelayObserver:
-    events_service: EventsApplicationService
+    events_service: EventRelayPublishPort
     run_lookup: OrchestrationRunLookupPort | None = None
     tool_execution_port: ToolExecutionPort | None = None
 

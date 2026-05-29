@@ -6,10 +6,8 @@ from threading import Event as StopEvent
 from typing import Any
 import time
 
-from crxzipple.modules.agent.application import AgentApplicationService
 from crxzipple.modules.agent.domain.entities import AgentProfile
 from crxzipple.modules.agent.domain.exceptions import AgentNotFoundError
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
 from crxzipple.modules.orchestration.application.commands import (
     SubmitOrchestrationTurnInput,
@@ -22,7 +20,11 @@ from crxzipple.modules.orchestration.application.llm_resolver import (
 )
 from crxzipple.modules.orchestration.application.ports.runtime import (
     OrchestrationRunLookupPort,
-    OrchestrationSchedulerSubmitPort,
+    OrchestrationSubmissionPort,
+)
+from crxzipple.modules.orchestration.application.ports.context import (
+    AgentProfileCatalogPort,
+    EventTopicWaitPort,
 )
 from crxzipple.modules.orchestration.application.observers import turn_session_topic
 from crxzipple.modules.orchestration.domain import (
@@ -80,7 +82,7 @@ def terminal(run: OrchestrationRun) -> bool:
 
 
 def resolve_profile(
-    agent_service: AgentApplicationService,
+    agent_service: AgentProfileCatalogPort,
     *,
     agent_id: str | None,
 ) -> tuple[AgentProfile | None, str | None]:
@@ -378,7 +380,7 @@ def build_submit_turn_input(
 
 
 def submit_turn(
-    scheduler_service: OrchestrationSchedulerSubmitPort,
+    scheduler_service: OrchestrationSubmissionPort,
     *,
     content: Any,
     options: TurnSubmissionOptions,
@@ -423,9 +425,9 @@ def submit_turn(
 
 
 def submit_and_wait_for_turn(
-    scheduler_service: OrchestrationSchedulerSubmitPort,
+    scheduler_service: OrchestrationSubmissionPort,
     run_lookup: OrchestrationRunLookupPort,
-    events_service: EventsApplicationService | None,
+    events_service: EventTopicWaitPort | None,
     *,
     content: Any,
     options: AwaitTurnOptions,

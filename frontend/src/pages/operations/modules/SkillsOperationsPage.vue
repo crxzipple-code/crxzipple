@@ -30,7 +30,7 @@ import type {
 import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
-import { installGlobalSkill, loadSkillsOperations, validateSkillPackage } from "../api";
+import { installGlobalSkill, loadSkillsOperations, syncSkillCatalog, validateSkillPackage } from "../api";
 import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
@@ -58,7 +58,10 @@ const fallbackTabs: OperationsTab[] = [
   { id: "access", label: "Access Requirements" },
   { id: "missing", label: "Missing Capabilities" },
   { id: "logs", label: "Resolution Logs" },
+  { id: "reads", label: "Skill Reads" },
   { id: "resolver", label: "Resolver Detail" },
+  { id: "authoring", label: "Authoring Backlog" },
+  { id: "authoring_failures", label: "Authoring Failures" },
   { id: "conflicts", label: "Conflicts / Overrides" },
   { id: "profiles", label: "Profile Usage" },
 ];
@@ -77,16 +80,21 @@ const skillsTextKeys: Record<string, string> = {
   "Capability Requirements": "operations.skills.tab.requirements",
   "Access Requirements": "operations.skills.tab.access",
   "Resolution Logs": "operations.skills.tab.logs",
+  "Skill Reads": "operations.skills.tab.reads",
   "Resolver Detail": "operations.skills.tab.resolver",
+  "Authoring Backlog": "operations.skills.tab.authoring",
+  "Authoring Failures": "operations.skills.tab.authoringFailures",
   "Conflicts / Overrides": "operations.skills.tab.conflicts",
   "Profile Usage": "operations.skills.tab.profiles",
   "Skill Readiness": "operations.skills.section.readiness",
   "Skill Package Sources": "operations.skills.section.sources",
   "Requirement Footprint": "operations.skills.section.footprint",
+  "Skill Authoring": "operations.skills.section.authoring",
   "Import / Normalize": "operations.skills.section.import",
   "List Skills": "operations.skills.action.listSkills",
   "Validate Skill": "operations.skills.action.validateSkill",
   "Validate Package": "operations.skills.action.validatePackage",
+  "Sync Skill Catalog": "operations.skills.action.syncCatalog",
   "Install Global Skill": "operations.skills.action.installGlobal",
   "Skill": "text.skill",
   "Source": "table.source",
@@ -116,15 +124,17 @@ const skillsTextKeys: Record<string, string> = {
   "Optional Tool": "operations.skills.requirement.optionalTool",
   "Required Effect": "operations.skills.requirement.requiredEffect",
   "Access": "operations.module.access",
-  "Secret": "operations.skills.requirement.secret",
-  "Credential File": "operations.skills.requirement.credentialFile",
+  "Supported Platform": "operations.skills.requirement.supportedPlatform",
   "Setup Hint": "operations.skills.requirement.setupHint",
   "No skills available for this surface.": "operations.skills.empty.installed",
   "No missing skill capabilities.": "operations.skills.empty.missing",
   "No access requirements declared by skills.": "operations.skills.empty.access",
   "No capability requirements declared by skills.": "operations.skills.empty.requirements",
   "No skill resolution events.": "operations.skills.empty.logs",
+  "No skill read events.": "operations.skills.empty.reads",
   "No resolver detail.": "operations.skills.empty.resolver",
+  "No active skill authoring drafts.": "operations.skills.empty.authoringBacklog",
+  "No skill authoring failures.": "operations.skills.empty.authoringFailures",
   "No skill conflicts or overrides.": "operations.skills.empty.conflicts",
   "No profile usage is available.": "operations.skills.empty.profiles",
   "No skill requirement footprint.": "operations.skills.empty.footprint",
@@ -133,6 +143,13 @@ const skillsTextKeys: Record<string, string> = {
   "No resources bundled with this skill.": "operations.skills.empty.resources",
   "No related skill events.": "operations.skills.empty.relatedEvents",
   "No records.": "table.noRecords",
+  "Validate draft": "operations.skills.next.validateDraft",
+  "Revise draft": "operations.skills.next.reviseDraft",
+  "Fix validation errors": "operations.skills.next.fixValidation",
+  "Build diff or apply owner write": "operations.skills.next.buildDiffOrApply",
+  "Apply owner write after approval": "operations.skills.next.applyAfterApproval",
+  "Review failure and revise draft": "operations.skills.next.reviewFailure",
+  "Inspect draft": "operations.skills.next.inspectDraft",
 };
 
 const page = ref<OperationsSkillsReadModel | null>(null);
@@ -164,7 +181,10 @@ const mainTable = computed(() => {
   if (activeTab.value === "access") return page.value?.access_requirements ?? emptyTable("access_requirements", "Access Requirements");
   if (activeTab.value === "missing") return page.value?.missing_capabilities ?? emptyTable("missing_capabilities", "Missing Capabilities");
   if (activeTab.value === "logs") return page.value?.resolution_logs ?? emptyTable("resolution_logs", "Resolution Logs");
+  if (activeTab.value === "reads") return page.value?.skill_reads ?? emptyTable("skill_reads", "Skill Reads");
   if (activeTab.value === "resolver") return page.value?.resolver_detail ?? emptyTable("resolver_detail", "Resolver Detail");
+  if (activeTab.value === "authoring") return page.value?.authoring_backlog ?? emptyTable("authoring_backlog", "Authoring Backlog");
+  if (activeTab.value === "authoring_failures") return page.value?.authoring_failures ?? emptyTable("authoring_failures", "Authoring Failures");
   if (activeTab.value === "conflicts") return page.value?.conflicts_overrides ?? emptyTable("conflicts_overrides", "Conflicts / Overrides");
   if (activeTab.value === "profiles") return page.value?.profile_usage ?? emptyTable("profile_usage", "Profile Usage");
   return page.value?.recently_resolved_skills ?? emptyTable("recently_resolved_skills", "Installed Skills");
@@ -195,6 +215,13 @@ const requirementFootprintPreview = computed<UiTableSection>(() => {
   };
 });
 const resolutionLogs = computed(() => page.value?.resolution_logs ?? emptyTable("resolution_logs", "Resolution Logs"));
+const authoringBacklog = computed(() => page.value?.authoring_backlog ?? emptyTable("authoring_backlog", "Authoring Backlog"));
+const authoringFailures = computed(() => page.value?.authoring_failures ?? emptyTable("authoring_failures", "Authoring Failures"));
+const authoringPreviewRows = computed(() => authoringBacklog.value.rows.slice(0, 3));
+const authoringPreviewOverflow = computed(() => Math.max(
+  (authoringBacklog.value.total ?? authoringBacklog.value.rows.length) - authoringPreviewRows.value.length,
+  0,
+));
 const readinessSegments = computed(() => chartSegments(readinessChart.value));
 const sourceSegments = computed(() => chartSegments(sourceChart.value));
 const drawerDetail = computed<OperationsSkillDetail | null>(() => {
@@ -278,6 +305,44 @@ function missingCapabilityTone(row: DataTableRow): UiTone {
   return "neutral";
 }
 
+function openAuthoring(row: DataTableRow) {
+  selectTab("authoring");
+  selectedSkillId.value = null;
+  void row;
+}
+
+function openAuthoringFailure(row: DataTableRow) {
+  selectTab("authoring_failures");
+  selectedSkillId.value = null;
+  void row;
+}
+
+function authoringTitle(row: DataTableRow): string {
+  const skill = firstCellText(row, ["skill", "draft"]);
+  const draft = firstCellText(row, ["draft"]);
+  if (skill !== "-" && draft !== "-" && skill !== draft) return `${skillsText(skill)} · ${draft}`;
+  return skill !== "-" ? skillsText(skill) : draft;
+}
+
+function authoringMeta(row: DataTableRow): string {
+  const intent = firstCellText(row, ["intent", "event"]);
+  const next = firstCellText(row, ["next_step", "error", "validation"]);
+  return [intent, next].filter((value) => value && value !== "-").map(skillsText).join(" / ") || "-";
+}
+
+function authoringStatus(row: DataTableRow): string {
+  const value = firstCellText(row, ["status", "readiness", "validation"]);
+  return value !== "-" ? skillsText(value) : "-";
+}
+
+function authoringTone(row: DataTableRow): UiTone {
+  const value = firstCellText(row, ["status", "readiness", "validation", "event"]).toLowerCase();
+  if (/error|fail|invalid|blocked/.test(value)) return "danger";
+  if (/draft|pending|setup|warning/.test(value)) return "warning";
+  if (/ready|valid|validated|success|applied/.test(value)) return "success";
+  return "neutral";
+}
+
 function cellValueText(value: unknown): string {
   if (value === null || value === undefined || value === "") return "-";
   if (typeof value === "object" && value !== null && "text" in value) {
@@ -336,9 +401,9 @@ function canRunImportAction(action: UiRuntimeAction) {
 
 async function runImportAction(action: UiRuntimeAction) {
   if (!canRunImportAction(action)) return;
-  const sourcePath = promptSkillPath(action);
-  if (!sourcePath) return;
-  if (action.requires_confirmation && !window.confirm(t("operations.skills.action.installConfirm", { path: sourcePath }))) {
+  const sourcePath = action.id === "sync_skill_catalog" ? "" : promptSkillPath(action);
+  if (action.id !== "sync_skill_catalog" && !sourcePath) return;
+  if (action.requires_confirmation && !window.confirm(t("operations.skills.action.installConfirm", { path: sourcePath ?? "" }))) {
     return;
   }
 
@@ -347,10 +412,13 @@ async function runImportAction(action: UiRuntimeAction) {
   loadError.value = null;
   try {
     if (action.id === "validate_skill_package") {
-      const result = await validateSkillPackage(sourcePath);
+      const result = await validateSkillPackage(sourcePath ?? "");
       actionNotice.value = t("operations.skills.action.validateNotice", { skill: result.name });
+    } else if (action.id === "sync_skill_catalog") {
+      const result = await syncSkillCatalog();
+      actionNotice.value = t("operations.skills.action.syncNotice", { count: String(result.synced_count) });
     } else if (action.id === "install_global_skill") {
-      const result = await installGlobalSkill(sourcePath);
+      const result = await installGlobalSkill(sourcePath ?? "");
       actionNotice.value = t("operations.skills.action.installNotice", {
         skill: result.skill.name,
         path: result.target_path,
@@ -401,7 +469,7 @@ function skillsText(value: string | null | undefined): string {
   if (key) return t(key);
   if (value === "requirements currently satisfied") return t("operations.skills.delta.ready");
   if (value === "required tools or access not ready") return t("operations.skills.delta.missing");
-  if (value === "auth, secrets, credential files") return t("operations.skills.delta.access");
+  if (value === "required access declarations") return t("operations.skills.delta.access");
   if (value === "Skill packages are queryable") return t("operations.skills.delta.queryable");
   if (value === "Some skill requirements need setup") return t("operations.skills.delta.attention");
   if (value === "Skill manager is not connected") return t("operations.skills.delta.disconnected");
@@ -581,6 +649,32 @@ onUnmounted(() => {
         </div>
         <p v-if="!missingCapabilities.rows.length" class="panel-empty">{{ emptyState(missingCapabilities) }}</p>
       </article>
+
+      <article class="authoring-panel">
+        <div class="panel-heading">
+          <h3>{{ t("operations.skills.section.authoring") }}</h3>
+          <a href="/operations/skills?tab=authoring" @click.prevent="selectTab('authoring')">{{ t("common.viewAll") }}</a>
+        </div>
+        <div v-if="authoringPreviewRows.length" class="status-preview-list">
+          <button
+            v-for="(row, index) in authoringPreviewRows"
+            :key="rowId(row) ?? `${authoringTitle(row)}-${index}`"
+            type="button"
+            class="status-preview-row"
+            @click="openAuthoring(row)"
+          >
+            <span class="status-preview-copy">
+              <strong :title="authoringTitle(row)">{{ authoringTitle(row) }}</strong>
+              <small :title="authoringMeta(row)">{{ authoringMeta(row) }}</small>
+            </span>
+            <span :class="`status-preview-pill status-preview-pill--${authoringTone(row)}`">
+              {{ authoringStatus(row) }}
+            </span>
+          </button>
+          <p v-if="authoringPreviewOverflow" class="status-preview-more">+{{ authoringPreviewOverflow }} {{ t("common.more") }}</p>
+        </div>
+        <p v-if="!authoringBacklog.rows.length" class="panel-empty">{{ emptyState(authoringBacklog) }}</p>
+      </article>
     </section>
 
     <nav class="skills-tabs">
@@ -634,6 +728,22 @@ onUnmounted(() => {
           </div>
           <DataTable :columns="requirementFootprintPreview.columns" :rows="requirementFootprintPreview.rows" section-id="requirement-footprint" :page-size="5" :clickable-rows="true" @row-click="selectRow" />
           <p v-if="!requirementFootprint.rows.length" class="panel-empty">{{ emptyState(requirementFootprint) }}</p>
+        </article>
+
+        <article class="authoring-failures-panel">
+          <div class="panel-heading">
+            <h3>{{ sectionTitle(authoringFailures) }}</h3>
+            <a href="/operations/skills?tab=authoring_failures" @click.prevent="selectTab('authoring_failures')">{{ t("common.viewAll") }}</a>
+          </div>
+          <DataTable
+            :columns="authoringFailures.columns"
+            :rows="authoringFailures.rows"
+            section-id="skill-authoring-failures"
+            :page-size="4"
+            :clickable-rows="true"
+            @row-click="openAuthoringFailure"
+          />
+          <p v-if="!authoringFailures.rows.length" class="panel-empty">{{ emptyState(authoringFailures) }}</p>
         </article>
 
         <article class="import-panel">
@@ -914,7 +1024,7 @@ h4 {
 
 .skills-status-strip {
   display: grid;
-  grid-template-columns: minmax(250px, 0.82fr) minmax(260px, 0.88fr) minmax(410px, 1.3fr);
+  grid-template-columns: minmax(220px, 0.76fr) minmax(220px, 0.76fr) minmax(330px, 1.1fr) minmax(330px, 1.1fr);
   gap: 6px;
   align-items: start;
   margin-top: 6px;
@@ -928,7 +1038,8 @@ h4 {
 
 .readiness-panel,
 .source-panel,
-.missing-panel {
+.missing-panel,
+.authoring-panel {
   min-height: 118px;
   overflow: visible;
 }

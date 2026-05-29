@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
+from crxzipple.modules.tool.application.ports import ToolEventSubscriptionStreamPort
 from crxzipple.shared.domain.events import Event, named_event_topic
 
 
@@ -54,7 +54,7 @@ class ToolDispatchEventSubscriber:
 class ToolRuntimeEventService:
     """Owned event pump for tool lifecycle reactions."""
 
-    events_service: EventsApplicationService
+    events_service: ToolEventSubscriptionStreamPort
     dispatch_subscriber: ToolDispatchEventSubscriber
     subscription_id: str = "tool.runtime.dispatch-recovery"
     source_topic: str = named_event_topic("dispatch.task.recovered")

@@ -1,5 +1,56 @@
 kind: local_package
 namespace: openai_image
+capabilities:
+  - credential.read
+  - access.readiness
+  - artifact.read
+  - artifact.write
+  - bounded_network.http
+dependencies:
+  - id: credential_provider
+    kind: service_dependency
+    description: Access credential provider used to resolve the OpenAI API key binding.
+  - id: artifact_service
+    kind: optional_dependency
+    description: Artifact service used by image edit inputs.
+  - id: openai_image_http_client_factory
+    kind: optional_dependency
+    description: Test/runtime HTTP client factory override for OpenAI image requests.
+    metadata:
+      source: config
+  - id: openai_image_base_url
+    kind: optional_dependency
+    description: Optional OpenAI image base URL override.
+    metadata:
+      source: config
+  - id: openai_image_timeout_seconds
+    kind: optional_dependency
+    description: Optional OpenAI image timeout override.
+    metadata:
+      source: config
+provider_backends:
+  - id: openai_image.default
+    capability: image_generation
+    display_name: OpenAI Images
+    runtime_kind: local
+    runtime_ref: openai_image_generate
+    priority: 10
+    credential_requirements:
+      - requirement_set_id: openai_image.backend.credentials
+        requirements:
+          - requirement_id: openai_image.backend.openai_api_key
+            slot: openai_api_key
+            expected_kind: api_key
+            binding_id: openai-api-key
+            provider: openai
+            transport: runtime_context
+            setup_flow_hint:
+              flow_kind: manual
+              provider: openai
+    metadata:
+      stable_functions:
+        - openai_image_generate
+        - openai_image_edit
 local_tools:
   - id: openai_image_generate
     name: OpenAI Image Generate
@@ -50,7 +101,19 @@ local_tools:
     required_effect_ids:
       - remote_tool_execution
     access_requirements:
-      - env:OPENAI_API_KEY
+      - openai-api-key
+    credential_requirements:
+      - requirement_set_id: openai_image_generate.credentials
+        requirements:
+          - requirement_id: openai_image_generate.openai_api_key
+            slot: openai_api_key
+            expected_kind: api_key
+            binding_id: openai-api-key
+            provider: openai
+            transport: runtime_context
+            setup_flow_hint:
+              flow_kind: manual
+              provider: openai
     mutates_state: false
     timeout_seconds: 300
     supported_modes:
@@ -131,7 +194,19 @@ local_tools:
       - remote_tool_execution
       - sensitive_operation_confirmation
     access_requirements:
-      - env:OPENAI_API_KEY
+      - openai-api-key
+    credential_requirements:
+      - requirement_set_id: openai_image_edit.credentials
+        requirements:
+          - requirement_id: openai_image_edit.openai_api_key
+            slot: openai_api_key
+            expected_kind: api_key
+            binding_id: openai-api-key
+            provider: openai
+            transport: runtime_context
+            setup_flow_hint:
+              flow_kind: manual
+              provider: openai
     mutates_state: false
     timeout_seconds: 300
     supported_modes:

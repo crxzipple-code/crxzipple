@@ -12,6 +12,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
@@ -63,6 +64,7 @@ def profile_from_agent_home_config_payload(
     llm_payload = _section_payload(payload, "llm_routing_policy")
     execution_payload = _section_payload(payload, "execution_policy")
     runtime_payload = _section_payload(payload, "runtime_preferences")
+    memory_payload = _memory_payload(payload, runtime_payload)
 
     if not instruction_payload and _optional_text(payload.get("system_prompt")) is not None:
         instruction_payload = {
@@ -94,9 +96,6 @@ def profile_from_agent_home_config_payload(
             "workdir": _optional_text(payload.get("workdir")),
             "workspace": _optional_text(payload.get("workspace")),
             "sandbox_mode": _optional_text(payload.get("sandbox_mode")),
-            "memory_retrieval_backend": _optional_text(
-                payload.get("memory_retrieval_backend"),
-            ),
             "attrs": (
                 dict(payload["attrs"])
                 if isinstance(payload.get("attrs"), dict)
@@ -109,10 +108,6 @@ def profile_from_agent_home_config_payload(
             "workdir": _optional_text(runtime_payload.get("workdir")),
             "workspace": _optional_text(runtime_payload.get("workspace")),
             "sandbox_mode": _optional_text(runtime_payload.get("sandbox_mode")),
-            "memory_retrieval_backend": (
-                _optional_text(runtime_payload.get("memory_retrieval_backend"))
-                or _optional_text(payload.get("memory_retrieval_backend"))
-            ),
             "attrs": (
                 dict(runtime_payload["attrs"])
                 if isinstance(runtime_payload.get("attrs"), dict)
@@ -124,13 +119,13 @@ def profile_from_agent_home_config_payload(
     return AgentProfile(
         id=profile_id,
         name=_optional_text(payload.get("name")) or profile_id,
-        description=_optional_text(payload.get("description")) or "",
         enabled=bool(payload.get("enabled", True)),
         identity=AgentIdentity.from_payload(identity_payload),
         instruction_policy=AgentInstructionPolicy.from_payload(instruction_payload),
         llm_routing_policy=AgentLlmRoutingPolicy.from_payload(llm_payload),
         execution_policy=AgentExecutionPolicy.from_payload(execution_payload),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
+        memory=AgentMemoryBinding.from_payload(memory_payload),
         created_at=created_at,
         updated_at=updated_at,
     )
@@ -152,6 +147,8 @@ def apply_agent_home_config_payload(
     instruction_payload = _section_payload(payload, "instruction_policy")
     llm_payload = _section_payload(payload, "llm_routing_policy")
     execution_payload = _section_payload(payload, "execution_policy")
+    raw_runtime_payload = _section_payload(payload, "runtime_preferences")
+    memory_payload = _memory_payload(payload, raw_runtime_payload)
     runtime_payload = _merge_runtime_payload(
         profile,
         payload,
@@ -168,11 +165,6 @@ def apply_agent_home_config_payload(
 
     profile.apply_updates(
         name=_optional_text(payload.get("name")) or profile.name,
-        description=(
-            _optional_text(payload.get("description"))
-            if payload.get("description") is not None
-            else profile.description
-        ),
         enabled=bool(payload.get("enabled", profile.enabled)),
         identity=(
             AgentIdentity.from_payload(identity_payload)
@@ -195,6 +187,11 @@ def apply_agent_home_config_payload(
             else profile.execution_policy
         ),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
+        memory=(
+            AgentMemoryBinding.from_payload(memory_payload)
+            if memory_payload
+            else profile.memory
+        ),
     )
     profile.created_at, profile.updated_at = _profile_timestamps(
         payload,
@@ -218,15 +215,10 @@ def build_agent_home_config_payload(
         runtime_payload["workspace"] = profile.runtime_preferences.workspace
     if profile.runtime_preferences.sandbox_mode is not None:
         runtime_payload["sandbox_mode"] = profile.runtime_preferences.sandbox_mode
-    if profile.runtime_preferences.memory_retrieval_backend is not None:
-        runtime_payload["memory_retrieval_backend"] = (
-            profile.runtime_preferences.memory_retrieval_backend
-        )
 
     return {
         "id": profile.id,
         "name": profile.name,
-        "description": profile.description,
         "enabled": profile.enabled,
         "created_at": format_datetime_utc(profile.created_at),
         "updated_at": format_datetime_utc(profile.updated_at),
@@ -235,6 +227,7 @@ def build_agent_home_config_payload(
         "llm_routing_policy": profile.llm_routing_policy.to_payload(),
         "execution_policy": profile.execution_policy.to_payload(),
         "runtime_preferences": runtime_payload,
+        "memory": profile.memory.to_payload(),
     }
 
 
@@ -276,14 +269,17 @@ def _merge_runtime_payload(
             or _optional_text(payload.get("sandbox_mode"))
             or profile.runtime_preferences.sandbox_mode
         ),
-        "memory_retrieval_backend": (
-            _optional_text(runtime_payload.get("memory_retrieval_backend"))
-            or _optional_text(payload.get("memory_retrieval_backend"))
-            or profile.runtime_preferences.memory_retrieval_backend
-        ),
         "attrs": merged_attrs,
     }
     return merged
+
+
+def _memory_payload(
+    payload: dict[str, Any],
+    runtime_payload: dict[str, Any],
+) -> dict[str, Any]:
+    del runtime_payload
+    return _section_payload(payload, "memory")
 
 
 def _optional_text(value: object) -> str | None:

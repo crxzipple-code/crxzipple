@@ -7,17 +7,18 @@ from typing import TYPE_CHECKING, Callable
 
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.dispatch.application import dispatch_wakeup_topic
-from crxzipple.modules.events import Event, EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
-from crxzipple.modules.orchestration.application.lane import session_lane_key
+from crxzipple.modules.orchestration.application.ingress_processing import (
+    fail_assignment_input_from_ingress_error,
+    process_ingress_request,
+)
+from crxzipple.modules.orchestration.application.ports import EventBusPort
 from crxzipple.modules.orchestration.application.worker import (
     orchestration_executor_assignment_requested_topic,
 )
 from crxzipple.modules.orchestration.domain import (
-    OrchestrationBoundSessionTarget,
     OrchestrationExecutorLease,
     OrchestrationIngressRequest,
-    OrchestrationIngressRequestKind,
     OrchestrationRun,
     OrchestrationSchedulerSignal,
     OrchestrationSchedulerSignalKind,
@@ -25,12 +26,7 @@ from crxzipple.modules.orchestration.domain import (
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationValidationError,
 )
-from crxzipple.modules.session.domain import (
-    DirectSessionScope,
-    SessionResetPolicy,
-    SessionRouteContext,
-)
-from crxzipple.shared.domain.events import named_event_topic
+from crxzipple.shared.domain.events import Event, named_event_topic
 
 if TYPE_CHECKING:
     from crxzipple.modules.orchestration.application.commands import (
@@ -42,12 +38,6 @@ if TYPE_CHECKING:
         ResumeOrchestrationRunInput,
         SubmitBoundOrchestrationTurnInput,
         SubmitOrchestrationTurnInput,
-    )
-    from crxzipple.modules.orchestration.application.intake_commands import (
-        BindSessionInput,
-        EnqueueOrchestrationRunInput,
-        PrepareSessionRunInput,
-        RouteOrchestrationRunInput,
     )
     from crxzipple.modules.orchestration.application.ports.runtime import (
         OrchestrationSchedulerIntakePort,
@@ -99,7 +89,7 @@ class OrchestrationSchedulerService:
     ]
     resume_run_fn: Callable[["ResumeOrchestrationRunInput"], OrchestrationRun]
     fail_assignment_fn: Callable[["FailAssignmentInput"], OrchestrationRun]
-    events_service: EventsApplicationService | None = None
+    events_service: EventBusPort | None = None
     on_run_enqueued: Callable[[OrchestrationRun], None] | None = None
     runtime_event_service: "OrchestrationRuntimeEventService | None" = None
 
@@ -427,87 +417,27 @@ class OrchestrationSchedulerService:
         *,
         worker_id: str,
     ) -> OrchestrationRun | None:
-        if request is None:
-            return None
-        try:
-            run = self._prepare_and_enqueue_request(request)
-            self.ingress_coordinator.complete_request(request.id)
-            if self.on_run_enqueued is not None:
-                try:
-                    self.on_run_enqueued(run)
-                except Exception:
-                    logger.exception(
-                        "orchestration scheduler run-enqueued callback failed",
-                        extra={
-                            "request_kind": request.kind.value,
-                            "request_id": request.id,
-                            "run_id": run.id,
-                        },
-                    )
-            return run
-        except Exception as exc:
-            self.ingress_coordinator.fail_request(
-                request.id,
-                message=str(exc) or type(exc).__name__,
-                code=_exception_code(exc, default="ingress_prepare_failed"),
-                details={
-                    "run_id": request.run_id,
-                    "request_kind": request.kind.value,
-                    **_exception_details(exc),
-                },
-            )
-            try:
-                failure = self._fail_input(
-                    request,
-                    worker_id=worker_id,
-                    exc=exc,
-                )
-                self.fail_assignment_fn(failure)
-            except Exception:
-                logger.exception(
-                    "failed to mark ingress-backed run as failed",
-                    extra={
-                        "request_kind": request.kind.value,
-                        "request_id": request.id,
-                        "run_id": request.run_id,
-                    },
-                )
-            raise
+        return process_ingress_request(
+            request,
+            worker_id=worker_id,
+            ingress_coordinator=self.ingress_coordinator,
+            intake_port=self.intake_port,
+            fail_run=self._fail_ingress_backed_run,
+            on_run_enqueued=self.on_run_enqueued,
+        )
 
-    def _prepare_and_enqueue_request(
+    def _fail_ingress_backed_run(
         self,
         request: OrchestrationIngressRequest,
-    ) -> OrchestrationRun:
-        if request.kind is OrchestrationIngressRequestKind.ROUTED_TURN:
-            prepared = self.intake_port.prepare_session_run(
-                self._prepare_input(request),
-            )
-            return self.intake_port.enqueue(
-                self._enqueue_input(request, run_id=prepared.id),
-            )
-        if request.kind is OrchestrationIngressRequestKind.BOUND_TURN:
-            bound_target = self._ingress_bound_target(request)
-            routed = self.intake_port.route(
-                self._route_bound_request_input(
-                    request=request,
-                    bound_target=bound_target,
-                ),
-            )
-            bound = self.intake_port.bind_session(
-                self._bind_bound_request_input(
-                    run_id=routed.id,
-                    active_session_id=bound_target.active_session_id,
-                ),
-            )
-            return self.intake_port.enqueue(
-                self._enqueue_bound_request_input(
-                    request=request,
-                    bound_target=bound_target,
-                    run_id=bound.id,
-                ),
-            )
-        raise OrchestrationValidationError(
-            f"Unsupported orchestration ingress request kind '{request.kind.value}'.",
+        worker_id: str,
+        exc: Exception,
+    ) -> None:
+        self.fail_assignment_fn(
+            fail_assignment_input_from_ingress_error(
+                request,
+                worker_id=worker_id,
+                exc=exc,
+            ),
         )
 
     def _process_signal(
@@ -567,221 +497,3 @@ class OrchestrationSchedulerService:
                 },
             ),
         )
-
-    @staticmethod
-    def _prepare_input(
-        request: OrchestrationIngressRequest,
-    ) -> "PrepareSessionRunInput":
-        from crxzipple.modules.orchestration.application.intake_commands import (
-            PrepareSessionRunInput,
-        )
-
-        if request.kind is not OrchestrationIngressRequestKind.ROUTED_TURN:
-            raise OrchestrationValidationError(
-                f"Request '{request.id}' is not a routed-turn ingress request.",
-            )
-        return PrepareSessionRunInput(
-            run_id=request.run_id,
-            context=OrchestrationSchedulerService._ingress_route_context(request),
-            requested_llm_id=request.requested_llm_id,
-            ensure=request.ensure_session,
-            touch_activity=request.touch_activity,
-            reset_policy=OrchestrationSchedulerService._ingress_reset_policy(request),
-            priority=request.priority,
-            metadata=dict(request.prepare_metadata),
-        )
-
-    @staticmethod
-    def _enqueue_input(
-        request: OrchestrationIngressRequest,
-        *,
-        run_id: str,
-    ) -> "EnqueueOrchestrationRunInput":
-        from crxzipple.modules.orchestration.application.intake_commands import (
-            EnqueueOrchestrationRunInput,
-        )
-
-        return EnqueueOrchestrationRunInput(
-            run_id=run_id,
-            queue_policy=request.queue_policy,
-            priority=request.priority,
-        )
-
-    @staticmethod
-    def _route_bound_request_input(
-        *,
-        request: OrchestrationIngressRequest,
-        bound_target: OrchestrationBoundSessionTarget,
-    ) -> "RouteOrchestrationRunInput":
-        from crxzipple.modules.orchestration.application.intake_commands import (
-            RouteOrchestrationRunInput,
-        )
-
-        return RouteOrchestrationRunInput(
-            run_id=request.run_id,
-            agent_id=bound_target.agent_id,
-            session_key=bound_target.session_key,
-            lane_key=OrchestrationSchedulerService._bound_lane_key(
-                session_key=bound_target.session_key,
-                lane_key=bound_target.lane_key,
-            ),
-            priority=request.priority,
-            metadata=OrchestrationSchedulerService._bound_request_metadata(
-                request=request,
-                session_key=bound_target.session_key,
-            ),
-        )
-
-    @staticmethod
-    def _bind_bound_request_input(
-        *,
-        run_id: str,
-        active_session_id: str,
-    ) -> "BindSessionInput":
-        from crxzipple.modules.orchestration.application.intake_commands import (
-            BindSessionInput,
-        )
-
-        return BindSessionInput(
-            run_id=run_id,
-            active_session_id=active_session_id,
-        )
-
-    @staticmethod
-    def _enqueue_bound_request_input(
-        *,
-        request: OrchestrationIngressRequest,
-        bound_target: OrchestrationBoundSessionTarget,
-        run_id: str,
-    ) -> "EnqueueOrchestrationRunInput":
-        from crxzipple.modules.orchestration.application.intake_commands import (
-            EnqueueOrchestrationRunInput,
-        )
-
-        return EnqueueOrchestrationRunInput(
-            run_id=run_id,
-            lane_key=OrchestrationSchedulerService._bound_lane_key(
-                session_key=bound_target.session_key,
-                lane_key=bound_target.lane_key,
-            ),
-            queue_policy=request.queue_policy,
-            priority=request.priority,
-        )
-
-    @staticmethod
-    def _bound_request_metadata(
-        *,
-        request: OrchestrationIngressRequest,
-        session_key: str,
-    ) -> dict[str, object]:
-        metadata = {
-            "session_key": session_key,
-            **dict(request.prepare_metadata),
-        }
-        requested_llm_id = (
-            request.requested_llm_id.strip()
-            if isinstance(request.requested_llm_id, str)
-            and request.requested_llm_id.strip()
-            else None
-        )
-        if requested_llm_id is not None:
-            metadata.setdefault("requested_llm_id", requested_llm_id)
-        return metadata
-
-    @staticmethod
-    def _bound_lane_key(*, session_key: str, lane_key: str | None) -> str:
-        if isinstance(lane_key, str) and lane_key.strip():
-            return lane_key.strip()
-        return session_lane_key(session_key)
-
-    @staticmethod
-    def _ingress_bound_target(
-        request: OrchestrationIngressRequest,
-    ) -> OrchestrationBoundSessionTarget:
-        bound_target = request.bound_session_target
-        if bound_target is None:
-            raise OrchestrationValidationError(
-                f"Missing bound session target for ingress request '{request.id}'.",
-            )
-        return bound_target
-
-    @staticmethod
-    def _fail_input(
-        request: OrchestrationIngressRequest,
-        *,
-        worker_id: str,
-        exc: Exception,
-    ) -> "FailAssignmentInput":
-        from crxzipple.modules.orchestration.application.commands import (
-            FailAssignmentInput,
-        )
-
-        message = str(exc) or type(exc).__name__
-        return FailAssignmentInput(
-            run_id=request.run_id,
-            worker_id=worker_id,
-            message=message,
-            code=_exception_code(exc, default="ingress_prepare_failed"),
-            details={
-                "request_id": request.id,
-                **_exception_details(exc),
-            },
-        )
-
-    @staticmethod
-    def _ingress_route_context(request: OrchestrationIngressRequest) -> SessionRouteContext:
-        if request.kind is not OrchestrationIngressRequestKind.ROUTED_TURN:
-            raise OrchestrationValidationError(
-                f"Request '{request.id}' does not carry a route context.",
-            )
-        payload = dict(request.route_context_payload)
-        direct_scope = payload.get("direct_scope")
-        if direct_scope is not None:
-            payload["direct_scope"] = (
-                direct_scope
-                if isinstance(direct_scope, DirectSessionScope)
-                else DirectSessionScope(str(direct_scope))
-            )
-        metadata = payload.get("metadata")
-        if not isinstance(metadata, dict):
-            payload["metadata"] = {}
-        try:
-            return SessionRouteContext(**payload)
-        except Exception as exc:
-            raise OrchestrationValidationError(
-                f"Invalid orchestration ingress route context for request '{request.id}'.",
-            ) from exc
-
-    @staticmethod
-    def _ingress_reset_policy(
-        request: OrchestrationIngressRequest,
-    ) -> SessionResetPolicy | None:
-        payload = request.reset_policy_payload
-        if not payload:
-            return None
-        return SessionResetPolicy(
-            idle_minutes=(
-                int(payload["idle_minutes"])
-                if payload.get("idle_minutes") is not None
-                else None
-            ),
-            daily_reset_hour_utc=(
-                int(payload["daily_reset_hour_utc"])
-                if payload.get("daily_reset_hour_utc") is not None
-                else None
-            ),
-        )
-
-
-def _exception_code(exc: Exception, *, default: str) -> str:
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and code.strip():
-        return code.strip()
-    return default
-
-
-def _exception_details(exc: Exception) -> dict[str, object]:
-    details = getattr(exc, "details", None)
-    if isinstance(details, dict):
-        return dict(details)
-    return {}

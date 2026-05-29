@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 
 JsonObject = dict[str, Any]
@@ -54,6 +54,7 @@ class AccessConsumerBindingRecord:
     enabled: bool = True
     asset_id: str | None = None
     credential_binding_id: str | None = None
+    credential_bindings: Mapping[str, str] = field(default_factory=dict)
     requirement_sets: tuple[tuple[str, ...], ...] = ()
     status: str = "active"
     redaction_policy: JsonObject = field(default_factory=dict)
@@ -86,6 +87,46 @@ class AccessConnectionProfileRecord:
     endpoint_ref: str | None = None
     credential_binding_id: str | None = None
     status: str = "active"
+    redaction_policy: JsonObject = field(default_factory=dict)
+    metadata: JsonObject = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AccessOAuthProviderRecord:
+    provider_id: str
+    display_name: str
+    provider_kind: str = "oauth2"
+    authorization_url: str | None = None
+    token_url: str | None = None
+    revocation_url: str | None = None
+    device_code_url: str | None = None
+    default_scopes: tuple[str, ...] = ()
+    client_id: str | None = None
+    client_credential_binding_id: str | None = None
+    callback_url: str | None = None
+    callback_mode: str = "manual_code"
+    status: str = "active"
+    redaction_policy: JsonObject = field(default_factory=dict)
+    metadata: JsonObject = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AccessOAuthAccountRecord:
+    account_id: str
+    provider_id: str
+    credential_binding_id: str | None
+    display_name: str | None = None
+    subject: str | None = None
+    granted_scopes: tuple[str, ...] = ()
+    expires_at: datetime | None = None
+    refresh_ready: bool = False
+    status: str = "active"
+    storage_key: str | None = None
+    masked_preview: str | None = None
     redaction_policy: JsonObject = field(default_factory=dict)
     metadata: JsonObject = field(default_factory=dict)
     created_at: datetime | None = None
@@ -170,6 +211,40 @@ class AccessGovernanceRepository(Protocol):
     ) -> AccessConsumerBindingRecord | None: ...
 
     def list_consumer_bindings(self) -> tuple[AccessConsumerBindingRecord, ...]: ...
+
+    def upsert_oauth_provider(
+        self,
+        record: AccessOAuthProviderRecord,
+    ) -> AccessOAuthProviderRecord: ...
+
+    def get_oauth_provider(self, provider_id: str) -> AccessOAuthProviderRecord | None: ...
+
+    def list_oauth_providers(self) -> tuple[AccessOAuthProviderRecord, ...]: ...
+
+    def upsert_oauth_account(
+        self,
+        record: AccessOAuthAccountRecord,
+    ) -> AccessOAuthAccountRecord: ...
+
+    def get_oauth_account(self, account_id: str) -> AccessOAuthAccountRecord | None: ...
+
+    def list_oauth_accounts(self) -> tuple[AccessOAuthAccountRecord, ...]: ...
+
+    def create_setup_session(
+        self,
+        record: AccessSetupSessionRecord,
+    ) -> AccessSetupSessionRecord: ...
+
+    def get_setup_session(self, session_id: str) -> AccessSetupSessionRecord | None: ...
+
+    def complete_setup_session(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        metadata: JsonObject | None = None,
+        completed_at: datetime | None = None,
+    ) -> AccessSetupSessionRecord: ...
 
 
 class AccessActionAuditRepository(Protocol):

@@ -84,7 +84,7 @@ class SubprocessSandboxBackend:
             "CRXZIPPLE_SANDBOX": "true",
             "PYTHONPATH": os.pathsep.join([str(self._project_root), str(self._project_src)]),
         }
-        pythonpath = os.getenv("PYTHONPATH")
+        pythonpath = getattr(os, "environ").get("PYTHONPATH")
         if pythonpath:
             env["PYTHONPATH"] = os.pathsep.join(
                 [str(self._project_root), str(self._project_src), pythonpath],

@@ -15,6 +15,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
@@ -28,7 +29,6 @@ _UNSET = object()
 class RegisterAgentProfileInput:
     id: str
     name: str
-    description: str = ""
     enabled: bool = True
     identity: AgentIdentity = field(default_factory=AgentIdentity)
     instruction_policy: AgentInstructionPolicy = field(
@@ -41,7 +41,7 @@ class RegisterAgentProfileInput:
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
     )
-    home_sidecar_files: dict[str, str] = field(default_factory=dict)
+    memory: AgentMemoryBinding = field(default_factory=AgentMemoryBinding)
     reason: str | None = None
     actor: str | None = None
 
@@ -50,13 +50,13 @@ class RegisterAgentProfileInput:
 class UpdateAgentProfileInput:
     id: str
     name: object = _UNSET
-    description: object = _UNSET
     enabled: object = _UNSET
     identity: object = _UNSET
     instruction_policy: object = _UNSET
     llm_routing_policy: object = _UNSET
     execution_policy: object = _UNSET
     runtime_preferences: object = _UNSET
+    memory: object = _UNSET
     reason: str | None = None
     actor: str | None = None
 
@@ -176,9 +176,6 @@ class AgentApplicationService:
         home_registry_resolver: Callable[[str, str], str | None] | None = None,
         home_registry_writer: Callable[[str, str, str], Any] | None = None,
         home_registry_remover: Callable[[str, str], Any] | None = None,
-        home_sidecar_factory: (
-            Callable[[dict[str, object], str], dict[str, str]] | None
-        ) = None,
         home_file_reader: Callable[[str], tuple[Any, ...]] | None = None,
         home_file_writer: Callable[[str, dict[str, str]], tuple[Any, ...]] | None = None,
     ) -> None:
@@ -194,7 +191,6 @@ class AgentApplicationService:
         self.home_registry_resolver = home_registry_resolver
         self.home_registry_writer = home_registry_writer
         self.home_registry_remover = home_registry_remover
-        self.home_sidecar_factory = home_sidecar_factory
         self.home_file_reader = home_file_reader
         self.home_file_writer = home_file_writer
 
@@ -208,7 +204,6 @@ class AgentApplicationService:
             profile = AgentProfile(
                 id=data.id,
                 name=data.name,
-                description=data.description,
                 enabled=data.enabled,
                 identity=data.identity,
                 instruction_policy=data.instruction_policy,
@@ -218,6 +213,7 @@ class AgentApplicationService:
                     data.id,
                     data.runtime_preferences,
                 ),
+                memory=data.memory,
             )
             profile.record_event(
                 Event(
@@ -232,7 +228,6 @@ class AgentApplicationService:
             self._persist_profile_state_and_home(
                 uow,
                 profile,
-                home_sidecar_files=data.home_sidecar_files,
             )
             uow.commit()
             return profile
@@ -253,7 +248,6 @@ class AgentApplicationService:
                 profile_kwargs: dict[str, object] = {
                     "id": data.id,
                     "name": data.name,
-                    "description": data.description,
                     "enabled": data.enabled,
                     "identity": data.identity,
                     "instruction_policy": data.instruction_policy,
@@ -263,6 +257,7 @@ class AgentApplicationService:
                         data.id,
                         data.runtime_preferences,
                     ),
+                    "memory": data.memory,
                 }
                 if existing is not None:
                     profile_kwargs["created_at"] = existing.created_at
@@ -284,13 +279,7 @@ class AgentApplicationService:
                 self._persist_profile_state_and_home(
                     uow,
                     profile,
-                    home_sidecar_files=data.home_sidecar_files,
                     write_home=write_home,
-                    source_home_dir=(
-                        existing.runtime_preferences.resolved_home_dir
-                        if existing is not None
-                        else None
-                    ),
                 )
                 synced_profiles.append(profile)
 
@@ -304,12 +293,8 @@ class AgentApplicationService:
                 raise AgentNotFoundError(
                     f"Agent profile '{data.id}' was not found.",
                 )
-            previous_home_dir = profile.runtime_preferences.resolved_home_dir
             profile.apply_updates(
                 name=data.name if data.name is not _UNSET else None,
-                description=(
-                    data.description if data.description is not _UNSET else None
-                ),
                 enabled=data.enabled if data.enabled is not _UNSET else None,
                 identity=data.identity if data.identity is not _UNSET else None,
                 instruction_policy=(
@@ -332,6 +317,7 @@ class AgentApplicationService:
                     if data.runtime_preferences is not _UNSET
                     else None
                 ),
+                memory=data.memory if data.memory is not _UNSET else None,
                 reason=data.reason,
                 actor=data.actor,
             )
@@ -339,7 +325,6 @@ class AgentApplicationService:
             self._persist_profile_state_and_home(
                 uow,
                 profile,
-                source_home_dir=previous_home_dir,
             )
             uow.commit()
             return profile
@@ -463,9 +448,6 @@ class AgentApplicationService:
                     home_dir=target_home_dir,
                     workdir=resolved_workdir,
                     sandbox_mode=previous_runtime_preferences.sandbox_mode,
-                    memory_retrieval_backend=(
-                        previous_runtime_preferences.memory_retrieval_backend
-                    ),
                     attrs=dict(previous_runtime_preferences.attrs),
                 ),
             )
@@ -476,7 +458,6 @@ class AgentApplicationService:
             self._persist_profile_state_and_home(
                 uow,
                 profile,
-                source_home_dir=previous_runtime_preferences.resolved_home_dir,
             )
             uow.commit()
             return MigrateAgentHomeResult(
@@ -511,10 +492,6 @@ class AgentApplicationService:
             self._persist_profile_state_and_home(
                 uow,
                 updated_profile,
-                home_sidecar_files=self._build_home_sidecar_files(
-                    payload,
-                    home_dir=home_dir,
-                ),
             )
             uow.commit()
             return SyncAgentHomeResult(
@@ -538,23 +515,18 @@ class AgentApplicationService:
                 profile=profile,
                 home_dir=data.home_dir,
             )
-            previous_home_dir = profile.runtime_preferences.resolved_home_dir
             if data.home_dir is not None and data.home_dir.strip():
                 profile.apply_updates(
                     runtime_preferences=AgentRuntimePreferences(
                         home_dir=home_dir,
                         workdir=profile.runtime_preferences.resolved_workdir or home_dir,
                         sandbox_mode=profile.runtime_preferences.sandbox_mode,
-                        memory_retrieval_backend=(
-                            profile.runtime_preferences.memory_retrieval_backend
-                        ),
                         attrs=dict(profile.runtime_preferences.attrs),
                     ),
                 )
             self._persist_profile_state_and_home(
                 uow,
                 profile,
-                source_home_dir=previous_home_dir,
             )
             uow.commit()
             return ExportAgentHomeResult(
@@ -586,9 +558,6 @@ class AgentApplicationService:
                     workdir=profile.runtime_preferences.resolved_workdir or home_dir,
                     workspace=profile.runtime_preferences.workspace,
                     sandbox_mode=profile.runtime_preferences.sandbox_mode,
-                    memory_retrieval_backend=(
-                        profile.runtime_preferences.memory_retrieval_backend
-                    ),
                     attrs=dict(profile.runtime_preferences.attrs),
                 ),
             )
@@ -630,7 +599,6 @@ class AgentApplicationService:
             workdir=resolved_workdir,
             workspace=runtime_preferences.workspace,
             sandbox_mode=runtime_preferences.sandbox_mode,
-            memory_retrieval_backend=runtime_preferences.memory_retrieval_backend,
             attrs=dict(runtime_preferences.attrs),
         )
 
@@ -700,8 +668,6 @@ class AgentApplicationService:
         uow: AgentUnitOfWork,
         profile: AgentProfile,
         *,
-        home_sidecar_files: dict[str, str] | None = None,
-        source_home_dir: str | None = None,
         write_home: bool | str = True,
     ) -> None:
         self._normalize_profile_runtime_preferences(profile)
@@ -716,14 +682,6 @@ class AgentApplicationService:
         if should_write_home:
             self._ensure_home_scaffold(profile)
             self._write_home_config(profile, home_dir=home_dir)
-            resolved_sidecar_files = dict(home_sidecar_files or {})
-            if (
-                not resolved_sidecar_files
-                and source_home_dir is not None
-                and not _same_home_dir(source_home_dir, home_dir)
-            ):
-                resolved_sidecar_files = self._read_home_sidecar_files(source_home_dir)
-            self._write_home_sidecars(home_dir=home_dir, files=resolved_sidecar_files)
         self._register_home(profile.id, home_dir)
         uow.collect(profile)
 
@@ -778,35 +736,6 @@ class AgentApplicationService:
             raise AgentValidationError("Agent home config writing is unavailable.")
         return self.home_config_writer(profile, home_dir)
 
-    def _write_home_sidecars(self, *, home_dir: str, files: dict[str, str]) -> Any:
-        if not files:
-            return None
-        if self.home_file_writer is None:
-            raise AgentValidationError("Agent home file writing is unavailable.")
-        try:
-            return self.home_file_writer(home_dir, files)
-        except ValueError as exc:
-            raise AgentValidationError(str(exc)) from exc
-
-    def _read_home_sidecar_files(self, home_dir: str) -> dict[str, str]:
-        if self.home_file_reader is None:
-            return {}
-        return {
-            item.name: item.content
-            for item in self.home_file_reader(home_dir)
-            if item.name.startswith(".state/") and item.exists
-        }
-
-    def _build_home_sidecar_files(
-        self,
-        payload: dict[str, object],
-        *,
-        home_dir: str,
-    ) -> dict[str, str]:
-        if self.home_sidecar_factory is None:
-            return {}
-        return dict(self.home_sidecar_factory(payload, home_dir))
-
     def _apply_home_config(
         self,
         profile: AgentProfile,
@@ -853,17 +782,6 @@ class AgentApplicationService:
             )
             for item in written_files
         )
-
-
-def _same_home_dir(first: str, second: str) -> bool:
-    try:
-        return Path(first).expanduser().resolve() == Path(second).expanduser().resolve()
-    except OSError:
-        return (
-            Path(first).expanduser().absolute()
-            == Path(second).expanduser().absolute()
-        )
-
 
 def _coerce_action_input(
     profile: str | AgentProfileActionInput,

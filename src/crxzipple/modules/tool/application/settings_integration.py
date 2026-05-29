@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from fnmatch import fnmatchcase
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from crxzipple.core.config import (
@@ -9,11 +8,7 @@ from crxzipple.core.config import (
     OpenApiCredentialBinding,
     OpenApiProviderSettings,
 )
-from crxzipple.modules.tool.application.discovery import ToolDiscoveryGateway
-from crxzipple.modules.tool.application.specifications import ToolSpec
-from crxzipple.modules.tool.domain import Tool, ToolSourceKind
 from crxzipple.shared.settings import (
-    ToolEnablementConfig,
     ToolProviderConfig,
     ToolRootConfig,
 )
@@ -21,7 +16,14 @@ from crxzipple.shared.settings import (
 
 ToolProviderConfigLike = ToolProviderConfig | Mapping[str, Any]
 ToolRootConfigLike = ToolRootConfig | Mapping[str, Any]
-ToolEnablementConfigLike = ToolEnablementConfig | Mapping[str, Any]
+
+_forbidden_openapi_credential_source_prefixes = (
+    "env:",  # forbidden direct source
+    "file:",  # forbidden direct source
+    "codex_auth_json",  # forbidden direct source
+    "codex-cli",  # forbidden direct source
+    "auth_ref",  # forbidden legacy credential field
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,114 +31,6 @@ class ToolSettingsBootstrapConfig:
     openapi_providers: tuple[OpenApiProviderSettings, ...] = ()
     mcp_providers: tuple[McpProviderSettings, ...] = ()
     local_paths: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ToolEnablementTarget:
-    tool_id: str
-    name: str
-    enabled: bool
-    source_kind: ToolSourceKind
-    provider_id: str | None = None
-    tags: tuple[str, ...] = ()
-
-
-class ToolEnablementService:
-    def __init__(
-        self,
-        configs: Iterable[ToolEnablementConfigLike] = (),
-    ) -> None:
-        self._configs = tuple(_tool_enablement_config(config) for config in configs)
-
-    @property
-    def configs(self) -> tuple[ToolEnablementConfig, ...]:
-        return self._configs
-
-    def enabled_for_target(self, target: ToolEnablementTarget) -> bool:
-        enabled = target.enabled
-        for config in self._configs:
-            if _tool_enablement_matches(config, target):
-                enabled = config.enabled
-        return enabled
-
-    def apply_to_spec(self, spec: ToolSpec) -> ToolSpec:
-        enabled = self.enabled_for_target(
-            ToolEnablementTarget(
-                tool_id=spec.id,
-                name=spec.name,
-                enabled=spec.enabled,
-                source_kind=spec.source_kind,
-                provider_id=spec.provider_name,
-                tags=spec.tags,
-            ),
-        )
-        if enabled == spec.enabled:
-            return spec
-        return replace(spec, enabled=enabled)
-
-    def apply_to_tool(self, tool: Tool, *, provider_id: str | None = None) -> Tool:
-        enabled = self.enabled_for_target(
-            ToolEnablementTarget(
-                tool_id=tool.id,
-                name=tool.name,
-                enabled=tool.enabled,
-                source_kind=tool.source_kind,
-                provider_id=provider_id,
-                tags=tool.tags,
-            ),
-        )
-        if enabled == tool.enabled:
-            return tool
-        return replace(tool, enabled=enabled)
-
-
-class ToolEnablementDiscoveryGateway:
-    def __init__(
-        self,
-        gateway: ToolDiscoveryGateway,
-        enablement: ToolEnablementService,
-    ) -> None:
-        self._gateway = gateway
-        self._enablement = enablement
-
-    def list_providers(self):
-        return self._gateway.list_providers()
-
-    def discover(self, *, provider_name: str | None = None) -> list[ToolSpec]:
-        return [
-            self._enablement.apply_to_spec(spec)
-            for spec in self._gateway.discover(provider_name=provider_name)
-        ]
-
-
-class ToolEnablementRuntimeGateway:
-    def __init__(
-        self,
-        gateway: object,
-        enablement: ToolEnablementService,
-    ) -> None:
-        self._gateway = gateway
-        self._enablement = enablement
-
-    def list_local_tools(self) -> list[Tool]:
-        return [
-            self._enablement.apply_to_tool(tool)
-            for tool in self._gateway.list_local_tools()
-        ]
-
-    async def execute(
-        self,
-        tool: Tool,
-        target: object,
-        arguments: dict[str, Any],
-        execution_context: object | None = None,
-    ) -> Any:
-        return await self._gateway.execute(
-            tool,
-            target,
-            arguments,
-            execution_context=execution_context,
-        )
 
 
 def tool_settings_bootstrap_config_from_settings(
@@ -213,6 +107,9 @@ def openapi_provider_settings_from_config(
         default_effect_ids=_string_tuple(
             _lookup_configured_value(config, "default_effect_ids"),
         ),
+        runtime_requirements=_string_tuple(
+            _lookup_configured_value(config, "runtime_requirements"),
+        ),
     )
 
 
@@ -220,9 +117,18 @@ def mcp_provider_settings_from_config(
     config: ToolProviderConfigLike,
 ) -> McpProviderSettings:
     provider_name = _provider_name(config)
+    transport = str(_lookup_configured_value(config, "transport") or "stdio").strip().lower()
     return McpProviderSettings(
         name=provider_name,
-        command=_command_parts_from_config(config, provider_name=provider_name),
+        command=_command_parts_from_config(
+            config,
+            provider_name=provider_name,
+            required=transport == "stdio",
+        ),
+        transport=transport,
+        endpoint_url=_optional_text(
+            _lookup_configured_value(config, "endpoint_url", "url"),
+        ),
         description=_optional_text(
             _lookup(config, "description", "display_name"),
         )
@@ -249,17 +155,13 @@ def _openapi_credential_bindings_from_config(
 ) -> tuple[OpenApiCredentialBinding, ...]:
     raw = _lookup(config, "credential_bindings", "credentials")
     if raw in (None, {}):
-        credential_binding = _optional_text(
-            _lookup(config, "credential_binding", "credential_binding_ref"),
-        )
-        if credential_binding is None:
-            return ()
-        return (
-            OpenApiCredentialBinding(
-                scheme_name="default",
-                source=credential_binding,
-            ),
-        )
+        for field_name in ("credential_binding", "credential_binding_ref"):
+            if _lookup(config, field_name) is not None:
+                raise ValueError(
+                    f"OpenAPI provider '{provider_name}' must use credential_bindings; "
+                    f"field '{field_name}' is no longer accepted.",
+                )
+        return ()
     if isinstance(raw, list | tuple):
         bindings: list[OpenApiCredentialBinding] = []
         for index, item in enumerate(raw):
@@ -274,17 +176,29 @@ def _openapi_credential_bindings_from_config(
                     f"credential_bindings[{index}].scheme_name"
                 ),
             )
+            _reject_legacy_credential_fields(
+                item,
+                provider_name=provider_name,
+                scheme_name=scheme_name,
+            )
             bindings.append(
                 OpenApiCredentialBinding(
                     scheme_name=scheme_name,
-                    source=_optional_text(item.get("source")),
-                    username_source=_optional_text(
-                        item.get("username_source") or item.get("username"),
-                    ),
-                    password_source=_optional_text(
-                        item.get("password_source") or item.get("password"),
-                    ),
+                    credential_binding_id=_optional_text(item.get("credential_binding_id")),
+                    username_binding_id=_optional_text(item.get("username_binding_id")),
+                    password_binding_id=_optional_text(item.get("password_binding_id")),
                 ),
+            )
+            _validate_openapi_credential_binding(
+                bindings[-1],
+                raw=item,
+                provider_name=provider_name,
+                scheme_name=scheme_name,
+            )
+            _ensure_openapi_credential_binding(
+                bindings[-1],
+                provider_name=provider_name,
+                scheme_name=scheme_name,
             )
         return tuple(bindings)
     if not isinstance(raw, Mapping):
@@ -299,16 +213,23 @@ def _openapi_credential_bindings_from_config(
             field_name=f"OpenAPI provider '{provider_name}' credential scheme",
         )
         if isinstance(value, str):
+            credential_binding_id = _required_text(
+                value,
+                field_name=(
+                    f"OpenAPI provider '{provider_name}' credential "
+                    f"'{normalized_scheme_name}'"
+                ),
+            )
+            _reject_direct_credential_source(
+                credential_binding_id,
+                provider_name=provider_name,
+                scheme_name=normalized_scheme_name,
+                field_name="credential_binding_id",
+            )
             bindings.append(
                 OpenApiCredentialBinding(
                     scheme_name=normalized_scheme_name,
-                    source=_required_text(
-                        value,
-                        field_name=(
-                            f"OpenAPI provider '{provider_name}' credential "
-                            f"'{normalized_scheme_name}'"
-                        ),
-                    ),
+                    credential_binding_id=credential_binding_id,
                 ),
             )
             continue
@@ -317,33 +238,132 @@ def _openapi_credential_bindings_from_config(
                 f"OpenAPI provider '{provider_name}' credential "
                 f"'{normalized_scheme_name}' must be a string or mapping.",
             )
-        source = _optional_text(value.get("source"))
-        username_source = _optional_text(
-            value.get("username_source") or value.get("username"),
+        _reject_legacy_credential_fields(
+            value,
+            provider_name=provider_name,
+            scheme_name=normalized_scheme_name,
         )
-        password_source = _optional_text(
-            value.get("password_source") or value.get("password"),
-        )
-        if source is None and (username_source is None or password_source is None):
+        credential_binding_id = _optional_text(value.get("credential_binding_id"))
+        username_binding_id = _optional_text(value.get("username_binding_id"))
+        password_binding_id = _optional_text(value.get("password_binding_id"))
+        if (
+            credential_binding_id is None
+            and (
+                username_binding_id is None
+                or password_binding_id is None
+            )
+        ):
             raise ValueError(
                 f"OpenAPI provider '{provider_name}' credential "
-                f"'{normalized_scheme_name}' must define source or username/password.",
+                f"'{normalized_scheme_name}' must define credential_binding_id or username/password binding ids.",
             )
-        bindings.append(
-            OpenApiCredentialBinding(
-                scheme_name=normalized_scheme_name,
-                source=source,
-                username_source=username_source,
-                password_source=password_source,
-            ),
+        binding = OpenApiCredentialBinding(
+            scheme_name=normalized_scheme_name,
+            credential_binding_id=credential_binding_id,
+            username_binding_id=username_binding_id,
+            password_binding_id=password_binding_id,
         )
+        _validate_openapi_credential_binding(
+            binding,
+            raw=value,
+            provider_name=provider_name,
+            scheme_name=normalized_scheme_name,
+        )
+        bindings.append(binding)
     return tuple(bindings)
+
+
+def _validate_openapi_credential_binding(
+    binding: OpenApiCredentialBinding,
+    *,
+    raw: Mapping[str, object],
+    provider_name: str,
+    scheme_name: str,
+) -> None:
+    _reject_legacy_credential_fields(
+        raw,
+        provider_name=provider_name,
+        scheme_name=scheme_name,
+    )
+    for field_name, value in (
+        ("credential_binding_id", binding.credential_binding_id),
+        ("username_binding_id", binding.username_binding_id),
+        ("password_binding_id", binding.password_binding_id),
+    ):
+        if value is None:
+            continue
+        _reject_direct_credential_source(
+            value,
+            provider_name=provider_name,
+            scheme_name=scheme_name,
+            field_name=field_name,
+        )
+
+
+def _ensure_openapi_credential_binding(
+    binding: OpenApiCredentialBinding,
+    *,
+    provider_name: str,
+    scheme_name: str,
+) -> None:
+    if binding.credential_binding_id is not None:
+        return
+    if binding.username_binding_id is not None and binding.password_binding_id is not None:
+        return
+    raise ValueError(
+        f"OpenAPI provider '{provider_name}' credential '{scheme_name}' must define "
+        "credential_binding_id or username/password binding ids.",
+    )
+
+
+def _reject_legacy_credential_fields(
+    value: Mapping[str, object],
+    *,
+    provider_name: str,
+    scheme_name: str,
+) -> None:
+    for field_name in (
+        "source",
+        "username_source",
+        "password_source",
+        "username",
+        "password",
+        "auth_ref",  # forbidden legacy credential field
+        "credential_binding",
+        "credential_binding_ref",
+        "binding_id",
+        "username_binding",
+        "password_binding",
+    ):
+        if value.get(field_name) is not None:
+            raise ValueError(
+                f"OpenAPI provider '{provider_name}' credential "
+                f"'{scheme_name}' must use Access credential binding ids; "
+                f"field '{field_name}' is no longer accepted.",
+            )
+
+
+def _reject_direct_credential_source(
+    value: str,
+    *,
+    provider_name: str,
+    scheme_name: str,
+    field_name: str,
+) -> None:
+    normalized = value.strip()
+    if normalized.startswith(_forbidden_openapi_credential_source_prefixes):
+        raise ValueError(
+            f"OpenAPI provider '{provider_name}' credential '{scheme_name}' "
+            f"field '{field_name}' must reference an Access credential binding id, "
+            "not a direct credential source.",
+        )
 
 
 def _command_parts_from_config(
     config: ToolProviderConfigLike,
     *,
     provider_name: str,
+    required: bool = True,
 ) -> tuple[str, ...]:
     command = _lookup(config, "command")
     args = _lookup(config, "args")
@@ -352,10 +372,14 @@ def _command_parts_from_config(
     elif isinstance(command, Iterable):
         command_parts = tuple(str(part).strip() for part in command if str(part).strip())
     else:
+        if not required:
+            return ()
         raise ValueError(
             f"MCP provider '{provider_name}' must define command as a string or list.",
         )
     if not command_parts:
+        if not required:
+            return ()
         raise ValueError(f"MCP provider '{provider_name}' command cannot be empty.")
     return command_parts
 
@@ -473,53 +497,3 @@ def _dedupe_text(values: Iterable[str]) -> tuple[str, ...]:
         seen.add(normalized)
         resolved.append(normalized)
     return tuple(resolved)
-
-
-def _tool_enablement_config(config: ToolEnablementConfigLike) -> ToolEnablementConfig:
-    if isinstance(config, ToolEnablementConfig):
-        return config
-    return ToolEnablementConfig.from_payload(config)
-
-
-def _tool_enablement_matches(
-    config: ToolEnablementConfig,
-    target: ToolEnablementTarget,
-) -> bool:
-    scope = config.scope.strip().lower()
-    if scope in {"*", "all", "global"}:
-        scope_matches = True
-    elif scope in {"tool", "tools"}:
-        scope_matches = True
-    elif scope in {"provider", "provider_id"}:
-        scope_matches = (
-            config.provider_id is not None and config.provider_id == target.provider_id
-        )
-    elif scope in {"local", "local_discovery"}:
-        scope_matches = target.source_kind is ToolSourceKind.LOCAL_DISCOVERY
-    elif scope in {"remote", "remote_registry"}:
-        scope_matches = target.source_kind is ToolSourceKind.REMOTE_REGISTRY
-    else:
-        scope_matches = scope == target.source_kind.value
-    if not scope_matches:
-        return False
-
-    if config.source_kind is not None and config.source_kind != target.source_kind.value:
-        return False
-    if config.provider_id is not None and config.provider_id != target.provider_id:
-        return False
-    if config.tool_id is not None and config.tool_id != target.tool_id:
-        return False
-    if config.pattern is not None and not (
-        fnmatchcase(target.tool_id, config.pattern)
-        or fnmatchcase(target.name, config.pattern)
-    ):
-        return False
-    if (
-        config.tool_id is None
-        and config.pattern is None
-        and config.provider_id is None
-        and config.source_kind is None
-        and scope in {"tool", "tools"}
-    ):
-        return False
-    return True

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import os
 import shlex
 import signal
@@ -29,6 +30,7 @@ class ProcessSupervisor:
         working_directory: str,
         session_key: str | None = None,
         metadata: dict[str, object] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessSession:
         process_id = str(uuid4())
         session_dir = self._repository.create_session_dir(process_id)
@@ -49,6 +51,7 @@ class ProcessSupervisor:
                     stdin=subprocess.DEVNULL,
                     stdout=stdout_file,
                     stderr=stderr_file,
+                    env=_process_env(env),
                     start_new_session=True,
                 )
         except OSError as exc:
@@ -95,14 +98,14 @@ class ProcessSupervisor:
             refreshed = self._repository.refresh(self._repository.get(process_id))
             if not refreshed.is_running:
                 return refreshed
-            time.sleep(0.1)
+            time.sleep(0.02)
         _signal_process(session.pid, signal.SIGKILL)
         deadline = time.time() + 2
         while time.time() < deadline:
             refreshed = self._repository.refresh(self._repository.get(process_id))
             if not refreshed.is_running:
                 return refreshed
-            time.sleep(0.1)
+            time.sleep(0.02)
         return self._repository.refresh(self._repository.get(process_id))
 
     def close(self) -> None:
@@ -126,3 +129,15 @@ def _signal_process(pid: int, sig: signal.Signals) -> None:
         os.kill(pid, sig)
     except (ProcessLookupError, PermissionError):
         return
+
+
+def _process_env(env: Mapping[str, str] | None) -> dict[str, str] | None:
+    if not env:
+        return None
+    process_env = dict(os.environ)
+    for key, value in env.items():
+        normalized_key = str(key).strip()
+        if not normalized_key:
+            continue
+        process_env[normalized_key] = str(value)
+    return process_env

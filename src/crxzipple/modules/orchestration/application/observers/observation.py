@@ -5,9 +5,9 @@ from datetime import datetime
 from typing import Any
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.orchestration.application.ports import (
-    OrchestrationExecutorControlPort,
+    EventPublishPort,
+    OrchestrationExecutorLeaseQueryPort,
     OrchestrationRunLookupPort,
     OrchestrationRunQueryPort,
     ToolExecutionPort,
@@ -122,7 +122,7 @@ def _compact_metric_groups(
 
 @dataclass(slots=True)
 class RunObservationObserver:
-    events_service: EventsApplicationService
+    events_service: EventPublishPort
     run_lookup: OrchestrationRunLookupPort
 
     def observe_run_event(self, event: Event) -> None:
@@ -186,7 +186,7 @@ class RunObservationObserver:
 
 @dataclass(slots=True)
 class SessionMessageObservationObserver:
-    events_service: EventsApplicationService
+    events_service: EventPublishPort
 
     def observe_message_appended(self, event: Event) -> None:
         session_key = event.payload.get("session_key")
@@ -219,7 +219,7 @@ class SessionMessageObservationObserver:
 
 @dataclass(slots=True)
 class ToolRunObservationObserver:
-    events_service: EventsApplicationService
+    events_service: EventPublishPort
     run_lookup: OrchestrationRunLookupPort
     tool_execution_port: ToolExecutionPort
 
@@ -308,9 +308,9 @@ class ToolRunObservationObserver:
 
 @dataclass(slots=True)
 class RuntimeObservationObserver:
-    events_service: EventsApplicationService
+    events_service: EventPublishPort
     run_query: OrchestrationRunQueryPort
-    executor_control: OrchestrationExecutorControlPort
+    executor_lease_query: OrchestrationExecutorLeaseQueryPort
 
     def observe_runtime_event(self, event: Event) -> None:
         now = utcnow()
@@ -323,7 +323,7 @@ class RuntimeObservationObserver:
         waiting_runs = self.run_query.list_runs(
             status=OrchestrationRunStatus.WAITING,
         )
-        leases = self.executor_control.list_executor_leases(status=None)
+        leases = self.executor_lease_query.list_executor_leases(status=None)
         metric_leases = self._metric_leases(leases, now=now)
         source_event_name = event.event_name or event.name or ""
         payload = {

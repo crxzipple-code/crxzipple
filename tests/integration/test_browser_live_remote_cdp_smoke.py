@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from crxzipple.core.config import load_settings
 from crxzipple.interfaces.http.app import create_app
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness, seed_browser_state_root
 
 
@@ -216,6 +217,17 @@ def _build_handler() -> type[BaseHTTPRequestHandler]:
     return _Handler
 
 
+def _interactive_refs(snapshot_payload: dict[str, object]) -> list[dict[str, object]]:
+    value = snapshot_payload["value"]["result"]["value"]  # type: ignore[index]
+    if isinstance(value, dict):
+        refs = value.get("refs")
+        if isinstance(refs, list):
+            return [item for item in refs if isinstance(item, dict)]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
 @unittest.skipUnless(_LIVE_SMOKE_ENABLED, "remote-cdp live browser smoke test is disabled")
 class BrowserLiveRemoteCdpSmokeTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -297,7 +309,7 @@ class BrowserLiveRemoteCdpSmokeTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
-        self.client.app.state.container.engine.dispose()
+        self.client.app.state.container.require(AppKey.DATABASE_ENGINE).dispose()
         self.harness.close()
         proxy_server = getattr(self, "_cdp_forward_server", None)
         if proxy_server is not None:
@@ -371,7 +383,7 @@ class BrowserLiveRemoteCdpSmokeTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(snapshot_response.status_code, 200, snapshot_response.text)
-        items = snapshot_response.json()["value"]["result"]["value"]
+        items = _interactive_refs(snapshot_response.json())
         self.assertTrue(items, "interactive snapshot returned no items")
 
         query_item = next(

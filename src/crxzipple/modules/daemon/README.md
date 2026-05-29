@@ -34,8 +34,9 @@ processes and endpoints that those business flows depend on.
   - `worker:tool-scheduler`
   - `worker:tool`
 - capability daemons
-  - `capability:chrome-mcp:user`
+  - channel runtimes, OCR runtimes, and other non-worker processes
 - host daemons
+  - `host:browser:{profile}`
   - future managed browser hosts or similar long-lived runtimes
 
 ## Grouping
@@ -54,7 +55,7 @@ The initial bootstrap groups are:
 - `channels`
   - managed channel runtime services
 - `browser`
-  - managed browser hosts and Chrome MCP
+  - managed browser hosts
 - `ocr`
   - managed local OCR hosts
 
@@ -69,7 +70,7 @@ Daemon supervisor surfaces also expose a few predefined service sets:
 - `channels-stack`
   - channel runtime services
 - `browser-stack`
-  - browser-group services like managed browser hosts and Chrome MCP
+  - browser-group services like managed browser hosts
 - `ocr-stack`
   - OCR-group services
 
@@ -88,10 +89,11 @@ The initial implementation intentionally focuses on:
   and optional explicit service reconciliation
 
 Today the module can actively manage internal process-backed worker daemons,
-channel runtimes, and selected capability daemons. Capability daemons now also
-include:
+channel runtimes, managed browser hosts, and standard MCP services.
 
-- process-backed Chrome MCP capabilities
+Browser MCP services are not part of the default browser runtime path. Browser
+tools use the single Tool Source `configured.browser` and resolve the browser
+profile as runtime context; daemon only owns `host:browser:{profile}` lifecycle.
 
 Endpoint-only capabilities are still supported for attach-only cases.
 

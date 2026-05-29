@@ -1,6 +1,7 @@
 export type RuntimeModuleId =
   | "orchestration"
   | "tool"
+  | "browser"
   | "llm"
   | "access"
   | "channels"
@@ -285,7 +286,22 @@ export interface WorkbenchStepView {
   details_available: boolean;
   linked_entities: UiLinkedEntity[];
   actions: UiRuntimeAction[];
+  approval?: ApprovalRequestDetail | null;
   trace: UiTraceContext;
+}
+
+export interface ApprovalRequestDetail {
+  request_id: string;
+  effect_id: string;
+  label: string;
+  reason: string;
+  tool_name?: string | null;
+  tool_ids: string[];
+  tool_arguments: Record<string, string | number | boolean | null>;
+  execution_mode?: string | null;
+  execution_strategy?: string | null;
+  execution_environment?: string | null;
+  draft_id?: string | null;
 }
 
 export interface WorkbenchInspectorReadModel {
@@ -452,6 +468,11 @@ export interface OperationsToolReadModel extends OperationsPageBase {
   tool_waiting_io: UiTableSection;
   tool_runs: UiTableSection;
   tool_types: UiChartSection;
+  source_health: UiTableSection;
+  discovery_failures: UiTableSection;
+  function_catalog: UiTableSection;
+  provider_backend_health: UiTableSection;
+  cli_process_health: UiTableSection;
   auth_missing: UiTableSection;
   worker_pool: UiChartSection;
   workers: UiTableSection;
@@ -466,6 +487,17 @@ export interface OperationsToolReadModel extends OperationsPageBase {
   strategies: UiTableSection;
   worker_details: OperationsToolWorkerDetail[];
   tool_run_details: OperationsToolRunDetail[];
+}
+
+export interface OperationsBrowserReadModel extends OperationsPageBase {
+  module: "browser";
+  profiles: UiTableSection;
+  profile_pools: UiTableSection;
+  profile_allocations: UiTableSection;
+  page_observations: UiTableSection;
+  daemon_runtimes: UiTableSection;
+  network_activity: UiTableSection;
+  diagnostics: UiTableSection;
 }
 
 export interface OperationsToolWorkerDetail {
@@ -540,6 +572,8 @@ export interface OperationsLlmInvocationDetail {
 export interface OperationsAccessReadModel extends OperationsPageBase {
   module: "access";
   access_targets: UiTableSection;
+  access_requirements: UiTableSection;
+  access_audit_summary: UiTableSection;
   missing_access: UiTableSection;
   credential_health: UiChartSection;
   provider_auth_blocked: UiTableSection;
@@ -662,7 +696,10 @@ export interface OperationsSkillsReadModel extends OperationsPageBase {
   access_requirements: UiTableSection;
   capability_requirements: UiTableSection;
   resolution_logs: UiTableSection;
+  skill_reads: UiTableSection;
   resolver_detail: UiTableSection;
+  authoring_backlog: UiTableSection;
+  authoring_failures: UiTableSection;
   import_normalize: UiRuntimeAction[];
   skill_package_sources: UiChartSection;
   conflicts_overrides: UiTableSection;
@@ -773,6 +810,7 @@ export interface OperationsDaemonProcessDetail {
 export type OperationsReadModel =
   | OperationsOrchestrationReadModel
   | OperationsToolReadModel
+  | OperationsBrowserReadModel
   | OperationsLlmReadModel
   | OperationsAccessReadModel
   | OperationsChannelsReadModel
@@ -1015,6 +1053,44 @@ export interface SettingsAuditSummary {
   reason_required: boolean;
 }
 
+export interface SettingsRuntimeDefaultsField {
+  path: string;
+  value: string | number | boolean | null;
+  default: string | number | boolean | null;
+  unit?: string | null;
+  minimum?: number | null;
+  consumer?: string | null;
+  apply_requirement?: string | null;
+  input?: "number" | "toggle" | (string & {});
+}
+
+export interface SettingsRuntimeDefaultsGroup {
+  id: "orchestration" | "compaction" | "tool_worker" | (string & {});
+  fields: SettingsRuntimeDefaultsField[];
+}
+
+export interface SettingsRuntimeDefaultsApplyRequirement {
+  id: string;
+  mode?: "restart_required" | "hot_apply" | (string & {});
+  owner?: string | null;
+  applies_after?: string | null;
+}
+
+export interface SettingsRuntimeDefaultsReadModel {
+  schema: "runtime-defaults.v1" | (string & {});
+  resource_id: string;
+  status: SettingsStatus;
+  enabled: boolean;
+  source?: string | null;
+  version?: number | string | null;
+  updated_at?: string | null;
+  resolved_at?: string | null;
+  effective_payload: SettingsPayload;
+  groups: SettingsRuntimeDefaultsGroup[];
+  apply_requirements: SettingsRuntimeDefaultsApplyRequirement[];
+  validation: SettingsValidationSummary;
+}
+
 export interface SettingsResourceDetailReadModel {
   resource: SettingsResourceKind;
   kind: SettingsResourceKind;
@@ -1034,6 +1110,7 @@ export interface SettingsResourceDetailReadModel {
   audit: SettingsAuditSummary;
   actions: SettingsActionDescriptor[];
   versions: SettingsPayload[];
+  runtime_defaults?: SettingsRuntimeDefaultsReadModel;
 }
 
 export interface SettingsResourcePageReadModel {
@@ -1102,6 +1179,8 @@ export interface SettingsActionResultPayload {
   validation?: SettingsValidationSummary | SettingsPayload;
   resolution?: SettingsResolutionPayload;
   impact?: SettingsImpactPreview;
+  runtime_defaults?: SettingsRuntimeDefaultsReadModel;
+  apply_requirement?: SettingsRuntimeDefaultsApplyRequirement[];
   [key: string]: unknown;
 }
 

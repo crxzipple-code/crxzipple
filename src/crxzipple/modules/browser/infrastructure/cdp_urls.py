@@ -84,9 +84,13 @@ def candidate_cdp_http_bases(
 
     _push(cached_base_url)
     _push(browser_ref_to_cdp_http_base(browser_ref))
-    normalized_base = normalize_cdp_http_base(base_url)
-    _push(normalized_base)
+    normalized_base = None
+    if isinstance(base_url, str) and base_url.strip():
+        normalized_base = normalize_cdp_http_base(base_url)
+        _push(normalized_base)
 
+    if normalized_base is None:
+        return tuple(candidates)
     parsed = urlsplit(normalized_base)
     host = parsed.hostname or ""
     port = parsed.port

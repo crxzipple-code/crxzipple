@@ -62,11 +62,13 @@ ChannelProfile(
         ChannelAccountProfile(
             account_id="default",
             transport_mode="webhook",
+            credential_bindings={
+                "lark_app_id": "access-binding:lark-app-id",
+                "lark_app_secret": "access-binding:lark-app-secret",
+                "lark_verification_token": "access-binding:lark-verification-token",
+            },
             metadata={
                 "agent_id": "crxzipple",
-                "lark_app_id_binding": "env:LARK_APP_ID",
-                "lark_app_secret_binding": "env:LARK_APP_SECRET",
-                "lark_verification_token_binding": "env:LARK_VERIFICATION_TOKEN",
             },
         ),
     ),
@@ -77,20 +79,12 @@ Useful account metadata fields currently supported:
 
 - `agent_id`
 - `llm_id`
-- `lark_app_id`
-- `lark_app_id_binding`
-- `lark_app_secret`
-- `lark_app_secret_binding`
-- `lark_verification_token`
-- `lark_verification_token_binding`
-- `lark_encrypt_key`
-- `lark_encrypt_key_binding`
+- `credential_bindings`
 - `lark_base_url`
 - `lark_receive_id_type`
 - `lark_default_receive_id_type`
 - `lark_group_require_bot_mention`
 - `lark_bot_open_id`
-- `lark_bot_open_id_binding`
 
 Field meanings:
 
@@ -98,16 +92,10 @@ Field meanings:
   default agent profile used for inbound callbacks
 - `llm_id`
   optional llm override
-- `lark_app_id_binding`, `lark_app_secret_binding`
-  preferred credential references for the self-built app identity used to fetch
-  `tenant_access_token`
-- `lark_verification_token_binding`
-  preferred token reference for event callback validation
-- `lark_encrypt_key_binding`
-  preferred secret reference for decrypting and signature-verifying encrypted callbacks
-- `lark_app_id`, `lark_app_secret`, `lark_verification_token`, `lark_encrypt_key`
-  legacy inline values kept for backward compatibility; repo config should use
-  the `..._binding` form instead of storing sensitive values directly
+- `credential_bindings`
+  preferred Access-owned binding map keyed by credential slot. Lark currently
+  recognizes `lark_app_id`, `lark_app_secret`, `lark_verification_token`,
+  `lark_encrypt_key`, and `lark_bot_open_id`.
 - `lark_base_url`
   optional server base URL override
   default is `https://open.feishu.cn`
@@ -121,8 +109,25 @@ Field meanings:
   optional bot `open_id` used to evaluate group mention gating.
   If omitted, the runtime will try to resolve it automatically through
   `GET /open-apis/bot/v3/info` using the configured app credentials.
-- `lark_bot_open_id_binding`
-  optional binding reference for a pre-known bot `open_id`
+
+Profile YAML should reference Access credential binding IDs, not direct
+environment credential sources:
+
+```yaml
+channel_type: lark
+accounts:
+  - account_id: default
+    transport_mode: long_connection
+    credential_bindings:
+      lark_app_id: access-binding:lark-app-id
+      lark_app_secret: access-binding:lark-app-secret
+      lark_verification_token: access-binding:lark-verification-token
+      lark_encrypt_key: access-binding:lark-encrypt-key
+      lark_bot_open_id: access-binding:lark-bot-open-id
+    metadata:
+      agent_id: crxzipple
+      lark_group_require_bot_mention: true
+```
 
 ## Inbound Endpoint
 

@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.daemon import DaemonNotFoundError, DaemonValidationError
 from .presenters import (
@@ -31,7 +31,7 @@ def list_services(
 ) -> list[dict[str, Any]]:
     return [
         spec_payload(spec)
-        for spec in container.daemon_service.list_service_specs(
+        for spec in container.require(AppKey.DAEMON_SERVICE).list_service_specs(
             role=role,
             service_group=service_group,
         )
@@ -44,7 +44,7 @@ def list_service_sets(
 ) -> list[dict[str, Any]]:
     return [
         service_set_payload(service_set)
-        for service_set in container.daemon_service.list_service_sets()
+        for service_set in container.require(AppKey.DAEMON_SERVICE).list_service_sets()
     ]
 
 
@@ -55,7 +55,7 @@ def list_instances(
     refresh: bool = Query(default=True),
 ) -> list[dict[str, Any]]:
     try:
-        instances = container.daemon_manager.list_instances(
+        instances = container.require(AppKey.DAEMON_MANAGER).list_instances(
             service_key=service_key,
             refresh=refresh,
         )
@@ -72,7 +72,7 @@ def list_leases(
     owner_kind: str | None = Query(default=None),
     owner_id: str | None = Query(default=None),
 ) -> list[dict[str, Any]]:
-    leases = container.daemon_service.list_leases(service_key=service_key)
+    leases = container.require(AppKey.DAEMON_SERVICE).list_leases(service_key=service_key)
     if status is not None:
         normalized_status = status.strip().lower()
         leases = tuple(lease for lease in leases if lease.status == normalized_status)
@@ -92,12 +92,12 @@ def get_service_detail(
     refresh: bool = Query(default=True),
 ) -> dict[str, Any]:
     try:
-        spec = container.daemon_service.get_service_spec(service_key)
-        instances = container.daemon_manager.list_instances(
+        spec = container.require(AppKey.DAEMON_SERVICE).get_service_spec(service_key)
+        instances = container.require(AppKey.DAEMON_MANAGER).list_instances(
             service_key=service_key,
             refresh=refresh,
         )
-        leases = container.daemon_service.list_leases(service_key=service_key)
+        leases = container.require(AppKey.DAEMON_SERVICE).list_leases(service_key=service_key)
     except (DaemonValidationError, DaemonNotFoundError) as exc:
         _raise_http_error(exc)
     return service_detail_payload(
@@ -113,7 +113,7 @@ def ensure_service(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[dict[str, Any]]:
     try:
-        instances = container.daemon_manager.ensure_service(service_key)
+        instances = container.require(AppKey.DAEMON_MANAGER).ensure_service(service_key)
     except (DaemonValidationError, DaemonNotFoundError) as exc:
         _raise_http_error(exc)
     return [instance_payload(instance) for instance in instances]
@@ -125,7 +125,7 @@ def healthcheck_service(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[dict[str, Any]]:
     try:
-        instances = container.daemon_manager.healthcheck_service(service_key)
+        instances = container.require(AppKey.DAEMON_MANAGER).healthcheck_service(service_key)
     except (DaemonValidationError, DaemonNotFoundError) as exc:
         _raise_http_error(exc)
     return [instance_payload(instance) for instance in instances]
@@ -137,7 +137,7 @@ def reconcile_service(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[dict[str, Any]]:
     try:
-        instances = container.daemon_manager.reconcile_service(service_key)
+        instances = container.require(AppKey.DAEMON_MANAGER).reconcile_service(service_key)
     except (DaemonValidationError, DaemonNotFoundError) as exc:
         _raise_http_error(exc)
     return [instance_payload(instance) for instance in instances]
@@ -149,7 +149,7 @@ def stop_service(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[dict[str, Any]]:
     try:
-        instances = container.daemon_manager.stop_service(service_key)
+        instances = container.require(AppKey.DAEMON_MANAGER).stop_service(service_key)
     except (DaemonValidationError, DaemonNotFoundError) as exc:
         _raise_http_error(exc)
     return [instance_payload(instance) for instance in instances]

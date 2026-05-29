@@ -61,14 +61,10 @@ from crxzipple.shared import (
     SESSION_MESSAGE_APPENDED_SOURCE_EVENT,
     TOOL_RUN_OBSERVATION_SOURCE_EVENT_NAMES,
 )
-from crxzipple.modules.session.domain import (
-    SessionMessage,
-    SessionMessageKind,
-    SessionMessageVisibility,
-)
 from crxzipple.shared.domain.events import Event, named_event_topic
 from crxzipple.shared.event_contracts import TOOL_LLM_EVENT_NAMES
 from crxzipple.shared.infrastructure.event_bus import InMemoryEventBus
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
 
@@ -350,6 +346,21 @@ class EventsModuleTestCase(unittest.TestCase):
             "tool.worker.pruned",
             "tool.enabled",
             "tool.disabled",
+            "tool.source.created",
+            "tool.source.updated",
+            "tool.source.disabled",
+            "tool.source.restored",
+            "tool.source.deleted",
+            "tool.source.discovery_completed",
+            "tool.source.discovery_failed",
+            "tool.function.created",
+            "tool.function.updated",
+            "tool.function.stale",
+            "tool.function.deprecated",
+            "tool.function.enabled",
+            "tool.function.disabled",
+            "tool.function.policy_updated",
+            "tool.cli.output_observed",
             "llm.invocation_started",
             "llm.invocation_succeeded",
             "llm.invocation_failed",
@@ -387,6 +398,19 @@ class EventsModuleTestCase(unittest.TestCase):
                     self.assertEqual(definition.owner, "tool")
                     self.assertIn("tool_id", field_paths)
                     self.assertIn("tool_name", field_paths)
+                elif event_name.startswith("tool.source."):
+                    self.assertEqual(definition.owner, "tool")
+                    self.assertIn("source_id", field_paths)
+                    self.assertIn("status", field_paths)
+                elif event_name.startswith("tool.function."):
+                    self.assertEqual(definition.owner, "tool")
+                    self.assertIn("function_id", field_paths)
+                    self.assertIn("source_id", field_paths)
+                elif event_name.startswith("tool.cli."):
+                    self.assertEqual(definition.owner, "tool")
+                    self.assertIn("process_id", field_paths)
+                    self.assertIn("stream", field_paths)
+                    self.assertIn("text_length", field_paths)
                 elif event_name.startswith("llm.invocation_"):
                     self.assertEqual(definition.owner, "llm")
                     self.assertIn("invocation_id", field_paths)
@@ -400,7 +424,7 @@ class EventsModuleTestCase(unittest.TestCase):
                     self.assertIn("text_delta_length", field_paths)
 
     def test_event_definition_registry_covers_operations_observer_subscriptions(self) -> None:
-        from crxzipple.bootstrap.container import _build_event_definition_registry
+        from crxzipple.app.assembly.events import build_event_definition_registry
         from crxzipple.modules.operations.application.event_contracts import (
             OPERATIONS_PROJECTION_INVALIDATED_EVENT,
         )
@@ -408,7 +432,7 @@ class EventsModuleTestCase(unittest.TestCase):
             operations_observer_event_names,
         )
 
-        registry = _build_event_definition_registry()
+        registry = build_event_definition_registry()
         defined = {definition.event_name for definition in registry.list_definitions()}
         subscribed = set(operations_observer_event_names(registry))
 
@@ -434,11 +458,15 @@ class EventsModuleTestCase(unittest.TestCase):
             OPERATIONS_PROJECTION_INVALIDATED_EVENT,
             "tool.enabled",
             "tool.disabled",
+            "tool.source.discovery_completed",
+            "tool.function.created",
             "llm.stream_delta_observed",
             "orchestration.ingress.requested",
             "orchestration.scheduler.signal.requested",
             "orchestration.executor.assignment.requested",
             "orchestration.executor.lease.heartbeated",
+            "browser.network.fetch.executed",
+            "browser.network.replay.executed",
         )
         for event_name in operational_event_names:
             with self.subTest(event_name=event_name):
@@ -937,32 +965,41 @@ class EventsModuleTestCase(unittest.TestCase):
             block_ms=20,
         )
         service = EventsApplicationService(backend)
-        handled_domain: list[str] = []
-        handled_topics: list[str] = []
+        try:
+            handled_domain: list[str] = []
+            handled_topics: list[str] = []
 
-        service.subscribe(
-            EventSelector.topic_only(named_event_topic("demo.event")),
-            lambda event: handled_domain.append(event.name),
-        )
-        service.subscribe(
-            EventSelector.topic_only("runtime.demo"),
-            lambda envelope: handled_topics.append(envelope.topic),
-        )
+            service.subscribe(
+                EventSelector.topic_only(named_event_topic("demo.event")),
+                lambda event: handled_domain.append(event.name),
+            )
+            service.subscribe(
+                EventSelector.topic_only("runtime.demo"),
+                lambda envelope: handled_topics.append(envelope.topic),
+            )
 
-        service.publish(Event(name="demo.event", payload={"ok": True}))
-        service.publish(
-            Event(
-                topic="runtime.demo",
-                kind="fact",
-                target=EventTarget(channel_type="web", connection_id="conn-1"),
-                payload={"ok": True},
-            ),
-        )
+            service.publish(Event(name="demo.event", payload={"ok": True}))
+            service.publish(
+                Event(
+                    topic="runtime.demo",
+                    kind="fact",
+                    target=EventTarget(channel_type="web", connection_id="conn-1"),
+                    payload={"ok": True},
+                ),
+            )
 
-        self.assertEqual(handled_domain, ["demo.event"])
-        self.assertEqual(handled_topics, ["runtime.demo"])
-        self.assertEqual([event.name for event in _published_named_events(backend)], ["demo.event"])
-        self.assertEqual([envelope.topic for envelope in _published_topic_events(backend)], ["runtime.demo"])
+            self.assertEqual(handled_domain, ["demo.event"])
+            self.assertEqual(handled_topics, ["runtime.demo"])
+            self.assertEqual(
+                [event.name for event in _published_named_events(backend)],
+                ["demo.event"],
+            )
+            self.assertEqual(
+                [envelope.topic for envelope in _published_topic_events(backend)],
+                ["runtime.demo"],
+            )
+        finally:
+            service.close()
 
     def test_redis_events_backend_can_wait_and_read_topic_records(self) -> None:
         backend = RedisEventsBackend(
@@ -972,36 +1009,42 @@ class EventsModuleTestCase(unittest.TestCase):
         )
         service = EventsApplicationService(backend)
 
-        cursor = service.snapshot_event_topic("runtime.demo")
-        service.publish(
-            Event(topic="runtime.demo", payload={"order": 1}),
-        )
-        service.publish(
-            Event(topic="runtime.demo", payload={"order": 2}),
-        )
+        try:
+            cursor = service.snapshot_event_topic("runtime.demo")
+            service.publish(
+                Event(topic="runtime.demo", payload={"order": 1}),
+            )
+            service.publish(
+                Event(topic="runtime.demo", payload={"order": 2}),
+            )
 
-        self.assertTrue(
-            service.wait_for_event_topic(
+            self.assertTrue(
+                service.wait_for_event_topic(
+                    "runtime.demo",
+                    after_cursor=cursor,
+                    timeout_seconds=0.1,
+                ),
+            )
+            matched = service.wait_for_event_topics(
+                (
+                    EventTopicWatch("runtime.other", "0-0"),
+                    EventTopicWatch("runtime.demo", cursor),
+                ),
+                timeout_seconds=0.1,
+            )
+            self.assertEqual(matched, EventTopicWatch("runtime.demo", cursor))
+            records = service.read_event_topic(
                 "runtime.demo",
                 after_cursor=cursor,
-                timeout_seconds=0.1,
-            ),
-        )
-        matched = service.wait_for_event_topics(
-            (
-                EventTopicWatch("runtime.other", "0-0"),
-                EventTopicWatch("runtime.demo", cursor),
-            ),
-            timeout_seconds=0.1,
-        )
-        self.assertEqual(matched, EventTopicWatch("runtime.demo", cursor))
-        records = service.read_event_topic(
-            "runtime.demo",
-            after_cursor=cursor,
-            limit=10,
-        )
-        self.assertEqual([record.cursor for record in records], ["1-0", "2-0"])
-        self.assertEqual([record.envelope.payload["order"] for record in records], [1, 2])
+                limit=10,
+            )
+            self.assertEqual([record.cursor for record in records], ["1-0", "2-0"])
+            self.assertEqual(
+                [record.envelope.payload["order"] for record in records],
+                [1, 2],
+            )
+        finally:
+            service.close()
 
     def test_redis_events_backend_persists_subscription_cursor(self) -> None:
         service = EventsApplicationService(
@@ -1011,26 +1054,28 @@ class EventsModuleTestCase(unittest.TestCase):
                 block_ms=20,
             ),
         )
-
-        service.set_subscription_cursor(
-            "redis-subscription",
-            source_topic="redis.source",
-            cursor="2-0",
-        )
-
-        state = service.get_subscription_cursor(
-            "redis-subscription",
-            source_topic="redis.source",
-        )
-        self.assertIsNotNone(state)
-        assert state is not None
-        self.assertEqual(state.cursor, "2-0")
-        self.assertIsNone(
-            service.get_subscription_cursor(
+        try:
+            service.set_subscription_cursor(
                 "redis-subscription",
-                source_topic="other.source",
-            ),
-        )
+                source_topic="redis.source",
+                cursor="2-0",
+            )
+
+            state = service.get_subscription_cursor(
+                "redis-subscription",
+                source_topic="redis.source",
+            )
+            self.assertIsNotNone(state)
+            assert state is not None
+            self.assertEqual(state.cursor, "2-0")
+            self.assertIsNone(
+                service.get_subscription_cursor(
+                    "redis-subscription",
+                    source_topic="other.source",
+                ),
+            )
+        finally:
+            service.close()
 
     def test_redis_events_backend_propagates_source_and_topic_events_across_backends(self) -> None:
         client = FakeRedisClient()
@@ -1042,27 +1087,30 @@ class EventsModuleTestCase(unittest.TestCase):
         )
         handled_domain: list[str] = []
         handled_topics: list[str] = []
+        try:
+            subscriber.subscribe(
+                EventSelector.topic_only(named_event_topic("demo.event")),
+                lambda event: handled_domain.append(event.name),
+            )
+            subscriber.subscribe(
+                EventSelector.topic_only("runtime.demo"),
+                lambda envelope: handled_topics.append(envelope.topic),
+            )
 
-        subscriber.subscribe(
-            EventSelector.topic_only(named_event_topic("demo.event")),
-            lambda event: handled_domain.append(event.name),
-        )
-        subscriber.subscribe(
-            EventSelector.topic_only("runtime.demo"),
-            lambda envelope: handled_topics.append(envelope.topic),
-        )
+            publisher.publish(Event(name="demo.event", payload={"ok": True}))
+            publisher.publish(
+                Event(
+                    topic="runtime.demo",
+                    kind="broadcast",
+                    payload={"ok": True},
+                ),
+            )
 
-        publisher.publish(Event(name="demo.event", payload={"ok": True}))
-        publisher.publish(
-            Event(
-                topic="runtime.demo",
-                kind="broadcast",
-                payload={"ok": True},
-            ),
-        )
-
-        self.assertTrue(_wait_until(lambda: handled_domain == ["demo.event"]))
-        self.assertTrue(_wait_until(lambda: handled_topics == ["runtime.demo"]))
+            self.assertTrue(_wait_until(lambda: handled_domain == ["demo.event"]))
+            self.assertTrue(_wait_until(lambda: handled_topics == ["runtime.demo"]))
+        finally:
+            subscriber.close()
+            publisher.close()
 
     def test_dispatch_wake_subscriber_publishes_runtime_wakeup_envelope(self) -> None:
         backend = InMemoryEventsBackend()
@@ -1391,7 +1439,7 @@ class EventsModuleTestCase(unittest.TestCase):
         runtime_observer = RuntimeObservationObserver(
             events_service=service,
             run_query=_FakeOrchestrationControl(),
-            executor_control=SimpleNamespace(
+            executor_lease_query=SimpleNamespace(
                 list_executor_leases=lambda status=None: [_ExpiredLease(), _FakeLease()]
             ),
         )
@@ -1449,21 +1497,31 @@ class EventsModuleTestCase(unittest.TestCase):
 
     def test_container_exposes_events_service(self) -> None:
         harness = SqliteTestHarness()
-        container = harness.build_container()
+        container = harness.build_runtime_container()
         try:
-            self.assertIsNotNone(container.events_service)
-            self.assertIs(container.event_bus.events_service, container.events_service)
-            self.assertIsInstance(container.events_service.backend, FileBackedEventsBackend)
+            events_service = container.require(AppKey.EVENTS_SERVICE)
+            event_bus = container.require(AppKey.EVENTS_BUS)
+            self.assertIsNotNone(events_service)
+            self.assertIs(event_bus.events_service, events_service)
+            self.assertIsInstance(events_service.backend, FileBackedEventsBackend)
         finally:
             container.close()
             harness.close()
 
     def test_container_operations_observer_records_dispatch_enqueue_event(self) -> None:
         harness = SqliteTestHarness()
-        container = harness.build_container()
+        container = harness.build_runtime_container()
         try:
-            self.assertIsNotNone(container.events_service)
-            container.dispatch_service.create_task(
+            events_service = container.require(AppKey.EVENTS_SERVICE)
+            dispatch_service = container.require(AppKey.DISPATCH_SERVICE)
+            operations_observer_runtime = container.require(
+                AppKey.OPERATIONS_OBSERVER_RUNTIME_EVENT_SERVICE,
+            )
+            operations_observation_store = container.require(
+                AppKey.OPERATIONS_OBSERVATION_STORE,
+            )
+            self.assertIsNotNone(events_service)
+            dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="task-1",
                     owner_kind="orchestration_run",
@@ -1471,16 +1529,15 @@ class EventsModuleTestCase(unittest.TestCase):
                     lane_key="agent:main",
                 ),
             )
-            container.dispatch_service.enqueue_task(
+            dispatch_service.enqueue_task(
                 EnqueueDispatchTaskInput(task_id="task-1"),
             )
-            assert container.operations_observer_runtime_event_service is not None
             processed_events = (
-                container.operations_observer_runtime_event_service.process_available_events(
+                operations_observer_runtime.process_available_events(
                     limit_per_subscription=10,
                 )
             )
-            dispatch_observation = container.operations_observation_store.get_module_observation(
+            dispatch_observation = operations_observation_store.get_module_observation(
                 "dispatch",
             )
 
@@ -1500,11 +1557,16 @@ class EventsModuleTestCase(unittest.TestCase):
 
     def test_container_scheduler_runtime_publishes_dispatch_wakeup_envelope(self) -> None:
         harness = SqliteTestHarness()
-        container = harness.build_container()
+        container = harness.build_runtime_container()
         try:
-            self.assertIsNotNone(container.events_service)
-            backend = container.events_service.backend
-            container.dispatch_service.create_task(
+            events_service = container.require(AppKey.EVENTS_SERVICE)
+            dispatch_service = container.require(AppKey.DISPATCH_SERVICE)
+            scheduler_runtime = container.require(
+                AppKey.ORCHESTRATION_SCHEDULER_RUNTIME_EVENT_SERVICE,
+            )
+            self.assertIsNotNone(events_service)
+            backend = events_service.backend
+            dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="task-1",
                     owner_kind="orchestration_run",
@@ -1512,11 +1574,10 @@ class EventsModuleTestCase(unittest.TestCase):
                     lane_key="agent:main",
                 ),
             )
-            container.dispatch_service.enqueue_task(
+            dispatch_service.enqueue_task(
                 EnqueueDispatchTaskInput(task_id="task-1"),
             )
-            assert container.orchestration_scheduler_runtime_event_service is not None
-            container.orchestration_scheduler_runtime_event_service.process_available_events(
+            scheduler_runtime.process_available_events(
                 limit_per_subscription=10,
             )
             published = _published_topic_events(backend)
@@ -1533,13 +1594,15 @@ class EventsModuleTestCase(unittest.TestCase):
 
     def test_file_backed_events_backend_supports_cross_container_wakeup_wait(self) -> None:
         harness = SqliteTestHarness()
-        waiter = harness.build_container()
-        publisher = harness.build_container()
+        waiter = harness.build_runtime_container()
+        publisher = harness.build_runtime_container()
         try:
-            self.assertIsNotNone(waiter.events_service)
-            self.assertIsNotNone(publisher.events_service)
-            cursor = waiter.events_service.snapshot_event_topic("runtime.cross-process")
-            publisher.events_service.publish(
+            waiter_events = waiter.require(AppKey.EVENTS_SERVICE)
+            publisher_events = publisher.require(AppKey.EVENTS_SERVICE)
+            self.assertIsNotNone(waiter_events)
+            self.assertIsNotNone(publisher_events)
+            cursor = waiter_events.snapshot_event_topic("runtime.cross-process")
+            publisher_events.publish(
                 Event(
                     topic="runtime.cross-process",
                     kind="command",
@@ -1547,7 +1610,7 @@ class EventsModuleTestCase(unittest.TestCase):
                 ),
             )
             self.assertEqual(
-                waiter.events_service.wait_for_event_topics(
+                waiter_events.wait_for_event_topics(
                     (
                         EventTopicWatch("runtime.other-cross-process", cursor),
                         EventTopicWatch("runtime.cross-process", cursor),
@@ -1562,15 +1625,16 @@ class EventsModuleTestCase(unittest.TestCase):
 
     def test_file_backed_events_backend_serializes_cross_backend_topic_writes(self) -> None:
         harness = SqliteTestHarness()
-        first = harness.build_container()
-        second = harness.build_container()
+        first = harness.build_runtime_container()
+        second = harness.build_runtime_container()
         try:
-            self.assertIsNotNone(first.events_service)
-            self.assertIsNotNone(second.events_service)
+            first_events = first.require(AppKey.EVENTS_SERVICE)
+            second_events = second.require(AppKey.EVENTS_SERVICE)
+            self.assertIsNotNone(first_events)
+            self.assertIsNotNone(second_events)
 
             def _publish(index: int) -> None:
-                service = first.events_service if index % 2 == 0 else second.events_service
-                assert service is not None
+                service = first_events if index % 2 == 0 else second_events
                 service.publish(
                     Event(
                         topic="runtime.concurrent",
@@ -1582,7 +1646,7 @@ class EventsModuleTestCase(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as executor:
                 list(executor.map(_publish, range(40)))
 
-            records = first.events_service.read_event_topic(
+            records = first_events.read_event_topic(
                 "runtime.concurrent",
                 after_cursor=None,
                 limit=100,
@@ -1604,20 +1668,22 @@ class EventsModuleTestCase(unittest.TestCase):
 
     def test_file_backed_events_backend_can_replay_topic_records_across_containers(self) -> None:
         harness = SqliteTestHarness()
-        reader = harness.build_container()
-        writer = harness.build_container()
+        reader = harness.build_runtime_container()
+        writer = harness.build_runtime_container()
         try:
-            self.assertIsNotNone(reader.events_service)
-            self.assertIsNotNone(writer.events_service)
-            cursor = reader.events_service.snapshot_event_topic("runtime.replay")
-            writer.events_service.publish(
+            reader_events = reader.require(AppKey.EVENTS_SERVICE)
+            writer_events = writer.require(AppKey.EVENTS_SERVICE)
+            self.assertIsNotNone(reader_events)
+            self.assertIsNotNone(writer_events)
+            cursor = reader_events.snapshot_event_topic("runtime.replay")
+            writer_events.publish(
                 Event(
                     topic="runtime.replay",
                     kind="fact",
                     payload={"step": 1},
                 ),
             )
-            writer.events_service.publish(
+            writer_events.publish(
                 Event(
                     topic="runtime.replay",
                     kind="fact",
@@ -1625,7 +1691,7 @@ class EventsModuleTestCase(unittest.TestCase):
                 ),
             )
 
-            records = reader.events_service.read_event_topic(
+            records = reader_events.read_event_topic(
                 "runtime.replay",
                 after_cursor=cursor,
                 limit=10,

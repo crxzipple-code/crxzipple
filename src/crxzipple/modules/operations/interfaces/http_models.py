@@ -10,6 +10,7 @@ from crxzipple.modules.operations.application.read_models import (
     ChannelInteractionDetailModel,
     ChannelRecordDetailModel,
     ChannelRuntimeDetailModel,
+    BrowserOperationsPage,
     ChannelsOperationsPage,
     DaemonInstanceDetailModel,
     DaemonLeaseDetailModel,
@@ -238,6 +239,12 @@ class OperationsSkillValidateRequest(OperationsActionRequest):
 
 class OperationsSkillInstallRequest(OperationsActionRequest):
     source_dir: str
+
+
+class OperationsSkillSyncRequest(OperationsActionRequest):
+    workspace_dir: str | None = None
+    source_id: str | None = None
+    surface: str = "interactive"
 
 
 class OperationsAccessCheckRequest(OperationsActionRequest):
@@ -599,6 +606,8 @@ class AccessOperationsResponse(BaseModel):
     active_tab: str
     actions: list[RuntimeActionResponse]
     access_targets: OperationsTableSectionResponse
+    access_requirements: OperationsTableSectionResponse
+    access_audit_summary: OperationsTableSectionResponse
     missing_access: OperationsTableSectionResponse
     credential_health: OperationsChartSectionResponse
     provider_auth_blocked: OperationsTableSectionResponse
@@ -631,6 +640,12 @@ class AccessOperationsResponse(BaseModel):
             actions=[RuntimeActionResponse.from_value(item) for item in view.actions],
             access_targets=OperationsTableSectionResponse.from_value(
                 view.access_targets,
+            ),
+            access_requirements=OperationsTableSectionResponse.from_value(
+                view.access_requirements,
+            ),
+            access_audit_summary=OperationsTableSectionResponse.from_value(
+                view.access_audit_summary,
             ),
             missing_access=OperationsTableSectionResponse.from_value(
                 view.missing_access,
@@ -828,7 +843,10 @@ class SkillsOperationsResponse(BaseModel):
     access_requirements: OperationsTableSectionResponse
     capability_requirements: OperationsTableSectionResponse
     resolution_logs: OperationsTableSectionResponse
+    skill_reads: OperationsTableSectionResponse
     resolver_detail: OperationsTableSectionResponse
+    authoring_backlog: OperationsTableSectionResponse
+    authoring_failures: OperationsTableSectionResponse
     import_normalize: list[RuntimeActionResponse]
     skill_package_sources: OperationsChartSectionResponse
     conflicts_overrides: OperationsTableSectionResponse
@@ -873,8 +891,17 @@ class SkillsOperationsResponse(BaseModel):
             resolution_logs=OperationsTableSectionResponse.from_value(
                 view.resolution_logs,
             ),
+            skill_reads=OperationsTableSectionResponse.from_value(
+                view.skill_reads,
+            ),
             resolver_detail=OperationsTableSectionResponse.from_value(
                 view.resolver_detail,
+            ),
+            authoring_backlog=OperationsTableSectionResponse.from_value(
+                view.authoring_backlog,
+            ),
+            authoring_failures=OperationsTableSectionResponse.from_value(
+                view.authoring_failures,
             ),
             import_normalize=[
                 RuntimeActionResponse.from_value(item)
@@ -1355,6 +1382,65 @@ class ChannelsOperationsResponse(BaseModel):
         )
 
 
+class BrowserOperationsResponse(BaseModel):
+    module: str
+    title: str
+    subtitle: str
+    health: str
+    updated_at: str
+    auto_refresh: bool
+    role: OperationsModuleRoleResponse
+    metrics: list[MetricCardResponse]
+    tabs: list[OperationsTabResponse]
+    active_tab: str
+    actions: list[RuntimeActionResponse]
+    profiles: OperationsTableSectionResponse
+    profile_pools: OperationsTableSectionResponse
+    profile_allocations: OperationsTableSectionResponse
+    page_observations: OperationsTableSectionResponse
+    daemon_runtimes: OperationsTableSectionResponse
+    network_activity: OperationsTableSectionResponse
+    diagnostics: OperationsTableSectionResponse
+
+    @classmethod
+    def from_view(
+        cls,
+        view: BrowserOperationsPage,
+    ) -> "BrowserOperationsResponse":
+        return cls(
+            module=view.module,
+            title=view.title,
+            subtitle=view.subtitle,
+            health=view.health,
+            updated_at=view.updated_at,
+            auto_refresh=view.auto_refresh,
+            role=OperationsModuleRoleResponse.from_value(view.role),
+            metrics=[MetricCardResponse.from_value(item) for item in view.metrics],
+            tabs=[OperationsTabResponse.from_value(item) for item in view.tabs],
+            active_tab=view.active_tab,
+            actions=[RuntimeActionResponse.from_value(item) for item in view.actions],
+            profiles=OperationsTableSectionResponse.from_value(view.profiles),
+            profile_pools=OperationsTableSectionResponse.from_value(
+                view.profile_pools,
+            ),
+            profile_allocations=OperationsTableSectionResponse.from_value(
+                view.profile_allocations,
+            ),
+            page_observations=OperationsTableSectionResponse.from_value(
+                view.page_observations,
+            ),
+            daemon_runtimes=OperationsTableSectionResponse.from_value(
+                view.daemon_runtimes,
+            ),
+            network_activity=OperationsTableSectionResponse.from_value(
+                view.network_activity,
+            ),
+            diagnostics=OperationsTableSectionResponse.from_value(
+                view.diagnostics,
+            ),
+        )
+
+
 class DaemonOperationsResponse(BaseModel):
     module: str
     title: str
@@ -1655,6 +1741,11 @@ class ToolOperationsResponse(BaseModel):
     tool_waiting_io: OperationsTableSectionResponse
     tool_runs: OperationsTableSectionResponse
     tool_types: OperationsChartSectionResponse
+    source_health: OperationsTableSectionResponse
+    discovery_failures: OperationsTableSectionResponse
+    function_catalog: OperationsTableSectionResponse
+    provider_backend_health: OperationsTableSectionResponse
+    cli_process_health: OperationsTableSectionResponse
     auth_missing: OperationsTableSectionResponse
     worker_pool: OperationsChartSectionResponse
     workers: OperationsTableSectionResponse
@@ -1698,6 +1789,21 @@ class ToolOperationsResponse(BaseModel):
             ),
             tool_runs=OperationsTableSectionResponse.from_value(view.tool_runs),
             tool_types=OperationsChartSectionResponse.from_value(view.tool_types),
+            source_health=OperationsTableSectionResponse.from_value(
+                view.source_health,
+            ),
+            discovery_failures=OperationsTableSectionResponse.from_value(
+                view.discovery_failures,
+            ),
+            function_catalog=OperationsTableSectionResponse.from_value(
+                view.function_catalog,
+            ),
+            provider_backend_health=OperationsTableSectionResponse.from_value(
+                view.provider_backend_health,
+            ),
+            cli_process_health=OperationsTableSectionResponse.from_value(
+                view.cli_process_health,
+            ),
             auth_missing=OperationsTableSectionResponse.from_value(view.auth_missing),
             worker_pool=OperationsChartSectionResponse.from_value(view.worker_pool),
             workers=OperationsTableSectionResponse.from_value(view.workers),

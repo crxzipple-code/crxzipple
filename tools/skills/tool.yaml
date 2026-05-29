@@ -1,5 +1,12 @@
 kind: local_package
 namespace: skills
+capabilities:
+  - skill.read
+  - skill.authoring
+dependencies:
+  - id: skill_manager
+    kind: service_dependency
+    description: Skill read port used to resolve and read enabled local skill packages.
 local_tools:
   - id: skill_read
     name: Skill Read
@@ -27,4 +34,266 @@ local_tools:
       - async
     supported_environments:
       - local
+    capability_ids:
+      - skill.read
     runtime_key: skill_read
+  - id: skill_draft_create
+    name: Skill Draft Create
+    description: Create a governed skill draft through the Skills authoring service. Does not write skill package files.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_draft_create
+    tool_kind: function
+    dependencies:
+      - id: skill_authoring_service
+        kind: service_dependency
+        description: Skill authoring port used to create governed skill drafts.
+    parameters:
+      - name: intent
+        data_type: string
+        description: Draft intent, usually create or update. Defaults to create.
+        required: false
+      - name: skill_name
+        data_type: string
+        description: Stable skill package name for the draft.
+        required: true
+      - name: summary
+        data_type: string
+        description: Short summary of the reusable experience or workflow being captured.
+        required: false
+      - name: target_source_id
+        data_type: string
+        description: Optional target Skills source id for the eventual apply.
+        required: false
+      - name: target_scope
+        data_type: string
+        description: Optional target scope, such as workspace or global.
+        required: false
+      - name: workspace_dir
+        data_type: string
+        description: Optional workspace directory override. Defaults to the execution context workspace.
+        required: false
+      - name: manifest
+        data_type: object
+        description: Draft manifest/frontmatter payload.
+        required: true
+      - name: instructions_body
+        data_type: string
+        description: Draft SKILL.md body, excluding frontmatter if the service stores manifest separately.
+        required: true
+      - name: support_files
+        data_type: array
+        description: Optional support files as structured draft payloads with path and content.
+        required: false
+      - name: requirements
+        data_type: object
+        description: Optional structured requirement summary for tools, access, effects, surfaces, and platforms.
+        required: false
+      - name: reason
+        data_type: string
+        description: Reason for creating the draft.
+        required: false
+    tags:
+      - skill
+      - authoring
+      - builtin
+      - system-managed
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    capability_ids:
+      - skill.authoring
+    required_effect_ids:
+      - skill_authoring.create
+    mutates_state: true
+    runtime_key: skill_draft_create
+  - id: skill_draft_update
+    name: Skill Draft Update
+    description: Update a governed skill draft through the Skills authoring service. Does not write skill package files.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_draft_update
+    tool_kind: function
+    dependencies:
+      - id: skill_authoring_service
+        kind: service_dependency
+        description: Skill authoring port used to update governed skill drafts.
+    parameters:
+      - name: draft_id
+        data_type: string
+        description: Draft id returned by skill_draft_create or the Skills authoring service.
+        required: true
+      - name: patch
+        data_type: object
+        description: Structured draft patch for manifest, instructions_body, support_files, requirements, or metadata.
+        required: true
+      - name: reason
+        data_type: string
+        description: Reason for updating the draft.
+        required: false
+    tags:
+      - skill
+      - authoring
+      - builtin
+      - system-managed
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    capability_ids:
+      - skill.authoring
+    required_effect_ids:
+      - skill_authoring.update
+    mutates_state: true
+    runtime_key: skill_draft_update
+  - id: skill_draft_validate
+    name: Skill Draft Validate
+    description: Validate a governed skill draft, including manifest, instructions, files, requirements, and readiness.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_draft_validate
+    tool_kind: function
+    dependencies:
+      - id: skill_authoring_service
+        kind: service_dependency
+        description: Skill authoring port used to validate governed skill drafts.
+    parameters:
+      - name: draft_id
+        data_type: string
+        description: Draft id to validate.
+        required: true
+    tags:
+      - skill
+      - authoring
+      - validation
+      - builtin
+      - system-managed
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    capability_ids:
+      - skill.authoring
+    required_effect_ids:
+      - skill_authoring.validate
+    mutates_state: true
+    runtime_key: skill_draft_validate
+  - id: skill_draft_diff
+    name: Skill Draft Diff
+    description: Build or refresh the human-readable and structured diff for a governed skill draft.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_draft_diff
+    tool_kind: function
+    dependencies:
+      - id: skill_authoring_service
+        kind: service_dependency
+        description: Skill authoring port used to diff governed skill drafts.
+    parameters:
+      - name: draft_id
+        data_type: string
+        description: Draft id to diff.
+        required: true
+    tags:
+      - skill
+      - authoring
+      - diff
+      - builtin
+      - system-managed
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    capability_ids:
+      - skill.authoring
+    required_effect_ids:
+      - skill_authoring.diff
+    mutates_state: true
+    runtime_key: skill_draft_diff
+  - id: skill_draft_apply
+    name: Skill Draft Apply
+    description: Apply an approved skill draft through the Skills authoring service. Requires explicit user approval and the skill_authoring.apply authorization effect.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_draft_apply
+    tool_kind: function
+    dependencies:
+      - id: skill_authoring_service
+        kind: service_dependency
+        description: Skill authoring port used to apply approved governed skill drafts.
+    parameters:
+      - name: draft_id
+        data_type: string
+        description: Draft id to apply after approval.
+        required: true
+      - name: reason
+        data_type: string
+        description: User-visible reason for applying the draft.
+        required: true
+    tags:
+      - skill
+      - authoring
+      - apply
+      - builtin
+      - system-managed
+      - surface:interactive
+      - approval:required
+    required_effect_ids:
+      - skill_authoring.apply
+    requires_confirmation: true
+    mutates_state: true
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    capability_ids:
+      - skill.authoring
+    runtime_key: skill_draft_apply
+  - id: skill_draft_reject
+    name: Skill Draft Reject
+    description: Reject a governed skill draft through the Skills authoring service without applying it.
+    provider_name: local_system
+    entrypoint: tools.skills.local:skill_draft_reject
+    tool_kind: function
+    dependencies:
+      - id: skill_authoring_service
+        kind: service_dependency
+        description: Skill authoring port used to reject governed skill drafts.
+    parameters:
+      - name: draft_id
+        data_type: string
+        description: Draft id to reject.
+        required: true
+      - name: reason
+        data_type: string
+        description: Reason for rejecting the draft.
+        required: false
+    tags:
+      - skill
+      - authoring
+      - reject
+      - builtin
+      - system-managed
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    capability_ids:
+      - skill.authoring
+    required_effect_ids:
+      - skill_authoring.reject
+    mutates_state: true
+    runtime_key: skill_draft_reject

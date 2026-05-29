@@ -11,7 +11,7 @@ from crxzipple.shared.domain.events import Event
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
 from tests.unit.tool_runtime_test_support import process_next_background_tool_run
-from tools.skills.local import skill_read
+from tools.skills.local import SkillsToolDeps, skill_read
 
 
 class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
@@ -29,19 +29,19 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             ),
             "second invocation should not run",
         )
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-sessions-yield",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -51,7 +51,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -82,27 +82,25 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="missing_access_tool",
-                name="Missing Access Tool",
-                description="Requires an external credential.",
-                access_requirements=("env:MISSING_STALE_TOOL_TOKEN",),
-            ),
+        self.seed_tool(
+            tool_id="missing_access_tool",
+            name="Missing Access Tool",
+            description="Requires an external credential.",
+            access_requirements=("env:MISSING_STALE_TOOL_TOKEN",),
         )
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-stale-access-tool-call",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -112,7 +110,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -143,14 +141,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
     def test_wait_on_tool_reconciles_when_tool_finished_before_wait_mapping(self) -> None:
         self._register_agent_and_llm()
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="background_echo",
-                name="Background Echo",
-                description="Only runs in the background.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                runtime_key="background_echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="background_echo",
+            name="Background Echo",
+            description="Only runs in the background.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            runtime_key="background_echo",
         )
 
         async def background_echo(arguments: dict[str, object]) -> ToolRunResult:
@@ -159,15 +155,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 details={"message": arguments.get("message")},
             )
 
-        self.container.local_tool_catalog.register(tool, background_echo)
+        self.local_runtime_registry.register(tool, background_echo)
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-early-tool-finish",
                 inbound_instruction=InboundInstruction(source="cli", content="hello"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -177,7 +173,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         claimed = assign_next_orchestration_assignment(self.container,
@@ -186,7 +182,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         assert claimed is not None
 
         queued_tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="background_echo",
                     arguments={"message": "background hello"},
@@ -204,7 +200,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         assert finished_tool_run is not None
         self.assertEqual(finished_tool_run.status, ToolRunStatus.SUCCEEDED)
 
-        reconciled = self.container.orchestration_executor_service.wait_assignment_on_tool(
+        reconciled = self.orchestration_executor_service.wait_assignment_on_tool(
             run_id=run.id,
             worker_id="worker-1",
             pending_tool_run_ids=(queued_tool_run.id,),
@@ -224,27 +220,29 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             orchestration_run_heartbeat_seconds=0.05,
         )
         custom_harness.initialize_schema(settings=custom_settings)
-        container = custom_harness.build_container(settings=custom_settings)
+        container = custom_harness.build_runtime_container(settings=custom_settings)
         try:
             adapter = _SlowStaticTextAdapter(
                 text="slow llm response",
                 delay_seconds=0.15,
             )
-            container.llm_adapter_registry.register(
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
                 LlmApiFamily.OPENAI_RESPONSES,
                 adapter,
             )
-            container.llm_service.sync_profiles(
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).sync_profiles(
                 (
                     RegisterLlmProfileInput(
                         id="openai.gpt-5.4-mini",
                         provider=LlmProviderKind.OPENAI,
                         api_family=LlmApiFamily.OPENAI_RESPONSES,
                         model_name="gpt-5.4-mini",
+                        credential_binding_id=credential_binding_id,
                     ),
                 ),
             )
-            container.agent_service.register_profile(
+            container.require(AppKey.AGENT_SERVICE).register_profile(
                 RegisterAgentProfileInput(
                     id="assistant",
                     name="Assistant",
@@ -257,13 +255,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            run = container.orchestration_intake_service.accept(
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-heartbeat-loop",
                     inbound_instruction=InboundInstruction(source="cli", content="hello"),
                 ),
             )
-            container.orchestration_intake_service.prepare_session_run(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -273,7 +271,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_intake_service.enqueue(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -288,7 +286,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "dispatch.task.heartbeated",
                 [
                     event.event_name
-                    for event in container.event_bus.published_events
+                    for event in container.require(AppKey.EVENTS_BUS).published_events
                     if isinstance(event, Event) and bool(event.name)
                 ],
             )
@@ -297,7 +295,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_process_next_orchestration_assignment_injects_available_skills_catalog(self) -> None:
         adapter = _StaticTextAdapter(text="hello with skill catalog")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -324,13 +322,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "crxzipple.modules.skills.infrastructure.filesystem.repository.DEFAULT_SYSTEM_SKILLS_DIR",
                 root / "system",
             ):
-                run = self.container.orchestration_intake_service.accept(
+                run = self.orchestration_intake_service.accept(
                     AcceptOrchestrationRunInput(
                         run_id="run-skill-catalog",
                         inbound_instruction=InboundInstruction(source="cli", content="hello"),
                     ),
                 )
-                self.container.orchestration_intake_service.prepare_session_run(
+                self.orchestration_intake_service.prepare_session_run(
                     PrepareSessionRunInput(
                         run_id=run.id,
                         context=SessionRouteContext(
@@ -340,7 +338,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                         ),
                     ),
                 )
-                self.container.orchestration_intake_service.enqueue(
+                self.orchestration_intake_service.enqueue(
                     EnqueueOrchestrationRunInput(run_id=run.id),
                 )
 
@@ -374,19 +372,19 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_process_next_orchestration_assignment_injects_session_tools_guidance(self) -> None:
         adapter = _StaticTextAdapter(text="hello with session tools")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-session-tools-guidance",
                 inbound_instruction=InboundInstruction(source="cli", content="continue the task"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -396,7 +394,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -433,7 +431,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_process_next_orchestration_assignment_can_read_skill_and_continue(self) -> None:
         adapter = _SkillReadingAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -457,13 +455,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 runtime_preferences=AgentRuntimePreferences(workspace=str(workspace)),
             )
 
-            run = self.container.orchestration_intake_service.accept(
+            run = self.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-read-skill",
                     inbound_instruction=InboundInstruction(source="cli", content="review the repo"),
                 ),
             )
-            self.container.orchestration_intake_service.prepare_session_run(
+            self.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -473,7 +471,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.enqueue(
+            self.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -504,7 +502,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "Review changes carefully and cite concrete findings.",
                 str(skill_tool_messages[0].content),
             )
-            session_messages = self.container.session_service.list_messages(
+            session_messages = self.session_service.list_messages(
                 ListSessionMessagesInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
@@ -537,13 +535,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "required_tools: [git_diff]\n"
                 "suggested_tools: [git_diff, memory_search]\n"
                 "required_effects: [workspace_read]\n"
-                "required_credential_files: [credentials/git.json]\n"
+                "required_access: [git-credential-binding]\n"
                 "---\n"
                 "# Repo Review\n",
                 encoding="utf-8",
             )
 
-            handler = skill_read(self.container)
+            handler = skill_read(
+                SkillsToolDeps(
+                    skill_manager=self.skill_manager,
+                ),
+            )
             self.assertIsNotNone(handler)
             assert handler is not None
 
@@ -568,8 +570,8 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ["git_diff", "memory_search"],
             )
             self.assertEqual(
-                result.metadata["requirements"]["compatibility_credential_files"],
-                ["credentials/git.json"],
+                result.metadata["requirements"]["required_access"],
+                ["git-credential-binding"],
             )
             self.assertIn("- Required effects: workspace_read", str(result.blocks))
             with self.assertRaisesRegex(
@@ -589,9 +591,9 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 )
 
-    def test_prompt_assembly_resolves_skill_visibility_from_tools_not_auth(self) -> None:
+    def test_prompt_assembly_resolves_skill_visibility_from_runtime_readiness(self) -> None:
         adapter = _StaticTextAdapter(text="skill visibility resolved")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -606,12 +608,6 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "name: ready-review\n"
                 "description: Review with a ready local tool.\n"
                 "required_tools: [ready_review_tool]\n"
-                "required_auth:\n"
-                "  - provider: github\n"
-                "    kind: oauth_connector\n"
-                "    scopes: [repo_read]\n"
-                "required_secrets: [READY_REVIEW_SECRET]\n"
-                "required_credential_files: [credentials/review-token.txt]\n"
                 "---\n"
                 "# Ready Review\n",
                 encoding="utf-8",
@@ -623,7 +619,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "name: blocked-review\n"
                 "description: Review with missing setup.\n"
                 "required_tools: [missing_review_tool]\n"
-                "required_auth:\n"
+                "required_access:\n"
                 "  - provider: gmail\n"
                 "    kind: oauth_connector\n"
                 "    scopes: [mail_read]\n"
@@ -631,25 +627,23 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "# Blocked Review\n",
                 encoding="utf-8",
             )
-            ready_tool = self.container.tool_service.register(
-                RegisterToolInput(
-                    id="ready_review_tool",
-                    name="Ready Review Tool",
-                    description="Supports ready review skills.",
-                    supported_modes=(ToolMode.INLINE,),
-                    runtime_key="ready_review_tool",
-                ),
+            ready_tool = self.seed_tool(
+                tool_id="ready_review_tool",
+                name="Ready Review Tool",
+                description="Supports ready review skills.",
+                supported_modes=(ToolMode.INLINE,),
+                runtime_key="ready_review_tool",
             )
 
             async def ready_review_tool(arguments: dict[str, object]) -> ToolRunResult:
                 return ToolRunResult.text(str(arguments))
 
-            self.container.local_tool_catalog.register(ready_tool, ready_review_tool)
+            self.local_runtime_registry.register(ready_tool, ready_review_tool)
             self._register_agent_and_llm(
                 runtime_preferences=AgentRuntimePreferences(workspace=str(workspace)),
             )
 
-            run = self.container.orchestration_intake_service.accept(
+            run = self.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-resolve-skill-visibility",
                     inbound_instruction=InboundInstruction(
@@ -658,7 +652,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.prepare_session_run(
+            self.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -668,7 +662,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.enqueue(
+            self.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
             processed = process_next_orchestration_assignment(
@@ -709,11 +703,14 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             if item["name"] == "blocked-review"
         )
         self.assertEqual(blocked_readiness["missing_tools"], ["missing_review_tool"])
-        self.assertNotIn("missing_auth", blocked_readiness)
+        self.assertEqual(
+            blocked_readiness["missing_access"],
+            ["gmail:oauth_connector(mail_read)"],
+        )
 
     def test_prompt_assembly_reports_blocked_skills_when_none_are_ready(self) -> None:
         adapter = _StaticTextAdapter(text="no skills ready")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -747,7 +744,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 runtime_preferences=AgentRuntimePreferences(workspace=str(workspace)),
             )
 
-            run = self.container.orchestration_intake_service.accept(
+            run = self.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-blocked-skills-observed",
                     inbound_instruction=InboundInstruction(
@@ -756,7 +753,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.prepare_session_run(
+            self.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -766,7 +763,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.enqueue(
+            self.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
             processed = process_next_orchestration_assignment(
@@ -795,6 +792,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(skills_catalog_block["metadata"]["count"], 0)
         self.assertEqual(skills_catalog_block["metadata"]["skills"], [])
+        self.assertEqual(skills_catalog_block["metadata"]["available_skill_names"], [])
         resolved_skills = skills_catalog_block["metadata"]["resolved_skills"]
         readiness_by_name = {
             item["name"]: item["readiness"]
@@ -815,7 +813,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_process_next_orchestration_assignment_allows_skill_read_alongside_other_tools(self) -> None:
         adapter = _SkillReadAndEchoAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -835,14 +833,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self._register_agent_and_llm(
                 runtime_preferences=AgentRuntimePreferences(workspace=str(workspace)),
             )
-            tool = self.container.tool_service.register(
-                RegisterToolInput(
-                    id="echo",
-                    name="Echo",
-                    description="Returns the input payload for local inline execution tests.",
-                    supported_modes=(ToolMode.INLINE,),
-                    runtime_key="echo",
-                ),
+            tool = self.seed_tool(
+                tool_id="echo",
+                name="Echo",
+                description="Returns the input payload for local inline execution tests.",
+                supported_modes=(ToolMode.INLINE,),
+                runtime_key="echo",
             )
 
             async def echo(arguments: dict[str, object]) -> ToolRunResult:
@@ -851,15 +847,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     details={"echo": arguments.get("message")},
                 )
 
-            self.container.local_tool_catalog.register(tool, echo)
+            self.local_runtime_registry.register(tool, echo)
 
-            run = self.container.orchestration_intake_service.accept(
+            run = self.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-read-skill-and-echo",
                     inbound_instruction=InboundInstruction(source="cli", content="review the repo"),
                 ),
             )
-            self.container.orchestration_intake_service.prepare_session_run(
+            self.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -869,7 +865,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.enqueue(
+            self.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -896,7 +892,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_process_next_orchestration_assignment_can_read_multiple_skills_before_deciding(self) -> None:
         adapter = _MultiSkillReadAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -920,13 +916,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 runtime_preferences=AgentRuntimePreferences(workspace=str(workspace)),
             )
 
-            run = self.container.orchestration_intake_service.accept(
+            run = self.orchestration_intake_service.accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-read-multiple-skills",
                     inbound_instruction=InboundInstruction(source="cli", content="decide how to answer"),
                 ),
             )
-            self.container.orchestration_intake_service.prepare_session_run(
+            self.orchestration_intake_service.prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -936,7 +932,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            self.container.orchestration_intake_service.enqueue(
+            self.orchestration_intake_service.enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -961,19 +957,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_process_next_orchestration_assignment_completes_inline_tool_loop(self) -> None:
         adapter = _InlineToolLoopAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="echo",
-                name="Echo",
-                description="Returns the input payload for local inline execution tests.",
-                supported_modes=(ToolMode.INLINE,),
-                runtime_key="echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Returns the input payload for local inline execution tests.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
         )
 
         async def echo(arguments: dict[str, object]) -> ToolRunResult:
@@ -982,15 +976,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 details={"echo": arguments.get("message")},
             )
 
-        self.container.local_tool_catalog.register(tool, echo)
+        self.local_runtime_registry.register(tool, echo)
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-process-inline-tool",
                 inbound_instruction=InboundInstruction(source="cli", content="search"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -1000,7 +994,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -1042,7 +1036,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(adapter.requests[1].messages[-1].tool_call_id, "call-echo-1")
         self.assertEqual(adapter.requests[1].messages[-1].name, "echo")
 
-        session_messages = self.container.session_service.list_messages(
+        session_messages = self.session_service.list_messages(
             ListSessionMessagesInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
@@ -1073,19 +1067,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             ),
             "parallel tool loop complete",
         )
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="echo",
-                name="Echo",
-                description="Returns the input payload for local inline execution tests.",
-                supported_modes=(ToolMode.INLINE,),
-                runtime_key="echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Returns the input payload for local inline execution tests.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
         )
         entered: list[str] = []
         entered_lock = threading.Lock()
@@ -1105,15 +1097,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 details={"echo": arguments.get("message")},
             )
 
-        self.container.local_tool_catalog.register(tool, echo)
+        self.local_runtime_registry.register(tool, echo)
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-process-parallel-inline-tools",
                 inbound_instruction=InboundInstruction(source="cli", content="search"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -1123,7 +1115,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -1148,14 +1140,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
     def test_tool_execution_reuses_run_context_for_batch_decisions(self) -> None:
         self._register_agent_and_llm()
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="context_echo",
-                name="Context Echo",
-                description="Returns whether execution context was attached.",
-                supported_modes=(ToolMode.INLINE,),
-                runtime_key="context_echo",
-            ),
+        tool = self.seed_tool(
+            tool_id="context_echo",
+            name="Context Echo",
+            description="Returns whether execution context was attached.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="context_echo",
         )
 
         async def context_echo(
@@ -1169,14 +1159,14 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 },
             )
 
-        self.container.local_tool_catalog.register(tool, context_echo)
-        run = self.container.orchestration_intake_service.accept(
+        self.local_runtime_registry.register(tool, context_echo)
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-tool-batch-context",
                 inbound_instruction=InboundInstruction(source="cli", content="search"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -1186,8 +1176,8 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        bound_run = self.container.orchestration_run_query_service.get_run(run.id)
-        resolved_tools = self.container.orchestration_inspection_service.resolve_tools(
+        bound_run = self.orchestration_run_query_service.get_run(run.id)
+        resolved_tools = self.orchestration_inspection_service.resolve_tools(
             bound_run,
         )
         call_count = 0
@@ -1201,12 +1191,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             }
 
         tool_resolver = (
-            self.container.orchestration_inspection_service.engine.tool_resolver
+            self.orchestration_inspection_service.engine.tool_resolver
         )
         tool_resolver.run_context_provider = run_context_provider
 
         outcome = asyncio.run(
-            self.container.orchestration_inspection_service.engine.tool_executor.execute_tool_calls_async(
+            self.orchestration_inspection_service.engine.tool_executor.execute_tool_calls_async(
                 bound_run,
                 session_key="agent:assistant:main",
                 active_session_id=bound_run.active_session_id or "",
@@ -1255,21 +1245,23 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             llm_profiles=(),
         )
         custom_harness.initialize_schema(settings=settings)
-        container = custom_harness.build_container(settings=settings)
+        container = custom_harness.build_runtime_container(settings=settings)
         try:
-            container.llm_adapter_registry.register(
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
                 LlmApiFamily.OPENAI_RESPONSES,
                 _BackgroundToolAdapter(),
             )
-            container.llm_service.register_profile(
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).register_profile(
                 RegisterLlmProfileInput(
                     id="openai.gpt-5.4-mini",
                     provider=LlmProviderKind.OPENAI,
                     api_family=LlmApiFamily.OPENAI_RESPONSES,
                     model_name="gpt-5.4-mini",
+                    credential_binding_id=credential_binding_id,
                 ),
             )
-            container.agent_service.register_profile(
+            container.require(AppKey.AGENT_SERVICE).register_profile(
                 RegisterAgentProfileInput(
                     id="assistant",
                     name="Assistant",
@@ -1282,14 +1274,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            tool = container.tool_service.register(
-                RegisterToolInput(
-                    id="background_echo",
-                    name="Background Echo",
-                    description="Only runs in the background.",
-                    supported_modes=(ToolMode.BACKGROUND,),
-                    runtime_key="background_echo",
-                ),
+            tool = seed_catalog_tool(
+                container,
+                tool_id="background_echo",
+                name="Background Echo",
+                description="Only runs in the background.",
+                supported_modes=(ToolMode.BACKGROUND,),
+                runtime_key="background_echo",
             )
 
             async def background_echo(arguments: dict[str, object]) -> ToolRunResult:
@@ -1298,21 +1289,21 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     details={"message": arguments.get("message")},
                 )
 
-            container.local_tool_catalog.register(tool, background_echo)
+            container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(tool, background_echo)
             AuthorizationServiceAdapter(
-                container.authorization_service,
+                container.require(AppKey.AUTHORIZATION_SERVICE),
             ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="background_execution",
             )
 
-            run = container.orchestration_intake_service.accept(
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-process-tool",
                     inbound_instruction=InboundInstruction(source="cli", content="search"),
                 ),
             )
-            container.orchestration_intake_service.prepare_session_run(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1322,7 +1313,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_intake_service.enqueue(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -1338,12 +1329,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(processed.waiting_reason, "tool_background_wait")
             self.assertEqual(len(processed.pending_tool_run_ids), 1)
 
-            tool_run = container.tool_service.get_tool_run(
+            tool_run = container.require(AppKey.TOOL_SERVICE).get_tool_run(
                 processed.pending_tool_run_ids[0],
             )
             self.assertEqual(tool_run.status, ToolRunStatus.QUEUED)
 
-            session_messages = container.session_service.list_messages(
+            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
                 ListSessionMessagesInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
@@ -1378,22 +1369,24 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             llm_profiles=(),
         )
         custom_harness.initialize_schema(settings=settings)
-        container = custom_harness.build_container(settings=settings)
+        container = custom_harness.build_runtime_container(settings=settings)
         try:
             adapter = _BackgroundToolAdapter()
-            container.llm_adapter_registry.register(
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
                 LlmApiFamily.OPENAI_RESPONSES,
                 adapter,
             )
-            container.llm_service.register_profile(
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).register_profile(
                 RegisterLlmProfileInput(
                     id="openai.gpt-5.4-mini",
                     provider=LlmProviderKind.OPENAI,
                     api_family=LlmApiFamily.OPENAI_RESPONSES,
                     model_name="gpt-5.4-mini",
+                    credential_binding_id=credential_binding_id,
                 ),
             )
-            container.agent_service.register_profile(
+            container.require(AppKey.AGENT_SERVICE).register_profile(
                 RegisterAgentProfileInput(
                     id="assistant",
                     name="Assistant",
@@ -1409,14 +1402,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            tool = container.tool_service.register(
-                RegisterToolInput(
-                    id="background_echo",
-                    name="Background Echo",
-                    description="Only runs in the background.",
-                    supported_modes=(ToolMode.BACKGROUND,),
-                    runtime_key="background_echo",
-                ),
+            tool = seed_catalog_tool(
+                container,
+                tool_id="background_echo",
+                name="Background Echo",
+                description="Only runs in the background.",
+                supported_modes=(ToolMode.BACKGROUND,),
+                runtime_key="background_echo",
             )
 
             async def background_echo(
@@ -1433,21 +1425,21 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     },
                 )
 
-            container.local_tool_catalog.register(tool, background_echo)
+            container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(tool, background_echo)
             AuthorizationServiceAdapter(
-                container.authorization_service,
+                container.require(AppKey.AUTHORIZATION_SERVICE),
             ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="background_execution",
             )
 
-            run = container.orchestration_intake_service.accept(
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-background-context",
                     inbound_instruction=InboundInstruction(source="cli", content="search"),
                 ),
             )
-            container.orchestration_intake_service.prepare_session_run(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1457,7 +1449,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_intake_service.enqueue(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -1470,7 +1462,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(waiting.status, OrchestrationRunStatus.WAITING)
             self.assertEqual(len(waiting.pending_tool_run_ids), 1)
 
-            queued_tool_run = container.tool_service.get_tool_run(
+            queued_tool_run = container.require(AppKey.TOOL_SERVICE).get_tool_run(
                 waiting.pending_tool_run_ids[0],
             )
             self.assertEqual(
@@ -1481,6 +1473,23 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 queued_tool_run.invocation_context_payload["workspace_dir"],
                 workspace_dir.name,
             )
+            self.assertEqual(queued_tool_run.metadata["source"], "orchestration")
+            self.assertEqual(
+                queued_tool_run.metadata["orchestration_run_id"],
+                "run-background-context",
+            )
+            self.assertEqual(
+                queued_tool_run.metadata["session_key"],
+                "agent:assistant:main",
+            )
+            self.assertEqual(
+                queued_tool_run.metadata["active_session_id"],
+                waiting.active_session_id,
+            )
+            self.assertEqual(queued_tool_run.metadata["agent_id"], "assistant")
+            self.assertEqual(queued_tool_run.metadata["tool_call_id"], "call-bg-1")
+            self.assertEqual(queued_tool_run.metadata["tool_name"], "background_echo")
+            self.assertEqual(queued_tool_run.metadata["workspace_dir"], workspace_dir.name)
             self.assertIn(
                 "workspace_bound",
                 queued_tool_run.invocation_context_payload["available_scopes"],
@@ -1497,6 +1506,14 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(
                 finished_tool_run.output_payload["execution_context"]["session_key"],
                 "agent:assistant:main",
+            )
+            self.assertEqual(
+                finished_tool_run.output_payload["execution_context"]["active_session_id"],
+                waiting.active_session_id,
+            )
+            self.assertEqual(
+                finished_tool_run.output_payload["execution_context"]["trace_id"],
+                "run-background-context",
             )
             self.assertEqual(
                 finished_tool_run.output_payload["execution_context"]["workspace_dir"],
@@ -1527,22 +1544,24 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             llm_profiles=(),
         )
         custom_harness.initialize_schema(settings=settings)
-        container = custom_harness.build_container(settings=settings)
+        container = custom_harness.build_runtime_container(settings=settings)
         try:
             adapter = _BackgroundResumeAdapter()
-            container.llm_adapter_registry.register(
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
                 LlmApiFamily.OPENAI_RESPONSES,
                 adapter,
             )
-            container.llm_service.register_profile(
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).register_profile(
                 RegisterLlmProfileInput(
                     id="openai.gpt-5.4-mini",
                     provider=LlmProviderKind.OPENAI,
                     api_family=LlmApiFamily.OPENAI_RESPONSES,
                     model_name="gpt-5.4-mini",
+                    credential_binding_id=credential_binding_id,
                 ),
             )
-            container.agent_service.register_profile(
+            container.require(AppKey.AGENT_SERVICE).register_profile(
                 RegisterAgentProfileInput(
                     id="assistant",
                     name="Assistant",
@@ -1555,14 +1574,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            tool = container.tool_service.register(
-                RegisterToolInput(
-                    id="background_echo",
-                    name="Background Echo",
-                    description="Only runs in the background.",
-                    supported_modes=(ToolMode.BACKGROUND,),
-                    runtime_key="background_echo",
-                ),
+            tool = seed_catalog_tool(
+                container,
+                tool_id="background_echo",
+                name="Background Echo",
+                description="Only runs in the background.",
+                supported_modes=(ToolMode.BACKGROUND,),
+                runtime_key="background_echo",
             )
 
             async def background_echo(arguments: dict[str, object]) -> ToolRunResult:
@@ -1571,21 +1589,21 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     details={"message": arguments.get("message")},
                 )
 
-            container.local_tool_catalog.register(tool, background_echo)
+            container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(tool, background_echo)
             AuthorizationServiceAdapter(
-                container.authorization_service,
+                container.require(AppKey.AUTHORIZATION_SERVICE),
             ).grant_agent_effect_authorization(
                 agent_id="assistant",
                 effect_id="background_execution",
             )
 
-            run = container.orchestration_intake_service.accept(
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-process-background-resume",
                     inbound_instruction=InboundInstruction(source="cli", content="search"),
                 ),
             )
-            container.orchestration_intake_service.prepare_session_run(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1595,7 +1613,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_intake_service.enqueue(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -1616,10 +1634,10 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(finished_tool_run.id, background_tool_run_id)
             self.assertEqual(finished_tool_run.status, ToolRunStatus.SUCCEEDED)
 
-            container.orchestration_scheduler_service.process_runtime_events(
+            container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
                 limit_per_subscription=10,
             )
-            processed_signal = container.orchestration_scheduler_service.process_next_signal(
+            processed_signal = container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_next_signal(
                 worker_id="scheduler-1",
             )
             self.assertIsNotNone(processed_signal)
@@ -1629,7 +1647,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "tool_terminal",
             )
 
-            resumed = container.orchestration_run_query_service.get_run(run.id)
+            resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id)
             self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
             self.assertEqual(resumed.stage, OrchestrationRunStage.QUEUED)
             self.assertEqual(resumed.pending_tool_run_ids, ())
@@ -1639,7 +1657,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 OrchestrationQueuePolicy.RESUME_FIRST,
             )
 
-            session_messages = container.session_service.list_messages(
+            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
                 ListSessionMessagesInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
@@ -1724,22 +1742,24 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             llm_profiles=(),
         )
         custom_harness.initialize_schema(settings=settings)
-        container = custom_harness.build_container(settings=settings)
+        container = custom_harness.build_runtime_container(settings=settings)
         try:
             adapter = _BackgroundApprovalAdapter()
-            container.llm_adapter_registry.register(
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
                 LlmApiFamily.OPENAI_RESPONSES,
                 adapter,
             )
-            container.llm_service.register_profile(
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).register_profile(
                 RegisterLlmProfileInput(
                     id="openai.gpt-5.4-mini",
                     provider=LlmProviderKind.OPENAI,
                     api_family=LlmApiFamily.OPENAI_RESPONSES,
                     model_name="gpt-5.4-mini",
+                    credential_binding_id=credential_binding_id,
                 ),
             )
-            container.agent_service.register_profile(
+            container.require(AppKey.AGENT_SERVICE).register_profile(
                 RegisterAgentProfileInput(
                     id="assistant",
                     name="Assistant",
@@ -1752,14 +1772,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             )
 
-            tool = container.tool_service.register(
-                RegisterToolInput(
-                    id="background_echo",
-                    name="Background Echo",
-                    description="Only runs in the background.",
-                    supported_modes=(ToolMode.BACKGROUND,),
-                    runtime_key="background_echo",
-                ),
+            tool = seed_catalog_tool(
+                container,
+                tool_id="background_echo",
+                name="Background Echo",
+                description="Only runs in the background.",
+                supported_modes=(ToolMode.BACKGROUND,),
+                runtime_key="background_echo",
             )
 
             async def background_echo(arguments: dict[str, object]) -> ToolRunResult:
@@ -1768,15 +1787,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     details={"message": arguments.get("message")},
                 )
 
-            container.local_tool_catalog.register(tool, background_echo)
+            container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(tool, background_echo)
 
-            run = container.orchestration_intake_service.accept(
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
                 AcceptOrchestrationRunInput(
                     run_id="run-background-tool-wait-recovery",
                     inbound_instruction=InboundInstruction(source="cli", content="search"),
                 ),
             )
-            container.orchestration_intake_service.prepare_session_run(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
                 PrepareSessionRunInput(
                     run_id=run.id,
                     context=SessionRouteContext(
@@ -1786,7 +1805,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     ),
                 ),
             )
-            container.orchestration_intake_service.enqueue(
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
                 EnqueueOrchestrationRunInput(run_id=run.id),
             )
 
@@ -1797,7 +1816,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             pending_request = waiting_for_approval.pending_approval_request()
             assert pending_request is not None
 
-            waiting_on_tool = container.orchestration_approval_control_service.resolve_approval_request(
+            waiting_on_tool = container.require(AppKey.ORCHESTRATION_APPROVAL_CONTROL_SERVICE).resolve_approval_request(
                 ResolveApprovalRequestInput(
                     run_id=run.id,
                     request_id=pending_request.request_id,
@@ -1806,7 +1825,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             )
             self.assertEqual(waiting_on_tool.stage, OrchestrationRunStage.WAITING_ON_TOOL)
 
-            with container.uow_factory() as uow:
+            with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
                 uow.orchestration_waits.delete_for_run(run.id)
                 uow.commit()
 
@@ -1819,11 +1838,11 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(finished_tool_run.status, ToolRunStatus.SUCCEEDED)
 
             recovered = (
-                container.orchestration_scheduler_service.recover_abandoned_runs()
+                container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).recover_abandoned_runs()
             )
             self.assertTrue(any(item.id == run.id for item in recovered))
 
-            resumed = container.orchestration_run_query_service.get_run(run.id)
+            resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id)
             self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
             self.assertEqual(resumed.stage, OrchestrationRunStage.QUEUED)
 
@@ -1841,19 +1860,19 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             custom_harness.close()
 
     def test_process_next_orchestration_assignment_fails_when_llm_requests_unknown_tool(self) -> None:
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             _ToolCallAdapter(),
         )
         self._register_agent_and_llm()
 
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id="run-process-tool",
                 inbound_instruction=InboundInstruction(source="cli", content="search"),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -1863,7 +1882,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
 
@@ -1880,7 +1899,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.error.code, "engine_failed")
         self.assertIn("search_docs", processed.error.message)
 
-        session_messages = self.container.session_service.list_messages(
+        session_messages = self.session_service.list_messages(
             ListSessionMessagesInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,

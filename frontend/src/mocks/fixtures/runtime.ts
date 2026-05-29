@@ -26,7 +26,7 @@ export const threads: ThreadSummary[] = [
     title: "打开外部网页收集信息",
     agent: "Browser Expert",
     status: "waiting",
-    last_action: "等待 browser_control 授权",
+    last_action: "等待 browser.navigate 授权",
     updated_at: "2026-04-29T06:29:06.000Z",
   },
   {
@@ -269,12 +269,12 @@ export const operationsModules: OperationsModuleOverview[] = [
       { id: "access_gated", label: "Access Gated", value: "11", delta: "tools with access requirements", tone: "warning" },
     ],
     queue: [
-      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["background", "toolrun_browser_42", "browser_control", "queued", "19s"]),
+      row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["background", "toolrun_browser_42", "browser.navigate", "queued", "19s"]),
       row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["background", "toolrun_img_88", "image_generate", "dispatching to worker", "41s"]),
       row(["Priority", "Run ID", "Lane Key", "Wait Reason", "Wait Time"], ["inline", "toolrun_sql_17", "sql_query", "running", "7s"]),
     ],
     lane_locks: [
-      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["browser_control", "-", "60s", "-", "confirmation, access gated"]),
+      row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["browser.navigate", "-", "60s", "-", "confirmation, access gated"]),
       row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["shell_exec", "-", "30s", "-", "mutates state"]),
       row(["Lane Key", "Holder Run ID", "TTL", "Expires At", "Reason"], ["sql_query", "-", "45s", "-", "access gated"]),
     ],
@@ -556,7 +556,7 @@ export const settingsSummary: SettingsSummary = {
   ],
   recent_changes: [
     row(["Time", "Change", "Owner", "Type"], ["2 hours ago", "Updated agent profile: Research Assistant", "Jane Doe", "Agent Profile"]),
-    row(["Time", "Change", "Owner", "Type"], ["5 hours ago", "Added new tool: browser_control", "John Smith", "Tool"]),
+    row(["Time", "Change", "Owner", "Type"], ["5 hours ago", "Added new tool: browser.snapshot", "John Smith", "Tool"]),
     row(["Time", "Change", "Owner", "Type"], ["1 day ago", "Updated skill: Search Knowledge Base", "Jane Doe", "Skill"]),
   ],
   issues: [

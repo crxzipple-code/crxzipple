@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import re
-from typing import TYPE_CHECKING, Any, Protocol
+from dataclasses import dataclass, field
+from typing import Any
 
-from crxzipple.modules.memory.application import MemorySearchHit, MemoryUseContext
+from crxzipple.modules.memory.application import (
+    MemoryActorContext,
+    MemoryRecallRequest,
+    MemoryRememberRequest,
+    MemoryRuntimeService,
+    MemorySearchHit,
+    memory_citation,
+)
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
-
-if TYPE_CHECKING:
-    from crxzipple.modules.memory.application import FileBackedMemoryService
-
 
 MEMORY_SEARCH_TOOL_ID = "memory_search"
 MEMORY_READ_TOOL_ID = "memory_read"
@@ -16,52 +19,56 @@ MEMORY_WRITE_DAILY_TOOL_ID = "memory_write_daily"
 MEMORY_FLUSH_SKIP_TOOL_ID = "memory_flush_skip"
 DEFAULT_MEMORY_SEARCH_LIMIT = 6
 MAX_MEMORY_SEARCH_INJECTED_CHARS = 4_000
-_AGENT_ID_ATTR = "agent_id"
 
 
-class MemoryToolContextResolver(Protocol):
-    def resolve(self, space_ref: str | None) -> MemoryUseContext | None:
-        ...
+@dataclass(frozen=True, slots=True)
+class MemoryToolDeps:
+    memory_runtime_service: MemoryRuntimeService = field(
+        metadata={"dependency_id": "memory_runtime_service"},
+    )
 
 
 def _resolve_memory_dependencies(
-    container: Any,
-) -> tuple[FileBackedMemoryService, MemoryToolContextResolver] | None:
-    memory_service = getattr(container, "file_memory_service", None)
-    memory_context_resolver = getattr(container, "memory_context_resolver", None)
-    if memory_service is None or memory_context_resolver is None:
+    deps: MemoryToolDeps | Any,
+) -> MemoryRuntimeService | None:
+    resolved = _coerce_memory_deps(deps)
+    if resolved is None:
         return None
-    return memory_service, memory_context_resolver
+    return resolved.memory_runtime_service
 
 
-def _resolve_tool_context(
+def _coerce_memory_deps(value: MemoryToolDeps | Any) -> MemoryToolDeps | None:
+    if isinstance(value, MemoryToolDeps):
+        return value
+    memory_runtime_service = getattr(value, "memory_runtime_service", None)
+    if memory_runtime_service is None:
+        return None
+    return MemoryToolDeps(
+        memory_runtime_service=memory_runtime_service,
+    )
+
+
+def _actor_context(
     execution_context: ToolExecutionContext | None,
-    *,
-    context_resolver: MemoryToolContextResolver,
-) -> MemoryUseContext:
+) -> MemoryActorContext:
     if execution_context is None:
         raise ValueError("Memory tool context is unavailable for this run.")
-    agent_id = execution_context.get_str(_AGENT_ID_ATTR)
-    context = context_resolver.resolve(agent_id)
-    if context is None:
+    actor = MemoryActorContext.from_attrs(execution_context.attrs)
+    if actor.agent_id is None:
         raise ValueError("Memory tool context is unavailable for this run.")
-    return context
+    return actor
 
 
-def memory_search(container: Any):
-    dependencies = _resolve_memory_dependencies(container)
-    if dependencies is None:
+def memory_search(deps: MemoryToolDeps | Any):
+    memory_runtime_service = _resolve_memory_dependencies(deps)
+    if memory_runtime_service is None:
         return None
-    memory_service, context_resolver = dependencies
 
     async def handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
-        context = _resolve_tool_context(
-            execution_context,
-            context_resolver=context_resolver,
-        )
+        actor = _actor_context(execution_context)
         query = str(arguments.get("query", "")).strip()
         if not query:
             raise ValueError("memory_search requires a non-empty query.")
@@ -73,12 +80,19 @@ def memory_search(container: Any):
         except (TypeError, ValueError) as exc:
             raise ValueError("memory_search limit must be an integer.") from exc
         limit = min(max(limit, 1), DEFAULT_MEMORY_SEARCH_LIMIT)
-        hits = memory_service.search(context=context, query=query, limit=limit)
+        recall = memory_runtime_service.recall(
+            MemoryRecallRequest(
+                actor=actor,
+                query=query,
+                max_items=limit,
+            ),
+        )
+        hits = recall.hits
         return ToolRunResult.text(
             render_memory_search_result(query=query, hits=tuple(hits)),
             metadata={
                 "tool": MEMORY_SEARCH_TOOL_ID,
-                "space_id": context.space_id,
+                "space_id": recall.scope.context.space_id,
                 "query": query,
                 "result_count": len(hits),
                 "results": [
@@ -97,30 +111,27 @@ def memory_search(container: Any):
     return handler
 
 
-def memory_read(container: Any):
-    dependencies = _resolve_memory_dependencies(container)
-    if dependencies is None:
+def memory_read(deps: MemoryToolDeps | Any):
+    memory_runtime_service = _resolve_memory_dependencies(deps)
+    if memory_runtime_service is None:
         return None
-    memory_service, context_resolver = dependencies
 
     async def handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
-        context = _resolve_tool_context(
-            execution_context,
-            context_resolver=context_resolver,
-        )
+        actor = _actor_context(execution_context)
         citation = str(arguments.get("citation", "")).strip()
         if not citation:
             raise ValueError("memory_read requires a citation.")
-        path, start_line, end_line = _parse_memory_citation(citation)
-        excerpt = memory_service.get(
-            context=context,
-            path=path,
-            start_line=start_line,
-            line_count=(end_line - start_line + 1) if end_line is not None else None,
+        recall = memory_runtime_service.recall(
+            MemoryRecallRequest(
+                actor=actor,
+                citation=citation,
+                max_items=1,
+            ),
         )
+        excerpt = recall.excerpt
         return ToolRunResult.text(
             render_memory_read_result(
                 excerpt,
@@ -128,7 +139,7 @@ def memory_read(container: Any):
             ),
             metadata={
                 "tool": MEMORY_READ_TOOL_ID,
-                "space_id": context.space_id,
+                "space_id": recall.scope.context.space_id,
                 "citation": citation,
                 "found": excerpt is not None,
             },
@@ -137,29 +148,33 @@ def memory_read(container: Any):
     return handler
 
 
-def memory_write_daily(container: Any):
-    dependencies = _resolve_memory_dependencies(container)
-    if dependencies is None:
+def memory_write_daily(deps: MemoryToolDeps | Any):
+    memory_runtime_service = _resolve_memory_dependencies(deps)
+    if memory_runtime_service is None:
         return None
-    memory_service, context_resolver = dependencies
 
     async def handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
-        context = _resolve_tool_context(
-            execution_context,
-            context_resolver=context_resolver,
-        )
+        actor = _actor_context(execution_context)
         content = str(arguments.get("content", "")).strip()
         if not content:
             raise ValueError("memory_write_daily requires non-empty content.")
-        write_result = memory_service.append_daily(
-            context=context,
-            content=content,
+        remember = memory_runtime_service.remember(
+            MemoryRememberRequest(
+                actor=actor,
+                content=content,
+                intent="freeform",
+                retention="durable",
+                metadata={"tool": MEMORY_WRITE_DAILY_TOOL_ID},
+            ),
         )
+        write_result = remember.write_result
+        if write_result is None:
+            raise RuntimeError("Memory remember completed without a write result.")
         payload = {
-            "status": "written",
+            "status": remember.status,
             "path": write_result.path,
             "line_start": write_result.line_start,
             "line_end": write_result.line_end,
@@ -173,7 +188,7 @@ def memory_write_daily(container: Any):
             details=payload,
             metadata={
                 "tool": MEMORY_WRITE_DAILY_TOOL_ID,
-                "space_id": context.space_id,
+                "space_id": remember.scope.context.space_id,
                 **payload,
             },
         )
@@ -181,19 +196,17 @@ def memory_write_daily(container: Any):
     return handler
 
 
-def memory_flush_skip(container: Any):
-    dependencies = _resolve_memory_dependencies(container)
-    if dependencies is None:
+def memory_flush_skip(deps: MemoryToolDeps | Any):
+    memory_runtime_service = _resolve_memory_dependencies(deps)
+    if memory_runtime_service is None:
         return None
-    _, context_resolver = dependencies
 
     async def handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
     ) -> ToolRunResult:
-        context = _resolve_tool_context(
-            execution_context,
-            context_resolver=context_resolver,
+        plan = memory_runtime_service.resolve_access_plan(
+            _actor_context(execution_context),
         )
         del arguments
         payload = {"status": "skipped"}
@@ -202,7 +215,7 @@ def memory_flush_skip(container: Any):
             details=payload,
             metadata={
                 "tool": MEMORY_FLUSH_SKIP_TOOL_ID,
-                "space_id": context.space_id,
+                "space_id": plan.scope.context.space_id,
                 **payload,
             },
         )
@@ -274,25 +287,3 @@ def render_memory_read_result(
         ],
     )
     return "\n".join(lines).strip()
-
-
-def memory_citation(path: str, start_line: int, end_line: int) -> str:
-    if end_line <= start_line:
-        return f"{path}:{start_line}"
-    return f"{path}:{start_line}-{end_line}"
-
-
-def _parse_memory_citation(citation: str) -> tuple[str, int, int]:
-    normalized = citation.strip()
-    match = re.fullmatch(r"(.+):(\d+)(?:-(\d+))?", normalized)
-    if match is None:
-        raise ValueError("memory_read citation must look like path:start or path:start-end.")
-    path = match.group(1).strip()
-    start_line = int(match.group(2))
-    end_group = match.group(3)
-    end_line = int(end_group) if end_group is not None else start_line
-    if end_line < start_line:
-        raise ValueError(
-            "memory_read citation end line must be greater than or equal to start line.",
-        )
-    return path, start_line, end_line

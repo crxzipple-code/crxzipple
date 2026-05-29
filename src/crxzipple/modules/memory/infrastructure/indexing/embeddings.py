@@ -7,6 +7,13 @@ import re
 
 import requests
 
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    AccessCredentialKind,
+    CredentialBindingRef,
+    CredentialProvider,
+)
+
 
 class LocalHashedMemoryEmbeddingProvider:
     def __init__(
@@ -54,29 +61,25 @@ class OpenAICompatibleMemoryEmbeddingProvider:
         *,
         base_url: str,
         model_name: str,
-        credential_binding: str,
-        resolved_credential: str | None = None,
+        credential_binding_id: str,
+        credential_provider: CredentialProvider,
         timeout_seconds: int = 30,
     ) -> None:
         normalized_base_url = base_url.strip()
         normalized_model_name = model_name.strip()
-        normalized_binding = credential_binding.strip()
+        normalized_binding_id = credential_binding_id.strip()
         if not normalized_base_url:
             raise ValueError("OpenAI-compatible memory embeddings require a base_url.")
         if not normalized_model_name:
             raise ValueError("OpenAI-compatible memory embeddings require a model_name.")
-        if not normalized_binding:
+        if not normalized_binding_id:
             raise ValueError(
-                "OpenAI-compatible memory embeddings require a credential_binding.",
+                "OpenAI-compatible memory embeddings require a credential_binding_id.",
             )
         self._base_url = normalized_base_url
         self._model_name = normalized_model_name
-        self._credential_binding = normalized_binding
-        self._resolved_credential = (
-            resolved_credential.strip()
-            if resolved_credential is not None and resolved_credential.strip()
-            else None
-        )
+        self._credential_binding_id = normalized_binding_id
+        self._credential_provider = credential_provider
         self._timeout_seconds = max(timeout_seconds, 1)
 
     @property
@@ -95,17 +98,30 @@ class OpenAICompatibleMemoryEmbeddingProvider:
         from crxzipple.modules.llm.infrastructure.adapters.common import (
             ensure_json_response,
             join_url,
-            resolve_credential_binding,
         )
 
         normalized_texts = [str(text) for text in texts]
         if not normalized_texts:
             return ()
-        token = resolve_credential_binding(
-            self._credential_binding,
-            required=True,
-            description="memory vector provider",
-            resolved_credential=self._resolved_credential,
+        token = self._credential_provider.resolve_credential(
+            CredentialBindingRef(
+                binding_id=self._credential_binding_id,
+                source_type="access",
+                source_ref=self._credential_binding_id,
+                expected_kind=AccessCredentialKind.API_KEY,
+            ),
+            consumer=AccessConsumerRef(
+                consumer_id=f"memory.vector:{self._model_name}",
+                module="memory",
+                component="vector_embeddings",
+                metadata={"provider": self.provider_name},
+            ),
+            trace_context={
+                "component": "memory.vector_embeddings",
+                "provider": self.provider_name,
+                "model": self._model_name,
+                "base_url": self.provider_key,
+            },
         )
         response = requests.post(
             join_url(self._base_url, "/embeddings"),

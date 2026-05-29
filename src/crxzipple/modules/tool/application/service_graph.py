@@ -7,6 +7,9 @@ from crxzipple.modules.tool.application.concurrency import ToolRunConcurrencyPol
 from crxzipple.modules.tool.application.scheduler_service import (
     ToolBackgroundSchedulerService,
 )
+from crxzipple.modules.tool.application.runtime_pool_service import (
+    ToolRuntimePoolService,
+)
 from crxzipple.modules.tool.application.service_support import ToolServiceDependencies
 from crxzipple.modules.tool.application.services import ToolApplicationService
 from crxzipple.modules.tool.application.submission_service import ToolSubmissionService
@@ -20,6 +23,7 @@ class ToolServiceGraph:
     scheduler_service: ToolBackgroundSchedulerService
     worker_service: ToolWorkerService
     submission_service: ToolSubmissionService
+    runtime_pool_service: ToolRuntimePoolService
     application_service: ToolApplicationService
 
 
@@ -42,13 +46,14 @@ def build_tool_service_graph(deps: ToolServiceDependencies) -> ToolServiceGraph:
     )
     submission_service = ToolSubmissionService(
         deps,
-        catalog_service=catalog_service,
         worker_service=worker_service,
     )
+    runtime_pool_service = ToolRuntimePoolService(deps)
     application_service = ToolApplicationService(
         catalog_service=catalog_service,
         worker_service=worker_service,
         submission_service=submission_service,
+        runtime_pool_service=runtime_pool_service,
     )
     return ToolServiceGraph(
         deps=deps,
@@ -56,5 +61,6 @@ def build_tool_service_graph(deps: ToolServiceDependencies) -> ToolServiceGraph:
         scheduler_service=scheduler_service,
         worker_service=worker_service,
         submission_service=submission_service,
+        runtime_pool_service=runtime_pool_service,
         application_service=application_service,
     )

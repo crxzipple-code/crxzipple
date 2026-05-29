@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.authorization import authorize_llm_action
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.llm.application import (
@@ -16,10 +16,7 @@ from crxzipple.modules.llm.application import (
     RegisterLlmProfileInput,
     StreamLlmInput,
 )
-from crxzipple.modules.llm.application.services import (
-    public_credential_binding_label,
-    register_llm_profile_input_from_config,
-)
+from crxzipple.modules.llm.application.services import register_llm_profile_input_from_config
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
@@ -31,6 +28,7 @@ from crxzipple.modules.llm.domain import (
     LlmSourceKind,
     ToolSchema,
 )
+from crxzipple.modules.llm.domain.exceptions import LlmValidationError
 from crxzipple.shared.time import (
     format_datetime_utc,
     format_optional_datetime_utc,
@@ -58,7 +56,7 @@ class RegisterLlmProfileRequest(BaseModel):
     capabilities: list[LlmCapability] = Field(default_factory=list)
     default_params: LlmDefaultsResponse = Field(default_factory=LlmDefaultsResponse)
     base_url: str | None = None
-    credential_binding: str | None = None
+    credential_binding_id: str | None = None
     timeout_seconds: int = 60
     max_concurrency: int | None = Field(default=None, ge=1)
     concurrency_key: str | None = None
@@ -76,7 +74,7 @@ class LlmProfileResponse(BaseModel):
     capabilities: list[str]
     default_params: LlmDefaultsResponse
     base_url: str | None
-    credential_binding: str | None
+    credential_binding_id: str | None
     timeout_seconds: int
     max_concurrency: int | None = None
     concurrency_key: str | None = None
@@ -99,6 +97,15 @@ class ToolSchemaRequest(BaseModel):
 
 
 class InvokeLlmRequest(BaseModel):
+    messages: list[LlmMessageRequest]
+    tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
+    response_format: dict[str, Any] | None = None
+    overrides: dict[str, Any] = Field(default_factory=dict)
+    invocation_id: str | None = None
+
+
+class TestLlmProfileRequest(BaseModel):
+    profile: RegisterLlmProfileRequest
     messages: list[LlmMessageRequest]
     tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
@@ -155,7 +162,16 @@ def register_profile(
     payload: RegisterLlmProfileRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmProfileResponse:
-    profile = container.llm_service.register_profile(_register_request_to_input(payload))
+    try:
+        profile = container.require(AppKey.LLM_SERVICE).register_profile(_register_request_to_input(payload))
+    except LlmValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "llm_profile_validation_failed",
+                "message": str(exc),
+            },
+        ) from exc
     return _to_profile_response(profile)
 
 
@@ -178,7 +194,7 @@ def _register_request_to_input(
             extra_body=dict(payload.default_params.extra_body),
         ),
         base_url=payload.base_url,
-        credential_binding=payload.credential_binding,
+        credential_binding_id=payload.credential_binding_id,
         timeout_seconds=payload.timeout_seconds,
         max_concurrency=payload.max_concurrency,
         concurrency_key=payload.concurrency_key,
@@ -200,7 +216,7 @@ def _profile_config_id(config: object) -> str:
 
 
 def _configured_profiles_from_settings(container: AppContainer) -> tuple[object, ...]:
-    return tuple(getattr(container.settings, "llm_profiles", ()))
+    return tuple(getattr(container.require(AppKey.CORE_SETTINGS), "llm_profiles", ()))
 
 
 @router.get("", response_model=list[LlmProfileResponse])
@@ -209,7 +225,7 @@ def list_profiles(
 ) -> list[LlmProfileResponse]:
     return [
         _to_profile_response(profile)
-        for profile in container.llm_service.list_profiles()
+        for profile in container.require(AppKey.LLM_SERVICE).list_profiles()
     ]
 
 
@@ -224,12 +240,60 @@ def sync_profiles(
         for item in _configured_profiles_from_settings(container)
         if not selected_ids or _profile_config_id(item) in selected_ids
     )
-    synced = container.llm_service.sync_profiles(
+    synced = container.require(AppKey.LLM_SERVICE).sync_profiles(
         tuple(
             register_llm_profile_input_from_config(item) for item in configured_profiles
         ),
     )
     return [_to_profile_response(item) for item in synced]
+
+
+@router.post(
+    "/test",
+    response_model=LlmInvocationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def test_profile(
+    payload: TestLlmProfileRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> LlmInvocationResponse:
+    try:
+        invocation = container.require(AppKey.LLM_SERVICE).test_profile(
+            _register_request_to_input(payload.profile),
+            InvokeLlmInput(
+                llm_id=payload.profile.id,
+                messages=tuple(
+                    LlmMessage(
+                        role=item.role,
+                        content=item.content,
+                        name=item.name,
+                        tool_call_id=item.tool_call_id,
+                        metadata=item.metadata,
+                    )
+                    for item in payload.messages
+                ),
+                tool_schemas=tuple(
+                    ToolSchema(
+                        name=item.name,
+                        description=item.description,
+                        input_schema=item.input_schema,
+                    )
+                    for item in payload.tool_schemas
+                ),
+                response_format=payload.response_format,
+                overrides=payload.overrides,
+                invocation_id=payload.invocation_id,
+            ),
+        )
+    except LlmValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "llm_profile_validation_failed",
+                "message": str(exc),
+            },
+        ) from exc
+    return _to_invocation_response(invocation)
 
 
 @router.put("/{llm_id}", response_model=LlmProfileResponse)
@@ -246,7 +310,16 @@ def update_profile(
                 "message": "Request body id must match the llm_id path parameter.",
             },
         )
-    profile = container.llm_service.update_profile(_register_request_to_input(payload))
+    try:
+        profile = container.require(AppKey.LLM_SERVICE).update_profile(_register_request_to_input(payload))
+    except LlmValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "llm_profile_validation_failed",
+                "message": str(exc),
+            },
+        ) from exc
     return _to_profile_response(profile)
 
 
@@ -255,7 +328,7 @@ def get_profile(
     llm_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmProfileResponse:
-    return _to_profile_response(container.llm_service.get_profile(llm_id))
+    return _to_profile_response(container.require(AppKey.LLM_SERVICE).get_profile(llm_id))
 
 
 @router.post("/{llm_id}/enable", response_model=LlmProfileResponse)
@@ -264,7 +337,7 @@ def enable_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmProfileResponse:
     return _to_profile_response(
-        container.llm_service.set_profile_enabled(llm_id, enabled=True),
+        container.require(AppKey.LLM_SERVICE).set_profile_enabled(llm_id, enabled=True),
     )
 
 
@@ -274,7 +347,7 @@ def disable_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmProfileResponse:
     return _to_profile_response(
-        container.llm_service.set_profile_enabled(llm_id, enabled=False),
+        container.require(AppKey.LLM_SERVICE).set_profile_enabled(llm_id, enabled=False),
     )
 
 
@@ -283,7 +356,7 @@ def delete_profile(
     llm_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> Response:
-    container.llm_service.delete_profile(llm_id)
+    container.require(AppKey.LLM_SERVICE).delete_profile(llm_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -303,7 +376,7 @@ def invoke_llm(
         action="llm.invoke",
         interface_name="http",
     )
-    invocation = container.llm_service.invoke(
+    invocation = container.require(AppKey.LLM_SERVICE).invoke(
         InvokeLlmInput(
             llm_id=llm_id,
             messages=tuple(
@@ -346,7 +419,7 @@ def stream_llm(
     )
 
     def event_stream():
-        for event in container.llm_service.stream_invoke(
+        for event in container.require(AppKey.LLM_SERVICE).stream_invoke(
             StreamLlmInput(
                 llm_id=llm_id,
                 messages=tuple(
@@ -388,7 +461,7 @@ def list_invocations(
 ) -> list[LlmInvocationResponse]:
     return [
         _to_invocation_response(invocation)
-        for invocation in container.llm_service.list_invocations(llm_id=llm_id)
+        for invocation in container.require(AppKey.LLM_SERVICE).list_invocations(llm_id=llm_id)
     ]
 
 
@@ -397,7 +470,7 @@ def get_invocation(
     invocation_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmInvocationResponse:
-    return _to_invocation_response(container.llm_service.get_invocation(invocation_id))
+    return _to_invocation_response(container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id))
 
 
 def _format_sse_event(event_name: str, payload: dict[str, Any]) -> str:
@@ -421,7 +494,7 @@ def _to_profile_response(profile: Any) -> LlmProfileResponse:
             extra_body=dict(profile.default_params.extra_body),
         ),
         base_url=profile.base_url,
-        credential_binding=public_credential_binding_label(profile.credential_binding),
+        credential_binding_id=profile.credential_binding_id,
         timeout_seconds=profile.timeout_seconds,
         max_concurrency=profile.max_concurrency,
         concurrency_key=profile.concurrency_key,

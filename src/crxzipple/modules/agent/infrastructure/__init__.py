@@ -16,6 +16,7 @@ from crxzipple.modules.agent.infrastructure.home_registry import (
     list_registered_agent_homes,
     register_agent_home,
     resolve_registered_agent_home,
+    unregister_agent_home,
 )
 from crxzipple.modules.agent.infrastructure.home_migration import (
     migrate_agent_home_contents,
@@ -38,6 +39,7 @@ __all__ = [
     "register_agent_home",
     "render_agent_home_config",
     "resolve_registered_agent_home",
+    "unregister_agent_home",
     "write_agent_home_files",
     "write_agent_home_config",
 ]

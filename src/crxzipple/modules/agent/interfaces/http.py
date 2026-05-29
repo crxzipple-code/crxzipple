@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.core.config import AgentProfileSettings
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.agent.application import (
@@ -18,7 +18,6 @@ from crxzipple.modules.agent.application import (
     AgentProfileResolutionQueryService,
     AgentResolutionTrace,
     AgentResolvedLlm,
-    AgentResolvedSkill,
     AgentResolvedTool,
     AgentResolutionSummary,
     AgentValidationIssue,
@@ -39,14 +38,13 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 from crxzipple.modules.agent.interfaces.dto import AgentProfileDTO
-from crxzipple.modules.orchestration.infrastructure import MemoryBindingService
 
 
 router = APIRouter()
-_memory_binding_service = MemoryBindingService()
 
 
 class AgentIdentityRequest(BaseModel):
@@ -80,14 +78,18 @@ class AgentRuntimePreferencesRequest(BaseModel):
     workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
-    memory_retrieval_backend: str | None = None
     attrs: dict[str, object] = Field(default_factory=dict)
+
+
+class AgentMemoryBindingRequest(BaseModel):
+    enabled: bool = True
+    scope_ref: str | None = None
+    access: str = "read_write"
 
 
 class RegisterAgentProfileRequest(BaseModel):
     id: str
     name: str
-    description: str = ""
     enabled: bool = True
     identity: AgentIdentityRequest = Field(default_factory=AgentIdentityRequest)
     instruction_policy: AgentInstructionPolicyRequest = Field(
@@ -100,19 +102,20 @@ class RegisterAgentProfileRequest(BaseModel):
     runtime_preferences: AgentRuntimePreferencesRequest = Field(
         default_factory=AgentRuntimePreferencesRequest,
     )
+    memory: AgentMemoryBindingRequest = Field(default_factory=AgentMemoryBindingRequest)
     reason: str | None = None
     actor: str | None = None
 
 
 class UpdateAgentProfileRequest(BaseModel):
     name: str | None = None
-    description: str | None = None
     enabled: bool | None = None
     identity: AgentIdentityRequest | None = None
     instruction_policy: AgentInstructionPolicyRequest | None = None
     llm_routing_policy: AgentLlmRoutingPolicyRequest | None = None
     execution_policy: AgentExecutionPolicyRequest | None = None
     runtime_preferences: AgentRuntimePreferencesRequest | None = None
+    memory: AgentMemoryBindingRequest | None = None
     reason: str | None = None
     actor: str | None = None
 
@@ -175,14 +178,18 @@ class AgentRuntimePreferencesResponse(BaseModel):
     workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
-    memory_retrieval_backend: str | None = None
     attrs: dict[str, object] = Field(default_factory=dict)
+
+
+class AgentMemoryBindingResponse(BaseModel):
+    enabled: bool
+    scope_ref: str | None = None
+    access: str
 
 
 class AgentProfileResponse(BaseModel):
     id: str
     name: str
-    description: str
     enabled: bool
     created_at: str
     updated_at: str
@@ -191,6 +198,7 @@ class AgentProfileResponse(BaseModel):
     llm_routing_policy: AgentLlmRoutingPolicyResponse
     execution_policy: AgentExecutionPolicyResponse
     runtime_preferences: AgentRuntimePreferencesResponse
+    memory: AgentMemoryBindingResponse
 
 
 class AgentHomeMigrationResponse(BaseModel):
@@ -228,7 +236,6 @@ class AgentResolutionSummaryResponse(BaseModel):
     status: str
     llm_routes: int
     tools: int
-    skills: int
     access_grants: int
     authorization_grants: int
     issues: int
@@ -243,7 +250,7 @@ class AgentResolvedLlmResponse(BaseModel):
     model_name: str | None = None
     capabilities: list[str] = Field(default_factory=list)
     context_window_tokens: int | None = None
-    credential_binding: str | None = None
+    credential_binding_id: str | None = None
 
 
 class AgentResolvedToolResponse(BaseModel):
@@ -252,24 +259,12 @@ class AgentResolvedToolResponse(BaseModel):
     enabled: bool
     name: str | None = None
     kind: str | None = None
-    source_kind: str | None = None
+    definition_origin: str | None = None
     access_requirements: list[str] = Field(default_factory=list)
     access_requirement_sets: list[list[str]] = Field(default_factory=list)
     required_effect_ids: list[str] = Field(default_factory=list)
     requires_confirmation: bool = False
     mutates_state: bool = False
-
-
-class AgentResolvedSkillResponse(BaseModel):
-    skill_id: str
-    resolved: bool
-    name: str | None = None
-    source: str | None = None
-    required_tools: list[str] = Field(default_factory=list)
-    optional_tools: list[str] = Field(default_factory=list)
-    suggested_tools: list[str] = Field(default_factory=list)
-    required_effects: list[str] = Field(default_factory=list)
-    access_requirements: list[str] = Field(default_factory=list)
 
 
 class AgentAccessGrantResponse(BaseModel):
@@ -313,7 +308,6 @@ class AgentProfileResolutionResponse(BaseModel):
     summary: AgentResolutionSummaryResponse
     llm_routes: list[AgentResolvedLlmResponse] = Field(default_factory=list)
     tools: list[AgentResolvedToolResponse] = Field(default_factory=list)
-    skills: list[AgentResolvedSkillResponse] = Field(default_factory=list)
     access_grants: list[AgentAccessGrantResponse] = Field(default_factory=list)
     authorization_grants: list[AgentAuthorizationGrantResponse] = Field(
         default_factory=list,
@@ -328,7 +322,7 @@ def register_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentProfileResponse:
     try:
-        profile = container.agent_service.register_profile(
+        profile = container.require(AppKey.AGENT_SERVICE).register_profile(
             _register_request_to_input(payload),
         )
     except AgentAlreadyExistsError as exc:
@@ -344,7 +338,7 @@ def list_profiles(
 ) -> list[AgentProfileResponse]:
     return [
         _to_response(AgentProfileDTO.from_entity(profile))
-        for profile in container.agent_service.list_profiles()
+        for profile in container.require(AppKey.AGENT_SERVICE).list_profiles()
     ]
 
 
@@ -356,10 +350,10 @@ def sync_profiles(
     selected_ids = set(profile or [])
     configured_profiles = tuple(
         item
-        for item in container.settings.agent_profiles
+        for item in container.require(AppKey.CORE_SETTINGS).agent_profiles
         if not selected_ids or item.id in selected_ids
     )
-    synced = container.agent_service.sync_profiles(
+    synced = container.require(AppKey.AGENT_SERVICE).sync_profiles(
         tuple(_profile_settings_to_input(item) for item in configured_profiles),
     )
     return [_to_response(AgentProfileDTO.from_entity(item)) for item in synced]
@@ -372,7 +366,7 @@ def update_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentProfileResponse:
     try:
-        profile = container.agent_service.update_profile(
+        profile = container.require(AppKey.AGENT_SERVICE).update_profile(
             _update_request_to_input(agent_id, payload),
         )
     except AgentNotFoundError as exc:
@@ -390,7 +384,7 @@ def delete_profile(
     actor: Annotated[str | None, Query()] = None,
 ) -> Response:
     try:
-        container.agent_service.delete_profile(
+        container.require(AppKey.AGENT_SERVICE).delete_profile(
             AgentProfileActionInput(id=agent_id, reason=reason, actor=actor),
         )
     except AgentNotFoundError as exc:
@@ -407,7 +401,7 @@ def migrate_home(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentHomeMigrationResponse:
     try:
-        result = container.agent_service.migrate_profile_home(
+        result = container.require(AppKey.AGENT_SERVICE).migrate_profile_home(
             MigrateAgentHomeInput(
                 id=agent_id,
                 home_dir=payload.home_dir,
@@ -434,7 +428,7 @@ def get_home(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentHomeSnapshotResponse:
     try:
-        snapshot = container.agent_service.inspect_profile_home(agent_id)
+        snapshot = container.require(AppKey.AGENT_SERVICE).inspect_profile_home(agent_id)
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except AgentValidationError as exc:
@@ -448,12 +442,11 @@ def get_profile_resolution(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentProfileResolutionResponse:
     service = AgentProfileResolutionQueryService(
-        agent_profiles=container.agent_service,
-        llm_profiles=container.llm_service,
-        tool_catalog=container.tool_service,
-        skill_catalog=container.skill_manager,
-        access_readiness=container.access_service,
-        authorization_policies=container.authorization_service,
+        agent_profiles=container.require(AppKey.AGENT_SERVICE),
+        llm_profiles=container.require(AppKey.LLM_SERVICE),
+        tool_catalog=container.require(AppKey.TOOL_QUERY_SERVICE),
+        access_readiness=container.require(AppKey.ACCESS_SERVICE),
+        authorization_policies=container.require(AppKey.AUTHORIZATION_SERVICE),
     )
     try:
         return _to_resolution_response(service.resolve(agent_id))
@@ -468,7 +461,7 @@ def update_home(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentHomeSnapshotResponse:
     try:
-        snapshot = container.agent_service.update_profile_home_files(
+        snapshot = container.require(AppKey.AGENT_SERVICE).update_profile_home_files(
             UpdateAgentHomeFilesInput(
                 id=agent_id,
                 files={item.name: item.content for item in payload.files},
@@ -488,7 +481,7 @@ def sync_home(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentHomeConfigResponse:
     try:
-        result = container.agent_service.sync_profile_home(
+        result = container.require(AppKey.AGENT_SERVICE).sync_profile_home(
             SyncAgentHomeInput(
                 id=agent_id,
                 home_dir=payload.home_dir,
@@ -512,7 +505,7 @@ def export_home(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentHomeConfigResponse:
     try:
-        result = container.agent_service.export_profile_home(
+        result = container.require(AppKey.AGENT_SERVICE).export_profile_home(
             ExportAgentHomeInput(
                 id=agent_id,
                 home_dir=payload.home_dir,
@@ -535,7 +528,7 @@ def get_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AgentProfileResponse:
     try:
-        profile = container.agent_service.get_profile(agent_id)
+        profile = container.require(AppKey.AGENT_SERVICE).get_profile(agent_id)
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     return _to_response(AgentProfileDTO.from_entity(profile))
@@ -548,7 +541,7 @@ def enable_profile(
     payload: AgentProfileActionRequest | None = None,
 ) -> AgentProfileResponse:
     try:
-        profile = container.agent_service.enable_profile(
+        profile = container.require(AppKey.AGENT_SERVICE).enable_profile(
             _action_request_to_input(agent_id, payload),
         )
     except AgentNotFoundError as exc:
@@ -563,7 +556,7 @@ def disable_profile(
     payload: AgentProfileActionRequest | None = None,
 ) -> AgentProfileResponse:
     try:
-        profile = container.agent_service.disable_profile(
+        profile = container.require(AppKey.AGENT_SERVICE).disable_profile(
             _action_request_to_input(agent_id, payload),
         )
     except AgentNotFoundError as exc:
@@ -577,7 +570,6 @@ def _register_request_to_input(
     return RegisterAgentProfileInput(
         id=payload.id,
         name=payload.name,
-        description=payload.description,
         enabled=payload.enabled,
         identity=AgentIdentity(
             display_name=payload.identity.display_name,
@@ -606,10 +598,12 @@ def _register_request_to_input(
             workdir=payload.runtime_preferences.workdir,
             workspace=payload.runtime_preferences.workspace,
             sandbox_mode=payload.runtime_preferences.sandbox_mode,
-            memory_retrieval_backend=(
-                payload.runtime_preferences.memory_retrieval_backend
-            ),
             attrs=dict(payload.runtime_preferences.attrs),
+        ),
+        memory=AgentMemoryBinding(
+            enabled=payload.memory.enabled,
+            scope_ref=payload.memory.scope_ref,
+            access=payload.memory.access,
         ),
         reason=payload.reason,
         actor=payload.actor,
@@ -623,8 +617,6 @@ def _update_request_to_input(
     updates: dict[str, object] = {}
     if payload.name is not None:
         updates["name"] = payload.name
-    if payload.description is not None:
-        updates["description"] = payload.description
     if payload.enabled is not None:
         updates["enabled"] = payload.enabled
     if payload.identity is not None:
@@ -659,10 +651,13 @@ def _update_request_to_input(
             workdir=payload.runtime_preferences.workdir,
             workspace=payload.runtime_preferences.workspace,
             sandbox_mode=payload.runtime_preferences.sandbox_mode,
-            memory_retrieval_backend=(
-                payload.runtime_preferences.memory_retrieval_backend
-            ),
             attrs=dict(payload.runtime_preferences.attrs),
+        )
+    if payload.memory is not None:
+        updates["memory"] = AgentMemoryBinding(
+            enabled=payload.memory.enabled,
+            scope_ref=payload.memory.scope_ref,
+            access=payload.memory.access,
         )
     return UpdateAgentProfileInput(
         id=agent_id,
@@ -687,7 +682,6 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
     return RegisterAgentProfileInput(
         id=profile.id,
         name=profile.name,
-        description=profile.description,
         enabled=profile.enabled,
         identity=AgentIdentity.from_payload(profile.identity),
         instruction_policy=AgentInstructionPolicy.from_payload(
@@ -700,11 +694,7 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         runtime_preferences=AgentRuntimePreferences.from_payload(
             profile.runtime_preferences,
         ),
-        home_sidecar_files=(
-            _memory_binding_service.sidecar_files_from_runtime_preferences_payload(
-                profile.runtime_preferences,
-            )
-        ),
+        memory=AgentMemoryBinding.from_payload(profile.memory),
     )
 
 
@@ -712,7 +702,6 @@ def _to_response(dto: AgentProfileDTO) -> AgentProfileResponse:
     return AgentProfileResponse(
         id=dto.id,
         name=dto.name,
-        description=dto.description,
         enabled=dto.enabled,
         created_at=dto.created_at,
         updated_at=dto.updated_at,
@@ -743,8 +732,12 @@ def _to_response(dto: AgentProfileDTO) -> AgentProfileResponse:
             workdir=dto.runtime_preferences.workdir,
             workspace=dto.runtime_preferences.workspace,
             sandbox_mode=dto.runtime_preferences.sandbox_mode,
-            memory_retrieval_backend=dto.runtime_preferences.memory_retrieval_backend,
             attrs=dict(dto.runtime_preferences.attrs),
+        ),
+        memory=AgentMemoryBindingResponse(
+            enabled=dto.memory.enabled,
+            scope_ref=dto.memory.scope_ref,
+            access=dto.memory.access,
         ),
     )
 
@@ -758,7 +751,6 @@ def _to_resolution_response(
         summary=_to_resolution_summary_response(resolution.summary),
         llm_routes=[_to_resolved_llm_response(item) for item in resolution.llm_routes],
         tools=[_to_resolved_tool_response(item) for item in resolution.tools],
-        skills=[_to_resolved_skill_response(item) for item in resolution.skills],
         access_grants=[
             _to_access_grant_response(item) for item in resolution.access_grants
         ],
@@ -778,7 +770,6 @@ def _to_resolution_summary_response(
         status=summary.status,
         llm_routes=summary.llm_routes,
         tools=summary.tools,
-        skills=summary.skills,
         access_grants=summary.access_grants,
         authorization_grants=summary.authorization_grants,
         issues=summary.issues,
@@ -795,7 +786,7 @@ def _to_resolved_llm_response(item: AgentResolvedLlm) -> AgentResolvedLlmRespons
         model_name=item.model_name,
         capabilities=list(item.capabilities),
         context_window_tokens=item.context_window_tokens,
-        credential_binding=item.credential_binding,
+        credential_binding_id=item.credential_binding_id,
     )
 
 
@@ -806,26 +797,12 @@ def _to_resolved_tool_response(item: AgentResolvedTool) -> AgentResolvedToolResp
         enabled=item.enabled,
         name=item.name,
         kind=item.kind,
-        source_kind=item.source_kind,
+        definition_origin=item.definition_origin,
         access_requirements=list(item.access_requirements),
         access_requirement_sets=[list(group) for group in item.access_requirement_sets],
         required_effect_ids=list(item.required_effect_ids),
         requires_confirmation=item.requires_confirmation,
         mutates_state=item.mutates_state,
-    )
-
-
-def _to_resolved_skill_response(item: AgentResolvedSkill) -> AgentResolvedSkillResponse:
-    return AgentResolvedSkillResponse(
-        skill_id=item.skill_id,
-        resolved=item.resolved,
-        name=item.name,
-        source=item.source,
-        required_tools=list(item.required_tools),
-        optional_tools=list(item.optional_tools),
-        suggested_tools=list(item.suggested_tools),
-        required_effects=list(item.required_effects),
-        access_requirements=list(item.access_requirements),
     )
 
 

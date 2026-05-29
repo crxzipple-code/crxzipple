@@ -7,12 +7,15 @@ from .events import (
     workbench_steps_topic,
 )
 from .observers import WorkbenchEventRelayObserver
+from .ports import EventRelayPublishPort, EventRelayStreamPort
 from .runtime import EventRelayRuntimeService, EventRelaySubscription
 
 __all__ = [
     "EVENT_RELAY_WORKBENCH_UPDATED_EVENT",
+    "EventRelayPublishPort",
     "EventRelayRuntimeService",
     "EventRelaySubscription",
+    "EventRelayStreamPort",
     "WorkbenchEventRelayObserver",
     "WorkbenchRelayUpdate",
     "workbench_home_topic",

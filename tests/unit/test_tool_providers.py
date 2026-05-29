@@ -1,8 +1,88 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
-from tests.unit.tool_test_support import *  # noqa: F403
+from crxzipple.app.assembly.tool import _browser_runtime_handlers
+from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.settings import CreateSettingsResourceInput
+from crxzipple.modules.tool.application.activation import (
+    ToolPackageApplyContext,
+    ToolOpenApiPlan,
+    ToolPackagePlan,
+    ToolRuntimePlan,
+)
+from crxzipple.modules.tool.application.catalog_models import (
+    ToolFunctionCatalogRecord,
+    ToolFunctionRuntimeKind,
+    ToolSourceCatalogKind,
+    ToolSourceCatalogRecord,
+)
+from crxzipple.modules.tool.domain.exceptions import ToolValidationError
+from crxzipple.modules.tool.infrastructure import (
+    activate_configured_provider_runtimes,
+    apply_tool_package_plans,
+    discover_tool_package_plans,
+    load_tool_package_plan,
+)
+from tools.browser.local import BrowserToolDeps
+from tests.unit.tool_test_support import (
+    ExecuteToolInput,
+    LocalToolRuntimeRegistry,
+    McpProviderSettings,
+    OpenApiCredentialBinding,
+    OpenApiProviderSettings,
+    SampleApiServer,
+    SqliteTestHarness,
+    ToolEnvironment,
+    ToolKind,
+    ToolNamespaceDefinition,
+    ToolRunStatus,
+    ToolRuntimeRegistry,
+    ToolTestCaseBase,
+    asyncio,
+    discover_tool_namespaces,
+    fixture_path,
+    load_settings,
+    openapi_fixture_path,
+    os,
+    replace,
+    sys,
+    tool_dependency_bindings,
+)
+
+
+def _seed_sample_openapi_access_bindings(container) -> None:  # noqa: ANN001
+    container.require(AppKey.SETTINGS_ACTION_SERVICE).create_resource(
+        CreateSettingsResourceInput(
+            resource_id="access_sample_openapi",
+            resource_kind="access-assets",
+            owner_module="settings",
+            display_name="Sample OpenAPI credentials",
+            payload={
+                "credential_bindings": [
+                    {
+                        "binding_id": "binding.sample.query",
+                        "binding_kind": "api_key",
+                        "source_kind": "env",
+                        "source_ref": "SAMPLE_API_KEY",
+                    },
+                    {
+                        "binding_id": "binding.sample.bearer",
+                        "binding_kind": "bearer_token",
+                        "source_kind": "env",
+                        "source_ref": "SAMPLE_BEARER_TOKEN",
+                    },
+                ],
+                "metadata": {"source": "test_tool_providers"},
+            },
+            reason="seed sample OpenAPI Access bindings",
+            publish=True,
+            source="unit_test",
+        ),
+    )
 
 
 class ToolProvidersTestCase(ToolTestCaseBase):
@@ -13,7 +93,6 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [namespace.name for namespace in namespaces],
             [
                 "brave_search",
-                "browser",
                 "command",
                 "debug",
                 "itick_market",
@@ -31,7 +110,6 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [namespace.kind for namespace in namespaces],
             [
                 "openapi",
-                "local_package",
                 "local_package",
                 "local_package",
                 "openapi",
@@ -53,44 +131,129 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
         self.assertEqual(
             [len(namespace.local_bindings) for namespace in namespaces],
-            [0, 5, 2, 1, 0, 4, 9, 0, 0, 2, 8, 1, 6],
+            [0, 2, 1, 0, 4, 9, 0, 0, 2, 8, 7, 6],
         )
         self.assertEqual(
             [len(namespace.remote_bindings) for namespace in namespaces],
-            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
         self.assertEqual(
             [len(namespace.sandbox_bindings) for namespace in namespaces],
-            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
 
-        catalog = LocalToolCatalog()
-        remote_registry = ToolRuntimeRegistry()
-        sandbox_registry = ToolRuntimeRegistry()
-        register_scanned_tool_packages(
-            SimpleNamespace(
-                local_tool_catalog=catalog,
-                remote_tool_registry=remote_registry,
-                sandbox_tool_registry=sandbox_registry,
-                file_memory_service=self.container.file_memory_service,
-                memory_context_resolver=self.container.memory_context_resolver,
-                process_service=self.container.process_service,
-                session_service=self.container.session_service,
-                session_workspace_lookup=lambda _session_key: "/tmp/workspace",
-                orchestration_run_query_service_lookup=(
-                    lambda: self.container.orchestration_run_query_service
-                ),
-                orchestration_cancellation_service_lookup=(
-                    lambda: self.container.orchestration_cancellation_service
-                ),
-                orchestration_scheduler_service_lookup=(
-                    lambda: self.container.orchestration_scheduler_service
-                ),
-                skill_manager=self.container.skill_manager,
+        plans = discover_tool_package_plans()
+        self.assertTrue(all(isinstance(plan, ToolPackagePlan) for plan in plans))
+        self.assertEqual(
+            [plan.namespace for plan in plans],
+            [ns.name for ns in namespaces],
+        )
+        self.assertNotIn("browser", [plan.namespace for plan in plans])
+        mobile_plan = next(plan for plan in plans if plan.namespace == "mobile")
+        self.assertEqual(
+            [dependency.id for dependency in mobile_plan.local_handlers[0].dependencies],
+            ["mobile_facade", "mobile_result_serializer"],
+        )
+        self.assertTrue(
+            all(
+                dependency.required
+                for dependency in mobile_plan.local_handlers[0].dependencies
             ),
         )
+        debug_plan = next(plan for plan in plans if plan.namespace == "debug")
+        self.assertTrue(
+            all(isinstance(plan, ToolRuntimePlan) for plan in debug_plan.remote_runtimes),
+        )
+        self.assertEqual(debug_plan.remote_runtimes[0].runtime_kind, "remote")
+        self.assertEqual(debug_plan.sandbox_runtimes[0].runtime_kind, "sandbox")
+        brave_plan = next(plan for plan in plans if plan.namespace == "brave_search")
+        self.assertEqual(brave_plan.package_kind, "openapi")
+        self.assertEqual(
+            brave_plan.capability_ids,
+            ("bounded_network.http", "credential.read", "access.readiness"),
+        )
+        self.assertIsInstance(brave_plan.openapi, ToolOpenApiPlan)
+        assert brave_plan.openapi is not None
+        self.assertEqual(brave_plan.openapi.provider.name, "brave_search")
+        skills_plan = next(plan for plan in plans if plan.namespace == "skills")
+        self.assertEqual(
+            [
+                dependency.id
+                for dependency in skills_plan.local_handlers[0].dependencies
+            ],
+            ["skill_manager"],
+        )
+        skill_authoring_handler = next(
+            handler
+            for handler in skills_plan.local_handlers
+            if handler.tool.id == "skill_draft_create"
+        )
+        self.assertEqual(
+            [dependency.id for dependency in skill_authoring_handler.dependencies],
+            ["skill_manager", "skill_authoring_service"],
+        )
+        self.assertTrue(skill_authoring_handler.tool.execution_policy.mutates_state)
+        self.assertEqual(
+            skill_authoring_handler.tool.required_effect_ids,
+            ("skill_authoring.create",),
+        )
+        skill_validate_handler = next(
+            handler
+            for handler in skills_plan.local_handlers
+            if handler.tool.id == "skill_draft_validate"
+        )
+        self.assertTrue(skill_validate_handler.tool.execution_policy.mutates_state)
+        self.assertEqual(
+            skill_validate_handler.tool.required_effect_ids,
+            ("skill_authoring.validate",),
+        )
+        skill_diff_handler = next(
+            handler
+            for handler in skills_plan.local_handlers
+            if handler.tool.id == "skill_draft_diff"
+        )
+        self.assertTrue(skill_diff_handler.tool.execution_policy.mutates_state)
+        self.assertEqual(
+            skill_diff_handler.tool.required_effect_ids,
+            ("skill_authoring.diff",),
+        )
+        skill_apply_handler = next(
+            handler
+            for handler in skills_plan.local_handlers
+            if handler.tool.id == "skill_draft_apply"
+        )
+        self.assertTrue(skill_apply_handler.tool.execution_policy.requires_confirmation)
+        self.assertTrue(skill_apply_handler.tool.execution_policy.mutates_state)
+        self.assertEqual(
+            skill_apply_handler.tool.required_effect_ids,
+            ("skill_authoring.apply",),
+        )
 
-        registered_ids = [tool.id for tool in catalog.list_local_tools()]
+        catalog = LocalToolRuntimeRegistry()
+        remote_registry = ToolRuntimeRegistry()
+        sandbox_registry = ToolRuntimeRegistry()
+        apply_tool_package_plans(
+            ToolPackageApplyContext(
+                local_runtime_registry=catalog,
+                remote_tool_registry=remote_registry,
+                sandbox_tool_registry=sandbox_registry,
+                dependency_bindings=tool_dependency_bindings({
+                    "credential_provider": self.access_service,
+                    "memory_runtime_service": self.memory_runtime_service,
+                    "process_service": self.process_service,
+                    "session_service": self.session_service,
+                    "session_workspace_lookup": lambda _session_key: "/tmp/workspace",
+                    "session_runtime_control": object(),
+                    "skill_manager": self.skill_manager,
+                    "skill_authoring_service": self.skill_manager,
+                    "mobile_facade": object(),
+                    "mobile_result_serializer": object(),
+                }),
+            ),
+            plans,
+        )
+
+        registered_ids = [tool.id for tool in catalog.list_registered_tools()]
         self.assertEqual(
             sorted(registered_ids),
             sorted(
@@ -103,6 +266,15 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     "memory_read",
                     "memory_search",
                     "memory_write_daily",
+                    "mobile_devices",
+                    "mobile_press",
+                    "mobile_screenshot",
+                    "mobile_script",
+                    "mobile_snapshot",
+                    "mobile_swipe",
+                    "mobile_tap",
+                    "mobile_type",
+                    "mobile_wait",
                     "openai_image_edit",
                     "openai_image_generate",
                     "edit",
@@ -115,6 +287,12 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     "subagents",
                     "sessions_stop",
                     "sessions_yield",
+                    "skill_draft_apply",
+                    "skill_draft_create",
+                    "skill_draft_diff",
+                    "skill_draft_reject",
+                    "skill_draft_update",
+                    "skill_draft_validate",
                     "skill_read",
                     "workspace_list",
                     "write",
@@ -125,22 +303,468 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         self.assertIsNotNone(remote_registry.get_handler("remote.echo"))
         self.assertIsNotNone(sandbox_registry.get_handler("sandbox.echo"))
 
-    def test_lists_discovery_providers_and_discovers_by_provider_name(self) -> None:
-        providers = self.container.tool_service.list_discovery_providers()
+    def test_local_package_credential_requirements_reject_direct_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_dir = Path(temp_dir) / "direct_credential"
+            package_dir.mkdir()
+            manifest_path = package_dir / "tool.yaml"
+            manifest_path.write_text(
+                """
+kind: local_package
+namespace: direct_credential
+local_tools:
+  - id: direct_credential_demo
+    name: Direct Credential Demo
+    description: Invalid direct source binding.
+    provider_name: local
+    entrypoint: tools.direct_credential.local:run
+    tool_kind: function
+    parameters: []
+    credential_requirements:
+      - requirements:
+          - slot: demo_api_key
+            expected_kind: api_key
+            binding_id: env:DEMO_API_KEY
+            provider: demo
+    supported_modes: [inline]
+    supported_strategies: [async]
+    supported_environments: [local]
+    runtime_key: direct_credential_demo
+""".lstrip(),
+                encoding="utf-8",
+            )
 
+            with self.assertRaisesRegex(ToolValidationError, "direct credential source"):
+                load_tool_package_plan(manifest_path)
+
+    def test_browser_tool_package_manifest_is_retired(self) -> None:
+        self.assertFalse(
+            (
+                Path(__file__).resolve().parents[2]
+                / "tools"
+                / "browser"
+                / "tool.yaml"
+            ).exists(),
+        )
+
+    def test_mobile_tool_package_fails_fast_without_required_runtime_services(self) -> None:
+        mobile_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "mobile" / "tool.yaml",
+        )
+
+        with self.assertRaisesRegex(
+            ToolValidationError,
+            "requires service dependency 'mobile_facade'",
+        ):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(local_runtime_registry=LocalToolRuntimeRegistry()),
+                (mobile_plan,),
+            )
+
+    def test_skills_tool_package_fails_fast_without_required_skill_manager(self) -> None:
+        skills_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "skills" / "tool.yaml",
+        )
+
+        with self.assertRaisesRegex(
+            ToolValidationError,
+            "requires service dependency 'skill_manager'",
+        ):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(
+                    local_runtime_registry=LocalToolRuntimeRegistry(),
+                ),
+                (skills_plan,),
+            )
+
+    def test_local_package_activation_uses_active_catalog_runtime_refs(self) -> None:
+        skills_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "skills" / "tool.yaml",
+        )
+        disabled_catalog = LocalToolRuntimeRegistry()
+
+        apply_tool_package_plans(
+            ToolPackageApplyContext(
+                local_runtime_registry=disabled_catalog,
+                local_function_refs_by_namespace={"skills": ()},
+                dependency_bindings=tool_dependency_bindings(
+                    {
+                        "skill_manager": self.skill_manager,
+                        "skill_authoring_service": self.skill_manager,
+                    },
+                ),
+            ),
+            (skills_plan,),
+        )
+
+        self.assertIsNone(disabled_catalog.get_handler("skill_read"))
+
+        active_catalog = LocalToolRuntimeRegistry()
+        apply_tool_package_plans(
+            ToolPackageApplyContext(
+                local_runtime_registry=active_catalog,
+                local_function_refs_by_namespace={"skills": ("skill_read",)},
+                dependency_bindings=tool_dependency_bindings(
+                    {
+                        "skill_manager": self.skill_manager,
+                        "skill_authoring_service": self.skill_manager,
+                    },
+                ),
+            ),
+            (skills_plan,),
+        )
+
+        self.assertIsNotNone(active_catalog.get_handler("skill_read"))
+
+    def test_sessions_tool_package_fails_fast_without_session_runtime_control(
+        self,
+    ) -> None:
+        sessions_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "sessions" / "tool.yaml",
+        )
+
+        with self.assertRaisesRegex(
+            ToolValidationError,
+            "requires service dependency 'session_runtime_control'",
+        ):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(
+                    local_runtime_registry=LocalToolRuntimeRegistry(),
+                    dependency_bindings=tool_dependency_bindings(
+                        {"session_service": self.session_service},
+                    ),
+                ),
+                (sessions_plan,),
+            )
+
+    def test_tool_package_apply_rejects_duplicate_namespaces(self) -> None:
+        debug_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "debug" / "tool.yaml",
+        )
+
+        with self.assertRaisesRegex(ToolValidationError, "Duplicate tool namespace"):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(local_runtime_registry=LocalToolRuntimeRegistry()),
+                (debug_plan, debug_plan),
+            )
+
+    def test_tool_package_apply_rejects_duplicate_tool_ids(self) -> None:
+        debug_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "debug" / "tool.yaml",
+        )
+        duplicate_tool_plan = ToolPackagePlan(
+            namespace="debug_duplicate_tools",
+            root_path=debug_plan.root_path,
+            manifest_path=debug_plan.manifest_path,
+            package_kind="local_package",
+            local_handlers=debug_plan.local_handlers,
+        )
+
+        with self.assertRaisesRegex(ToolValidationError, "Duplicate tool id"):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(local_runtime_registry=LocalToolRuntimeRegistry()),
+                (debug_plan, duplicate_tool_plan),
+            )
+
+    def test_tool_package_apply_rejects_duplicate_runtime_keys(self) -> None:
+        debug_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "debug" / "tool.yaml",
+        )
+        duplicate_runtime_plan = ToolPackagePlan(
+            namespace="debug_duplicate_runtimes",
+            root_path=debug_plan.root_path,
+            manifest_path=debug_plan.manifest_path,
+            package_kind="local_package",
+            remote_runtimes=debug_plan.remote_runtimes,
+        )
+
+        with self.assertRaisesRegex(ToolValidationError, "Duplicate tool runtime"):
+            apply_tool_package_plans(
+                ToolPackageApplyContext(remote_tool_registry=ToolRuntimeRegistry()),
+                (debug_plan, duplicate_runtime_plan),
+                include_local=False,
+            )
+
+    def test_tool_runtime_registry_rejects_duplicate_runtime_keys(self) -> None:
+        async def _runtime_handler(**_kwargs):  # noqa: ANN202
+            return {}
+
+        debug_plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "debug" / "tool.yaml",
+        )
+        tool = debug_plan.local_handlers[0].tool
+        catalog = LocalToolRuntimeRegistry()
+        catalog.register(tool, lambda **_kwargs: {})
+
+        runtime_registry = ToolRuntimeRegistry()
+        runtime_registry.register("debug.duplicate", _runtime_handler)
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            runtime_registry.register("debug.duplicate", _runtime_handler)
+
+    def test_configured_openapi_runtime_activation_uses_persisted_function_metadata(
+        self,
+    ) -> None:
+        source = ToolSourceCatalogRecord(
+            source_id="configured.openapi.sample_api",
+            kind=ToolSourceCatalogKind.OPENAPI,
+            display_name="Sample API",
+            config={
+                "source": "configured_tool_provider",
+                "provider": {
+                    "name": "sample_api",
+                    "spec_location": "/path/that/must/not/be/read.json",
+                    "base_url": "http://127.0.0.1:1",
+                    "timeout_seconds": 5,
+                    "max_concurrency": 3,
+                },
+            },
+        )
+        function = ToolFunctionCatalogRecord(
+            function_id="sample_api.echo_message",
+            source_id=source.source_id,
+            stable_key="openapi.sample_api.echo_message",
+            name="Echo Message",
+            description="Echo a message.",
+            input_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+            },
+            runtime_kind=ToolFunctionRuntimeKind.OPENAPI,
+            handler_ref="openapi.sample_api.echo_message",
+            metadata={
+                "openapi_operation": {
+                    "provider_name": "sample_api",
+                    "method": "get",
+                    "path_template": "/echo",
+                    "base_url": "http://127.0.0.1:1",
+                    "timeout_seconds": 5,
+                    "path_parameters": [],
+                    "query_parameters": ["message"],
+                    "body_required": False,
+                    "tags": [],
+                    "security_schemes": [],
+                    "security_requirements": [],
+                    "credential_bindings": [],
+                    "required_effect_ids": [],
+                },
+            },
+        )
+        registry = ToolRuntimeRegistry()
+
+        activate_configured_provider_runtimes(
+            sources=(source,),
+            functions_by_source={source.source_id: (function,)},
+            remote_runtime_registry=registry,
+            credential_provider=object(),
+            default_max_concurrency=9,
+        )
+
+        registration = registry.get_registration("openapi.sample_api.echo_message")
+        self.assertIsNotNone(registration)
+        assert registration is not None
+        self.assertEqual(registration.concurrency_key, "openapi:sample_api")
+        self.assertEqual(registration.max_concurrency, 3)
+
+    def test_browser_source_activation_registers_profile_context_catalog(self) -> None:
+        source_query = self.container.require(AppKey.TOOL_SOURCE_QUERY_SERVICE)
+        source = source_query.get_source("configured.browser")
+
+        self.assertIsNotNone(source)
+        assert source is not None
+        self.assertEqual(source.kind, ToolSourceCatalogKind.PROVIDER_BACKEND)
+        self.assertEqual(source.display_name, "Browser")
+        self.assertEqual(source.config["provider"], "crxzipple.browser")
+        self.assertEqual(source.config["profile_mode"], "runtime_context")
+
+        source_ids = {item.source_id for item in source_query.list_sources()}
+        self.assertIn("configured.browser", source_ids)
+        self.assertNotIn("configured.mcp.browser_user", source_ids)
+        self.assertNotIn("configured.mcp.browser_crxzipple", source_ids)
+        self.assertNotIn("bundled.local_package.browser", source_ids)
+
+        functions = source_query.list_functions(source_id="configured.browser")
+        function_ids = sorted(function.function_id for function in functions)
         self.assertEqual(
-            [provider.name for provider in providers],
-            ["local_builtin", "local_filesystem"],
+            function_ids,
+            [
+                "browser.click",
+                "browser.context.acquire",
+                "browser.context.current",
+                "browser.context.heartbeat",
+                "browser.context.reconcile",
+                "browser.context.release",
+                "browser.diagnostics.collect",
+                "browser.dom.box_model",
+                "browser.dom.clickability",
+                "browser.dom.computed_style",
+                "browser.dom.highlight",
+                "browser.dom.inspect",
+                "browser.dom.mutation_wait",
+                "browser.emulation.reset",
+                "browser.emulation.set",
+                "browser.evaluate",
+                "browser.geolocation.set",
+                "browser.navigate",
+                "browser.network.clear_capture",
+                "browser.network.fetch_as_page",
+                "browser.network.get_request",
+                "browser.network.get_request_body",
+                "browser.network.get_response_body",
+                "browser.network.list_requests",
+                "browser.network.replay_request",
+                "browser.network.start_capture",
+                "browser.network.stop_capture",
+                "browser.network_conditions.set",
+                "browser.page.errors",
+                "browser.page.lifecycle",
+                "browser.performance.metrics",
+                "browser.permissions.clear",
+                "browser.permissions.grant",
+                "browser.screenshot",
+                "browser.service_worker.inspect",
+                "browser.service_worker.list",
+                "browser.snapshot",
+                "browser.storage.cache.get",
+                "browser.storage.cache.list",
+                "browser.storage.indexeddb.get",
+                "browser.storage.indexeddb.list",
+                "browser.storage.indexeddb.query",
+                "browser.tabs.close",
+                "browser.tabs.list",
+                "browser.tabs.select",
+                "browser.trace.export",
+                "browser.trace.start",
+                "browser.trace.stop",
+                "browser.type",
+            ],
         )
-        self.assertEqual(providers[0].name, "local_builtin")
-        self.assertEqual(providers[0].source_kind, ToolSourceKind.LOCAL_DISCOVERY)
+        for function in functions:
+            self.assertEqual(function.runtime_kind, ToolFunctionRuntimeKind.LOCAL)
+            self.assertEqual(function.source_id, "configured.browser")
+            self.assertTrue(function.function_id.startswith("browser."))
+            self.assertIn("profile", function.input_schema["properties"])
+            self.assertIn("profile_pool", function.input_schema["properties"])
+            self.assertEqual(
+                function.metadata["runtime_requirement"],
+                "browser-profile-runtime",
+            )
+            self.assertFalse(function.handler_ref.startswith("mcp."))
+            self.assertFalse(function.function_id.startswith("mcp.browser_"))
+            for requirement_set in function.requirements.runtime_requirement_sets:
+                self.assertFalse(
+                    any(
+                        requirement.startswith("daemon:mcp:browser:")
+                        for requirement in requirement_set
+                    ),
+                )
+        registry = self.container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY)
+        for runtime_key in function_ids:
+            self.assertIsNotNone(registry.get_handler(runtime_key))
+        self.assertIsNone(registry.get_handler("browser_snapshot"))
+        browser_tool = self.container.require(AppKey.TOOL_QUERY_SERVICE).get_tool(
+            "browser.snapshot",
+        )
+        self.assertEqual(browser_tool.source_id, "configured.browser")
+        self.assertIn("browser.page_action", browser_tool.capability_ids)
 
-        discovered = self.container.tool_service.discover_tools(
-            provider_name="local_builtin",
+    def test_browser_runtime_handlers_report_public_function_id(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _BrowserToolApplication:
+            def execute_control(self, **_kwargs):  # noqa: ANN003, ANN201
+                return SimpleNamespace(payload={"ok": True}, runtime_metadata={})
+
+            def execute_page_action(self, **_kwargs):  # noqa: ANN003, ANN201
+                return SimpleNamespace(payload={"ok": True}, runtime_metadata={})
+
+        deps = BrowserToolDeps(
+            browser_tool_application=_BrowserToolApplication(),
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=object(),
+            browser_capabilities_resolver=object(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handlers = _browser_runtime_handlers(deps)
+
+        cases = {
+            "browser.navigate": {"url": "https://example.com"},
+            "browser.click": {"ref": "r1"},
+            "browser.dom.inspect": {"ref": "r1"},
+            "browser.emulation.set": {"width": 390, "height": 844},
+            "browser.diagnostics.collect": {},
+            "browser.snapshot": {},
+            "browser.tabs.list": {},
+        }
+        for runtime_key, arguments in cases.items():
+            with self.subTest(runtime_key=runtime_key):
+                result = asyncio.run(handlers[runtime_key](arguments))
+
+                self.assertEqual(result.metadata["tool"], runtime_key)
+
+    def test_configured_mcp_runtime_activation_uses_persisted_function_metadata(
+        self,
+    ) -> None:
+        source = ToolSourceCatalogRecord(
+            source_id="configured.mcp.sample_mcp",
+            kind=ToolSourceCatalogKind.MCP,
+            display_name="Sample MCP",
+            config={
+                "source": "configured_tool_provider",
+                "provider": {
+                    "name": "sample_mcp",
+                    "command": ["/path/that/must/not/start"],
+                    "timeout_seconds": 5,
+                    "max_concurrency": 4,
+                },
+            },
+        )
+        function = ToolFunctionCatalogRecord(
+            function_id="sample_mcp.echo",
+            source_id=source.source_id,
+            stable_key="mcp.sample_mcp.echo",
+            name="MCP Echo",
+            description="Echo a message.",
+            input_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+            },
+            runtime_kind=ToolFunctionRuntimeKind.MCP,
+            handler_ref="mcp.sample_mcp.echo",
+            metadata={
+                "mcp_definition": {
+                    "provider_name": "sample_mcp",
+                    "tool_name": "echo",
+                    "tags": ["mcp", "sample_mcp"],
+                    "timeout_seconds": 5,
+                    "mutates_state": False,
+                    "required_effect_ids": [],
+                },
+            },
+        )
+        registry = ToolRuntimeRegistry()
+        cleanup_callbacks: list[object] = []
+
+        activate_configured_provider_runtimes(
+            sources=(source,),
+            functions_by_source={source.source_id: (function,)},
+            remote_runtime_registry=registry,
+            credential_provider=object(),
+            default_max_concurrency=9,
+            add_cleanup_callback=lambda _source, callback: cleanup_callbacks.append(
+                callback,
+            ),
         )
 
-        self.assertEqual([tool.id for tool in discovered], ["echo"])
-        self.assertEqual(discovered[0].source_kind, ToolSourceKind.LOCAL_DISCOVERY)
+        registration = registry.get_registration("mcp.sample_mcp.echo")
+        self.assertIsNotNone(registration)
+        assert registration is not None
+        self.assertEqual(registration.concurrency_key, "mcp:sample_mcp")
+        self.assertEqual(registration.max_concurrency, 4)
+        self.assertEqual(len(cleanup_callbacks), 1)
+        for callback in cleanup_callbacks:
+            callback()
 
     def test_discovers_and_executes_openapi_remote_tools(self) -> None:
         server = SampleApiServer()
@@ -164,11 +788,11 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     credential_bindings=(
                         OpenApiCredentialBinding(
                             scheme_name="ApiKeyQuery",
-                            source="env:SAMPLE_API_KEY",
+                            credential_binding_id="binding.sample.query",
                         ),
                         OpenApiCredentialBinding(
                             scheme_name="BearerAuth",
-                            source="env:SAMPLE_BEARER_TOKEN",
+                            credential_binding_id="binding.sample.bearer",
                         ),
                     ),
                 ),
@@ -176,16 +800,27 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
 
         try:
-            container = harness.build_container(settings=settings)
-            providers = container.tool_service.list_discovery_providers()
-            self.assertEqual(
-                [provider.name for provider in providers],
-                ["local_builtin", "local_filesystem", "sample_api"],
+            container = harness.build_runtime_container(settings=settings)
+            _seed_sample_openapi_access_bindings(container)
+            tool_service = container.require(AppKey.TOOL_SERVICE)
+            source_query = container.require(AppKey.TOOL_SOURCE_QUERY_SERVICE)
+            source = source_query.get_source("configured.openapi.sample_api")
+            self.assertIsNotNone(source)
+            assert source is not None
+            self.assertEqual(source.kind.value, "openapi")
+            self.assertEqual(source.last_discovery_status.value, "completed")
+            listed_ids = [tool.id for tool in tool_service.list_tools()]
+            self.assertIn("sample_api.echo_message", listed_ids)
+            self.assertIn("sample_api.search_docs", listed_ids)
+            remote_tool_registry = container.require(
+                AppKey.TOOL_REMOTE_RUNTIME_REGISTRY,
             )
 
-            discovered = container.tool_service.discover_tools(
-                provider_name="sample_api",
-            )
+            discovered = [
+                tool
+                for tool in tool_service.list_tools()
+                if tool.id.startswith("sample_api.")
+            ]
             self.assertEqual(
                 [tool.id for tool in discovered],
                 ["sample_api.echo_message", "sample_api.search_docs"],
@@ -196,7 +831,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 (ToolEnvironment.REMOTE,),
             )
             self.assertEqual(discovered[1].parameters[-1].name, "body")
-            registration = container.remote_tool_registry.get_registration(
+            registration = remote_tool_registry.get_registration(
                 "openapi.sample_api.echo_message",
             )
             self.assertIsNotNone(registration)
@@ -211,7 +846,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 ),
             ):
                 echo_run = asyncio.run(
-                    container.tool_service.execute(
+                    tool_service.execute(
                         ExecuteToolInput(
                             tool_id="sample_api.echo_message",
                             arguments={"message": "hello", "uppercase": True},
@@ -238,7 +873,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 ),
             ):
                 search_run = asyncio.run(
-                    container.tool_service.execute(
+                    tool_service.execute(
                         ExecuteToolInput(
                             tool_id="sample_api.search_docs",
                             arguments={"body": {"query": "ddd", "limit": 2}},
@@ -259,60 +894,8 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             else:
                 os.environ["SAMPLE_BEARER_TOKEN"] = previous_bearer_token
             if "container" in locals():
-                container.engine.dispose()
-            harness.close()
-
-    def test_filesystem_local_provider_reconciles_removed_tool_manifests(self) -> None:
-        harness = SqliteTestHarness()
-        with tempfile.TemporaryDirectory() as tempdir:
-            tools_root = Path(tempdir)
-            tool_dir = tools_root / "temp_echo"
-            tool_dir.mkdir(parents=True)
-            (tool_dir / "run.py").write_text(
-                "\n".join(
-                    [
-                        "from __future__ import annotations",
-                        "",
-                        "def run(arguments: dict[str, object]) -> dict[str, object]:",
-                        "    return {'message': arguments.get('message')}",
-                        "",
-                    ],
-                ),
-                encoding="utf-8",
-            )
-            (tool_dir / "tool.json").write_text(
-                "\n".join(
-                    [
-                        "{",
-                        '  "id": "temp_echo",',
-                        '  "name": "Temp Echo",',
-                        '  "description": "Temp echo tool",',
-                        '  "entrypoint": "run.py:run"',
-                        "}",
-                    ],
-                ),
-                encoding="utf-8",
-            )
-
-            settings = replace(
-                load_settings(),
-                database_url=harness.database_url,
-                tool_local_paths=(str(tools_root),),
-            )
-            container = harness.build_container(settings=settings)
-            try:
-                self.assertIn(
-                    "temp_echo",
-                    [tool.id for tool in container.tool_service.list_tools()],
-                )
-                (tool_dir / "tool.json").unlink()
-                self.assertNotIn(
-                    "temp_echo",
-                    [tool.id for tool in container.tool_service.list_tools()],
-                )
-            finally:
                 container.close()
-                harness.close()
+            harness.close()
 
     def test_discovers_and_executes_mcp_remote_tools(self) -> None:
         harness = SqliteTestHarness()
@@ -331,16 +914,26 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
 
         try:
-            container = harness.build_container(settings=settings)
-            providers = container.tool_service.list_discovery_providers()
-            self.assertEqual(
-                [provider.name for provider in providers],
-                ["local_builtin", "local_filesystem", "sample_mcp"],
+            container = harness.build_runtime_container(settings=settings)
+            tool_service = container.require(AppKey.TOOL_SERVICE)
+            source_query = container.require(AppKey.TOOL_SOURCE_QUERY_SERVICE)
+            source = source_query.get_source("configured.mcp.sample_mcp")
+            self.assertIsNotNone(source)
+            assert source is not None
+            self.assertEqual(source.kind.value, "mcp")
+            self.assertEqual(source.last_discovery_status.value, "completed")
+            listed_ids = [tool.id for tool in tool_service.list_tools()]
+            self.assertIn("sample_mcp.echo", listed_ids)
+            self.assertIn("sample_mcp.sum", listed_ids)
+            remote_tool_registry = container.require(
+                AppKey.TOOL_REMOTE_RUNTIME_REGISTRY,
             )
 
-            discovered = container.tool_service.discover_tools(
-                provider_name="sample_mcp",
-            )
+            discovered = [
+                tool
+                for tool in tool_service.list_tools()
+                if tool.id.startswith("sample_mcp.")
+            ]
             self.assertEqual(
                 [tool.id for tool in discovered],
                 ["sample_mcp.echo", "sample_mcp.sum"],
@@ -350,7 +943,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 discovered[0].execution_support.supported_environments,
                 (ToolEnvironment.REMOTE,),
             )
-            registration = container.remote_tool_registry.get_registration(
+            registration = remote_tool_registry.get_registration(
                 "mcp.sample_mcp.echo",
             )
             self.assertIsNotNone(registration)
@@ -365,7 +958,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 ),
             ):
                 echo_run = asyncio.run(
-                    container.tool_service.execute(
+                    tool_service.execute(
                         ExecuteToolInput(
                             tool_id="sample_mcp.echo",
                             arguments={"message": "hello mcp", "uppercase": True},
@@ -389,7 +982,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 ),
             ):
                 sum_run = asyncio.run(
-                    container.tool_service.execute(
+                    tool_service.execute(
                         ExecuteToolInput(
                             tool_id="sample_mcp.sum",
                             arguments={"left": 2, "right": 5},
@@ -411,87 +1004,3 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             if "container" in locals():
                 container.close()
             harness.close()
-
-    def test_discovers_filesystem_local_tools_and_executes_with_process_strategy(self) -> None:
-        harness = SqliteTestHarness()
-        settings = replace(
-            load_settings(),
-            database_url=harness.database_url,
-            tool_local_paths=(fixture_path("local_tools"),),
-        )
-
-        try:
-            container = harness.build_container(settings=settings)
-            providers = container.tool_service.list_discovery_providers()
-            self.assertEqual(
-                [provider.name for provider in providers],
-                ["local_builtin", "local_filesystem"],
-            )
-
-            discovered = container.tool_service.discover_tools(
-                provider_name="local_filesystem",
-            )
-            self.assertEqual([tool.id for tool in discovered], ["greeter"])
-            self.assertEqual(discovered[0].source_kind, ToolSourceKind.LOCAL_DISCOVERY)
-
-            tool_run = asyncio.run(
-                container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="greeter",
-                        arguments={"name": "filesystem"},
-                        strategy=ToolExecutionStrategy.PROCESS,
-                    ),
-                ),
-            )
-            self.assertEqual(tool_run.status, ToolRunStatus.SUCCEEDED)
-            self.assertEqual(tool_run.output_payload["message"], "hello filesystem")
-            self.assertEqual(tool_run.result.metadata["environment"], "local")
-            self.assertNotEqual(tool_run.result.metadata["process_id"], os.getpid())
-        finally:
-            if "container" in locals():
-                container.close()
-            harness.close()
-
-    def test_process_local_overlay_with_same_id_remains_until_removed(self) -> None:
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="echo",
-                name="Old Echo",
-                description="Stale discovered copy.",
-                source_kind=ToolSourceKind.LOCAL_DISCOVERY,
-                runtime_key="echo",
-            ),
-        )
-        self.assertEqual(tool.name, "Old Echo")
-
-        discovered = self.container.tool_service.discover_tools(
-            provider_name="local_builtin",
-        )
-
-        self.assertEqual([item.id for item in discovered], ["echo"])
-        refreshed = next(
-            item for item in self.container.tool_service.list_tools() if item.id == "echo"
-        )
-        self.assertEqual(refreshed.id, "echo")
-        self.assertEqual(refreshed.name, "Old Echo")
-
-    def test_discover_does_not_override_manual_tool_with_same_id(self) -> None:
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="echo",
-                name="Manual Echo",
-                description="Manual override should stay untouched.",
-                source_kind=ToolSourceKind.MANUAL,
-            ),
-        )
-        self.assertEqual(tool.name, "Manual Echo")
-
-        discovered = self.container.tool_service.discover_tools(
-            provider_name="local_builtin",
-        )
-
-        self.assertEqual([item.id for item in discovered], ["echo"])
-        current = next(
-            item for item in self.container.tool_service.list_tools() if item.id == "echo"
-        )
-        self.assertEqual(current.name, "Manual Echo")

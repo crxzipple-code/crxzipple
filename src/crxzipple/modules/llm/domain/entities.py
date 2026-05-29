@@ -22,6 +22,11 @@ from crxzipple.modules.llm.domain.value_objects import (
 from crxzipple.shared.domain import AggregateRoot
 
 
+_forbidden_credential_binding_prefixes = ("env:", "file:")
+_forbidden_credential_binding_ids = {"codex_auth_json", "codex-cli", "auth_ref"}
+_forbidden_credential_binding_id_prefixes = ("codex_auth_json:", "auth_ref:")
+
+
 @dataclass(kw_only=True)
 class LlmProfile(AggregateRoot[str]):
     provider: LlmProviderKind
@@ -32,7 +37,7 @@ class LlmProfile(AggregateRoot[str]):
     capabilities: tuple[LlmCapability, ...] = field(default_factory=tuple)
     default_params: LlmDefaults = field(default_factory=LlmDefaults)
     base_url: str | None = None
-    credential_binding: str | None = None
+    credential_binding_id: str | None = None
     timeout_seconds: int = 60
     max_concurrency: int | None = None
     concurrency_key: str | None = None
@@ -54,7 +59,24 @@ class LlmProfile(AggregateRoot[str]):
             )
         if self.concurrency_key is not None:
             self.concurrency_key = self.concurrency_key.strip() or None
+        if self.credential_binding_id is not None:
+            self.credential_binding_id = self.credential_binding_id.strip() or None
+        if self.credential_binding_id is not None and _looks_like_credential_source(
+            self.credential_binding_id,
+        ):
+            raise LlmValidationError(
+                "LLM credential_binding_id must reference an Access credential binding id.",
+            )
         self.capabilities = tuple(dict.fromkeys(self.capabilities))
+
+
+def _looks_like_credential_source(value: str) -> bool:
+    normalized = value.strip()
+    return (
+        normalized.startswith(_forbidden_credential_binding_prefixes)
+        or normalized in _forbidden_credential_binding_ids
+        or normalized.startswith(_forbidden_credential_binding_id_prefixes)
+    )
 
 
 @dataclass(kw_only=True)

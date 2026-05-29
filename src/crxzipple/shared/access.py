@@ -29,6 +29,8 @@ class AccessReadinessStatus(StrEnum):
     WAITING_USER = "waiting_user"
     EXPIRED = "expired"
     DEGRADED = "degraded"
+    CREDENTIAL_KIND_MISMATCH = "credential_kind_mismatch"
+    CREDENTIAL_SOURCE_KIND_MISMATCH = "credential_source_kind_mismatch"
     UNSUPPORTED = "unsupported"
 
 
@@ -36,6 +38,120 @@ class AccessDecisionEffect(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
     CONDITIONAL = "conditional"
+
+
+class AccessCredentialKind(StrEnum):
+    API_KEY = "api_key"
+    BEARER_TOKEN = "bearer_token"
+    BASIC = "basic"
+    OAUTH2_ACCOUNT = "oauth2_account"
+    OPENID_CONNECT = "openid_connect"
+    APP_SECRET = "app_secret"
+    WEBHOOK_SECRET = "webhook_secret"
+    CERTIFICATE = "certificate"
+
+
+class AccessCredentialTransport(StrEnum):
+    HEADER = "header"
+    QUERY = "query"
+    COOKIE = "cookie"
+    BODY = "body"
+    OAUTH_AUTHORIZATION_HEADER = "oauth_authorization_header"
+    RUNTIME_CONTEXT = "runtime_context"
+
+
+class AccessSetupFlowKind(StrEnum):
+    NONE = "none"
+    ENV_BINDING = "env_binding"
+    FILE_BINDING = "file_binding"
+    BROWSER_OAUTH = "browser_oauth"
+    DEVICE_CODE = "device_code"
+    MANUAL = "manual"
+
+
+@dataclass(frozen=True, slots=True)
+class AccessSetupFlowHint:
+    flow_kind: AccessSetupFlowKind = AccessSetupFlowKind.NONE
+    provider: str | None = None
+    authorization_url: str | None = None
+    token_url: str | None = None
+    device_code_url: str | None = None
+    callback_url: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider", _normalize_optional_text(self.provider))
+        object.__setattr__(
+            self,
+            "authorization_url",
+            _normalize_optional_text(self.authorization_url),
+        )
+        object.__setattr__(self, "token_url", _normalize_optional_text(self.token_url))
+        object.__setattr__(
+            self,
+            "device_code_url",
+            _normalize_optional_text(self.device_code_url),
+        )
+        object.__setattr__(self, "callback_url", _normalize_optional_text(self.callback_url))
+
+
+@dataclass(frozen=True, slots=True)
+class AccessCredentialSlotRef:
+    slot: str
+    expected_kind: AccessCredentialKind
+    binding_id: str | None = None
+    required: bool = True
+    display_name: str | None = None
+    scopes: tuple[str, ...] = field(default_factory=tuple)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "slot", _normalize_text(self.slot, field_name="slot"))
+        object.__setattr__(self, "binding_id", _normalize_optional_text(self.binding_id))
+        object.__setattr__(self, "display_name", _normalize_optional_text(self.display_name))
+        object.__setattr__(self, "scopes", _normalize_text_tuple(self.scopes))
+
+
+@dataclass(frozen=True, slots=True)
+class AccessCredentialRequirementDeclaration:
+    requirement_id: str
+    consumer: "AccessConsumerRef"
+    slot: AccessCredentialSlotRef
+    provider: str | None = None
+    transport: AccessCredentialTransport = AccessCredentialTransport.RUNTIME_CONTEXT
+    parameter_name: str | None = None
+    setup_flow_hint: AccessSetupFlowHint = field(default_factory=AccessSetupFlowHint)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "requirement_id",
+            _normalize_text(self.requirement_id, field_name="requirement_id"),
+        )
+        object.__setattr__(self, "provider", _normalize_optional_text(self.provider))
+        object.__setattr__(self, "parameter_name", _normalize_optional_text(self.parameter_name))
+
+
+@dataclass(frozen=True, slots=True)
+class AccessCredentialRequirementSet:
+    requirement_set_id: str
+    consumer: "AccessConsumerRef"
+    requirements: tuple[AccessCredentialRequirementDeclaration, ...] = ()
+    alternative: bool = False
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "requirement_set_id",
+            _normalize_text(self.requirement_set_id, field_name="requirement_set_id"),
+        )
+        object.__setattr__(
+            self,
+            "requirements",
+            tuple(self.requirements),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +186,7 @@ class CredentialBindingRef:
     masked_preview: str | None = None
     scopes: tuple[str, ...] = field(default_factory=tuple)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    expected_kind: AccessCredentialKind | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -200,6 +317,20 @@ class AccessDecision:
     @property
     def allowed(self) -> bool:
         return self.effect is AccessDecisionEffect.ALLOW
+
+
+class AccessResolvedCredential(str):
+    audit_context: Mapping[str, Any]
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        audit_context: Mapping[str, Any] | None = None,
+    ) -> "AccessResolvedCredential":
+        instance = str.__new__(cls, value)
+        instance.audit_context = dict(audit_context or {})
+        return instance
 
 
 class EffectiveAccessProvider(Protocol):

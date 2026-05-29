@@ -11,6 +11,8 @@ from typing import Any
 from playwright.sync_api import sync_playwright
 
 from crxzipple.modules.browser.domain import BrowserValidationError, ResolvedBrowserProfile
+
+from .cdp_sessions import BrowserCdpSessionBroker
 from .cdp_urls import browser_ref_to_cdp_http_base, normalize_cdp_http_base
 
 _MAX_CONSOLE_MESSAGES_PER_PAGE = 200
@@ -28,6 +30,8 @@ class _ThreadPlaywrightState:
     target_ids_by_page: dict[int, str] = field(default_factory=dict)
     console_messages_by_page: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     console_listener_pages: dict[int, Any] = field(default_factory=dict)
+    page_errors_by_page: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    page_error_listener_pages: dict[int, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -82,6 +86,30 @@ class PlaywrightCdpSessionPool:
                 target_id=target_id,
             )
             return page
+
+        # Playwright can keep a live CDP browser object that has not observed a
+        # target opened through the raw /json/new endpoint. Reconnect once so
+        # target lookup is based on the current browser target list.
+        self._discard_profile_browser(state=state, profile_name=profile.name)
+        browser = self._browser_for(
+            profile=profile,
+            timeout_ms=timeout_ms,
+            cdp_url=cdp_url,
+            state=state,
+        )
+        pages = self._refresh_profile_pages(
+            state=state,
+            profile_name=profile.name,
+            browser=browser,
+        )
+        page = pages.get(target_id)
+        if page is not None:
+            self._ensure_page_console_listener(
+                state=state,
+                page=page,
+                target_id=target_id,
+            )
+            return page
         raise BrowserValidationError(
             f"Browser tab '{target_id}' is not available through Playwright CDP.",
         )
@@ -112,6 +140,23 @@ class PlaywrightCdpSessionPool:
             filtered = filtered[-limit:]
         return filtered
 
+    def get_page_errors(
+        self,
+        *,
+        page,
+        limit: int | None = None,
+        clear: bool = False,
+    ) -> list[dict[str, Any]]:
+        state = self._thread_state()
+        marker = id(page)
+        with self._lock:
+            errors = list(state.page_errors_by_page.get(marker, ()))
+            if clear:
+                state.page_errors_by_page[marker] = []
+        if limit is not None and limit > 0 and len(errors) > limit:
+            errors = errors[-limit:]
+        return [dict(item) for item in errors]
+
     def clear_profile(self, *, profile_name: str) -> None:
         browsers: list[Any] = []
         with self._lock:
@@ -121,6 +166,7 @@ class PlaywrightCdpSessionPool:
                 browser = state.browsers.pop(profile_name, None)
                 state.browser_urls.pop(profile_name, None)
                 self._purge_profile_console_state(state=state, profile_name=profile_name)
+                self._purge_profile_error_state(state=state, profile_name=profile_name)
                 self._clear_profile_page_cache(state=state, profile_name=profile_name)
                 if browser is not None and state.owner_thread is active_thread:
                     browsers.append(browser)
@@ -167,6 +213,28 @@ class PlaywrightCdpSessionPool:
                 )
         finally:
             self._close_browser(probe_browser)
+
+    def open_command_cdp_session(
+        self,
+        page: Any,
+        *,
+        operation: str | None = None,
+    ):
+        return BrowserCdpSessionBroker().open_command_session(
+            page,
+            operation=operation,
+        )
+
+    def open_subscription_cdp_session(
+        self,
+        page: Any,
+        *,
+        operation: str | None = None,
+    ):
+        return BrowserCdpSessionBroker().open_subscription_session(
+            page,
+            operation=operation,
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -224,6 +292,7 @@ class PlaywrightCdpSessionPool:
                 state.browsers.pop(profile.name, None)
                 state.browser_urls.pop(profile.name, None)
                 self._purge_profile_console_state(state=state, profile_name=profile.name)
+                self._purge_profile_error_state(state=state, profile_name=profile.name)
                 self._clear_profile_page_cache(state=state, profile_name=profile.name)
 
             playwright = self._ensure_playwright(state)
@@ -307,6 +376,7 @@ class PlaywrightCdpSessionPool:
                 return None
             if not self._browser_is_connected(browser) or self._page_is_closed(page):
                 self._purge_profile_console_state(state=state, profile_name=profile_name)
+                self._purge_profile_error_state(state=state, profile_name=profile_name)
                 self._clear_profile_page_cache(state=state, profile_name=profile_name)
                 return None
             return page
@@ -350,6 +420,21 @@ class PlaywrightCdpSessionPool:
         for page in profile_pages.values():
             state.target_ids_by_page.pop(id(page), None)
 
+    def _discard_profile_browser(
+        self,
+        *,
+        state: _ThreadPlaywrightState,
+        profile_name: str,
+    ) -> None:
+        with self._lock:
+            browser = state.browsers.pop(profile_name, None)
+            state.browser_urls.pop(profile_name, None)
+            self._purge_profile_console_state(state=state, profile_name=profile_name)
+            self._purge_profile_error_state(state=state, profile_name=profile_name)
+            self._clear_profile_page_cache(state=state, profile_name=profile_name)
+        if browser is not None:
+            self._close_browser(browser)
+
     @staticmethod
     def _purge_profile_console_state(
         *,
@@ -362,6 +447,18 @@ class PlaywrightCdpSessionPool:
             state.console_messages_by_page.pop(marker, None)
             state.console_listener_pages.pop(marker, None)
 
+    @staticmethod
+    def _purge_profile_error_state(
+        *,
+        state: _ThreadPlaywrightState,
+        profile_name: str,
+    ) -> None:
+        profile_pages = state.pages_by_profile.get(profile_name, {})
+        for page in profile_pages.values():
+            marker = id(page)
+            state.page_errors_by_page.pop(marker, None)
+            state.page_error_listener_pages.pop(marker, None)
+
     def _ensure_page_console_listener(
         self,
         *,
@@ -370,26 +467,45 @@ class PlaywrightCdpSessionPool:
         target_id: str,
     ) -> None:
         marker = id(page)
-        if state.console_listener_pages.get(marker) is page:
+        console_registered = state.console_listener_pages.get(marker) is page
+        page_error_registered = state.page_error_listener_pages.get(marker) is page
+        if console_registered and page_error_registered:
             return
         state.console_messages_by_page.setdefault(marker, [])
+        state.page_errors_by_page.setdefault(marker, [])
         register = getattr(page, "on", None)
         if not callable(register):
             state.console_listener_pages[marker] = page
+            state.page_error_listener_pages[marker] = page
             return
 
-        def _capture_console_message(message) -> None:  # noqa: ANN001
-            serialized = _serialize_console_message(message=message, target_id=target_id)
-            if serialized is None:
-                return
-            with self._lock:
-                bucket = state.console_messages_by_page.setdefault(marker, [])
-                bucket.append(serialized)
-                if len(bucket) > _MAX_CONSOLE_MESSAGES_PER_PAGE:
-                    del bucket[:-_MAX_CONSOLE_MESSAGES_PER_PAGE]
+        if not console_registered:
+            def _capture_console_message(message) -> None:  # noqa: ANN001
+                serialized = _serialize_console_message(message=message, target_id=target_id)
+                if serialized is None:
+                    return
+                with self._lock:
+                    bucket = state.console_messages_by_page.setdefault(marker, [])
+                    bucket.append(serialized)
+                    if len(bucket) > _MAX_CONSOLE_MESSAGES_PER_PAGE:
+                        del bucket[:-_MAX_CONSOLE_MESSAGES_PER_PAGE]
 
-        register("console", _capture_console_message)
-        state.console_listener_pages[marker] = page
+            register("console", _capture_console_message)
+            state.console_listener_pages[marker] = page
+
+        if not page_error_registered:
+            def _capture_page_error(error) -> None:  # noqa: ANN001
+                serialized = _serialize_page_error(error=error, target_id=target_id)
+                if serialized is None:
+                    return
+                with self._lock:
+                    bucket = state.page_errors_by_page.setdefault(marker, [])
+                    bucket.append(serialized)
+                    if len(bucket) > _MAX_CONSOLE_MESSAGES_PER_PAGE:
+                        del bucket[:-_MAX_CONSOLE_MESSAGES_PER_PAGE]
+
+            register("pageerror", _capture_page_error)
+            state.page_error_listener_pages[marker] = page
 
     def _page_target_id(
         self,
@@ -400,20 +516,19 @@ class PlaywrightCdpSessionPool:
         cached = state.target_ids_by_page.get(id(page))
         if cached:
             return cached
-        session = page.context.new_cdp_session(page)
+        broker = BrowserCdpSessionBroker()
+        session = broker.open_command_session(
+            page,
+            operation="Target.getTargetInfo",
+        )
         try:
-            payload = session.send("Target.getTargetInfo")
+            payload = broker.send_command(session, "Target.getTargetInfo")
         except Exception as exc:  # noqa: BLE001
             raise BrowserValidationError(
                 f"Playwright could not resolve the CDP target id for a page: {exc}",
             ) from exc
         finally:
-            detach = getattr(session, "detach", None)
-            if callable(detach):
-                try:
-                    detach()
-                except Exception:  # noqa: BLE001
-                    pass
+            broker.detach(session)
         if not isinstance(payload, dict):
             return None
         target_info = payload.get("targetInfo")
@@ -513,5 +628,24 @@ def _serialize_console_message(*, message, target_id: str) -> dict[str, Any] | N
         "level": level,
         "text": normalized_text,
         "location": _normalize_console_location(_message_attr(message, "location")),
+        "captured_at_ms": int(time.time() * 1000),
+    }
+
+
+def _serialize_page_error(*, error, target_id: str) -> dict[str, Any] | None:  # noqa: ANN001
+    message = _message_attr(error, "message")
+    if not isinstance(message, str) or not message.strip():
+        message = str(error).strip()
+    if not message:
+        return None
+    name = _message_attr(error, "name")
+    stack = _message_attr(error, "stack")
+    return {
+        "target_id": target_id,
+        "level": "error",
+        "source": "pageerror",
+        "text": message.strip(),
+        "name": str(name).strip() if isinstance(name, str) and name.strip() else None,
+        "stack": str(stack).strip() if isinstance(stack, str) and stack.strip() else None,
         "captured_at_ms": int(time.time() * 1000),
     }

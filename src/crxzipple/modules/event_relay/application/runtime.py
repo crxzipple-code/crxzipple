@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from threading import Event as StopEvent
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
 from crxzipple.shared.domain.events import Event, named_event_topic
+
+from .ports import EventRelayStreamPort
 
 logger = get_logger(__name__)
 
@@ -28,7 +29,7 @@ class EventRelayRuntimeService:
     def __init__(
         self,
         *,
-        events_service: EventsApplicationService,
+        events_service: EventRelayStreamPort,
         subscriptions: tuple[EventRelaySubscription, ...] = (),
         runtime_name: str = "event_relay.runtime",
     ) -> None:

@@ -7,26 +7,31 @@ interfaces and reused by other bounded contexts such as `agent`.
 
 - `Tool`: aggregate root for a tool definition and execution contract
 - `ToolRun`: aggregate root for one execution attempt with runtime lifecycle
-- `ToolSpec`: application-layer discovery/provider manifest that gets translated
-  into `Tool`
+- `ToolSource`: Tool-owned source declaration such as bundled local package,
+  OpenAPI, MCP, CLI, or provider backend source.
+- `ToolFunction`: stable executable catalog row produced by source discovery.
+- `ToolProviderBackend`: Tool-owned runtime supplier for provider capabilities
+  such as image generation.
+- `ToolSpec`: local package authoring manifest that gets translated into
+  discovery candidates.
 - `ToolExecutionSupport`: the supported `mode + strategy + environment` matrix
 - `ToolExecutionTarget`: the concrete execution target chosen for a run
-- `ToolSourceKind`: where the tool definition came from, such as manual registration
-  or local discovery
+- `ToolCatalogSourceKind`: source declaration kind for catalog governance.
+- `ToolFunctionRuntimeKind`: runtime surface used to execute a catalog function.
 
 ## What belongs here
 
-- Tool metadata and discovery information
+- Tool source/function/backend metadata and discovery information
 - Input contract and parameter definitions
 - Execution guardrails such as timeout, confirmation, and state mutation
 - Execution support across:
   - modes: `inline`, `background`
   - strategies: `async`, `thread`, `process`
   - environments: `local`, `sandbox`, `remote`
-- Local tool discovery and runtime binding
-- Discovery providers and provider-specific manifests
+- Local package, OpenAPI, MCP, CLI, and provider backend source discovery
 - Per-run lifecycle state such as `created`, `running`, `succeeded`, and `failed`
-- Availability state (`enabled` / `disabled`)
+- Availability state (`active` / `disabled` / `stale` / `deprecated` /
+  `deleted`)
 - Background execution handoff for local async runs
 - Runtime routing across `local`, `sandbox`, and `remote` adapters
 
@@ -34,8 +39,8 @@ interfaces and reused by other bounded contexts such as `agent`.
 
 The tool application is split into explicit runtime-facing services:
 
-- `ToolCatalogService` owns tool definitions, provider discovery, and
-  availability.
+- `ToolCatalogService` owns process-local debug registrations and delegates
+  production definitions to the Tool source/function catalog.
 - `ToolSubmissionService` validates requested tool targets, creates tool runs,
   executes inline runs, and enqueues background runs.
 - `ToolBackgroundSchedulerService` assigns queued background tool runs to
@@ -45,6 +50,10 @@ The tool application is split into explicit runtime-facing services:
 - `ToolApplicationService` is the public tool application surface used by
   interfaces and other modules. It does not own scheduler or worker runtime
   methods.
+- `ToolProviderBackendReadinessEvaluator` aggregates Access credential readiness
+  and runtime requirements for provider backends; Settings and Operations
+  consume that query surface instead of interpreting backend credentials
+  themselves.
 
 The scheduler and worker are intentionally separate. The scheduler decides which
 worker gets a queued background run. The worker executes assigned runs and may
@@ -60,8 +69,28 @@ resume an outer agent run.
 - Conversation or session lifecycle
 - Agent-specific orchestration rules
 - Concrete tool business logic such as workspace/file tools or debug/demo tools
+- External credential governance, setup, rotation, and audit. Tools declare
+  credential requirements and resolve Access binding ids at runtime; they do
+  not read secret sources directly.
 
 Those concerns should stay in other bounded contexts and reference tools by id.
+
+## Credential requirements
+
+Tool packages declare external credential needs through structured credential
+requirements. See
+[`docs/tool-credential-requirements-guide.md`](../../../../docs/tool-credential-requirements-guide.md)
+for the authoring contract.
+
+- OpenAPI provider `credentials` map security scheme names to Access binding ids.
+- Native/local packages use the `credential_requirements` manifest field.
+- Runtime code resolves binding ids through typed dependencies and the injected
+  Access credential provider.
+- Provider backend handlers receive the selected backend context through
+  `ToolExecutionContext.provider_backend`; they read binding ids from that
+  context instead of hardcoding secret sources.
+- `env:`, `file:`, raw tokens, and inline secret sources are
+  not accepted in tool manifests or provider config.
 
 ## Current implementation note
 
@@ -74,13 +103,15 @@ Those concerns should stay in other bounded contexts and reference tools by id.
   dedicated `tool-worker`
 - `background + async + sandbox/remote` follows the same queued worker flow and
   resolves through the runtime router
-- Tool discovery now goes through a provider registry; `discover-local` is a
-  compatibility alias for provider `local_builtin`
-- Re-running discovery now refreshes previously discovered non-manual tool
-  definitions when the provider contract changes
-- Filesystem-backed local tools can now be discovered from `tool.json`
-  manifests under fixed repository paths and executed through the existing
-  local runtime
+- Runtime resolution never triggers provider discovery or runtime registry
+  backfill. Source/function catalog rows are the definition truth; the local
+  runtime registry only maps active catalog function `handler_ref` values to
+  in-process handlers.
+- Re-running discovery refreshes source/function/backend catalog rows when the
+  source contract changes while preserving user-governed fields.
+- Recursive filesystem `tool.json` discovery is retired. Executable local tools
+  must enter the source/function catalog through `local_package` source manifests
+  and package activation.
 - OpenAPI-backed remote tools can now be discovered through configured
   providers and executed through the `remote` runtime
 - MCP-backed tools can now be discovered through configured stdio providers and
@@ -93,14 +124,13 @@ Those concerns should stay in other bounded contexts and reference tools by id.
   `cancel_requested` before the worker closes them as `cancelled`
 - A single tool worker process can execute multiple I/O-heavy background runs
   concurrently by running with `--max-in-flight > 1`; daemon-managed workers
-  default to `APP_TOOL_WORKER_MAX_IN_FLIGHT=4`
+  default to Settings `runtime-defaults/defaults` `tool_worker.max_in_flight`
 - Background scheduling also applies per-capability run limits before claiming
   work: image tools default to the worker capacity, while shared-state local
   tools such as browser, command, workspace, mobile, and session tools default to
-  one in-flight run per capability group. Tune with
-  `APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY`,
-  `APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY`, and
-  `APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY`.
+  one in-flight run per capability group. Tune with Settings Runtime Defaults
+  `tool_worker.default_run_concurrency`, `tool_worker.image_run_concurrency`,
+  and `tool_worker.shared_state_run_concurrency`.
 - The sandbox runner isolates execution in a temporary working directory under
   `APP_SANDBOX_BASE_DIR`
 - `APP_SANDBOX_BACKEND` now selects `subprocess` or `docker`
@@ -110,19 +140,22 @@ Those concerns should stay in other bounded contexts and reference tools by id.
   backend. The in-memory backend is process-local and should be treated as a
   test/local-single-process backend only.
 
-## Current provider path
+## Current source path
 
-- bundled tool namespaces: governed from repository `tools/*/tool.yaml`
-- `local_builtin`: discovers in-process local tools from the local catalog
-- `local_filesystem`: discovers local tools from `tool.json` manifests under:
-  - `.crxzipple/tools/`
-  - `tools/`
+- bundled tool namespaces are governed from repository `tools/*/tool.yaml`
+- local packages, OpenAPI specs, MCP sources, CLI sources, and provider
+  backends all materialize into Tool-owned source/function/backend catalog rows
+- process-local registrations remain a debug/test overlay and are not the
+  production catalog truth
 - bundled OpenAPI namespaces: discover remote HTTP tools from
   `tools/<namespace>/tool.yaml` + colocated spec files and register matching
   remote runtime handlers
 - configured OpenAPI providers: explicit override path for remote HTTP tools
 - configured MCP providers: discover tools over a lightweight stdio `tools/list`
   call and invoke them through `tools/call`
+- configured CLI sources: execute governed argv sessions through
+  `cli_help`, `cli_execute`, `cli_read_output`, and `cli_cancel`; help output is
+  not parsed into trusted tool functions
 
 OpenAPI discovery currently supports:
 
@@ -145,15 +178,26 @@ The current MCP provider path supports:
 It does not yet implement a full remote-capable MCP session manager or richer
 transport negotiation.
 
-The current filesystem local provider path supports:
+The current CLI source path supports:
 
-- recursive `tool.json` discovery under the fixed repository-local tool roots
-- `entrypoint` resolution using `<relative_file.py>:<callable>`
-- top-level callables that work with `async`, `thread`, and `process`
-- registration into the shared local runtime catalog so later CLI/HTTP/worker
-  processes can execute the same discovered tools
-- returning `ToolRunResult` as the recommended handler contract for keeping
-  business content separate from execution metadata
+- governed executable/argv execution with allowed subcommands, denied flags,
+  cwd/root policy, timeout, output limits, and Access credential injection
+- guided process sessions for help, execute, output polling, and cancellation
+- explicit promoted functions declared in source config for stable high-frequency
+  workflows
+
+It intentionally does not auto-generate `ToolFunction` records from arbitrary CLI
+help text. A help probe can inform a user or agent, but publishing a stable CLI
+function requires an explicit promoted function contract.
+
+Removed legacy paths:
+
+- `/tools/providers`, `/tools/discover`, `tool providers`, and `tool discover`
+  have been removed. Use `tool sources`, `tool functions`, and explicit
+  source sync commands.
+- Process-local runtime registration is not a production API. Tests and
+  benchmarks that need temporary tools must materialize a catalog source/function
+  first, then register only the matching local runtime handler.
 
 Plain dict return values are no longer accepted. Tool runtimes must return
 `ToolRunResult`.

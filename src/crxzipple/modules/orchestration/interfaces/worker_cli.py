@@ -10,16 +10,21 @@ import socket
 import threading
 from threading import Event as StopEvent
 import time
-from typing import Iterator
+from typing import ContextManager, Iterator
 from uuid import uuid4
 
 import typer
 
-from crxzipple.bootstrap import AppContainer, build_container
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging
 from crxzipple.interfaces.cli.crxzipple import guard_runtime_database
 from crxzipple.interfaces.cli.formatters import echo_data
+from crxzipple.interfaces.runtime_container import (
+    AppContainer,
+    AppKey,
+    AssemblyTarget,
+    runtime_container as managed_runtime_container,
+)
 from crxzipple.modules.agent.application import RegisterAgentProfileInput
 from crxzipple.modules.agent.domain import AgentLlmRoutingPolicy, AgentNotFoundError
 from crxzipple.modules.llm.application import (
@@ -61,8 +66,20 @@ from crxzipple.modules.orchestration.interfaces.shared import (
     parse_queue_policy,
     parse_run_stage,
 )
-from crxzipple.modules.tool.application import RegisterToolInput
-from crxzipple.modules.tool.domain import ToolMode, ToolRunResult
+from crxzipple.modules.tool.domain import (
+    ToolCatalogSourceKind,
+    ToolDefinitionOrigin,
+    ToolEnvironment,
+    ToolExecutionStrategy,
+    ToolExecutionSupport,
+    ToolFunction,
+    ToolFunctionRuntimeKind,
+    ToolFunctionStatus,
+    ToolKind,
+    ToolMode,
+    ToolRunResult,
+    ToolSource,
+)
 
 
 def _resolve_worker_id(worker_id: str | None) -> str:
@@ -103,29 +120,61 @@ def _parse_executor_lease_status(
 
 
 @contextmanager
-def _worker_container() -> Iterator[AppContainer]:
+def _runtime_container(
+    target: AssemblyTarget,
+    *,
+    enable_memory_watchers: bool | None = None,
+) -> Iterator[AppContainer]:
     settings = load_settings()
     configure_logging(settings)
-    container = build_container(
-        settings=settings,
-        enable_memory_watchers=True,
-    )
-    try:
+    with managed_runtime_container(
+        settings,
+        target=target,
+        enable_memory_watchers=enable_memory_watchers,
+    ) as container:
         yield container
-    finally:
-        container.close()
+
+
+def _executor_container() -> ContextManager[AppContainer]:
+    return _runtime_container(AssemblyTarget.ORCHESTRATION_EXECUTOR)
+
+
+def _scheduler_container() -> ContextManager[AppContainer]:
+    return _runtime_container(AssemblyTarget.ORCHESTRATION_SCHEDULER)
+
+
+def _admin_container() -> ContextManager[AppContainer]:
+    return _runtime_container(
+        AssemblyTarget.CLI_ADMIN,
+        enable_memory_watchers=False,
+    )
+
+
+@contextmanager
+def _linked_runtime_containers() -> Iterator[tuple[AppContainer, AppContainer]]:
+    with (
+        _runtime_container(
+            AssemblyTarget.ORCHESTRATION_SCHEDULER,
+            enable_memory_watchers=False,
+        ) as scheduler_container,
+        _runtime_container(
+            AssemblyTarget.ORCHESTRATION_EXECUTOR,
+            enable_memory_watchers=False,
+        ) as executor_container,
+    ):
+        yield scheduler_container, executor_container
 
 
 def _executor_port(container: AppContainer) -> OrchestrationExecutorControlPort:
-    return container.orchestration_executor_service
+    return container.require(AppKey.ORCHESTRATION_EXECUTOR_SERVICE)
 
 
 def _scheduler_port(container: AppContainer) -> OrchestrationSchedulerRuntimePort:
-    return container.orchestration_scheduler_service
+    return container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE)
 
 
 def _run_query_port(container: AppContainer) -> OrchestrationRunQueryPort:
-    return container.orchestration_run_query_service
+    return container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE)
 
 
 def _echo_run_or_idle(
@@ -217,9 +266,9 @@ def _resolve_max_concurrent_assignments(
 ) -> int:
     if explicit_value is not None:
         return max(int(explicit_value), 1)
-    settings = getattr(container, "settings", None)
+    runtime_bootstrap_config = container.require(AppKey.RUNTIME_BOOTSTRAP_CONFIG)
     configured_value = getattr(
-        settings,
+        runtime_bootstrap_config,
         "orchestration_executor_max_concurrent_assignments",
         4,
     )
@@ -236,7 +285,7 @@ def _execute_executor_loop(
 ) -> None:
     guard_runtime_database(load_settings(), runtime_name="orchestration executor")
     resolved_worker_id = _resolve_worker_id(worker_id)
-    with _worker_container() as container:
+    with _executor_container() as container:
         resolved_max_concurrent_assignments = _resolve_max_concurrent_assignments(
             container,
             max_concurrent_assignments,
@@ -295,7 +344,7 @@ def _execute_executor_probe(
     max_concurrent_assignments: int | None = None,
 ) -> None:
     resolved_worker_id = _resolve_worker_id(worker_id)
-    with _worker_container() as container:
+    with _executor_container() as container:
         resolved_max_concurrent_assignments = _resolve_max_concurrent_assignments(
             container,
             max_concurrent_assignments,
@@ -442,9 +491,7 @@ def _daemon_runtime_service_snapshots(
     *,
     service_keys: tuple[str, ...] = _ORCHESTRATION_RUNTIME_SERVICE_KEYS,
 ) -> list[dict[str, object]]:
-    daemon_manager = getattr(container, "daemon_manager", None)
-    if daemon_manager is None:
-        return []
+    daemon_manager = container.require(AppKey.DAEMON_MANAGER)
     snapshots: list[dict[str, object]] = []
     for service_key in service_keys:
         instances = daemon_manager.list_instances(
@@ -666,24 +713,16 @@ def _ensure_benchmark_agent(
     agent_id: str,
     llm_id: str,
 ) -> None:
-    agent_service = getattr(container, "agent_service", None)
-    if agent_service is None:
+    agent_service = container.require(AppKey.AGENT_SERVICE)
+    try:
+        agent_service.get_profile(agent_id)
         return
-    get_profile = getattr(agent_service, "get_profile", None)
-    if callable(get_profile):
-        try:
-            get_profile(agent_id)
-            return
-        except AgentNotFoundError:
-            pass
-    register_profile = getattr(agent_service, "register_profile", None)
-    if not callable(register_profile):
-        return
-    register_profile(
+    except AgentNotFoundError:
+        pass
+    agent_service.register_profile(
         RegisterAgentProfileInput(
             id=agent_id,
             name=f"Benchmark Tool IO {agent_id}",
-            description="Synthetic agent profile for orchestration tool IO benchmarks.",
             llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id=llm_id),
         ),
     )
@@ -708,8 +747,11 @@ def _register_tool_io_benchmark_runtime(
         llm_latency_seconds=llm_latency_seconds,
         stats=stats,
     )
-    container.llm_adapter_registry.register(LlmApiFamily.OLLAMA_NATIVE, adapter)
-    container.llm_service.register_profile(
+    container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+        LlmApiFamily.OLLAMA_NATIVE,
+        adapter,
+    )
+    container.require(AppKey.LLM_SERVICE).register_profile(
         RegisterLlmProfileInput(
             id=synthetic_llm_id,
             provider=LlmProviderKind.OLLAMA,
@@ -720,14 +762,54 @@ def _register_tool_io_benchmark_runtime(
             timeout_seconds=30,
         ),
     )
-    tool = container.tool_service.register(
-        RegisterToolInput(
+    source_id = f"benchmark.tool_io.{uuid4().hex[:12]}"
+    with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+        source = ToolSource(
+            id=source_id,
+            display_name="Synthetic Tool IO Benchmark",
+            kind=ToolCatalogSourceKind.LOCAL_PACKAGE,
+            description="Temporary benchmark source for orchestration tool IO tests.",
+            config={"namespace": "benchmark.tool_io"},
+        )
+        function = ToolFunction(
             id=synthetic_tool_id,
-            name="Synthetic Tool IO Sleep",
+            source_id=source_id,
+            stable_key=f"{source_id}.{synthetic_tool_id}",
+            name=synthetic_tool_id,
+            display_name="Synthetic Tool IO Sleep",
             description="Sleeps asynchronously to benchmark inline tool IO concurrency.",
-            supported_modes=(ToolMode.INLINE,),
-            runtime_key=synthetic_tool_id,
-        ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "call_index": {"type": "integer"},
+                    "sleep_seconds": {"type": "number"},
+                },
+            },
+            runtime_kind=ToolFunctionRuntimeKind.LOCAL,
+            handler_ref={"ref": synthetic_tool_id},
+            required_effect_ids=("local_tool_access",),
+            execution_support=ToolExecutionSupport(
+                supported_modes=(ToolMode.INLINE,),
+                supported_strategies=(ToolExecutionStrategy.ASYNC,),
+                supported_environments=(ToolEnvironment.LOCAL,),
+            ),
+            metadata={
+                "tool_kind": ToolKind.FUNCTION.value,
+                "definition_origin": ToolDefinitionOrigin.LOCAL_DISCOVERY.value,
+                "runtime_key": synthetic_tool_id,
+                "execution_support": {
+                    "supported_modes": (ToolMode.INLINE.value,),
+                    "supported_strategies": (ToolExecutionStrategy.ASYNC.value,),
+                    "supported_environments": (ToolEnvironment.LOCAL.value,),
+                },
+            },
+            status=ToolFunctionStatus.ACTIVE,
+        )
+        uow.tool_sources.upsert(source)
+        uow.tool_functions.upsert(function)
+        uow.commit()
+    tool = container.require(AppKey.TOOL_SERVICE).get_tool(
+        synthetic_tool_id,
     )
 
     async def _sleep_tool(arguments: dict[str, object]) -> ToolRunResult:
@@ -748,7 +830,7 @@ def _register_tool_io_benchmark_runtime(
         finally:
             stats.record_tool_completed()
 
-    container.local_tool_catalog.register(tool, _sleep_tool)
+    container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(tool, _sleep_tool)
     _ensure_benchmark_agent(container, agent_id=agent_id, llm_id=synthetic_llm_id)
     return synthetic_llm_id, synthetic_tool_id, stats
 
@@ -789,12 +871,15 @@ def _execute_tool_io_benchmark(
         option_name="--queue-policy",
         error_factory=_bad_parameter,
     ) or OrchestrationQueuePolicy.FIFO
+    effective_max_concurrent_assignments = (
+        max_concurrent_assignments if unique_lanes else 1
+    )
 
-    with _worker_container() as container:
+    with _linked_runtime_containers() as (scheduler_container, executor_container):
         try:
-            scheduler_service = _scheduler_port(container)
-            executor_service = _executor_port(container)
-            run_query = _run_query_port(container)
+            scheduler_service = _scheduler_port(scheduler_container)
+            executor_service = _executor_port(executor_container)
+            run_query = _run_query_port(executor_container)
             list_runs = getattr(run_query, "list_runs", None)
             if not allow_shared_executors and callable(list_runs):
                 queued_runs = list_runs(status=OrchestrationRunStatus.QUEUED)
@@ -833,7 +918,7 @@ def _execute_tool_io_benchmark(
 
             synthetic_llm_id, synthetic_tool_id, stats = (
                 _register_tool_io_benchmark_runtime(
-                    container,
+                    executor_container,
                     benchmark_id=benchmark_id,
                     agent_id=agent_id,
                     tool_calls_per_run=tool_calls_per_run,
@@ -843,7 +928,7 @@ def _execute_tool_io_benchmark(
             )
             executor_service.heartbeat_executor(
                 worker_id=resolved_worker_id,
-                max_inflight_assignments=max_concurrent_assignments,
+                max_inflight_assignments=effective_max_concurrent_assignments,
                 inflight_assignment_count=0,
                 metadata={
                     "benchmark_id": benchmark_id,
@@ -853,6 +938,9 @@ def _execute_tool_io_benchmark(
                         "active_run_ids": [],
                         "active_assignment_count": 0,
                         "max_concurrent_assignments": max_concurrent_assignments,
+                        "effective_max_concurrent_assignments": (
+                            effective_max_concurrent_assignments
+                        ),
                     },
                 },
             )
@@ -883,7 +971,7 @@ def _execute_tool_io_benchmark(
                     scheduler_service.run_until_stopped,
                     worker_id=resolved_scheduler_worker_id,
                     poll_interval_seconds=scheduler_poll_interval_seconds,
-                    max_runs=None,
+                    max_runs=run_count,
                     max_idle_cycles=None,
                     stop_event=scheduler_stop,
                 )
@@ -893,7 +981,7 @@ def _execute_tool_io_benchmark(
                     poll_interval_seconds=poll_interval_seconds,
                     max_runs=run_count,
                     max_idle_cycles=max_idle_cycles,
-                    max_concurrent_assignments=max_concurrent_assignments,
+                    max_concurrent_assignments=effective_max_concurrent_assignments,
                 )
                 processed_runs = executor_future.result()
                 try:
@@ -950,7 +1038,12 @@ def _execute_tool_io_benchmark(
                     },
                     "executor": {
                         "worker_id": resolved_worker_id,
-                        "max_concurrent_assignments": max_concurrent_assignments,
+                        "max_concurrent_assignments": (
+                            effective_max_concurrent_assignments
+                        ),
+                        "configured_max_concurrent_assignments": (
+                            max_concurrent_assignments
+                        ),
                         "poll_interval_seconds": poll_interval_seconds,
                     },
                     "scheduler": {
@@ -1009,11 +1102,11 @@ def _execute_executor_runtime_benchmark(
         error_factory=_bad_parameter,
     ) or OrchestrationQueuePolicy.FIFO
 
-    with _worker_container() as container:
+    with _linked_runtime_containers() as (scheduler_container, executor_container):
         try:
-            scheduler_service = _scheduler_port(container)
-            executor_service = _executor_port(container)
-            run_query = _run_query_port(container)
+            scheduler_service = _scheduler_port(scheduler_container)
+            executor_service = _executor_port(executor_container)
+            run_query = _run_query_port(executor_container)
             list_runs = getattr(run_query, "list_runs", None)
             if not allow_shared_executors and callable(list_runs):
                 queued_runs = list_runs(status=OrchestrationRunStatus.QUEUED)
@@ -1199,7 +1292,7 @@ def _execute_daemon_runtime_benchmark(
         error_factory=_bad_parameter,
     ) or OrchestrationQueuePolicy.FIFO
 
-    with _worker_container() as container:
+    with _admin_container() as container:
         try:
             scheduler_service = _scheduler_port(container)
             run_query = _run_query_port(container)
@@ -1302,7 +1395,7 @@ def _execute_scheduler_loop(
 ) -> None:
     guard_runtime_database(load_settings(), runtime_name="orchestration scheduler")
     resolved_worker_id = _resolve_worker_id(worker_id)
-    with _worker_container() as container:
+    with _scheduler_container() as container:
         try:
             scheduler_service = _scheduler_port(container)
             scheduler_service.run_until_stopped(
@@ -1327,7 +1420,7 @@ def _register_executor_commands(
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.process_next_assigned_assignment(
@@ -1347,7 +1440,7 @@ def _register_executor_commands(
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.admit_assignment(
@@ -1368,7 +1461,7 @@ def _register_executor_commands(
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.process_assignment_inline(
@@ -1411,7 +1504,7 @@ def _register_executor_commands(
             min=1,
             help=(
                 "Maximum assigned runs this executor advances concurrently. "
-                "Defaults to APP_ORCHESTRATION_EXECUTOR_MAX_CONCURRENT_ASSIGNMENTS."
+                "Defaults to Settings runtime defaults."
             ),
         ),
     ) -> None:
@@ -1455,7 +1548,7 @@ def _register_executor_commands(
             min=1,
             help=(
                 "Maximum assigned runs this executor advances concurrently. "
-                "Defaults to APP_ORCHESTRATION_EXECUTOR_MAX_CONCURRENT_ASSIGNMENTS."
+                "Defaults to Settings runtime defaults."
             ),
         ),
     ) -> None:
@@ -1869,7 +1962,7 @@ def _register_executor_commands(
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 lease = executor_service.heartbeat_executor(
@@ -1891,7 +1984,7 @@ def _register_executor_commands(
             help="Optional executor lease status filter.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 leases = executor_service.list_executor_leases(
@@ -1917,7 +2010,7 @@ def _register_executor_commands(
             help="Optional executor lease status filter.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 leases = executor_service.list_executor_leases(
@@ -1939,7 +2032,7 @@ def _register_executor_commands(
             help="Stable orchestration executor identifier.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.heartbeat_assignment(
@@ -1970,7 +2063,7 @@ def _register_executor_commands(
             help="Optional metadata JSON object merged into the run.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.advance_assignment(
@@ -2002,7 +2095,7 @@ def _register_executor_commands(
         ),
         reason: str | None = typer.Option(None, help="Optional waiting reason."),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.wait_assignment_on_tool(
@@ -2028,7 +2121,7 @@ def _register_executor_commands(
             help="Optional result payload JSON object.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.complete_assignment(
@@ -2058,7 +2151,7 @@ def _register_executor_commands(
             help="Optional failure details JSON object.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _executor_container() as container:
             try:
                 executor_service = _executor_port(container)
                 run = executor_service.fail_assignment(
@@ -2085,7 +2178,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 run = scheduler_service.process_next_request(
@@ -2114,7 +2207,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 signal = scheduler_service.process_next_signal(
@@ -2143,7 +2236,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
         ),
     ) -> None:
         resolved_worker_id = _resolve_worker_id(worker_id)
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 run = scheduler_service.assign_next_assignment()
@@ -2214,7 +2307,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
             help="Default short reply when nothing actionable is pending.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 runs = scheduler_service.request_due_heartbeats(
@@ -2232,7 +2325,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
 
     @app.command("recover-abandoned")
     def recover_abandoned() -> None:
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 runs = scheduler_service.recover_abandoned_runs()
@@ -2242,7 +2335,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
 
     @app.command("expire-executor-leases")
     def expire_executor_leases() -> None:
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 leases = scheduler_service.expire_executor_leases()
@@ -2275,7 +2368,7 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
             help="Whether resuming should clear pending tool run references.",
         ),
     ) -> None:
-        with _worker_container() as container:
+        with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
                 run = scheduler_service.resume_run(

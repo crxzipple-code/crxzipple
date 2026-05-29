@@ -75,7 +75,7 @@ class GeminiGenerateContentAdapter:
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
         ensure_image_input_supported(profile, request.messages)
         token = resolve_credential_binding(
-            profile.credential_binding,
+            profile.credential_binding_id,
             required=True,
             description=f"LLM profile '{profile.id}'",
             resolved_credential=request.resolved_credential,

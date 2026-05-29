@@ -38,7 +38,7 @@ class DaemonDomainTestCase(unittest.TestCase):
 
     def test_lease_lifecycle(self) -> None:
         lease = DaemonLease.create(
-            service_key="capability:chrome-mcp:user",
+            service_key="host:browser:user",
             instance_id="instance-1",
             owner_kind="tool_run",
             owner_id="run-1",

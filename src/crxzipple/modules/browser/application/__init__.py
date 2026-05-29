@@ -2,6 +2,8 @@
 
 from .ports import (
     BrowserActionEngine,
+    BrowserAllocationTargetInspector,
+    BrowserAllocationTargetRecycler,
     BrowserCapabilitiesResolver,
     BrowserControlEngine,
     BrowserControlCommandAssembler,
@@ -9,6 +11,8 @@ from .ports import (
     BrowserEngineRegistry,
     BrowserExecutionCoordinator,
     BrowserExecutionPlanner,
+    BrowserNetworkCaptureStore,
+    BrowserNetworkRedactor,
     BrowserPageActionAssembler,
     BrowserProfileResolver,
     BrowserProfileSelectionOps,
@@ -19,9 +23,20 @@ from .ports import (
     BrowserRuntimeStateStore,
     BrowserSystemConfigStore,
 )
+from .network_capture import BrowserNetworkCaptureService
+from .query import (
+    BrowserProfileAllocationRuntimeRecord,
+    BrowserProfilePoolRuntimeRecord,
+    BrowserProfileQueryService,
+    BrowserProfileRuntimeRecord,
+)
 from .services import (
     BrowserExecutionCoordinatorService,
     BrowserProfileAdminService,
+    BrowserProfileAllocatorService,
+    BrowserProfilePoolService,
+    DefaultBrowserAllocationTargetRecycler,
+    DefaultBrowserAllocationTargetInspector,
     DefaultBrowserCapabilitiesResolver,
     DefaultBrowserControlCommandAssembler,
     DefaultBrowserExecutionPlanner,
@@ -30,16 +45,36 @@ from .services import (
     DefaultBrowserProfileSelectionOpsFactory,
     DefaultBrowserProfileTabOpsFactory,
 )
+from .tool_application import (
+    BrowserToolApplicationError,
+    BrowserToolApplicationService,
+    BrowserToolExecutionError,
+    BrowserToolExecutionResult,
+)
 
 __all__ = [
     "BrowserExecutionCoordinatorService",
     "BrowserProfileAdminService",
+    "BrowserProfileAllocatorService",
+    "BrowserProfileAllocationRuntimeRecord",
+    "BrowserProfilePoolService",
+    "BrowserProfilePoolRuntimeRecord",
+    "BrowserProfileQueryService",
+    "BrowserProfileRuntimeRecord",
+    "BrowserToolApplicationError",
+    "BrowserToolApplicationService",
+    "BrowserToolExecutionError",
+    "BrowserToolExecutionResult",
     "BrowserActionEngine",
+    "BrowserAllocationTargetInspector",
+    "BrowserAllocationTargetRecycler",
     "BrowserCapabilitiesResolver",
     "BrowserControlEngine",
     "BrowserControlCommandAssembler",
     "BrowserEngineBinding",
     "BrowserPageActionAssembler",
+    "DefaultBrowserAllocationTargetRecycler",
+    "DefaultBrowserAllocationTargetInspector",
     "DefaultBrowserCapabilitiesResolver",
     "DefaultBrowserControlCommandAssembler",
     "DefaultBrowserExecutionPlanner",
@@ -50,6 +85,9 @@ __all__ = [
     "BrowserEngineRegistry",
     "BrowserExecutionCoordinator",
     "BrowserExecutionPlanner",
+    "BrowserNetworkCaptureService",
+    "BrowserNetworkCaptureStore",
+    "BrowserNetworkRedactor",
     "BrowserProfileResolver",
     "BrowserProfileSelectionOps",
     "BrowserProfileSelectionOpsFactory",

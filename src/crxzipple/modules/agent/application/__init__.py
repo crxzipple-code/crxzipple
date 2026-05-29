@@ -21,7 +21,6 @@ from crxzipple.modules.agent.application.resolution import (
     AgentResolutionSummary,
     AgentResolutionTrace,
     AgentResolvedLlm,
-    AgentResolvedSkill,
     AgentResolvedTool,
     AgentValidationIssue,
 )
@@ -42,7 +41,6 @@ __all__ = [
     "AgentResolutionSummary",
     "AgentResolutionTrace",
     "AgentResolvedLlm",
-    "AgentResolvedSkill",
     "AgentResolvedTool",
     "AgentValidationIssue",
     "ExportAgentHomeInput",

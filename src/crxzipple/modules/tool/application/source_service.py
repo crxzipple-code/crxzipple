@@ -1,0 +1,1262 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields, is_dataclass, replace
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Protocol
+
+from crxzipple.modules.tool.application.catalog_models import (
+    ToolFunctionCatalogRecord,
+    ToolFunctionRequirements,
+    ToolFunctionStatus,
+    ToolProviderBackendCandidate,
+    ToolSourceCatalogKind,
+    ToolSourceCatalogRecord,
+    ToolSourceDiscoveryRunRecord,
+    ToolSourceDiscoveryResult,
+    ToolSourceDiscoveryStatus,
+    ToolSourceStatus as CatalogToolSourceStatus,
+)
+from crxzipple.modules.tool.application.discovery import ToolDiscoveryService
+from crxzipple.modules.tool.application.reconcile_service import (
+    ToolCatalogReconcileResult,
+    ToolCatalogReconcileService,
+    ToolFunctionCatalogRepository,
+)
+from crxzipple.modules.tool.domain.entities import ToolProviderBackend, ToolSource
+from crxzipple.modules.tool.domain.exceptions import ToolValidationError
+from crxzipple.modules.tool.domain.repositories import ToolSourceRepository
+from crxzipple.modules.tool.domain.value_objects import (
+    ToolCatalogSourceKind,
+    ToolFunctionRuntimeKind as DomainToolFunctionRuntimeKind,
+    ToolProviderBackendStatus,
+    ToolProviderCapability,
+    ToolSourceStatus,
+)
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    AccessCredentialKind,
+    AccessCredentialRequirementDeclaration,
+    AccessCredentialRequirementSet,
+    AccessCredentialSlotRef,
+    AccessCredentialTransport,
+    AccessSetupFlowHint,
+    AccessSetupFlowKind,
+)
+from crxzipple.shared.domain import AggregateRoot, Event
+
+
+class ToolSourceUnitOfWork(Protocol):
+    tool_sources: ToolSourceRepository
+    tool_source_discovery_runs: Any
+    tool_function_catalog: ToolFunctionCatalogRepository
+    tool_functions: Any
+    tool_provider_backends: Any
+
+    def __enter__(self) -> "ToolSourceUnitOfWork":
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: Any,
+    ) -> None:
+        ...
+
+    def commit(self) -> None:
+        ...
+
+    def collect(self, aggregate: AggregateRoot[Any]) -> None:
+        ...
+
+
+@dataclass(kw_only=True)
+class _EventBuffer(AggregateRoot[str]):
+    pass
+
+
+class _UnitOfWorkEventPublisher:
+    def __init__(self, uow: ToolSourceUnitOfWork) -> None:
+        self._uow = uow
+        self._buffer = _EventBuffer(id="tool.catalog.reconcile.events")
+
+    def publish(self, event: Event) -> None:
+        self._buffer.record_event(event)
+        self._uow.collect(self._buffer)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSourceCommandResult:
+    source: ToolSourceCatalogRecord
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ToolFunctionCommandResult:
+    function: ToolFunctionCatalogRecord
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSourceSyncResult:
+    source: ToolSourceCatalogRecord
+    discovery: ToolSourceDiscoveryResult | None = None
+    reconcile: ToolCatalogReconcileResult | None = None
+    skipped: bool = False
+    error_message: str | None = None
+
+    @property
+    def changed(self) -> bool:
+        return bool(
+            self.reconcile is not None and self.reconcile.changed,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSourceCatalogSyncResult:
+    results: tuple[ToolSourceSyncResult, ...]
+
+    @property
+    def source_count(self) -> int:
+        return len(self.results)
+
+    @property
+    def function_count(self) -> int:
+        return sum(
+            len(result.discovery.candidates)
+            for result in self.results
+            if result.discovery is not None
+        )
+
+    @property
+    def changed_count(self) -> int:
+        return sum(
+            len(result.reconcile.changed)
+            for result in self.results
+            if result.reconcile is not None
+        )
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for result in self.results if result.error_message)
+
+
+class ToolSourceQueryService:
+    def __init__(self, uow_factory: Callable[[], ToolSourceUnitOfWork]) -> None:
+        self._uow_factory = uow_factory
+
+    def list_sources(
+        self,
+        *,
+        kind: ToolSourceCatalogKind | str | None = None,
+        status: CatalogToolSourceStatus | str | None = None,
+    ) -> tuple[ToolSourceCatalogRecord, ...]:
+        with self._uow_factory() as uow:
+            sources = uow.tool_sources.list(
+                kind=_domain_source_kind(kind) if kind is not None else None,
+                status=_domain_source_status(status) if status is not None else None,
+            )
+            return tuple(_source_entity_to_record(source) for source in sources)
+
+    def get_source(self, source_id: str) -> ToolSourceCatalogRecord | None:
+        with self._uow_factory() as uow:
+            source = uow.tool_sources.get(source_id)
+            if source is None:
+                return None
+            return _source_entity_to_record(source)
+
+    def list_discovery_runs(
+        self,
+        source_id: str,
+        *,
+        limit: int = 20,
+    ) -> tuple[ToolSourceDiscoveryRunRecord, ...]:
+        with self._uow_factory() as uow:
+            return uow.tool_source_discovery_runs.list_by_source(
+                source_id,
+                limit=limit,
+            )
+
+    def list_functions(
+        self,
+        *,
+        source_id: str | None = None,
+        status: ToolFunctionStatus | str | None = None,
+    ) -> tuple[ToolFunctionCatalogRecord, ...]:
+        with self._uow_factory() as uow:
+            functions = uow.tool_functions.list(
+                source_id=source_id,
+                status=status,
+            )
+            return tuple(_function_entity_to_record(function) for function in functions)
+
+    def get_function(self, function_id: str) -> ToolFunctionCatalogRecord | None:
+        with self._uow_factory() as uow:
+            function = uow.tool_functions.get(function_id)
+            if function is None:
+                return None
+            return _function_entity_to_record(function)
+
+    def list_provider_backends(
+        self,
+        *,
+        source_id: str | None = None,
+        capability: ToolProviderCapability | str | None = None,
+        status: ToolProviderBackendStatus | str | None = None,
+    ) -> tuple[ToolProviderBackend, ...]:
+        with self._uow_factory() as uow:
+            return tuple(
+                uow.tool_provider_backends.list(
+                    source_id=source_id,
+                    capability=capability,
+                    status=status,
+                ),
+            )
+
+    def get_provider_backend(self, backend_id: str) -> ToolProviderBackend | None:
+        with self._uow_factory() as uow:
+            return uow.tool_provider_backends.get(backend_id)
+
+
+class ToolSourceCommandService:
+    def __init__(self, uow_factory: Callable[[], ToolSourceUnitOfWork]) -> None:
+        self._uow_factory = uow_factory
+
+    def upsert_source(
+        self,
+        source: ToolSourceCatalogRecord,
+        *,
+        dry_run: bool = False,
+    ) -> ToolSourceCommandResult:
+        with self._uow_factory() as uow:
+            existing = uow.tool_sources.get(source.source_id)
+            merged = _merge_source(
+                incoming=source,
+                existing=existing,
+                observed_at=_utc_now(),
+            )
+            changed = existing is None or _source_changed(existing, merged)
+            if changed and not dry_run:
+                merged.record_event(
+                    _source_event(
+                        (
+                            "tool.source.created"
+                            if existing is None
+                            else "tool.source.updated"
+                        ),
+                        merged,
+                        observed_at=merged.updated_at,
+                        previous=_source_snapshot(existing),
+                        changed_fields=_source_changed_fields(existing, merged),
+                    ),
+                )
+                uow.tool_sources.upsert(merged)
+                uow.collect(merged)
+                uow.commit()
+            return ToolSourceCommandResult(
+                source=_source_entity_to_record(merged),
+                changed=changed,
+            )
+
+    def create_source(
+        self,
+        source: ToolSourceCatalogRecord,
+        *,
+        dry_run: bool = False,
+    ) -> ToolSourceCommandResult:
+        _validate_owner_writable_source(source)
+        with self._uow_factory() as uow:
+            existing = uow.tool_sources.get(source.source_id)
+            if existing is not None:
+                raise ToolValidationError(
+                    f"Tool source '{source.source_id}' already exists.",
+                )
+            entity = _source_record_to_entity(source, observed_at=_utc_now())
+            if not dry_run:
+                entity.record_event(
+                    _source_event(
+                        "tool.source.created",
+                        entity,
+                        observed_at=entity.created_at,
+                    ),
+                )
+                uow.tool_sources.upsert(entity)
+                uow.collect(entity)
+                uow.commit()
+            return ToolSourceCommandResult(
+                source=_source_entity_to_record(entity),
+                changed=True,
+            )
+
+    def update_source(
+        self,
+        source_id: str,
+        source: ToolSourceCatalogRecord,
+        *,
+        dry_run: bool = False,
+    ) -> ToolSourceCommandResult:
+        if source.source_id != source_id.strip():
+            raise ToolValidationError(
+                "Tool source update source_id must match the route source_id.",
+            )
+        _validate_owner_writable_source(source)
+        with self._uow_factory() as uow:
+            existing = uow.tool_sources.get(source_id)
+            if existing is None:
+                raise ToolValidationError(
+                    f"Tool source '{source_id}' does not exist.",
+                )
+            incoming = _source_record_to_entity(source, observed_at=_utc_now())
+            incoming.status = existing.status
+            incoming.last_discovered_at = existing.last_discovered_at
+            incoming.last_discovery_status = existing.last_discovery_status
+            updated = _merge_source(
+                incoming=_source_entity_to_record(incoming),
+                existing=existing,
+                observed_at=_utc_now(),
+            )
+            changed = _source_changed(existing, updated)
+            if changed and not dry_run:
+                updated.record_event(
+                    _source_event(
+                        "tool.source.updated",
+                        updated,
+                        observed_at=updated.updated_at,
+                        previous=_source_snapshot(existing),
+                        changed_fields=_source_changed_fields(existing, updated),
+                    ),
+                )
+                uow.tool_sources.upsert(updated)
+                uow.collect(updated)
+                uow.commit()
+            return ToolSourceCommandResult(
+                source=_source_entity_to_record(updated),
+                changed=changed,
+            )
+
+    def disable_source(self, source_id: str) -> ToolSourceCommandResult:
+        return self._set_source_status(source_id, ToolSourceStatus.DISABLED)
+
+    def restore_source(self, source_id: str) -> ToolSourceCommandResult:
+        return self._set_source_status(source_id, ToolSourceStatus.ACTIVE)
+
+    def delete_source(self, source_id: str) -> ToolSourceCommandResult:
+        return self._set_source_status(source_id, ToolSourceStatus.DELETED)
+
+    def sync_sources(
+        self,
+        sources: tuple[ToolSourceCatalogRecord, ...],
+        *,
+        discovery_service: ToolDiscoveryService,
+        deprecate_stale: bool = False,
+        dry_run: bool = False,
+    ) -> ToolSourceCatalogSyncResult:
+        return ToolSourceCatalogSyncResult(
+            results=tuple(
+                self.sync_source(
+                    source,
+                    discovery_service=discovery_service,
+                    deprecate_stale=deprecate_stale,
+                    dry_run=dry_run,
+                )
+                for source in sources
+            ),
+        )
+
+    def sync_source(
+        self,
+        source: ToolSourceCatalogRecord,
+        *,
+        discovery_service: ToolDiscoveryService,
+        deprecate_stale: bool = False,
+        dry_run: bool = False,
+    ) -> ToolSourceSyncResult:
+        current = self.upsert_source(source, dry_run=dry_run).source
+        if current.status in {
+            CatalogToolSourceStatus.DISABLED,
+            CatalogToolSourceStatus.DELETED,
+        }:
+            return ToolSourceSyncResult(source=current, skipped=True)
+
+        try:
+            discovery = discovery_service.discover(current)
+        except Exception as exc:
+            discovery = ToolSourceDiscoveryResult.failed(
+                source_id=current.source_id,
+                error_message=str(exc),
+            )
+
+        with self._uow_factory() as uow:
+            existing = uow.tool_sources.get(current.source_id)
+            result_source = _merge_source(
+                incoming=current,
+                existing=existing,
+                discovery=discovery,
+                observed_at=discovery.discovered_at,
+            )
+            if not dry_run:
+                result_source.record_event(
+                    _source_event(
+                        (
+                            "tool.source.discovery_completed"
+                            if discovery.status is ToolSourceDiscoveryStatus.COMPLETED
+                            else "tool.source.discovery_failed"
+                        ),
+                        result_source,
+                        observed_at=discovery.discovered_at,
+                        previous=_source_snapshot(existing),
+                        discovery=discovery,
+                        changed_fields=_source_changed_fields(existing, result_source),
+                    ),
+                )
+                uow.tool_sources.upsert(result_source)
+                uow.tool_source_discovery_runs.add(
+                    ToolSourceDiscoveryRunRecord.from_result(
+                        source=_source_entity_to_record(result_source),
+                        discovery=discovery,
+                    ),
+                )
+                uow.collect(result_source)
+
+            reconcile_result: ToolCatalogReconcileResult | None = None
+            if discovery.status is ToolSourceDiscoveryStatus.COMPLETED:
+                reconcile_result = ToolCatalogReconcileService(
+                    uow.tool_function_catalog,
+                    event_publisher=(
+                        _UnitOfWorkEventPublisher(uow) if not dry_run else None
+                    ),
+                ).reconcile_discovery_result(
+                    discovery,
+                    deprecate_stale=deprecate_stale,
+                    dry_run=dry_run,
+                )
+                _upsert_provider_backend_candidates(
+                    uow.tool_provider_backends,
+                    discovery.provider_backend_candidates,
+                    observed_at=discovery.discovered_at,
+                    dry_run=dry_run,
+                )
+            if not dry_run:
+                uow.commit()
+
+        return ToolSourceSyncResult(
+            source=_source_entity_to_record(result_source),
+            discovery=discovery,
+            reconcile=reconcile_result,
+            error_message=discovery.error_message,
+        )
+
+    def _set_source_status(
+        self,
+        source_id: str,
+        status: ToolSourceStatus,
+    ) -> ToolSourceCommandResult:
+        with self._uow_factory() as uow:
+            existing = uow.tool_sources.get(source_id)
+            if existing is None:
+                raise ToolValidationError(
+                    f"Tool source '{source_id}' does not exist.",
+                )
+            if existing.status is status:
+                return ToolSourceCommandResult(
+                    source=_source_entity_to_record(existing),
+                    changed=False,
+                )
+            now = _utc_now()
+            previous = _source_snapshot(existing)
+            existing.status = status
+            existing.revision += 1
+            existing.updated_at = now
+            existing.record_event(
+                _source_event(
+                    _source_status_event_name(status),
+                    existing,
+                    observed_at=now,
+                    previous=previous,
+                    changed_fields=("status",),
+                ),
+            )
+            uow.tool_sources.upsert(existing)
+            uow.collect(existing)
+            uow.commit()
+            return ToolSourceCommandResult(
+                source=_source_entity_to_record(existing),
+                changed=True,
+            )
+
+
+class ToolFunctionCommandService:
+    def __init__(self, uow_factory: Callable[[], ToolSourceUnitOfWork]) -> None:
+        self._uow_factory = uow_factory
+
+    def set_function_enabled(
+        self,
+        function_id: str,
+        *,
+        enabled: bool,
+    ) -> ToolFunctionCommandResult:
+        with self._uow_factory() as uow:
+            function = uow.tool_functions.get(function_id)
+            if function is None:
+                raise ToolValidationError(
+                    f"Tool function '{function_id}' does not exist.",
+                )
+            if function.status is ToolFunctionStatus.DELETED:
+                raise ToolValidationError(
+                    f"Tool function '{function_id}' is deleted.",
+                )
+            changed = function.enabled is not bool(enabled)
+            if changed:
+                function.enabled = bool(enabled)
+                function.revision += 1
+                function.updated_at = _utc_now()
+                function.record_event(
+                    _function_event(
+                        (
+                            "tool.function.enabled"
+                            if function.enabled
+                            else "tool.function.disabled"
+                        ),
+                        _function_entity_to_record(function),
+                        observed_at=function.updated_at,
+                        changed_fields=("enabled",),
+                    ),
+                )
+                uow.tool_functions.upsert(function)
+                uow.collect(function)
+                uow.commit()
+            return ToolFunctionCommandResult(
+                function=_function_entity_to_record(function),
+                changed=changed,
+            )
+
+    def update_function_policy(
+        self,
+        function_id: str,
+        *,
+        trust_policy: Mapping[str, Any],
+        approval_policy: Mapping[str, Any],
+        credential_binding_overrides: Mapping[str, str],
+        required_effect_overrides: tuple[str, ...] | None,
+    ) -> ToolFunctionCommandResult:
+        with self._uow_factory() as uow:
+            function = uow.tool_functions.get(function_id)
+            if function is None:
+                raise ToolValidationError(
+                    f"Tool function '{function_id}' does not exist.",
+                )
+            if function.status is ToolFunctionStatus.DELETED:
+                raise ToolValidationError(
+                    f"Tool function '{function_id}' is deleted.",
+                )
+            current = _function_entity_to_record(function)
+            updated = replace(
+                current,
+                trust_policy=trust_policy,
+                approval_policy=approval_policy,
+                credential_binding_overrides=credential_binding_overrides,
+                required_effect_overrides=required_effect_overrides,
+            )
+            changed_fields = tuple(
+                field_name
+                for field_name, current_value, next_value in (
+                    ("trust_policy", current.trust_policy, updated.trust_policy),
+                    ("approval_policy", current.approval_policy, updated.approval_policy),
+                    (
+                        "credential_binding_overrides",
+                        current.credential_binding_overrides,
+                        updated.credential_binding_overrides,
+                    ),
+                    (
+                        "required_effect_overrides",
+                        current.required_effect_overrides,
+                        updated.required_effect_overrides,
+                    ),
+                )
+                if current_value != next_value
+            )
+            changed = bool(changed_fields)
+            if changed:
+                function.trust_policy = dict(updated.trust_policy)
+                function.approval_policy = dict(updated.approval_policy)
+                function.credential_binding_overrides = dict(
+                    updated.credential_binding_overrides,
+                )
+                function.required_effect_overrides = (
+                    tuple(updated.required_effect_overrides)
+                    if updated.required_effect_overrides is not None
+                    else None
+                )
+                function.revision += 1
+                function.updated_at = _utc_now()
+                function.record_event(
+                    _function_event(
+                        "tool.function.policy_updated",
+                        _function_entity_to_record(function),
+                        observed_at=function.updated_at,
+                        changed_fields=changed_fields,
+                    ),
+                )
+                uow.tool_functions.upsert(function)
+                uow.collect(function)
+                uow.commit()
+            return ToolFunctionCommandResult(
+                function=_function_entity_to_record(function),
+                changed=changed,
+            )
+
+
+def _source_status_event_name(status: ToolSourceStatus) -> str:
+    if status is ToolSourceStatus.DISABLED:
+        return "tool.source.disabled"
+    if status is ToolSourceStatus.DELETED:
+        return "tool.source.deleted"
+    return "tool.source.restored"
+
+
+def _source_snapshot(source: ToolSource | None) -> dict[str, Any] | None:
+    if source is None:
+        return None
+    return {
+        "status": source.status.value,
+        "revision": source.revision,
+        "config_hash": source.config_hash,
+        "last_discovery_status": source.last_discovery_status,
+    }
+
+
+def _source_event(
+    name: str,
+    source: ToolSource,
+    *,
+    observed_at: datetime,
+    previous: Mapping[str, Any] | None = None,
+    discovery: ToolSourceDiscoveryResult | None = None,
+    changed_fields: tuple[str, ...] = (),
+) -> Event:
+    payload: dict[str, Any] = {
+        "source_id": source.source_id,
+        "kind": source.kind.value,
+        "display_name": source.display_name,
+        "status": source.status.value,
+        "revision": source.revision,
+        "config_hash": source.config_hash,
+    }
+    if source.last_discovery_status:
+        payload["discovery_status"] = source.last_discovery_status
+    if previous is not None:
+        payload["previous_status"] = previous.get("status")
+        payload["previous_revision"] = previous.get("revision")
+        payload["previous_config_hash"] = previous.get("config_hash")
+        previous_discovery_status = previous.get("last_discovery_status")
+        if previous_discovery_status:
+            payload["previous_discovery_status"] = previous_discovery_status
+    if discovery is not None:
+        payload["discovery_status"] = discovery.status.value
+        payload["function_count"] = len(discovery.candidates)
+        payload["provider_backend_count"] = len(discovery.provider_backend_candidates)
+        if discovery.error_message:
+            payload["error_message"] = discovery.error_message
+    if changed_fields:
+        payload["changed_fields"] = changed_fields
+    return Event(
+        name=name,
+        payload=payload,
+        occurred_at=observed_at,
+        ordering_key=source.source_id,
+    )
+
+
+def _function_event(
+    name: str,
+    function: ToolFunctionCatalogRecord,
+    *,
+    observed_at: datetime,
+    changed_fields: tuple[str, ...] = (),
+) -> Event:
+    payload: dict[str, Any] = {
+        "function_id": function.function_id,
+        "source_id": function.source_id,
+        "stable_key": function.stable_key,
+        "schema_hash": function.schema_hash,
+        "status": function.status.value,
+        "enabled": function.enabled,
+        "revision": function.revision,
+    }
+    if changed_fields:
+        payload["changed_fields"] = changed_fields
+    return Event(
+        name=name,
+        payload=payload,
+        occurred_at=observed_at,
+        ordering_key=function.function_id,
+    )
+
+
+def _merge_source(
+    *,
+    incoming: ToolSourceCatalogRecord,
+    existing: ToolSource | None,
+    discovery: ToolSourceDiscoveryResult | None = None,
+    observed_at: datetime,
+) -> ToolSource:
+    incoming_entity = _source_record_to_entity(
+        incoming,
+        observed_at=observed_at,
+        discovery=discovery,
+    )
+    if existing is None:
+        return incoming_entity
+
+    status = existing.status
+    if status not in {ToolSourceStatus.DISABLED, ToolSourceStatus.DELETED}:
+        status = incoming_entity.status
+
+    changed = _source_config_changed(existing, incoming_entity)
+    discovery_changed = discovery is not None and (
+        existing.last_discovered_at != incoming_entity.last_discovered_at
+        or existing.last_discovery_status != incoming_entity.last_discovery_status
+        or existing.status != status
+    )
+    revision = existing.revision + 1 if changed or discovery_changed else existing.revision
+    updated_at = observed_at if changed or discovery_changed else existing.updated_at
+    return ToolSource(
+        id=existing.source_id,
+        kind=incoming_entity.kind,
+        display_name=incoming_entity.display_name,
+        description=incoming_entity.description,
+        config=incoming_entity.config,
+        credential_requirements=incoming_entity.credential_requirements,
+        runtime_requirements=incoming_entity.runtime_requirements,
+        status=status,
+        revision=revision,
+        config_hash=incoming_entity.config_hash,
+        last_discovered_at=incoming_entity.last_discovered_at,
+        last_discovery_status=incoming_entity.last_discovery_status,
+        created_at=existing.created_at,
+        updated_at=updated_at,
+    )
+
+
+def _upsert_provider_backend_candidates(
+    repository: Any,
+    candidates: tuple[ToolProviderBackendCandidate, ...],
+    *,
+    observed_at: datetime,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        return
+    for candidate in candidates:
+        existing = repository.get(candidate.backend_id)
+        repository.upsert(
+            _provider_backend_candidate_to_entity(
+                candidate,
+                existing=existing,
+                observed_at=observed_at,
+            ),
+        )
+
+
+def _provider_backend_candidate_to_entity(
+    candidate: ToolProviderBackendCandidate,
+    *,
+    existing: ToolProviderBackend | None,
+    observed_at: datetime,
+) -> ToolProviderBackend:
+    status = ToolProviderBackendStatus.ACTIVE
+    enabled = candidate.enabled
+    created_at = observed_at
+    if existing is not None:
+        created_at = existing.created_at
+        enabled = existing.enabled
+        status = (
+            existing.status
+            if existing.status
+            in {ToolProviderBackendStatus.DISABLED, ToolProviderBackendStatus.DELETED}
+            else ToolProviderBackendStatus.ACTIVE
+        )
+    return ToolProviderBackend(
+        id=candidate.backend_id,
+        source_id=candidate.source_id,
+        capability=ToolProviderCapability(candidate.capability),
+        display_name=candidate.display_name,
+        credential_requirements=tuple(
+            _stable_payload(requirement)
+            for requirement in candidate.requirements.credential_requirements
+        ),
+        runtime_ref={
+            "runtime_kind": DomainToolFunctionRuntimeKind(
+                candidate.runtime_kind,
+            ).value,
+            "ref": candidate.runtime_ref,
+            "metadata": _stable_payload(candidate.metadata),
+        },
+        priority=candidate.priority,
+        enabled=enabled,
+        status=status,
+        created_at=created_at,
+        updated_at=observed_at,
+    )
+
+
+def _source_record_to_entity(
+    record: ToolSourceCatalogRecord,
+    *,
+    observed_at: datetime,
+    discovery: ToolSourceDiscoveryResult | None = None,
+) -> ToolSource:
+    status = _domain_source_status(record.status)
+    if discovery is not None and discovery.status is ToolSourceDiscoveryStatus.FAILED:
+        status = ToolSourceStatus.ERROR
+    return ToolSource(
+        id=record.source_id,
+        kind=_domain_source_kind(record.kind),
+        display_name=record.display_name,
+        description=record.description,
+        config=dict(record.config),
+        credential_requirements=tuple(
+            _stable_payload(requirement)
+            for requirement in record.credential_requirements
+        ),
+        runtime_requirements=tuple(
+            {"requirement": requirement}
+            for requirement in record.runtime_requirements
+        ),
+        status=status,
+        revision=record.revision,
+        config_hash=record.config_hash,
+        last_discovered_at=(
+            discovery.discovered_at
+            if discovery is not None
+            else record.last_discovered_at
+        ),
+        last_discovery_status=(
+            discovery.status.value
+            if discovery is not None
+            else (
+                record.last_discovery_status.value
+                if isinstance(record.last_discovery_status, ToolSourceDiscoveryStatus)
+                else record.last_discovery_status
+            )
+        ),
+        created_at=record.created_at or observed_at,
+        updated_at=record.updated_at or observed_at,
+    )
+
+
+def _source_entity_to_record(source: ToolSource) -> ToolSourceCatalogRecord:
+    return ToolSourceCatalogRecord(
+        source_id=source.source_id,
+        kind=ToolSourceCatalogKind(source.kind.value),
+        display_name=source.display_name,
+        description=source.description,
+        config=dict(source.config),
+        credential_requirements=tuple(source.credential_requirements),  # type: ignore[arg-type]
+        runtime_requirements=tuple(
+            str(item.get("requirement", "")).strip()
+            for item in source.runtime_requirements
+            if str(item.get("requirement", "")).strip()
+        ),
+        status=CatalogToolSourceStatus(source.status.value),
+        revision=source.revision,
+        config_hash=source.config_hash,
+        last_discovered_at=source.last_discovered_at,
+        last_discovery_status=(
+            ToolSourceDiscoveryStatus(source.last_discovery_status)
+            if source.last_discovery_status
+            and source.last_discovery_status
+            in {status.value for status in ToolSourceDiscoveryStatus}
+            else None
+        ),
+        created_at=source.created_at,
+        updated_at=source.updated_at,
+    )
+
+
+def _function_entity_to_record(function: Any) -> ToolFunctionCatalogRecord:
+    return ToolFunctionCatalogRecord(
+        function_id=function.function_id,
+        source_id=function.source_id,
+        stable_key=function.stable_key,
+        name=function.name,
+        description=function.description,
+        input_schema=dict(function.input_schema),
+        runtime_kind=function.runtime_kind.value,
+        handler_ref=_handler_ref_from_payload(function.handler_ref),
+        requirements=ToolFunctionRequirements(
+            credential_requirements=_credential_requirement_sets_from_payload(
+                function.credential_requirements,
+            ),
+            access_requirement_sets=function.access_requirement_sets,
+            runtime_requirement_sets=_runtime_requirement_sets_from_payload(
+                function.runtime_requirements,
+            ),
+            required_effect_ids=function.required_effect_ids,
+        ),
+        capabilities=function.capability_ids,
+        schema_hash=function.schema_hash,
+        status=function.status.value,
+        revision=function.revision,
+        enabled=function.enabled,
+        trust_policy=function.trust_policy,
+        approval_policy=function.approval_policy,
+        credential_binding_overrides=function.credential_binding_overrides,
+        required_effect_overrides=function.required_effect_overrides,
+        metadata=function.metadata,
+        created_at=function.created_at,
+        updated_at=function.updated_at,
+        last_seen_at=function.last_seen_at,
+        stale_since=function.stale_since,
+        deprecated_at=function.deprecated_at,
+    )
+
+
+def _runtime_requirement_sets_from_payload(
+    payload: tuple[Mapping[str, Any], ...],
+) -> tuple[tuple[str, ...], ...]:
+    requirement_sets: list[tuple[str, ...]] = []
+    for item in payload:
+        raw = item.get("requirements")
+        if not isinstance(raw, list | tuple):
+            raw = (item.get("requirement"),)
+        values = tuple(str(value).strip() for value in raw if str(value).strip())
+        if values:
+            requirement_sets.append(values)
+    return tuple(requirement_sets)
+
+
+def _credential_requirement_sets_from_payload(
+    payload: object | None,
+) -> tuple[AccessCredentialRequirementSet, ...]:
+    if not isinstance(payload, list | tuple):
+        return ()
+    requirement_sets: list[AccessCredentialRequirementSet] = []
+    for item in payload:
+        if isinstance(item, Mapping):
+            requirement_sets.append(_credential_requirement_set_from_payload(item))
+    return tuple(requirement_sets)
+
+
+def _credential_requirement_set_from_payload(
+    payload: Mapping[str, Any],
+) -> AccessCredentialRequirementSet:
+    consumer = _consumer_ref_from_payload(payload.get("consumer"))
+    raw_requirements = payload.get("requirements")
+    requirements: list[AccessCredentialRequirementDeclaration] = []
+    if isinstance(raw_requirements, list | tuple):
+        for item in raw_requirements:
+            if isinstance(item, Mapping):
+                requirements.append(
+                    _credential_requirement_from_payload(
+                        item,
+                        default_consumer=consumer,
+                    ),
+                )
+    return AccessCredentialRequirementSet(
+        requirement_set_id=str(payload.get("requirement_set_id", "")).strip(),
+        consumer=consumer,
+        requirements=tuple(requirements),
+        alternative=bool(payload.get("alternative", False)),
+        metadata=_mapping_payload(payload.get("metadata")),
+    )
+
+
+def _credential_requirement_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    default_consumer: AccessConsumerRef,
+) -> AccessCredentialRequirementDeclaration:
+    slot_payload = _mapping_payload(payload.get("slot"))
+    setup_payload = _mapping_payload(payload.get("setup_flow_hint"))
+    return AccessCredentialRequirementDeclaration(
+        requirement_id=str(payload.get("requirement_id", "")).strip(),
+        consumer=(
+            _consumer_ref_from_payload(payload.get("consumer"))
+            if isinstance(payload.get("consumer"), Mapping)
+            else default_consumer
+        ),
+        slot=AccessCredentialSlotRef(
+            slot=str(slot_payload.get("slot", "")).strip(),
+            expected_kind=AccessCredentialKind(
+                str(slot_payload.get("expected_kind", AccessCredentialKind.API_KEY.value)),
+            ),
+            binding_id=(
+                str(slot_payload["binding_id"]).strip()
+                if slot_payload.get("binding_id") is not None
+                else None
+            ),
+            required=bool(slot_payload.get("required", True)),
+            display_name=(
+                str(slot_payload["display_name"]).strip()
+                if slot_payload.get("display_name") is not None
+                else None
+            ),
+            scopes=tuple(
+                str(item).strip()
+                for item in slot_payload.get("scopes", ())
+                if str(item).strip()
+            ),
+            metadata=_mapping_payload(slot_payload.get("metadata")),
+        ),
+        provider=(
+            str(payload["provider"]).strip()
+            if payload.get("provider") is not None
+            else None
+        ),
+        transport=AccessCredentialTransport(
+            str(payload.get("transport", AccessCredentialTransport.RUNTIME_CONTEXT.value)),
+        ),
+        parameter_name=(
+            str(payload["parameter_name"]).strip()
+            if payload.get("parameter_name") is not None
+            else None
+        ),
+        setup_flow_hint=AccessSetupFlowHint(
+            flow_kind=AccessSetupFlowKind(
+                str(setup_payload.get("flow_kind", AccessSetupFlowKind.NONE.value)),
+            ),
+            provider=(
+                str(setup_payload["provider"]).strip()
+                if setup_payload.get("provider") is not None
+                else None
+            ),
+            authorization_url=(
+                str(setup_payload["authorization_url"]).strip()
+                if setup_payload.get("authorization_url") is not None
+                else None
+            ),
+            token_url=(
+                str(setup_payload["token_url"]).strip()
+                if setup_payload.get("token_url") is not None
+                else None
+            ),
+            device_code_url=(
+                str(setup_payload["device_code_url"]).strip()
+                if setup_payload.get("device_code_url") is not None
+                else None
+            ),
+            callback_url=(
+                str(setup_payload["callback_url"]).strip()
+                if setup_payload.get("callback_url") is not None
+                else None
+            ),
+            metadata=_mapping_payload(setup_payload.get("metadata")),
+        ),
+        metadata=_mapping_payload(payload.get("metadata")),
+    )
+
+
+def _consumer_ref_from_payload(payload: object | None) -> AccessConsumerRef:
+    values = _mapping_payload(payload)
+    return AccessConsumerRef(
+        consumer_id=str(values.get("consumer_id", "")).strip(),
+        module=str(values.get("module", "")).strip(),
+        component=(
+            str(values["component"]).strip()
+            if values.get("component") is not None
+            else None
+        ),
+        runtime_ref=(
+            str(values["runtime_ref"]).strip()
+            if values.get("runtime_ref") is not None
+            else None
+        ),
+        metadata=_mapping_payload(values.get("metadata")),
+    )
+
+
+def _mapping_payload(value: object | None) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _handler_ref_from_payload(payload: Mapping[str, Any]) -> str:
+    for key in ("ref", "handler", "runtime_key"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _validate_owner_writable_source(source: ToolSourceCatalogRecord) -> None:
+    config_source = str(source.config.get("source") or "").strip()
+    if config_source == "bundled_tool_package":
+        raise ToolValidationError(
+            "Bundled tool package sources are managed by the Tool package loader.",
+        )
+    if source.kind not in {
+        ToolSourceCatalogKind.OPENAPI,
+        ToolSourceCatalogKind.MCP,
+        ToolSourceCatalogKind.CLI,
+    }:
+        raise ToolValidationError(
+            "Tool source create/update currently supports configured OpenAPI, MCP and CLI sources.",
+        )
+    if config_source != "configured_tool_provider":
+        raise ToolValidationError(
+            "Configured Tool source config.source must be 'configured_tool_provider'.",
+        )
+    package_kind = str(source.config.get("package_kind") or "").strip()
+    if package_kind != source.kind.value:
+        raise ToolValidationError(
+            f"Configured Tool source config.package_kind must be '{source.kind.value}'.",
+        )
+    provider = source.config.get("provider")
+    if not isinstance(provider, Mapping):
+        raise ToolValidationError(
+            "Configured Tool source config.provider must be an object.",
+        )
+    provider_name = str(provider.get("name") or "").strip()
+    if not provider_name:
+        raise ToolValidationError(
+            "Configured Tool source config.provider.name is required.",
+        )
+    if source.kind is ToolSourceCatalogKind.OPENAPI:
+        spec_location = str(provider.get("spec_location") or "").strip()
+        if not spec_location:
+            raise ToolValidationError(
+                "Configured OpenAPI source config.provider.spec_location is required.",
+            )
+    if source.kind is ToolSourceCatalogKind.MCP:
+        command = provider.get("command")
+        if not isinstance(command, list | tuple) or not all(
+            isinstance(item, str) and item.strip()
+            for item in command
+        ):
+            raise ToolValidationError(
+                "Configured MCP source config.provider.command must be a non-empty string list.",
+            )
+    if source.kind is ToolSourceCatalogKind.CLI:
+        executable = str(provider.get("executable") or "").strip()
+        command = provider.get("command")
+        has_command = isinstance(command, list | tuple) and all(
+            isinstance(item, str) and item.strip()
+            for item in command
+        )
+        if not executable and not has_command:
+            raise ToolValidationError(
+                "Configured CLI source config.provider.executable or command is required.",
+            )
+        allowed_subcommands = provider.get("allowed_subcommands")
+        if (
+            not isinstance(allowed_subcommands, list | tuple)
+            or not allowed_subcommands
+            or not all(
+                isinstance(item, str) and item.strip()
+                for item in allowed_subcommands
+            )
+        ):
+            raise ToolValidationError(
+                "Configured CLI source config.provider.allowed_subcommands must be a non-empty string list.",
+            )
+
+
+def _domain_source_kind(value: ToolSourceCatalogKind | str) -> ToolCatalogSourceKind:
+    kind = ToolSourceCatalogKind(str(value))
+    try:
+        return ToolCatalogSourceKind(kind.value)
+    except ValueError as exc:
+        raise ToolValidationError(
+            f"Tool source kind '{kind.value}' is not supported by the persistent catalog.",
+        ) from exc
+
+
+def _domain_source_status(
+    value: CatalogToolSourceStatus | str,
+) -> ToolSourceStatus:
+    return ToolSourceStatus(CatalogToolSourceStatus(str(value)).value)
+
+
+def _source_config_changed(existing: ToolSource, incoming: ToolSource) -> bool:
+    return any(
+        (
+            existing.kind != incoming.kind,
+            existing.display_name != incoming.display_name,
+            existing.description != incoming.description,
+            existing.config_hash != incoming.config_hash,
+            existing.config != incoming.config,
+            existing.credential_requirements != incoming.credential_requirements,
+            existing.runtime_requirements != incoming.runtime_requirements,
+        ),
+    )
+
+
+def _source_changed(existing: ToolSource, incoming: ToolSource) -> bool:
+    return _source_config_changed(existing, incoming) or any(
+        (
+            existing.status != incoming.status,
+            existing.last_discovered_at != incoming.last_discovered_at,
+            existing.last_discovery_status != incoming.last_discovery_status,
+        ),
+    )
+
+
+def _source_changed_fields(
+    existing: ToolSource | None,
+    incoming: ToolSource,
+) -> tuple[str, ...]:
+    if existing is None:
+        return ()
+    comparisons: tuple[tuple[str, Any, Any], ...] = (
+        ("kind", existing.kind, incoming.kind),
+        ("display_name", existing.display_name, incoming.display_name),
+        ("description", existing.description, incoming.description),
+        ("config", existing.config, incoming.config),
+        (
+            "credential_requirements",
+            existing.credential_requirements,
+            incoming.credential_requirements,
+        ),
+        ("runtime_requirements", existing.runtime_requirements, incoming.runtime_requirements),
+        ("status", existing.status, incoming.status),
+        ("config_hash", existing.config_hash, incoming.config_hash),
+        ("last_discovered_at", existing.last_discovered_at, incoming.last_discovered_at),
+        (
+            "last_discovery_status",
+            existing.last_discovery_status,
+            incoming.last_discovery_status,
+        ),
+    )
+    return tuple(
+        field_name
+        for field_name, current, next_value in comparisons
+        if _stable_payload(current) != _stable_payload(next_value)
+    )
+
+
+def _stable_payload(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _stable_payload(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _stable_payload(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, tuple | list):
+        return [_stable_payload(item) for item in value]
+    return value
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+__all__ = [
+    "ToolFunctionCommandResult",
+    "ToolFunctionCommandService",
+    "ToolSourceCatalogSyncResult",
+    "ToolSourceCommandResult",
+    "ToolSourceCommandService",
+    "ToolSourceQueryService",
+    "ToolSourceSyncResult",
+    "ToolSourceUnitOfWork",
+]

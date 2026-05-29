@@ -114,6 +114,21 @@ class WorkbenchLinkedEntity:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalRequestDetail:
+    request_id: str
+    effect_id: str
+    label: str
+    reason: str
+    tool_name: str | None
+    tool_ids: tuple[str, ...]
+    tool_arguments: dict[str, object]
+    execution_mode: str | None = None
+    execution_strategy: str | None = None
+    execution_environment: str | None = None
+    draft_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class WorkbenchAction:
     id: str
     label: str
@@ -236,6 +251,7 @@ class TurnStepView:
     badges: tuple[StatusBadgeModel, ...]
     linked_entities: tuple[WorkbenchLinkedEntity, ...]
     actions: tuple[WorkbenchAction, ...]
+    approval: ApprovalRequestDetail | None
     details_available: bool
     trace: TraceContext
 
@@ -577,6 +593,7 @@ class WorkbenchReadModelProvider:
         approval = _pending_approval(run)
         if approval is not None:
             request_id = str(approval.get("request_id") or approval.get("id") or "")
+            approval_detail = _approval_detail(approval)
             steps.append(
                 _step(
                     run=run,
@@ -589,6 +606,8 @@ class WorkbenchReadModelProvider:
                     started_at=run.updated_at,
                     completed_at=None,
                     badges=(StatusBadgeModel(label="Authorization", tone="warning"),),
+                    linked_entities=_approval_entities(approval_detail),
+                    approval=approval_detail,
                     approval_request_id=request_id or None,
                 ),
             )
@@ -829,6 +848,7 @@ def _step(
     badges: tuple[StatusBadgeModel, ...] = (),
     linked_entities: tuple[WorkbenchLinkedEntity, ...] = (),
     actions: tuple[WorkbenchAction, ...] = (),
+    approval: ApprovalRequestDetail | None = None,
     tool_run_id: str | None = None,
     llm_invocation_id: str | None = None,
     artifact_id: str | None = None,
@@ -873,6 +893,7 @@ def _step(
         badges=badges,
         linked_entities=resolved_linked_entities,
         actions=resolved_actions,
+        approval=approval,
         details_available=True,
         trace=trace,
     )
@@ -1214,8 +1235,7 @@ def _tool_runs_for_run(
         return ()
     related: list[ToolRun] = []
     for tool_run in tool_runs:
-        context = tool_run.invocation_context
-        if context is not None and context.get_str("run_id") == run_id:
+        if _tool_run_orchestration_run_id(tool_run) == run_id:
             related.append(tool_run)
     return tuple(
         sorted(
@@ -1339,11 +1359,10 @@ def _tool_runs_for_runs(
     related: list[_DisplayToolRun] = []
     seen_tool_run_ids: set[str] = set()
     for tool_run in tool_runs:
-        context = tool_run.invocation_context
         source_run: OrchestrationRun | None = None
-        context_run_id = context.get_str("run_id") if context is not None else None
-        if context_run_id is not None:
-            source_run = run_by_id.get(context_run_id)
+        metadata_run_id = _tool_run_orchestration_run_id(tool_run)
+        if metadata_run_id is not None:
+            source_run = run_by_id.get(metadata_run_id)
         if source_run is None:
             source_run = tool_id_to_run.get(tool_run.id)
         if source_run is None or tool_run.id in seen_tool_run_ids:
@@ -1356,6 +1375,14 @@ def _tool_runs_for_runs(
             key=lambda item: item.tool_run.started_at or item.tool_run.created_at,
         ),
     )
+
+
+def _tool_run_orchestration_run_id(tool_run: ToolRun) -> str | None:
+    value = tool_run.metadata.get("orchestration_run_id")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
 
 
 def _tool_status(tool_run: ToolRun) -> str:
@@ -1759,8 +1786,8 @@ def _inspector_for_run(
                         _agent_default_llm_id(agent_profile) or "-",
                     ),
                     _kv(
-                        "Memory backend",
-                        _agent_memory_backend(agent_profile) or "-",
+                        "Memory scope",
+                        _agent_memory_scope(agent_profile) or "-",
                     ),
                 ),
             ),
@@ -1831,11 +1858,17 @@ def _agent_default_llm_id(agent_profile: Any | None) -> str | None:
     return _optional_text(getattr(routing, "default_llm_id", None))
 
 
-def _agent_memory_backend(agent_profile: Any | None) -> str | None:
+def _agent_memory_scope(agent_profile: Any | None) -> str | None:
     if agent_profile is None:
         return None
-    preferences = getattr(agent_profile, "runtime_preferences", None)
-    return _optional_text(getattr(preferences, "memory_retrieval_backend", None))
+    memory = getattr(agent_profile, "memory", None)
+    if not bool(getattr(memory, "enabled", False)):
+        return "disabled"
+    if hasattr(memory, "effective_scope_ref"):
+        agent_id = _optional_text(getattr(agent_profile, "id", None))
+        if agent_id is not None:
+            return _optional_text(memory.effective_scope_ref(agent_id))
+    return _optional_text(getattr(memory, "scope_ref", None)) or "agent default"
 
 
 def _prompt_block_count(run: OrchestrationRun, kind: str) -> int:
@@ -2065,6 +2098,67 @@ def _access_requirement_labels(value: object) -> tuple[str, ...]:
             if requirement is not None:
                 labels.append(requirement)
     return tuple(dict.fromkeys(labels))
+
+
+def _approval_detail(payload: dict[str, object]) -> ApprovalRequestDetail:
+    tool_arguments = _approval_tool_arguments(payload.get("tool_arguments"))
+    tool_name = _optional_text(payload.get("tool_name"))
+    draft_id = (
+        _optional_text(tool_arguments.get("draft_id"))
+        if tool_name == "skill_draft_apply"
+        else None
+    )
+    return ApprovalRequestDetail(
+        request_id=str(payload.get("request_id") or payload.get("id") or ""),
+        effect_id=str(payload.get("effect_id") or ""),
+        label=str(payload.get("label") or ""),
+        reason=str(payload.get("reason") or ""),
+        tool_name=tool_name,
+        tool_ids=tuple(
+            str(item)
+            for item in payload.get("tool_ids", ()) or ()
+            if str(item).strip()
+        ),
+        tool_arguments=tool_arguments,
+        execution_mode=_optional_text(payload.get("execution_mode")),
+        execution_strategy=_optional_text(payload.get("execution_strategy")),
+        execution_environment=_optional_text(payload.get("execution_environment")),
+        draft_id=draft_id,
+    )
+
+
+def _approval_tool_arguments(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {"draft_id", "reason"}
+    result: dict[str, object] = {}
+    for key, raw in value.items():
+        key_text = str(key)
+        if key_text not in allowed:
+            continue
+        if raw is None:
+            continue
+        if isinstance(raw, (str, int, float, bool)):
+            result[key_text] = raw
+        else:
+            result[key_text] = _truncate(str(raw), limit=200)
+    return result
+
+
+def _approval_entities(
+    approval: ApprovalRequestDetail | None,
+) -> tuple[WorkbenchLinkedEntity, ...]:
+    if approval is None or not approval.draft_id:
+        return ()
+    return (
+        _linked_entity(
+            entity_type="skill_draft",
+            entity_id=approval.draft_id,
+            label="Skill draft",
+            owner="skills",
+            route="/settings/skills",
+        ),
+    )
 
 
 def _approval_summary(payload: dict[str, object]) -> str:

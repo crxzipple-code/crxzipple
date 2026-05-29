@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.ocr.domain import OcrResult, OcrTextBlock
 from crxzipple.modules.ocr.interfaces.serializers import OcrResultSerializer
 
@@ -10,19 +11,26 @@ from tests.unit.cli_test_support import *
 
 class OcrCliTestCase(CliModuleTestCase):
     def test_ocr_analyze_artifact_command_uses_service(self) -> None:
-        container = SimpleNamespace(
-            ocr_service=SimpleNamespace(
+        values = {
+            AppKey.OCR_SERVICE: SimpleNamespace(
                 analyze_artifact=lambda **_: OcrResult(
                     backend="fake-ocr",
                     language="ch",
                     artifact_id="artifact-1",
                     variant="preview",
                     blocks=(OcrTextBlock(text="示例", confidence=0.9),),
-                    layout_blocks=(OcrTextBlock(text="示例", label="doc_title", confidence=0.9),),
-                    overall_ocr_blocks=(OcrTextBlock(text="示例", label="text", confidence=0.9),),
+                    layout_blocks=(
+                        OcrTextBlock(text="示例", label="doc_title", confidence=0.9),
+                    ),
+                    overall_ocr_blocks=(
+                        OcrTextBlock(text="示例", label="text", confidence=0.9),
+                    ),
                 )
             ),
-            ocr_result_serializer=OcrResultSerializer(),
+            AppKey.OCR_RESULT_SERIALIZER: OcrResultSerializer(),
+        }
+        container = SimpleNamespace(
+            require=lambda key: values[key],
         )
 
         with patch(
@@ -54,13 +62,14 @@ class OcrCliTestCase(CliModuleTestCase):
         self.assertEqual(payload["overall_ocr_blocks"][0]["label"], "text")
 
     def test_ocr_host_run_uses_uvicorn(self) -> None:
+        settings = SimpleNamespace(
+            ocr_host="127.0.0.1",
+            ocr_port=18900,
+            ocr_language="ch",
+            ocr_use_gpu=False,
+        )
         container = SimpleNamespace(
-            settings=SimpleNamespace(
-                ocr_host="127.0.0.1",
-                ocr_port=18900,
-                ocr_language="ch",
-                ocr_use_gpu=False,
-            )
+            require=lambda key: {AppKey.CORE_SETTINGS: settings}[key],
         )
 
         with patch(

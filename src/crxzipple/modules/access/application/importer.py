@@ -8,16 +8,16 @@ from crxzipple.modules.access.application.migration import (
     AccessMigration,
     AccessMigrationPlan,
 )
+from crxzipple.modules.access.application.ports import (
+    AccessSettingsActionPort,
+    AccessSettingsQueryPort,
+)
 from crxzipple.modules.access.application.repositories import (
     AccessConsumerBindingRecord,
 )
 from crxzipple.modules.settings.application.models import (
     CreateSettingsResourceInput,
     UpdateSettingsResourceInput,
-)
-from crxzipple.modules.settings.application.services import (
-    SettingsActionService,
-    SettingsQueryService,
 )
 from crxzipple.modules.settings.domain import SettingsNotFoundError
 
@@ -114,8 +114,8 @@ class _AccessSettingsResourceSeed:
 
 @dataclass(slots=True)
 class AccessSettingsBootstrapImporter:
-    action_service: SettingsActionService
-    query_service: SettingsQueryService
+    action_service: AccessSettingsActionPort
+    query_service: AccessSettingsQueryPort
 
     def import_from_legacy_container(
         self,

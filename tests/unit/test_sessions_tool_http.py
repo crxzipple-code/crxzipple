@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+
+from crxzipple.modules.access.application.repositories import AccessCredentialBindingRecord
 from crxzipple.modules.agent.application import RegisterAgentProfileInput
 from crxzipple.modules.agent.domain import (
     AgentInstructionPolicy,
@@ -55,7 +58,65 @@ class _SequentialTextAdapter:
         return LlmAdapterResponse(result=LlmResult(text=text))
 
 
+class _OverlayAccessConfigView:
+    def __init__(self, records: dict[str, AccessCredentialBindingRecord], *, fallback):
+        self.records = records
+        self.fallback = fallback
+
+    def get_credential_binding(self, binding_id: str):
+        normalized = binding_id.strip()
+        if normalized in self.records:
+            return self.records[normalized]
+        get_binding = getattr(self.fallback, "get_credential_binding", None)
+        if callable(get_binding):
+            return get_binding(normalized)
+        return None
+
+
 class SessionsToolHttpTestCase(ToolTestCaseBase):
+    default_llm_credential_binding_id = "openai-api-key"
+    default_llm_credential_env_name = "CRXZIPPLE_TEST_OPENAI_API_KEY"
+
+    def _register_openai_llm_profile(self) -> None:
+        credential_binding_id = self._install_default_llm_access_binding()
+        self.llm_service.register_profile(
+            RegisterLlmProfileInput(
+                id="openai.gpt-5.4-mini",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5.4-mini",
+                credential_binding_id=credential_binding_id,
+            ),
+        )
+
+    def _install_default_llm_access_binding(self) -> str:
+        previous_value = os.environ.get(self.default_llm_credential_env_name)
+        os.environ[self.default_llm_credential_env_name] = "test-openai-api-key"
+        if previous_value is None:
+            self.addCleanup(os.environ.pop, self.default_llm_credential_env_name, None)
+        else:
+            self.addCleanup(
+                os.environ.__setitem__,
+                self.default_llm_credential_env_name,
+                previous_value,
+            )
+        existing_view = getattr(self.access_service, "config_view", None)
+        self.access_service.config_view = _OverlayAccessConfigView(
+            {
+                self.default_llm_credential_binding_id: AccessCredentialBindingRecord(
+                    binding_id=self.default_llm_credential_binding_id,
+                    asset_id=None,
+                    binding_kind="api_key",
+                    source_kind="env",
+                    source_ref=self.default_llm_credential_env_name,
+                    masked_preview=f"env:{self.default_llm_credential_env_name}",
+                    metadata={"test_fixture": "sessions_tool_http"},
+                ),
+            },
+            fallback=existing_view,
+        )
+        return self.default_llm_credential_binding_id
+
     def _append_text(
         self,
         *,
@@ -68,7 +129,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         source_kind: str | None = None,
         source_id: str | None = None,
     ) -> None:
-        self.container.session_service.append_message(
+        self.session_service.append_message(
             AppendSessionMessageInput(
                 session_key=session_key,
                 session_id=session_id,
@@ -89,7 +150,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
     def test_session_status_uses_execution_context_and_reports_counts(self) -> None:
-        session = self.container.session_service.ensure_session(
+        session = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -98,7 +159,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 chat_type="direct",
             ),
         )
-        self.container.session_service.merge_session_metadata(
+        self.session_service.merge_session_metadata(
             session.id,
             metadata={
                 "compaction": {
@@ -113,7 +174,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="assistant",
             text="archive me first",
         )
-        self.container.session_service.archive_messages(
+        self.session_service.archive_messages(
             ArchiveSessionMessagesInput(
                 session_key=session.id,
                 session_id=session.active_session_id,
@@ -137,7 +198,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="session_status",
                     arguments={},
@@ -169,21 +230,21 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIn("- compaction: present", rendered)
 
     def test_sessions_list_defaults_to_context_agent_and_filters_status(self) -> None:
-        self.container.session_service.ensure_session(
+        self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
                 status="active",
             ),
         )
-        paused = self.container.session_service.ensure_session(
+        paused = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:review",
                 agent_id="assistant",
                 status="paused",
             ),
         )
-        self.container.session_service.ensure_session(
+        self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:other:main",
                 agent_id="other",
@@ -192,7 +253,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_list",
                     arguments={"status": "paused", "limit": 5},
@@ -218,7 +279,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIn("# Sessions", tool_run.result.blocks[0]["text"])
 
     def test_sessions_history_defaults_to_active_instance_only(self) -> None:
-        session = self.container.session_service.ensure_session(
+        session = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -232,13 +293,13 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             text="old instance context",
         )
 
-        self.container.session_service.reset_session(
+        self.session_service.reset_session(
             ResetSessionInput(
                 session_key=session.id,
                 reason="manual",
             ),
         )
-        refreshed = self.container.session_service.get_session(session.id)
+        refreshed = self.session_service.get_session(session.id)
         active_session_id = refreshed.active_session_id
         self._append_text(
             session_key=session.id,
@@ -246,7 +307,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="assistant",
             text="archive this active message",
         )
-        self.container.session_service.archive_messages(
+        self.session_service.archive_messages(
             ArchiveSessionMessagesInput(
                 session_key=session.id,
                 session_id=active_session_id,
@@ -272,7 +333,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_history",
                     arguments={},
@@ -299,7 +360,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertNotIn("archive this active message", rendered)
 
     def test_sessions_history_supports_explicit_session_id_and_include_archived(self) -> None:
-        session = self.container.session_service.ensure_session(
+        session = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -318,7 +379,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="assistant",
             text="older archived message",
         )
-        self.container.session_service.archive_messages(
+        self.session_service.archive_messages(
             ArchiveSessionMessagesInput(
                 session_key=session.id,
                 session_id=old_session_id,
@@ -326,13 +387,13 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 reason="compacted",
             ),
         )
-        self.container.session_service.reset_session(
+        self.session_service.reset_session(
             ResetSessionInput(
                 session_key=session.id,
                 reason="manual",
             ),
         )
-        refreshed = self.container.session_service.get_session(session.id)
+        refreshed = self.session_service.get_session(session.id)
         self._append_text(
             session_key=session.id,
             session_id=refreshed.active_session_id,
@@ -341,7 +402,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_history",
                     arguments={
@@ -375,19 +436,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
 
     def test_sessions_send_appends_message_and_enqueues_exact_follow_up_run(self) -> None:
         adapter = _StaticTextAdapter(text="session send complete")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
-        self.container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id="openai.gpt-5.4-mini",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-        self.container.agent_service.register_profile(
+        self._register_openai_llm_profile()
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -399,13 +453,13 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 ),
             ),
         )
-        sender = self.container.session_service.ensure_session(
+        sender = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:sender",
                 agent_id="assistant",
             ),
         )
-        target = self.container.session_service.ensure_session(
+        target = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -413,7 +467,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_send",
                     arguments={
@@ -435,7 +489,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         metadata = tool_run.result.metadata
         self.assertEqual(metadata["tool"], "sessions_send")
         self.assertEqual(metadata["session_key"], target.id)
-        enqueued_run = self.container.orchestration_run_query_service.get_run(metadata["run_id"])
+        enqueued_run = self.orchestration_run_query_service.get_run(metadata["run_id"])
         self.assertEqual(enqueued_run.status, OrchestrationRunStatus.QUEUED)
         self.assertEqual(enqueued_run.session_key, target.id)
         self.assertEqual(enqueued_run.active_session_id, target.active_session_id)
@@ -448,7 +502,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        messages = self.container.session_service.list_messages(
+        messages = self.session_service.list_messages(
             ListSessionMessagesInput(
                 session_key=target.id,
                 include_archived=True,
@@ -467,19 +521,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
 
     def test_sessions_spawn_creates_child_session_and_enqueues_child_run(self) -> None:
         adapter = _StaticTextAdapter(text="child session complete")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
-        self.container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id="openai.gpt-5.4-mini",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-        self.container.agent_service.register_profile(
+        self._register_openai_llm_profile()
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -491,7 +538,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 ),
             ),
         )
-        requester = self.container.session_service.ensure_session(
+        requester = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -499,7 +546,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={
@@ -523,7 +570,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(metadata["agent_id"], "assistant")
         self.assertTrue(metadata["child_session_key"].startswith("agent:assistant:subagent:"))
 
-        child_session = self.container.session_service.get_session(
+        child_session = self.session_service.get_session(
             metadata["child_session_key"],
         )
         self.assertEqual(child_session.active_session_id, metadata["child_active_session_id"])
@@ -536,7 +583,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             "run-parent-2",
         )
 
-        enqueued_run = self.container.orchestration_run_query_service.get_run(metadata["run_id"])
+        enqueued_run = self.orchestration_run_query_service.get_run(metadata["run_id"])
         self.assertEqual(enqueued_run.status, OrchestrationRunStatus.QUEUED)
         self.assertEqual(enqueued_run.session_key, child_session.id)
         self.assertEqual(enqueued_run.active_session_id, child_session.active_session_id)
@@ -549,7 +596,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        messages = self.container.session_service.list_messages(
+        messages = self.session_service.list_messages(
             ListSessionMessagesInput(
                 session_key=child_session.id,
                 include_archived=True,
@@ -568,19 +615,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
 
     def test_subagents_lists_child_session_buckets_for_requester(self) -> None:
         adapter = _StaticTextAdapter(text="child listing complete")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
-        self.container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id="openai.gpt-5.4-mini",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-        self.container.agent_service.register_profile(
+        self._register_openai_llm_profile()
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -592,7 +632,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 ),
             ),
         )
-        requester = self.container.session_service.ensure_session(
+        requester = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -600,7 +640,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         spawn_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "inspect child bucket"},
@@ -618,7 +658,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         child_session_key = spawn_run.result.metadata["child_session_key"]
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="subagents",
                     arguments={},
@@ -656,7 +696,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
     def test_subagents_lists_recursive_tree_and_run_state(self) -> None:
-        requester = self.container.session_service.ensure_session(
+        requester = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -664,7 +704,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         first_spawn = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "first child task"},
@@ -683,7 +723,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         child_run_id = first_spawn.result.metadata["run_id"]
 
         second_spawn = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "grandchild task"},
@@ -702,7 +742,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         grandchild_run_id = second_spawn.result.metadata["run_id"]
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="subagents",
                     arguments={},
@@ -754,19 +794,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             "child session complete",
             "parent follow-up complete",
         )
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
-        self.container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id="openai.gpt-5.4-mini",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-        self.container.agent_service.register_profile(
+        self._register_openai_llm_profile()
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -778,7 +811,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 ),
             ),
         )
-        requester = self.container.session_service.ensure_session(
+        requester = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -786,7 +819,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         spawn_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "delegate this child task"},
@@ -813,7 +846,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
 
         processed_signal = None
         for _ in range(4):
-            candidate = self.container.orchestration_scheduler_service.process_next_signal(
+            candidate = self.orchestration_scheduler_service.process_next_signal(
                 worker_id="scheduler-1",
             )
             self.assertIsNotNone(candidate)
@@ -832,7 +865,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(requester_followup.session_key, requester.id)
         self.assertEqual(requester_followup.metadata["prompt_mode"], "recovery_resume")
 
-        requester_messages = self.container.session_service.list_messages(
+        requester_messages = self.session_service.list_messages(
             ListSessionMessagesInput(
                 session_key=requester.id,
                 include_archived=True,
@@ -854,19 +887,12 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
 
     def test_session_status_reports_requester_followup_scheduling(self) -> None:
         adapter = _StaticTextAdapter(text="child session complete")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
-        self.container.llm_service.register_profile(
-            RegisterLlmProfileInput(
-                id="openai.gpt-5.4-mini",
-                provider=LlmProviderKind.OPENAI,
-                api_family=LlmApiFamily.OPENAI_RESPONSES,
-                model_name="gpt-5.4-mini",
-            ),
-        )
-        self.container.agent_service.register_profile(
+        self._register_openai_llm_profile()
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -878,7 +904,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 ),
             ),
         )
-        requester = self.container.session_service.ensure_session(
+        requester = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -886,7 +912,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         spawn_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "delegate this child task"},
@@ -912,7 +938,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
 
         processed_signal = None
         for _ in range(4):
-            candidate = self.container.orchestration_scheduler_service.process_next_signal(
+            candidate = self.orchestration_scheduler_service.process_next_signal(
                 worker_id="scheduler-1",
             )
             self.assertIsNotNone(candidate)
@@ -923,7 +949,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIsNotNone(processed_signal)
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="session_status",
                     arguments={},
@@ -973,7 +999,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIn("latest_followup_status: queued", rendered)
 
     def test_sessions_stop_cancels_requester_child_session_tree(self) -> None:
-        requester = self.container.session_service.ensure_session(
+        requester = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -981,7 +1007,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         first_spawn = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "first child task"},
@@ -1000,7 +1026,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         child_run_id = first_spawn.result.metadata["run_id"]
 
         second_spawn = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_spawn",
                     arguments={"text": "grandchild task"},
@@ -1019,7 +1045,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         grandchild_run_id = second_spawn.result.metadata["run_id"]
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_stop",
                     arguments={"reason": "user stopped requester"},
@@ -1049,17 +1075,17 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             {child_run_id, grandchild_run_id},
         )
         self.assertEqual(
-            self.container.orchestration_run_query_service.get_run(child_run_id).status,
+            self.orchestration_run_query_service.get_run(child_run_id).status,
             OrchestrationRunStatus.CANCELLED,
         )
         self.assertEqual(
-            self.container.orchestration_run_query_service.get_run(grandchild_run_id).status,
+            self.orchestration_run_query_service.get_run(grandchild_run_id).status,
             OrchestrationRunStatus.CANCELLED,
         )
         self.assertIn("# Session Stop", tool_run.result.blocks[0]["text"])
 
     def test_sessions_yield_returns_control_metadata(self) -> None:
-        session = self.container.session_service.ensure_session(
+        session = self.session_service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
@@ -1067,7 +1093,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sessions_yield",
                     arguments={"reason": "wait for child session"},

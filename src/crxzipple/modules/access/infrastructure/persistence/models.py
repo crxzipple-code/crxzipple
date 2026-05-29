@@ -77,6 +77,7 @@ class AccessConsumerBindingModel(Base):
         nullable=True,
         index=True,
     )
+    credential_bindings: Mapped[dict[str, str]] = mapped_column(JSON(), nullable=False)
     requirement_sets: Mapped[list[list[str]]] = mapped_column(JSON(), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     redaction_policy: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
@@ -135,6 +136,76 @@ class AccessConnectionProfileModel(Base):
         index=True,
     )
     status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    redaction_policy: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
+    metadata_: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON(),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
+class AccessOAuthProviderModel(Base):
+    __tablename__ = "access_oauth_providers"
+
+    provider_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    provider_kind: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    authorization_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    token_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    revocation_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    device_code_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    default_scopes: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    client_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    client_credential_binding_id: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+        index=True,
+    )
+    callback_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    callback_mode: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    redaction_policy: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
+    metadata_: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        JSON(),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+
+class AccessOAuthAccountModel(Base):
+    __tablename__ = "access_oauth_accounts"
+
+    account_id: Mapped[str] = mapped_column(String(180), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    credential_binding_id: Mapped[str | None] = mapped_column(
+        String(160),
+        nullable=True,
+        index=True,
+    )
+    display_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    subject: Mapped[str | None] = mapped_column(String(300), nullable=True, index=True)
+    granted_scopes: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    refresh_ready: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    storage_key: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
+    masked_preview: Mapped[str | None] = mapped_column(String(240), nullable=True)
     redaction_policy: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
     metadata_: Mapped[dict[str, object]] = mapped_column(
         "metadata",

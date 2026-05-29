@@ -11,6 +11,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.llm.application.adapters import LlmAdapterResponse
 from crxzipple.modules.llm.domain import LlmResult
 from crxzipple.modules.orchestration.application.turn_submission import (
@@ -139,11 +140,72 @@ class _FakeJsonResponse:
 
 class ChannelsModuleTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        self._credential_env_backup = {
+            key: os.environ.get(key)
+            for key in (
+                "LARK_APP_ID",
+                "LARK_APP_SECRET",
+                "LARK_VERIFICATION_TOKEN",
+                "LARK_ENCRYPT_KEY",
+                "LARK_BOT_OPEN_ID",
+            )
+        }
+        os.environ["LARK_APP_ID"] = "cli_a"
+        os.environ["LARK_APP_SECRET"] = "secret_a"
+        os.environ["LARK_VERIFICATION_TOKEN"] = "token-123"
+        os.environ["LARK_ENCRYPT_KEY"] = "encrypt-123"
+        os.environ["LARK_BOT_OPEN_ID"] = "ou_bot_1"
         self.harness = SqliteTestHarness()
-        self.container = self.harness.build_container()
+        self.container = self.harness.build_runtime_container()
+        self._bind_runtime_services()
+        self.llm_service.credential_provider = None
+
+    def _bind_runtime_services(self) -> None:
+        self.agent_service = self.container.require(AppKey.AGENT_SERVICE)
+        self.artifact_service = self.container.require(AppKey.ARTIFACT_SERVICE)
+        channel_infrastructure = self.container.require(AppKey.CHANNEL_INFRASTRUCTURE)
+        self.channel_control_service = self.container.require(
+            AppKey.CHANNEL_CONTROL_SERVICE,
+        )
+        self.channel_interaction_service = channel_infrastructure.interaction_service
+        self.channel_profile_service = self.container.require(
+            AppKey.CHANNEL_PROFILE_SERVICE,
+        )
+        self.channel_runtime_manager = self.container.require(
+            AppKey.CHANNEL_RUNTIME_MANAGER,
+        )
+        self.channel_runtime_planner = channel_infrastructure.runtime_planner
+        self.channel_state_root = channel_infrastructure.state_root
+        self.channel_system_config_store = channel_infrastructure.system_config_store
+        self.daemon_service = self.container.require(AppKey.DAEMON_SERVICE)
+        self.event_relay_runtime_event_service = self.container.require(
+            AppKey.EVENT_RELAY_RUNTIME_EVENT_SERVICE,
+        )
+        self.events_service = self.container.require(AppKey.EVENTS_SERVICE)
+        self.lark_channel_runtime_service = self.container.require(
+            AppKey.LARK_CHANNEL_RUNTIME_SERVICE,
+        )
+        self.llm_adapter_registry = self.container.require(
+            AppKey.LLM_ADAPTER_REGISTRY,
+        )
+        self.llm_service = self.container.require(AppKey.LLM_SERVICE)
+        self.orchestration_scheduler_service = self.container.require(
+            AppKey.ORCHESTRATION_SCHEDULER_SERVICE,
+        )
+        self.web_channel_runtime_service = self.container.require(
+            AppKey.WEB_CHANNEL_RUNTIME_SERVICE,
+        )
+        self.webhook_channel_runtime_service = self.container.require(
+            AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE,
+        )
 
     def tearDown(self) -> None:
         self.harness.close()
+        for key, value in self._credential_env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_channel_interaction_store_upgrades_delivery_metadata_shape(self) -> None:
         old_status = "projec" + "ted"
@@ -198,7 +260,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 self.assertNotIn(key, interaction.metadata)
 
     def test_channel_profile_service_persists_profiles_across_containers(self) -> None:
-        saved = self.container.channel_profile_service.upsert_profile(
+        saved = self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 capabilities=ChannelCapabilities(
@@ -218,15 +280,15 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertTrue(saved.capabilities.supports_streaming)
         self.assertEqual(len(saved.accounts), 1)
 
-        reopened = self.harness.build_container()
-        resolved = reopened.channel_profile_service.get_profile("WEB")
+        reopened = self.harness.build_runtime_container()
+        resolved = reopened.require(AppKey.CHANNEL_PROFILE_SERVICE).get_profile("WEB")
         self.assertIsNotNone(resolved)
         assert resolved is not None
         self.assertTrue(resolved.capabilities.supports_edit)
         self.assertEqual(resolved.accounts[0].transport_mode, "sse")
 
     def test_channel_profile_service_enable_disable_updates_runtime_truth(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(
@@ -238,30 +300,30 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        disabled = self.container.channel_profile_service.disable_profile("WEB")
+        disabled = self.channel_profile_service.disable_profile("WEB")
 
         self.assertFalse(disabled.enabled)
         with self.assertRaises(ChannelValidationError) as raised:
-            self.container.web_channel_runtime_service.ensure_registered(
+            self.web_channel_runtime_service.ensure_registered(
                 runtime_id="web-runtime-disabled",
             )
         self.assertEqual(raised.exception.code, "channel_profile_disabled")
 
-        enabled = self.container.channel_profile_service.enable_profile("web")
-        registration = self.container.web_channel_runtime_service.ensure_registered(
+        enabled = self.channel_profile_service.enable_profile("web")
+        registration = self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-enabled",
         )
 
         self.assertTrue(enabled.enabled)
         self.assertEqual(registration.runtime_id, "web-runtime-enabled")
-        binding = self.container.channel_runtime_manager.resolve_account_binding(
+        binding = self.channel_runtime_manager.resolve_account_binding(
             channel_type="web",
             channel_account_id="default",
         )
         self.assertIsNotNone(binding)
 
     def test_channel_runtime_manager_tracks_runtime_account_and_connection_bindings(self) -> None:
-        manager = self.container.channel_runtime_manager
+        manager = self.channel_runtime_manager
         registered = manager.register_runtime(
             ChannelRuntimeRegistration(
                 runtime_id="web-runtime-1",
@@ -314,15 +376,16 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(resolved_connection.runtime_id, "web-runtime-1")
         self.assertEqual(len(manager.list_connection_bindings(runtime_id="web-runtime-1")), 1)
 
-        reopened = self.harness.build_container()
-        reopened_runtime = reopened.channel_runtime_manager.resolve_account_runtime(
+        reopened = self.harness.build_runtime_container()
+        reopened_manager = reopened.require(AppKey.CHANNEL_RUNTIME_MANAGER)
+        reopened_runtime = reopened_manager.resolve_account_runtime(
             channel_type="web",
             channel_account_id="acc-1",
         )
         self.assertIsNotNone(reopened_runtime)
         assert reopened_runtime is not None
         self.assertEqual(reopened_runtime.service_key, "channel:web")
-        registry_after_unregister = reopened.channel_runtime_manager.unregister_runtime(
+        registry_after_unregister = reopened_manager.unregister_runtime(
             "web-runtime-1",
         )
         self.assertEqual(registry_after_unregister.runtimes, ())
@@ -341,10 +404,12 @@ class ChannelsModuleTestCase(unittest.TestCase):
                                 ChannelAccountProfile(
                                     account_id="default",
                                     transport_mode="webhook",
+                                    credential_bindings={
+                                        "lark_app_id": "access-binding:lark-app-id",
+                                        "lark_app_secret": "access-binding:lark-app-secret",
+                                    },
                                     metadata={
                                         "agent_id": "assistant-lark",
-                                        "lark_app_id": "cli_test",
-                                        "lark_app_secret": "secret_test",
                                     },
                                 ),
                             ),
@@ -355,22 +420,25 @@ class ChannelsModuleTestCase(unittest.TestCase):
 
             profile = store.load().profiles[0]
             self.assertEqual(profile.channel_type, "lark")
-            self.assertEqual(profile.accounts[0].metadata["lark_app_id"], "cli_test")
+            self.assertEqual(
+                profile.accounts[0].credential_bindings["lark_app_id"],
+                "access-binding:lark-app-id",
+            )
 
     def test_channel_system_config_store_exposed_on_container(self) -> None:
         profile = ChannelProfile(channel_type="telegram")
-        saved = self.container.channel_system_config_store.save(
+        saved = self.channel_system_config_store.save(
             replace(
-                self.container.channel_system_config_store.load(),
+                self.channel_system_config_store.load(),
                 profiles=(profile,),
             ),
         )
 
         self.assertEqual(saved.profiles[0].channel_type, "telegram")
-        self.assertEqual(self.container.channel_state_root.root_dir.name, "channels")
+        self.assertEqual(self.channel_state_root.root_dir.name, "channels")
 
     def test_channel_interaction_service_persists_interactions_and_binds_runs(self) -> None:
-        created = self.container.channel_interaction_service.upsert_interaction(
+        created = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark-msg-1",
                 channel_type="lark",
@@ -393,7 +461,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(created.interaction_id, "lark-msg-1")
         self.assertEqual(created.status, "received")
 
-        bound = self.container.channel_interaction_service.bind_run(
+        bound = self.channel_interaction_service.bind_run(
             "lark-msg-1",
             run_id="run-lark-1",
             session_key="agent:assistant:lark:dm:ou_1",
@@ -408,7 +476,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(bound.agent_id, "assistant")
         self.assertEqual(bound.metadata["submit_path"], "channel_ingress")
 
-        running = self.container.channel_interaction_service.mark_status(
+        running = self.channel_interaction_service.mark_status(
             "lark-msg-1",
             status="running",
             metadata={"last_observed_event_name": "orchestration.run.advanced"},
@@ -421,15 +489,16 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "orchestration.run.advanced",
         )
 
-        resolved = self.container.channel_interaction_service.get_interaction_by_run_id(
+        resolved = self.channel_interaction_service.get_interaction_by_run_id(
             "run-lark-1",
         )
         self.assertIsNotNone(resolved)
         assert resolved is not None
         self.assertEqual(resolved.interaction_id, "lark-msg-1")
 
-        reopened = self.harness.build_container()
-        reopened_interaction = reopened.channel_interaction_service.get_interaction(
+        reopened = self.harness.build_runtime_container()
+        reopened_infrastructure = reopened.require(AppKey.CHANNEL_INFRASTRUCTURE)
+        reopened_interaction = reopened_infrastructure.interaction_service.get_interaction(
             "lark-msg-1",
         )
         self.assertIsNotNone(reopened_interaction)
@@ -442,7 +511,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_channel_interaction_service_binds_all_matching_interactions_by_run_id(self) -> None:
-        first = self.container.channel_interaction_service.upsert_interaction(
+        first = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="webhook-run-bind-1",
                 channel_type="webhook",
@@ -450,7 +519,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="accepted",
             ),
         )
-        second = self.container.channel_interaction_service.upsert_interaction(
+        second = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="webhook-run-bind-2",
                 channel_type="webhook",
@@ -459,7 +528,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        bound = self.container.channel_interaction_service.bind_run_by_run_id(
+        bound = self.channel_interaction_service.bind_run_by_run_id(
             "run-bind-all-1",
             session_key="agent:assistant:webhook:dm:bind-all",
             agent_id="assistant",
@@ -472,7 +541,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             {first.interaction_id, second.interaction_id},
         )
         for interaction_id in ("webhook-run-bind-1", "webhook-run-bind-2"):
-            interaction = self.container.channel_interaction_service.get_interaction(
+            interaction = self.channel_interaction_service.get_interaction(
                 interaction_id,
             )
             self.assertIsNotNone(interaction)
@@ -489,7 +558,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             )
 
     def test_web_channel_runtime_registers_profile_accounts(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 capabilities=ChannelCapabilities(
@@ -502,11 +571,11 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        runtime = self.container.web_channel_runtime_service.ensure_registered(
+        runtime = self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-1",
         )
         self.assertEqual(runtime.service_key, "channel:web")
-        bound_runtime = self.container.channel_runtime_manager.resolve_account_runtime(
+        bound_runtime = self.channel_runtime_manager.resolve_account_runtime(
             channel_type="web",
             channel_account_id="default",
         )
@@ -515,11 +584,11 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(bound_runtime.runtime_id, "web-runtime-1")
 
     def test_web_channel_runtime_can_bind_and_unbind_connections(self) -> None:
-        self.container.web_channel_runtime_service.ensure_registered(
+        self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-1",
         )
 
-        binding = self.container.web_channel_runtime_service.bind_connection(
+        binding = self.web_channel_runtime_service.bind_connection(
             connection_id="conn-sse-1",
             channel_account_id="default",
             conversation_id="agent:demo:main",
@@ -530,20 +599,20 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(binding.channel_account_id, "default")
         self.assertTrue(binding.supports_streaming)
         self.assertEqual(
-            self.container.channel_runtime_manager.resolve_connection_binding(
+            self.channel_runtime_manager.resolve_connection_binding(
                 channel_type="web",
                 connection_id="conn-sse-1",
             ).runtime_id,
             "web-runtime-1",
         )
 
-        registry = self.container.web_channel_runtime_service.unbind_connection(
+        registry = self.web_channel_runtime_service.unbind_connection(
             "conn-sse-1",
         )
         self.assertEqual(registry.connection_bindings, ())
 
     def test_web_channel_runtime_loop_observes_session_events_and_updates_runtime_metadata(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(
@@ -552,16 +621,16 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.web_channel_runtime_service.ensure_registered(
+        self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-loop-1",
         )
-        self.container.web_channel_runtime_service.bind_connection(
+        self.web_channel_runtime_service.bind_connection(
             connection_id="conn-loop-1",
             channel_account_id="default",
             conversation_id="agent:demo:loop",
             runtime_id="web-runtime-loop-1",
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_live_topic("agent:demo:loop"),
                 kind="live",
@@ -576,14 +645,14 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.web_channel_runtime_service.run_runtime_loop(
+        self.web_channel_runtime_service.run_runtime_loop(
             "web",
             runtime_id="web-runtime-loop-1",
             poll_interval_seconds=0.05,
             max_cycles=1,
         )
 
-        runtime = self.container.channel_runtime_manager.get_runtime("web-runtime-loop-1")
+        runtime = self.channel_runtime_manager.get_runtime("web-runtime-loop-1")
         self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertNotIn("live_observed_count", runtime.metadata)
@@ -592,22 +661,22 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertNotIn("stream_path", runtime.metadata)
 
     def test_web_channel_runtime_seeds_session_observe_source_cursor(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        self.container.web_channel_runtime_service.ensure_registered(
+        self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-observe-1",
         )
-        self.container.web_channel_runtime_service.bind_connection(
+        self.web_channel_runtime_service.bind_connection(
             connection_id="conn-observe-1",
             channel_account_id="default",
             conversation_id="agent:demo:observe",
             runtime_id="web-runtime-observe-1",
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:demo:observe"),
                 kind="fact",
@@ -621,15 +690,15 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 },
             ),
         )
-        seeded_cursor = self.container.events_service.snapshot_event_topic(
+        seeded_cursor = self.events_service.snapshot_event_topic(
             turn_session_topic("agent:demo:observe"),
         )
-        seeded = self.container.web_channel_runtime_service.seed_connection_source_cursors(
+        seeded = self.web_channel_runtime_service.seed_connection_source_cursors(
             connection_id="conn-observe-1",
             conversation_id="agent:demo:observe",
         )
         self.assertEqual(seeded["observe_cursor"], seeded_cursor)
-        binding = self.container.channel_runtime_manager.resolve_connection_binding(
+        binding = self.channel_runtime_manager.resolve_connection_binding(
             channel_type="web",
             connection_id="conn-observe-1",
         )
@@ -637,7 +706,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         assert binding is not None
         self.assertEqual(binding.metadata["observe_cursor"], seeded_cursor)
         self.assertEqual(
-            self.container.web_channel_runtime_service.get_connection_observe_source_cursor(
+            self.web_channel_runtime_service.get_connection_observe_source_cursor(
                 connection_id="conn-observe-1",
                 conversation_id="agent:demo:observe",
             ),
@@ -645,22 +714,22 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_web_channel_runtime_routes_session_live_to_connection_topic(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        self.container.web_channel_runtime_service.ensure_registered(
+        self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-live-1",
         )
-        self.container.web_channel_runtime_service.bind_connection(
+        self.web_channel_runtime_service.bind_connection(
             connection_id="conn-live-1",
             channel_account_id="default",
             conversation_id="agent:demo:live",
             runtime_id="web-runtime-live-1",
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_live_topic("agent:demo:live"),
                 kind="live",
@@ -675,23 +744,23 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        binding = self.container.channel_runtime_manager.resolve_connection_binding(
+        binding = self.channel_runtime_manager.resolve_connection_binding(
             channel_type="web",
             connection_id="conn-live-1",
         )
         self.assertIsNotNone(binding)
         assert binding is not None
-        self.container.channel_runtime_manager.merge_connection_metadata(
+        self.channel_runtime_manager.merge_connection_metadata(
             channel_type="web",
             connection_id="conn-live-1",
             metadata={
-                "live_cursor": self.container.events_service.snapshot_event_topic(
+                "live_cursor": self.events_service.snapshot_event_topic(
                     turn_session_live_topic("agent:demo:live"),
                 ),
             },
         )
         self.assertEqual(
-            self.container.web_channel_runtime_service.get_connection_live_source_cursor(
+            self.web_channel_runtime_service.get_connection_live_source_cursor(
                 connection_id="conn-live-1",
                 conversation_id="agent:demo:live",
             ),
@@ -699,28 +768,28 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_web_channel_runtime_waits_for_live_and_observe_source_activity(self) -> None:
-        self.container.web_channel_runtime_service.ensure_registered(
+        self.web_channel_runtime_service.ensure_registered(
             runtime_id="web-runtime-wait-activity-1",
         )
-        self.container.web_channel_runtime_service.bind_connection(
+        self.web_channel_runtime_service.bind_connection(
             connection_id="conn-wait-activity-1",
             channel_account_id="default",
             conversation_id="agent:demo:wait-activity",
             runtime_id="web-runtime-wait-activity-1",
         )
-        self.container.web_channel_runtime_service.seed_connection_source_cursors(
+        self.web_channel_runtime_service.seed_connection_source_cursors(
             connection_id="conn-wait-activity-1",
             conversation_id="agent:demo:wait-activity",
         )
 
         self.assertFalse(
-            self.container.web_channel_runtime_service.wait_for_runtime_activity(
+            self.web_channel_runtime_service.wait_for_runtime_activity(
                 "web-runtime-wait-activity-1",
                 timeout_seconds=0.01,
             ),
         )
 
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_live_topic("agent:demo:wait-activity"),
                 kind="live",
@@ -734,22 +803,22 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
         self.assertTrue(
-            self.container.web_channel_runtime_service.wait_for_runtime_activity(
+            self.web_channel_runtime_service.wait_for_runtime_activity(
                 "web-runtime-wait-activity-1",
                 timeout_seconds=0.1,
             ),
         )
-        self.container.channel_runtime_manager.merge_connection_metadata(
+        self.channel_runtime_manager.merge_connection_metadata(
             channel_type="web",
             connection_id="conn-wait-activity-1",
             metadata={
-                "live_cursor": self.container.events_service.snapshot_event_topic(
+                "live_cursor": self.events_service.snapshot_event_topic(
                     turn_session_live_topic("agent:demo:wait-activity"),
                 ),
             },
         )
 
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:demo:wait-activity"),
                 kind="fact",
@@ -763,7 +832,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
         self.assertTrue(
-            self.container.web_channel_runtime_service.wait_for_runtime_activity(
+            self.web_channel_runtime_service.wait_for_runtime_activity(
                 "web-runtime-wait-activity-1",
                 timeout_seconds=0.1,
             ),
@@ -774,7 +843,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         callback_server.start()
         try:
             callback_status = (
-                self.container.webhook_channel_runtime_service.replay_dead_letter_payload(
+                self.webhook_channel_runtime_service.replay_dead_letter_payload(
                     callback_payload={
                         "outbound_id": "out-replay-direct-1",
                         "mode": "event",
@@ -804,7 +873,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             callback_server.close()
 
     def test_completed_run_with_webhook_reply_target_skips_legacy_runtime_topic_publication(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="webhook",
                 accounts=(
@@ -815,25 +884,25 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.container.channel_runtime_manager.register_runtime(
+        self.channel_runtime_manager.register_runtime(
             ChannelRuntimeRegistration(
                 runtime_id="webhook-runtime-auto-1",
                 channel_type="webhook",
                 service_key="channel:webhook",
             ),
         )
-        self.container.channel_runtime_manager.bind_account(
+        self.channel_runtime_manager.bind_account(
             ChannelAccountRuntimeBinding(
                 channel_type="webhook",
                 channel_account_id="default",
                 runtime_id="webhook-runtime-auto-1",
             ),
         )
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("skip webhook legacy runtime topic"),
         )
-        self.container.llm_service.register_profile(
+        self.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-webhook-skip",
                 provider=LlmProviderKind.OPENAI,
@@ -841,7 +910,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        self.container.agent_service.register_profile(
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant-webhook-skip",
                 name="Assistant Webhook Skip",
@@ -854,9 +923,9 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        profile = self.container.agent_service.get_profile("assistant-webhook-skip")
+        profile = self.agent_service.get_profile("assistant-webhook-skip")
         run = submit_turn(
-            self.container.orchestration_scheduler_service,
+            self.orchestration_scheduler_service,
             content="hello webhook auto",
             options=build_submission_options(
                 profile=profile,
@@ -888,7 +957,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ).to_payload(),
             },
         )
-        legacy_cursor = self.container.events_service.snapshot_event_topic(
+        legacy_cursor = self.events_service.snapshot_event_topic(
             _legacy_runtime_outbound_topic("webhook-runtime-auto-1"),
         )
 
@@ -899,7 +968,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         assert processed is not None
         self.assertEqual(processed.id, run.id)
 
-        legacy_records = self.container.events_service.read_event_topic(
+        legacy_records = self.events_service.read_event_topic(
             _legacy_runtime_outbound_topic("webhook-runtime-auto-1"),
             after_cursor=legacy_cursor,
             limit=10,
@@ -907,7 +976,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(legacy_records, ())
 
     def test_completed_run_with_webhook_observation_enabled_emits_callback_from_observe(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="webhook",
                 accounts=(
@@ -918,11 +987,11 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialTextAdapter("observe callback answer"),
         )
-        self.container.llm_service.register_profile(
+        self.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="test-llm-observe-webhook",
                 provider=LlmProviderKind.OPENAI,
@@ -930,7 +999,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        self.container.agent_service.register_profile(
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant-observe-webhook",
                 name="Assistant Observe Webhook",
@@ -943,15 +1012,15 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 runtime_preferences=AgentRuntimePreferences(),
             ),
         )
-        self.container.webhook_channel_runtime_service.ensure_registered(
+        self.webhook_channel_runtime_service.ensure_registered(
             runtime_id="webhook-runtime-observe-auto-1",
         )
         callback_server = _CallbackCaptureServer()
         callback_server.start()
         try:
-            agent = self.container.agent_service.get_profile("assistant-observe-webhook")
+            agent = self.agent_service.get_profile("assistant-observe-webhook")
             run = submit_turn(
-                self.container.orchestration_scheduler_service,
+                self.orchestration_scheduler_service,
                 content={"blocks": [{"type": "text", "text": "hello webhook observe"}]},
                 options=build_submission_options(
                     profile=agent,
@@ -984,7 +1053,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                     ).to_payload(),
                 },
             )
-            self.container.channel_interaction_service.upsert_interaction(
+            self.channel_interaction_service.upsert_interaction(
                 ChannelInteraction(
                     interaction_id=f"webhook:default:run:{run.id}",
                     channel_type="webhook",
@@ -1004,13 +1073,13 @@ class ChannelsModuleTestCase(unittest.TestCase):
                     run_id=run.id,
                     status=run.status.value,
                     metadata={
-                        "observe_cursor": self.container.events_service.snapshot_event_topic(
+                        "observe_cursor": self.events_service.snapshot_event_topic(
                             turn_session_topic(run.session_key),
                         ),
                     },
                 ),
             )
-            legacy_cursor = self.container.events_service.snapshot_event_topic(
+            legacy_cursor = self.events_service.snapshot_event_topic(
                 _legacy_runtime_outbound_topic("webhook-runtime-observe-auto-1"),
             )
 
@@ -1021,11 +1090,11 @@ class ChannelsModuleTestCase(unittest.TestCase):
             assert processed is not None
             self.assertEqual(processed.id, run.id)
 
-            assert self.container.event_relay_runtime_event_service is not None
-            self.container.event_relay_runtime_event_service.process_available_events(
+            assert self.event_relay_runtime_event_service is not None
+            self.event_relay_runtime_event_service.process_available_events(
                 limit_per_subscription=10,
             )
-            self.container.webhook_channel_runtime_service.run_runtime_loop(
+            self.webhook_channel_runtime_service.run_runtime_loop(
                 "webhook",
                 runtime_id="webhook-runtime-observe-auto-1",
                 poll_interval_seconds=0.05,
@@ -1037,7 +1106,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             self.assertEqual(payloads[0]["message"]["content_payload"]["blocks"][0]["text"], "observe callback answer")
             self.assertEqual(payloads[0]["metadata"]["run_id"], run.id)
             self.assertEqual(payloads[0]["metadata"]["interaction_id"], f"webhook:default:run:{run.id}")
-            legacy_records = self.container.events_service.read_event_topic(
+            legacy_records = self.events_service.read_event_topic(
                 _legacy_runtime_outbound_topic("webhook-runtime-observe-auto-1"),
                 after_cursor=legacy_cursor,
                 limit=10,
@@ -1047,7 +1116,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             callback_server.close()
 
     def test_webhook_observe_delivery_retries_and_dead_letters_failed_callback(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="webhook",
                 accounts=(
@@ -1061,17 +1130,17 @@ class ChannelsModuleTestCase(unittest.TestCase):
         callback_server = _CallbackCaptureServer(response_status=503)
         callback_server.start()
         try:
-            self.container.webhook_channel_runtime_service.ensure_registered(
+            self.webhook_channel_runtime_service.ensure_registered(
                 runtime_id="webhook-runtime-retry-1",
             )
-            self.container.channel_runtime_manager.bind_account(
+            self.channel_runtime_manager.bind_account(
                 ChannelAccountRuntimeBinding(
                     channel_type="webhook",
                     channel_account_id="default",
                     runtime_id="webhook-runtime-retry-1",
                 ),
             )
-            self.container.channel_interaction_service.upsert_interaction(
+            self.channel_interaction_service.upsert_interaction(
                 ChannelInteraction(
                     interaction_id="webhook:default:run:retry-1",
                     channel_type="webhook",
@@ -1087,13 +1156,13 @@ class ChannelsModuleTestCase(unittest.TestCase):
                     run_id="run-webhook-retry-1",
                     status="running",
                     metadata={
-                        "observe_cursor": self.container.events_service.snapshot_event_topic(
+                        "observe_cursor": self.events_service.snapshot_event_topic(
                             turn_session_topic("agent:demo:webhook-retry"),
                         ),
                     },
                 ),
             )
-            self.container.events_service.publish(
+            self.events_service.publish(
                 Event(
                     topic=turn_session_topic("agent:demo:webhook-retry"),
                     kind="fact",
@@ -1117,7 +1186,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             )
 
-            self.container.webhook_channel_runtime_service.run_runtime_loop(
+            self.webhook_channel_runtime_service.run_runtime_loop(
                 "webhook",
                 runtime_id="webhook-runtime-retry-1",
                 poll_interval_seconds=0.05,
@@ -1125,7 +1194,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             )
 
             self.assertEqual(len(callback_server.payloads), 3)
-            runtime = self.container.channel_runtime_manager.get_runtime(
+            runtime = self.channel_runtime_manager.get_runtime(
                 "webhook-runtime-retry-1",
             )
             self.assertIsNotNone(runtime)
@@ -1134,7 +1203,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             self.assertEqual(runtime.metadata["observe_delivery_count"], 0)
             self.assertEqual(runtime.metadata["last_delivery_callback_status"], "http_503")
 
-            dead_letters = self.container.events_service.read_event_topic(
+            dead_letters = self.events_service.read_event_topic(
                 channel_dead_letter_topic(
                     "webhook",
                     runtime_id="webhook-runtime-retry-1",
@@ -1155,25 +1224,25 @@ class ChannelsModuleTestCase(unittest.TestCase):
             callback_server.close()
 
     def test_lark_channel_runtime_fetches_token_and_sends_text_message(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-1",
         )
-        self.container.channel_interaction_service.upsert_interaction(
+        self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:text-observe-1",
                 channel_type="lark",
@@ -1194,7 +1263,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_user_1"),
                 kind="fact",
@@ -1253,7 +1322,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-1",
                 poll_interval_seconds=0.05,
@@ -1282,7 +1351,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             json.loads(calls[1][2]["json"]["content"])["text"],
             "hello from lark runtime",
         )
-        runtime = self.container.channel_runtime_manager.get_runtime("lark-runtime-1")
+        runtime = self.channel_runtime_manager.get_runtime("lark-runtime-1")
         self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertEqual(runtime.metadata["observe_observed_count"], 1)
@@ -1292,37 +1361,37 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_channel_runtime_delivers_text_and_artifacts_from_interaction_metadata(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-artifact-1",
         )
-        image_artifact = self.container.artifact_service.create_artifact(
+        image_artifact = self.artifact_service.create_artifact(
             data=b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==",
             ),
             mime_type="image/png",
             name="generated.png",
         )
-        file_artifact = self.container.artifact_service.create_artifact(
+        file_artifact = self.artifact_service.create_artifact(
             data=b"%PDF-1.4 test artifact\n",
             mime_type="application/pdf",
             name="report.pdf",
         )
-        interaction = self.container.channel_interaction_service.upsert_interaction(
+        interaction = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:artifact-delivery-1",
                 channel_type="lark",
@@ -1343,7 +1412,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_artifact_1"),
                 kind="fact",
@@ -1433,7 +1502,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-artifact-1",
                 poll_interval_seconds=0.05,
@@ -1474,7 +1543,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "file_v3_uploaded_1",
         )
 
-        refreshed = self.container.channel_interaction_service.get_interaction(
+        refreshed = self.channel_interaction_service.get_interaction(
             interaction.interaction_id,
         )
         self.assertIsNotNone(refreshed)
@@ -1490,25 +1559,25 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_channel_runtime_preserves_thread_reply_context(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-thread-1",
         )
-        self.container.channel_interaction_service.upsert_interaction(
+        self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:thread-observe-1",
                 channel_type="lark",
@@ -1534,7 +1603,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:thread:1"),
                 kind="fact",
@@ -1593,7 +1662,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-thread-1",
                 poll_interval_seconds=0.05,
@@ -1607,30 +1676,30 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(send_payload["reply_message_id"], "om_msg_parent_1")
 
     def test_lark_channel_runtime_resolves_credentials_from_bindings(self) -> None:
-        previous_app_id = os.environ.get("LARK_TEST_APP_ID")
-        previous_app_secret = os.environ.get("LARK_TEST_APP_SECRET")
-        os.environ["LARK_TEST_APP_ID"] = "cli_binding_a"
-        os.environ["LARK_TEST_APP_SECRET"] = "secret_binding_a"
+        previous_app_id = os.environ.get("LARK_APP_ID")
+        previous_app_secret = os.environ.get("LARK_APP_SECRET")
+        os.environ["LARK_APP_ID"] = "cli_binding_a"
+        os.environ["LARK_APP_SECRET"] = "secret_binding_a"
         try:
-            self.container.channel_profile_service.upsert_profile(
+            self.channel_profile_service.upsert_profile(
                 ChannelProfile(
                     channel_type="lark",
                     accounts=(
                         ChannelAccountProfile(
                             account_id="default",
                             transport_mode="webhook",
-                            metadata={
-                                "lark_app_id_binding": "env:LARK_TEST_APP_ID",
-                                "lark_app_secret_binding": "env:LARK_TEST_APP_SECRET",
+                            credential_bindings={
+                                "lark_app_id": "access-binding:lark-app-id",
+                                "lark_app_secret": "access-binding:lark-app-secret",
                             },
                         ),
                     ),
                 ),
             )
-            self.container.lark_channel_runtime_service.ensure_registered(
+            self.lark_channel_runtime_service.ensure_registered(
                 runtime_id="lark-runtime-binding-1",
             )
-            self.container.channel_interaction_service.upsert_interaction(
+            self.channel_interaction_service.upsert_interaction(
                 ChannelInteraction(
                     interaction_id="lark:default:event:binding-observe-1",
                     channel_type="lark",
@@ -1651,7 +1720,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                     status="running",
                 ),
             )
-            self.container.events_service.publish(
+            self.events_service.publish(
                 Event(
                     topic=turn_session_topic("agent:assistant:lark:binding:1"),
                     kind="fact",
@@ -1713,7 +1782,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 "crxzipple.modules.channels.application.runtime.request_url",
                 side_effect=_fake_request,
             ):
-                self.container.lark_channel_runtime_service.run_runtime_loop(
+                self.lark_channel_runtime_service.run_runtime_loop(
                     "lark",
                     runtime_id="lark-runtime-binding-1",
                     poll_interval_seconds=0.05,
@@ -1723,16 +1792,16 @@ class ChannelsModuleTestCase(unittest.TestCase):
             self.assertEqual(calls[0][2]["json"], {"app_id": "cli_binding_a", "app_secret": "secret_binding_a"})
         finally:
             if previous_app_id is None:
-                os.environ.pop("LARK_TEST_APP_ID", None)
+                os.environ.pop("LARK_APP_ID", None)
             else:
-                os.environ["LARK_TEST_APP_ID"] = previous_app_id
+                os.environ["LARK_APP_ID"] = previous_app_id
             if previous_app_secret is None:
-                os.environ.pop("LARK_TEST_APP_SECRET", None)
+                os.environ.pop("LARK_APP_SECRET", None)
             else:
-                os.environ["LARK_TEST_APP_SECRET"] = previous_app_secret
+                os.environ["LARK_APP_SECRET"] = previous_app_secret
 
     def test_lark_submit_message_event_creates_interaction_and_defers_session_binding(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
@@ -1744,7 +1813,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.container.llm_service.register_profile(
+        self.llm_service.register_profile(
             RegisterLlmProfileInput(
                 id="test-llm",
                 provider=LlmProviderKind.OPENAI,
@@ -1752,7 +1821,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 model_name="gpt-5.4-mini",
             ),
         )
-        self.container.agent_service.register_profile(
+        self.agent_service.register_profile(
             RegisterAgentProfileInput(
                 id="assistant",
                 name="Assistant",
@@ -1764,7 +1833,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        result = self.container.lark_channel_runtime_service.submit_message_event(
+        result = self.lark_channel_runtime_service.submit_message_event(
             "default",
             event_id="evt_lark_1",
             sender_open_id="ou_sender_1",
@@ -1784,7 +1853,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertIsNone(result["session_key"])
         self.assertEqual(result["interaction_status"], "accepted")
 
-        interaction = self.container.channel_interaction_service.get_interaction(
+        interaction = self.channel_interaction_service.get_interaction(
             "lark:default:event:evt_lark_1",
         )
         self.assertIsNotNone(interaction)
@@ -1802,13 +1871,13 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
         self.assertEqual(interaction.metadata["chat_type"], "direct")
 
-        queued = self.container.orchestration_scheduler_service.process_run_request(
+        queued = self.orchestration_scheduler_service.process_run_request(
             run_id=result["run_id"],
             worker_id="scheduler-lark-direct-1",
         )
         self.assertIsNotNone(queued)
         assert queued is not None
-        refreshed = self.container.channel_interaction_service.get_interaction(
+        refreshed = self.channel_interaction_service.get_interaction(
             "lark:default:event:evt_lark_1",
         )
         self.assertIsNotNone(refreshed)
@@ -1821,7 +1890,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_runtime_observes_run_events_and_updates_interaction_status(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
@@ -1832,10 +1901,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-observe-1",
         )
-        interaction = self.container.channel_interaction_service.upsert_interaction(
+        interaction = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:observe-1",
                 channel_type="lark",
@@ -1855,7 +1924,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="submitted",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_observe_1"),
                 kind="fact",
@@ -1871,7 +1940,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 },
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_observe_1"),
                 kind="fact",
@@ -1888,14 +1957,14 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.lark_channel_runtime_service.run_runtime_loop(
+        self.lark_channel_runtime_service.run_runtime_loop(
             "lark",
             runtime_id="lark-runtime-observe-1",
             poll_interval_seconds=0.05,
             max_cycles=1,
         )
 
-        refreshed = self.container.channel_interaction_service.get_interaction(
+        refreshed = self.channel_interaction_service.get_interaction(
             interaction.interaction_id,
         )
         self.assertIsNotNone(refreshed)
@@ -1913,7 +1982,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(refreshed.metadata["current_step"], 1)
         self.assertTrue(str(refreshed.metadata["observe_cursor"]).strip())
 
-        runtime = self.container.channel_runtime_manager.get_runtime(
+        runtime = self.channel_runtime_manager.get_runtime(
             "lark-runtime-observe-1",
         )
         self.assertIsNotNone(runtime)
@@ -1930,7 +1999,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_runtime_projects_tool_result_artifacts_into_interaction_metadata(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
@@ -1941,10 +2010,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-message-1",
         )
-        interaction = self.container.channel_interaction_service.upsert_interaction(
+        interaction = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:message-1",
                 channel_type="lark",
@@ -1965,7 +2034,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 metadata={"active_session_id": "session-inst-msg-1"},
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_message_1"),
                 kind="fact",
@@ -2013,14 +2082,14 @@ class ChannelsModuleTestCase(unittest.TestCase):
             ),
         )
 
-        self.container.lark_channel_runtime_service.run_runtime_loop(
+        self.lark_channel_runtime_service.run_runtime_loop(
             "lark",
             runtime_id="lark-runtime-message-1",
             poll_interval_seconds=0.05,
             max_cycles=1,
         )
 
-        refreshed = self.container.channel_interaction_service.get_interaction(
+        refreshed = self.channel_interaction_service.get_interaction(
             interaction.interaction_id,
         )
         self.assertIsNotNone(refreshed)
@@ -2061,25 +2130,25 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_runtime_projects_assistant_message_directly_from_observe(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-observe-send-1",
         )
-        interaction = self.container.channel_interaction_service.upsert_interaction(
+        interaction = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:assistant-observe-1",
                 channel_type="lark",
@@ -2102,10 +2171,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        legacy_cursor = self.container.events_service.snapshot_event_topic(
+        legacy_cursor = self.events_service.snapshot_event_topic(
             _legacy_runtime_outbound_topic("lark-runtime-observe-send-1"),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_assistant_1"),
                 kind="fact",
@@ -2167,7 +2236,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-observe-send-1",
                 poll_interval_seconds=0.05,
@@ -2184,13 +2253,13 @@ class ChannelsModuleTestCase(unittest.TestCase):
             json.loads(calls[1][2]["json"]["content"])["text"],
             "assistant result from observe",
         )
-        legacy_records = self.container.events_service.read_event_topic(
+        legacy_records = self.events_service.read_event_topic(
             _legacy_runtime_outbound_topic("lark-runtime-observe-send-1"),
             after_cursor=legacy_cursor,
             limit=10,
         )
         self.assertEqual(legacy_records, ())
-        refreshed = self.container.channel_interaction_service.get_interaction(
+        refreshed = self.channel_interaction_service.get_interaction(
             interaction.interaction_id,
         )
         self.assertIsNotNone(refreshed)
@@ -2203,32 +2272,32 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_runtime_projects_tool_result_to_lark_without_legacy_runtime_topic(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-observe-tool-1",
         )
-        image_artifact = self.container.artifact_service.create_artifact(
+        image_artifact = self.artifact_service.create_artifact(
             data=b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==",
             ),
             mime_type="image/png",
             name="generated-observe.png",
         )
-        interaction = self.container.channel_interaction_service.upsert_interaction(
+        interaction = self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:tool-observe-1",
                 channel_type="lark",
@@ -2251,7 +2320,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_tool_observe_1"),
                 kind="fact",
@@ -2324,7 +2393,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-observe-tool-1",
                 poll_interval_seconds=0.05,
@@ -2358,7 +2427,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             json.loads(message_payloads[1]["content"])["image_key"],
             "img_v3_observe_1",
         )
-        refreshed = self.container.channel_interaction_service.get_interaction(
+        refreshed = self.channel_interaction_service.get_interaction(
             interaction.interaction_id,
         )
         self.assertIsNotNone(refreshed)
@@ -2370,25 +2439,25 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
 
     def test_lark_channel_runtime_uses_open_id_for_direct_replies_by_default(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-direct-1",
         )
-        self.container.channel_interaction_service.upsert_interaction(
+        self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:direct-observe-1",
                 channel_type="lark",
@@ -2409,7 +2478,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_user_direct_1"),
                 kind="fact",
@@ -2468,7 +2537,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-direct-1",
                 poll_interval_seconds=0.05,
@@ -2481,26 +2550,28 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(send_call[2]["json"]["receive_id"], "ou_user_direct_1")
 
     def test_lark_channel_runtime_allows_account_receive_id_override(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
+                        },
                         metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
                             "lark_receive_id_type": "chat_id",
                         },
                     ),
                 ),
             ),
         )
-        self.container.lark_channel_runtime_service.ensure_registered(
+        self.lark_channel_runtime_service.ensure_registered(
             runtime_id="lark-runtime-override-1",
         )
-        self.container.channel_interaction_service.upsert_interaction(
+        self.channel_interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="lark:default:event:override-observe-1",
                 channel_type="lark",
@@ -2521,7 +2592,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 status="running",
             ),
         )
-        self.container.events_service.publish(
+        self.events_service.publish(
             Event(
                 topic=turn_session_topic("agent:assistant:lark:dm:ou_user_override_1"),
                 kind="fact",
@@ -2580,7 +2651,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            self.container.lark_channel_runtime_service.run_runtime_loop(
+            self.lark_channel_runtime_service.run_runtime_loop(
                 "lark",
                 runtime_id="lark-runtime-override-1",
                 poll_interval_seconds=0.05,
@@ -2593,16 +2664,16 @@ class ChannelsModuleTestCase(unittest.TestCase):
         self.assertEqual(send_call[2]["json"]["receive_id"], "oc_chat_override_1")
 
     def test_lark_channel_runtime_resolves_bot_open_id_via_bot_info(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="webhook",
-                        metadata={
-                            "lark_app_id": "cli_a",
-                            "lark_app_secret": "secret_a",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
@@ -2638,10 +2709,10 @@ class ChannelsModuleTestCase(unittest.TestCase):
             "crxzipple.modules.channels.application.runtime.request_url",
             side_effect=_fake_request,
         ):
-            open_id = self.container.lark_channel_runtime_service.resolve_bot_open_id_for_account(
+            open_id = self.lark_channel_runtime_service.resolve_bot_open_id_for_account(
                 "default",
             )
-            second_open_id = self.container.lark_channel_runtime_service.resolve_bot_open_id_for_account(
+            second_open_id = self.lark_channel_runtime_service.resolve_bot_open_id_for_account(
                 "default",
             )
 
@@ -2656,7 +2727,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
     def test_lark_channel_runtime_starts_long_connection_ingress_for_long_connection_account(
         self,
     ) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 enabled=True,
@@ -2665,18 +2736,18 @@ class ChannelsModuleTestCase(unittest.TestCase):
                         account_id="default",
                         enabled=True,
                         transport_mode="long_connection",
-                        metadata={
-                            "lark_app_id_binding": "env:LARK_TEST_APP_ID",
-                            "lark_app_secret_binding": "env:LARK_TEST_APP_SECRET",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
                         },
                     ),
                 ),
             ),
         )
-        previous_app_id = os.environ.get("LARK_TEST_APP_ID")
-        previous_app_secret = os.environ.get("LARK_TEST_APP_SECRET")
-        os.environ["LARK_TEST_APP_ID"] = "cli_long_connection"
-        os.environ["LARK_TEST_APP_SECRET"] = "secret_long_connection"
+        previous_app_id = os.environ.get("LARK_APP_ID")
+        previous_app_secret = os.environ.get("LARK_APP_SECRET")
+        os.environ["LARK_APP_ID"] = "cli_long_connection"
+        os.environ["LARK_APP_SECRET"] = "secret_long_connection"
         started: list[dict[str, object]] = []
 
         class _FakeThread:
@@ -2697,7 +2768,7 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 "crxzipple.modules.channels.application.runtime.Thread",
                 _FakeThread,
             ):
-                self.container.lark_channel_runtime_service.run_runtime_loop(
+                self.lark_channel_runtime_service.run_runtime_loop(
                     "lark",
                     runtime_id="lark-runtime-long-1",
                     poll_interval_seconds=0.05,
@@ -2705,20 +2776,20 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 )
         finally:
             if previous_app_id is None:
-                os.environ.pop("LARK_TEST_APP_ID", None)
+                os.environ.pop("LARK_APP_ID", None)
             else:
-                os.environ["LARK_TEST_APP_ID"] = previous_app_id
+                os.environ["LARK_APP_ID"] = previous_app_id
             if previous_app_secret is None:
-                os.environ.pop("LARK_TEST_APP_SECRET", None)
+                os.environ.pop("LARK_APP_SECRET", None)
             else:
-                os.environ["LARK_TEST_APP_SECRET"] = previous_app_secret
+                os.environ["LARK_APP_SECRET"] = previous_app_secret
 
         self.assertEqual(len(started), 1)
         self.assertEqual(started[0]["channel_account_id"], "default")
         self.assertEqual(started[0]["runtime_id"], "lark-runtime-long-1")
 
     def test_channel_runtime_planner_builds_daemon_specs_from_enabled_profiles(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 capabilities=ChannelCapabilities(
@@ -2730,22 +2801,22 @@ class ChannelsModuleTestCase(unittest.TestCase):
                 ),
             ),
         )
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="telegram",
                 enabled=False,
                 accounts=(ChannelAccountProfile(account_id="bot-1"),),
             ),
         )
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="inbox",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="poll"),),
             ),
         )
 
-        plans = self.container.channel_runtime_planner.build_plan(
-            self.container.channel_profile_service.get_system_config(),
+        plans = self.channel_runtime_planner.build_plan(
+            self.channel_profile_service.get_system_config(),
         )
 
         self.assertEqual(len(plans), 1)
@@ -2765,67 +2836,58 @@ class ChannelsModuleTestCase(unittest.TestCase):
         )
         self.assertEqual(plans[0].spec.metadata["env_keys"], [])
 
-    def test_channel_runtime_planner_collects_env_keys_from_binding_metadata(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+    def test_channel_runtime_planner_does_not_export_credential_env_keys(self) -> None:
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="lark",
                 accounts=(
                     ChannelAccountProfile(
                         account_id="default",
                         transport_mode="long_connection",
-                        metadata={
-                            "lark_app_id_binding": "env:LARK_APP_ID",
-                            "lark_app_secret_binding": "env:LARK_APP_SECRET",
-                            "lark_encrypt_key_binding": "env:LARK_ENCRYPT_KEY",
-                            "lark_verification_token_binding": "env:LARK_VERIFICATION_TOKEN",
-                            "lark_bot_open_id_binding": "env:LARK_BOT_OPEN_ID",
+                        credential_bindings={
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
+                            "lark_encrypt_key": "access-binding:lark-encrypt-key",
+                            "lark_verification_token": "access-binding:lark-verification-token",
+                            "lark_bot_open_id": "access-binding:lark-bot-open-id",
                         },
                     ),
                 ),
             ),
         )
 
-        plans = self.container.channel_runtime_planner.build_plan(
-            self.container.channel_profile_service.get_system_config(),
+        plans = self.channel_runtime_planner.build_plan(
+            self.channel_profile_service.get_system_config(),
         )
 
         lark_plan = next(plan for plan in plans if plan.service_key == "channel:lark")
-        self.assertEqual(
-            lark_plan.spec.metadata["env_keys"],
-            [
-                "LARK_APP_ID",
-                "LARK_APP_SECRET",
-                "LARK_BOT_OPEN_ID",
-                "LARK_ENCRYPT_KEY",
-                "LARK_VERIFICATION_TOKEN",
-            ],
-        )
+        self.assertEqual(lark_plan.spec.metadata["env_keys"], [])
 
     def test_channel_control_service_syncs_managed_daemon_specs(self) -> None:
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="web",
                 accounts=(ChannelAccountProfile(account_id="default", transport_mode="sse"),),
             ),
         )
-        self.container.channel_profile_service.upsert_profile(
+        self.channel_profile_service.upsert_profile(
             ChannelProfile(
                 channel_type="telegram",
                 accounts=(ChannelAccountProfile(account_id="bot-1", transport_mode="poll"),),
             ),
         )
 
-        planned = self.container.channel_control_service.sync_daemon_specs()
+        planned = self.channel_control_service.sync_daemon_specs()
         self.assertEqual({spec.key for spec in planned}, {"channel:web", "channel:telegram"})
 
-        daemon_specs = self.container.daemon_service.list_service_specs(service_group="channels")
+        daemon_specs = self.daemon_service.list_service_specs(service_group="channels")
         self.assertEqual({spec.key for spec in daemon_specs}, {"channel:web", "channel:telegram"})
 
-        self.container.channel_profile_service.remove_profile("telegram")
-        planned_after_removal = self.container.channel_control_service.sync_daemon_specs()
+        self.channel_profile_service.remove_profile("telegram")
+        planned_after_removal = self.channel_control_service.sync_daemon_specs()
 
         self.assertEqual({spec.key for spec in planned_after_removal}, {"channel:web"})
-        daemon_specs_after_removal = self.container.daemon_service.list_service_specs(service_group="channels")
+        daemon_specs_after_removal = self.daemon_service.list_service_specs(service_group="channels")
         self.assertEqual({spec.key for spec in daemon_specs_after_removal}, {"channel:web"})
 
 

@@ -18,8 +18,6 @@ class AgentCliTestCase(CliModuleTestCase):
                     "writer",
                     "Writer",
                     "openai.gpt-5.4-mini",
-                    "--description",
-                    "Writes concise summaries.",
                     "--display-name",
                     "Writer Agent",
                     "--stream-by-default",
@@ -183,10 +181,7 @@ class AgentCliTestCase(CliModuleTestCase):
                     (home_dir / "AGENT.md").read_text(encoding="utf-8"),
                     "legacy rules",
                 )
-                self.assertEqual(
-                    (home_dir / "memory" / "notes.md").read_text(encoding="utf-8"),
-                    "remember this",
-                )
+                self.assertFalse((home_dir / "memory" / "notes.md").exists())
 
                 get_result = self.runner.invoke(app, ["agent", "get", "writer"], env=self.env)
                 self.assertEqual(get_result.exit_code, 0)
@@ -301,7 +296,6 @@ class AgentCliTestCase(CliModuleTestCase):
                     "\n".join(
                         [
                             "defaults:",
-                            "  description: Default agent profile description.",
                             "  instruction_policy:",
                             "    stream_by_default: true",
                             "    response_style: concise",

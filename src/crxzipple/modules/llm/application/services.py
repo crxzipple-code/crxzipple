@@ -20,6 +20,7 @@ from crxzipple.modules.llm.domain.exceptions import (
     LlmInvocationNotAllowedError,
     LlmInvocationNotFoundError,
     LlmNotFoundError,
+    LlmValidationError,
 )
 from crxzipple.modules.llm.domain.repositories import (
     LlmInvocationRepository,
@@ -45,6 +46,10 @@ from crxzipple.shared.access import (
     CredentialProvider,
 )
 
+_forbidden_credential_binding_prefixes = ("env:", "file:")
+_forbidden_credential_binding_ids = {"codex_auth_json", "codex-cli", "auth_ref"}
+_forbidden_credential_binding_id_prefixes = ("codex_auth_json:", "auth_ref:")
+
 
 @dataclass(frozen=True, slots=True)
 class RegisterLlmProfileInput:
@@ -57,7 +62,7 @@ class RegisterLlmProfileInput:
     capabilities: tuple[LlmCapability, ...] = field(default_factory=tuple)
     default_params: LlmDefaults = field(default_factory=LlmDefaults)
     base_url: str | None = None
-    credential_binding: str | None = None
+    credential_binding_id: str | None = None
     timeout_seconds: int = 60
     max_concurrency: int | None = None
     concurrency_key: str | None = None
@@ -77,6 +82,13 @@ class LlmProfileImportLike(Protocol):
     provider: str | LlmProviderKind
     api_family: str | LlmApiFamily
     model_name: str
+
+
+class CredentialBindingMetadataProvider(Protocol):
+    def describe_credential_binding(
+        self,
+        binding_id: str,
+    ) -> Mapping[str, object] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +114,15 @@ class StreamLlmInput:
 def register_llm_profile_input_from_config(
     config: LlmProfileImportLike | Mapping[str, Any],
 ) -> RegisterLlmProfileInput:
-    """Convert a legacy import payload into LLM owner-module input."""
+    """Convert an import payload into LLM owner-module input."""
+
+    if any(
+        _config_has(config, key)
+        for key in ("credential_binding", "credential_binding_ref", "auth_ref")  # forbidden legacy profile key
+    ):
+        raise ValueError(
+            "LLM profile config must use credential_binding_id, not credential_binding.",
+        )
 
     return RegisterLlmProfileInput(
         id=str(_config_value(config, "id", _config_value(config, "profile_id"))),
@@ -122,12 +142,8 @@ def register_llm_profile_input_from_config(
             _config_value(config, "default_params", None),
         ),
         base_url=_optional_string_config_value(_config_value(config, "base_url", None)),
-        credential_binding=_credential_binding_from_config_value(
-            _config_value(
-                config,
-                "credential_binding",
-                _config_value(config, "credential_binding_ref", None),
-            ),
+        credential_binding_id=_credential_binding_id_from_config_value(
+            _config_value(config, "credential_binding_id", None),
         ),
         timeout_seconds=_int_config_value(
             _config_value(config, "timeout_seconds", 60),
@@ -165,7 +181,7 @@ def llm_profile_from_register_input(data: RegisterLlmProfileInput) -> LlmProfile
         capabilities=data.capabilities,
         default_params=data.default_params,
         base_url=data.base_url,
-        credential_binding=data.credential_binding,
+        credential_binding_id=data.credential_binding_id,
         timeout_seconds=data.timeout_seconds,
         max_concurrency=data.max_concurrency,
         concurrency_key=data.concurrency_key,
@@ -213,23 +229,7 @@ class LlmApplicationService:
             if uow.llm_profiles.get(data.id) is not None:
                 raise LlmAlreadyExistsError(f"LLM profile '{data.id}' already exists.")
 
-            profile = LlmProfile(
-                id=data.id,
-                provider=data.provider,
-                api_family=data.api_family,
-                model_name=data.model_name,
-                context_window_tokens=data.context_window_tokens,
-                model_family=data.model_family,
-                capabilities=data.capabilities,
-                default_params=data.default_params,
-                base_url=data.base_url,
-                credential_binding=data.credential_binding,
-                timeout_seconds=data.timeout_seconds,
-                max_concurrency=data.max_concurrency,
-                concurrency_key=data.concurrency_key,
-                source_kind=data.source_kind,
-                enabled=data.enabled,
-            )
+            profile = self._build_profile(data)
             profile.record_event(
                 Event(
                     name="llm.profile_registered",
@@ -305,7 +305,7 @@ class LlmApplicationService:
                 capabilities=existing.capabilities,
                 default_params=existing.default_params,
                 base_url=existing.base_url,
-                credential_binding=existing.credential_binding,
+                credential_binding_id=existing.credential_binding_id,
                 timeout_seconds=existing.timeout_seconds,
                 max_concurrency=existing.max_concurrency,
                 concurrency_key=existing.concurrency_key,
@@ -493,6 +493,47 @@ class LlmApplicationService:
             uow.collect(stored)
             uow.commit()
             return stored
+
+    def test_profile(
+        self,
+        profile_data: RegisterLlmProfileInput,
+        data: InvokeLlmInput,
+    ) -> LlmInvocation:
+        profile = self._build_profile(profile_data)
+        adapter = self.adapter_gateway.get(profile.api_family)
+        if adapter is None:
+            raise LlmAdapterNotConfiguredError(
+                f"No llm adapter is configured for api family '{profile.api_family.value}'.",
+            )
+
+        invocation = LlmInvocation(
+            id=data.invocation_id or uuid4().hex,
+            llm_id=profile.id,
+            messages=data.messages,
+            tool_schemas=data.tool_schemas,
+            response_format=data.response_format,
+            request_overrides=data.overrides,
+        )
+        invocation.start()
+
+        try:
+            request = self._build_adapter_request(profile, invocation)
+            with self.concurrency_limiter.limit(profile):
+                response = adapter.invoke(profile, request)
+        except Exception as exc:
+            invocation.fail(
+                LlmErrorPayload(
+                    message=str(exc) or type(exc).__name__,
+                    code="adapter_error",
+                ),
+            )
+            return invocation
+
+        invocation.succeed(
+            response.result,
+            provider_request_id=response.provider_request_id,
+        )
+        return invocation
 
     async def invoke_async(self, data: InvokeLlmInput) -> LlmInvocation:
         profile = await asyncio.to_thread(self._get_enabled_profile, data.llm_id)
@@ -1015,15 +1056,128 @@ class LlmApplicationService:
             ),
         )
 
-    @staticmethod
-    def _build_profile(data: RegisterLlmProfileInput) -> LlmProfile:
+    def _build_profile(self, data: RegisterLlmProfileInput) -> LlmProfile:
+        self._validate_credential_binding_compatibility(data)
         return llm_profile_from_register_input(data)
+
+    def _validate_credential_binding_compatibility(
+        self,
+        data: RegisterLlmProfileInput,
+    ) -> None:
+        inspector = getattr(self.credential_provider, "describe_credential_binding", None)
+        if not callable(inspector):
+            return
+        expectation = _credential_expectation_for(data.provider, data.api_family)
+        binding_id = _optional_string_config_value(data.credential_binding_id)
+        if binding_id is None:
+            if expectation["required"]:
+                raise LlmValidationError(
+                    f"LLM profile '{data.id}' requires {expectation['label']} credential binding.",
+                )
+            return
+        metadata = inspector(binding_id)
+        if metadata is None:
+            raise LlmValidationError(
+                f"LLM profile '{data.id}' references unknown Access credential binding '{binding_id}'.",
+            )
+        if not _credential_binding_matches_expectation(metadata, expectation["kind"]):
+            actual = _credential_binding_type_label(metadata)
+            raise LlmValidationError(
+                f"LLM profile '{data.id}' expects {expectation['label']} credential binding, "
+                f"but '{binding_id}' is {actual}.",
+            )
+
+
+def _credential_expectation_for(
+    provider: LlmProviderKind,
+    api_family: LlmApiFamily,
+) -> dict[str, object]:
+    if (
+        provider is LlmProviderKind.OPENAI_CODEX
+        or api_family is LlmApiFamily.OPENAI_CODEX_RESPONSES
+    ):
+        return {"kind": "oauth2_account", "label": "OAuth account", "required": True}
+    if (
+        provider in {
+            LlmProviderKind.OPENAI,
+            LlmProviderKind.ANTHROPIC,
+            LlmProviderKind.GOOGLE,
+        }
+        or api_family
+        in {
+            LlmApiFamily.OPENAI_RESPONSES,
+            LlmApiFamily.ANTHROPIC_MESSAGES,
+            LlmApiFamily.GEMINI_GENERATE_CONTENT,
+        }
+    ):
+        return {"kind": "api_key", "label": "API key", "required": True}
+    if (
+        provider is LlmProviderKind.OPENAI_COMPATIBLE
+        or api_family is LlmApiFamily.OPENAI_CHAT_COMPATIBLE
+    ):
+        return {"kind": "optional_api_key", "label": "API key or none", "required": False}
+    if provider is LlmProviderKind.OLLAMA or api_family is LlmApiFamily.OLLAMA_NATIVE:
+        return {"kind": "none", "label": "no credential", "required": False}
+    return {"kind": "any", "label": "Access credential", "required": False}
+
+
+def _credential_binding_matches_expectation(
+    metadata: Mapping[str, object],
+    expectation_kind: object,
+) -> bool:
+    if expectation_kind == "any":
+        return True
+    if expectation_kind == "none":
+        return False
+    if expectation_kind == "oauth2_account":
+        return _is_oauth_account_binding(metadata)
+    if expectation_kind in {"api_key", "optional_api_key"}:
+        return _is_api_key_binding(metadata)
+    return True
+
+
+def _is_api_key_binding(metadata: Mapping[str, object]) -> bool:
+    if _is_oauth_account_binding(metadata):
+        return False
+    kind = _metadata_text(metadata, "binding_kind")
+    return kind == "api_key"
+
+
+def _is_oauth_account_binding(metadata: Mapping[str, object]) -> bool:
+    return (
+        _metadata_text(metadata, "source_kind") == "oauth_account"
+        or _metadata_text(metadata, "binding_kind") == "oauth2_account"
+        or _metadata_text(metadata, "binding_kind") == "openid_connect"
+    )
+
+
+def _credential_binding_type_label(metadata: Mapping[str, object]) -> str:
+    if _is_oauth_account_binding(metadata):
+        return "OAuth account"
+    if _is_api_key_binding(metadata):
+        return "API key"
+    return (
+        _metadata_text(metadata, "binding_kind")
+        or _metadata_text(metadata, "source_kind")
+        or "credential"
+    )
+
+
+def _metadata_text(metadata: Mapping[str, object], key: str) -> str:
+    value = metadata.get(key)
+    return str(value).strip().lower() if value is not None else ""
 
 
 def _config_value(config: object, key: str, default: object = None) -> object:
     if isinstance(config, Mapping):
         return config.get(key, default)
     return getattr(config, key, default)
+
+
+def _config_has(config: object, key: str) -> bool:
+    if isinstance(config, Mapping):
+        return key in config
+    return hasattr(config, key)
 
 
 def _coerce_provider_kind(value: object) -> LlmProviderKind:
@@ -1086,22 +1240,26 @@ def _defaults_from_config_value(value: object) -> LlmDefaults:
     return LlmDefaults.from_payload(payload)
 
 
-def _credential_binding_from_config_value(value: object) -> str | None:
+def _credential_binding_id_from_config_value(value: object) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return _optional_string_config_value(value)
-    if isinstance(value, Mapping):
-        for key in ("source_ref", "binding_id", "storage_key"):
-            resolved = _optional_string_config_value(value.get(key))
-            if resolved is not None:
-                return resolved
-        return None
-    for attr_name in ("source_ref", "binding_id", "storage_key"):
-        resolved = _optional_string_config_value(getattr(value, attr_name, None))
-        if resolved is not None:
-            return resolved
-    return None
+        binding_id = _optional_string_config_value(value)
+        if binding_id is not None and _is_forbidden_credential_binding_id(binding_id):
+            raise ValueError(
+                "LLM credential_binding_id must reference an Access credential binding id.",
+            )
+        return binding_id
+    raise TypeError("LLM credential_binding_id must be an Access credential binding id string.")
+
+
+def _is_forbidden_credential_binding_id(value: str) -> bool:
+    normalized = value.strip()
+    return (
+        normalized.startswith(_forbidden_credential_binding_prefixes)
+        or normalized in _forbidden_credential_binding_ids
+        or normalized.startswith(_forbidden_credential_binding_id_prefixes)
+    )
 
 
 def _optional_string_config_value(value: object) -> str | None:
@@ -1134,52 +1292,20 @@ def _bool_config_value(value: object) -> bool:
 def credential_binding_ref_for_profile(
     profile: LlmProfile,
 ) -> CredentialBindingRef | None:
-    binding = _effective_credential_binding(profile)
-    if binding is None:
+    binding_id = _optional_string_config_value(profile.credential_binding_id)
+    if binding_id is None:
         return None
     return CredentialBindingRef(
-        binding_id=binding,
-        source_type=_credential_source_type(binding),
-        source_ref=binding,
+        binding_id=binding_id,
+        source_type="access_credential_binding",
+        source_ref=binding_id,
+        metadata={
+            "module": "llm",
+            "profile_id": profile.id,
+            "provider": profile.provider.value,
+            "api_family": profile.api_family.value,
+        },
     )
-
-
-def public_credential_binding_label(binding: str | None) -> str | None:
-    if binding is None or not binding.strip():
-        return None
-    normalized = binding.strip()
-    if normalized.startswith("env:"):
-        env_name = normalized.removeprefix("env:").strip()
-        return f"env:{env_name}" if env_name else "env"
-    if normalized.startswith("file:"):
-        return "file credential"
-    if normalized.startswith("codex_auth_json") or normalized in {
-        "codex-cli",
-        "codex_auth_json",
-    }:
-        return "codex_auth_json"
-    return "credential binding"
-
-
-def _effective_credential_binding(profile: LlmProfile) -> str | None:
-    if profile.credential_binding is not None and profile.credential_binding.strip():
-        return profile.credential_binding.strip()
-    if profile.api_family is LlmApiFamily.OPENAI_CODEX_RESPONSES:
-        return "codex_auth_json"
-    return None
-
-
-def _credential_source_type(binding: str) -> str:
-    if binding.startswith("env:"):
-        return "env"
-    if binding.startswith("file:"):
-        return "file"
-    if binding.startswith("codex_auth_json") or binding in {
-        "codex-cli",
-        "codex_auth_json",
-    }:
-        return "codex_auth_json"
-    return "binding"
 
 
 def _invocation_started_event_payload(

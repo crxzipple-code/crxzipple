@@ -9,8 +9,6 @@ from crxzipple.shared.settings import (
     AccessConfig,
     MemoryConfig,
     RuntimeDefaultsConfig,
-    SkillEnablementConfig,
-    ToolEnablementConfig,
     ToolProviderConfig,
     ToolRootConfig,
 )
@@ -78,18 +76,6 @@ class SettingsEffectiveConfigMaterializer:
             self._tool_root_from_payload,
         )
 
-    def tool_enablements(self) -> tuple[ToolEnablementConfig, ...]:
-        return self._materialize_many(
-            "tool-catalog",
-            self._tool_enablement_from_payload,
-        )
-
-    def skill_enablements(self) -> tuple[SkillEnablementConfig, ...]:
-        return self._materialize_many(
-            "skill-catalog",
-            self._skill_enablement_from_payload,
-        )
-
     def legacy_channel_profile_payloads(self) -> tuple[JsonObject, ...]:
         return self._materialize_many(
             "channel-profiles",
@@ -108,7 +94,7 @@ class SettingsEffectiveConfigMaterializer:
         return self._materialize_one(
             "runtime-defaults",
             lambda resource_id, payload: RuntimeDefaultsConfig.from_payload(
-                _normalize_runtime_defaults_payload(resource_id, payload),
+                _with_default_id(payload, "config_id", resource_id or "defaults"),
             ),
         )
 
@@ -212,50 +198,6 @@ class SettingsEffectiveConfigMaterializer:
         normalized.setdefault("source_kind", "local")
         return ToolRootConfig.from_payload(normalized)
 
-    def _tool_enablement_from_payload(
-        self,
-        resource_id: str,
-        payload: Mapping[str, Any],
-    ) -> ToolEnablementConfig | None:
-        provider_kind = str(
-            payload.get("provider_kind") or payload.get("kind") or ""
-        ).strip()
-        if provider_kind in {"openapi", "mcp", "local_root"}:
-            return None
-        if _has_selector_payload(
-            payload,
-            ("path", "spec_path", "spec_location", "spec_url", "command"),
-        ):
-            return None
-        if not _looks_like_enablement_payload(payload):
-            return None
-        normalized = dict(payload)
-        if not _has_selector_payload(
-            normalized,
-            ("tool_id", "pattern", "provider_id", "source_kind", "scope"),
-        ):
-            normalized["tool_id"] = resource_id
-        normalized.setdefault("id", resource_id)
-        normalized.setdefault("scope", "tool")
-        return ToolEnablementConfig.from_payload(normalized)
-
-    def _skill_enablement_from_payload(
-        self,
-        resource_id: str,
-        payload: Mapping[str, Any],
-    ) -> SkillEnablementConfig | None:
-        if not _looks_like_enablement_payload(payload):
-            return None
-        normalized = dict(payload)
-        if not _has_selector_payload(
-            normalized,
-            ("skill_id", "pattern", "source", "scope"),
-        ):
-            normalized["skill_id"] = resource_id
-        normalized.setdefault("id", resource_id)
-        normalized.setdefault("scope", "skill")
-        return SkillEnablementConfig.from_payload(normalized)
-
     def _access_config_from_payload(
         self,
         resource_id: str,
@@ -330,37 +272,6 @@ def _required_legacy_text(value: object, *, field_name: str) -> str:
     return normalized
 
 
-def _looks_like_enablement_payload(payload: Mapping[str, Any]) -> bool:
-    if payload.get("config_kind") in {
-        "enablement",
-        "tool_enablement",
-        "skill_enablement",
-    }:
-        return True
-    if payload.get("kind") in {"enablement", "tool_enablement", "skill_enablement"}:
-        return True
-    return any(
-        key in payload
-        for key in (
-            "tool_id",
-            "skill_id",
-            "enabled",
-            "pattern",
-            "scope",
-            "provider_id",
-            "source_kind",
-            "source",
-            "requirement_ids",
-            "allowed_modes",
-            "denied_consumers",
-        )
-    )
-
-
-def _has_selector_payload(payload: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
-    return any(payload.get(key) is not None for key in keys)
-
-
 def _normalize_channel_payload(
     resource_id: str, payload: Mapping[str, Any]
 ) -> JsonObject:
@@ -370,36 +281,6 @@ def _normalize_channel_payload(
         and normalized.get("channel_type") is not None
     ):
         normalized["channel_kind"] = normalized["channel_type"]
-    return normalized
-
-
-def _normalize_runtime_defaults_payload(
-    resource_id: str,
-    payload: Mapping[str, Any],
-) -> JsonObject:
-    normalized = _with_default_id(payload, "config_id", resource_id or "defaults")
-    if any(
-        isinstance(normalized.get(key), Mapping)
-        for key in ("orchestration", "tool_worker", "daemon")
-    ):
-        return normalized
-
-    orchestration: JsonObject = {}
-    tool_worker: JsonObject = {}
-    daemon: JsonObject = {}
-    for key, value in payload.items():
-        if key.startswith("orchestration_"):
-            orchestration[key.removeprefix("orchestration_")] = value
-        elif key.startswith("tool_worker_"):
-            tool_worker[key.removeprefix("tool_worker_")] = value
-        elif key.startswith("tool_run_"):
-            tool_worker[key.removeprefix("tool_")] = value
-        elif key.startswith("daemon_"):
-            daemon[key.removeprefix("daemon_")] = value
-
-    normalized["orchestration"] = orchestration
-    normalized["tool_worker"] = tool_worker
-    normalized["daemon"] = daemon
     return normalized
 
 

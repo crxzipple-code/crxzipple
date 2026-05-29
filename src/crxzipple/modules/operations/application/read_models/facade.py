@@ -12,6 +12,11 @@ from crxzipple.modules.operations.application.read_models.channels import (
     ChannelsOperationsQuery,
     ChannelsOperationsReadModelProvider,
 )
+from crxzipple.modules.operations.application.read_models.browser import (
+    BrowserOperationsPage,
+    BrowserOperationsQuery,
+    BrowserOperationsReadModelProvider,
+)
 from crxzipple.modules.operations.application.read_models.daemon import (
     DaemonOperationsPage,
     DaemonOperationsQuery,
@@ -59,6 +64,7 @@ from crxzipple.modules.operations.application.read_models.tool import (
 class OperationsReadModelProvider:
     orchestration: OrchestrationOperationsReadModelProvider
     tool: ToolOperationsReadModelProvider
+    browser: BrowserOperationsReadModelProvider
     llm: LlmOperationsReadModelProvider
     memory: MemoryOperationsReadModelProvider
     skills: SkillsOperationsReadModelProvider
@@ -76,6 +82,12 @@ class OperationsReadModelProvider:
         query: ToolOperationsQuery | None = None,
     ) -> ToolOperationsPage:
         return self.tool.page(query=query)
+
+    def browser_page(
+        self,
+        query: BrowserOperationsQuery | None = None,
+    ) -> BrowserOperationsPage:
+        return self.browser.page(query=query)
 
     def llm_page(
         self,
@@ -127,6 +139,8 @@ class OperationsReadModelProvider:
             return self.orchestration.overview()
         if module == "tool":
             return self.tool.overview()
+        if module == "browser":
+            return self.browser.overview()
         if module == "llm":
             return self.llm.overview()
         if module == "memory":

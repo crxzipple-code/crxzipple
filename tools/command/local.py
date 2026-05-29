@@ -47,21 +47,49 @@ class SessionBoundWorkspaceResolver:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandToolDeps:
+    session_workspace_lookup: Callable[[str], str | None]
+    process_service: ProcessApplicationService
+
+
+@dataclass(frozen=True, slots=True)
 class RenderedWorkspaceExec:
     content: str
 
 
-def exec(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    process_service = getattr(container, "process_service", None)
+def _coerce_command_deps(value: CommandToolDeps | Any) -> CommandToolDeps | None:
+    if isinstance(value, CommandToolDeps):
+        return value
+    session_workspace_lookup = getattr(value, "session_workspace_lookup", None)
+    process_service = getattr(value, "process_service", None)
     if session_workspace_lookup is None or not isinstance(
         process_service,
         ProcessApplicationService,
     ):
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
+    return CommandToolDeps(
         session_workspace_lookup=session_workspace_lookup,
+        process_service=process_service,
     )
+
+
+def _command_runtime(
+    deps: CommandToolDeps | Any,
+) -> tuple[SessionBoundWorkspaceResolver, ProcessApplicationService] | None:
+    resolved = _coerce_command_deps(deps)
+    if resolved is None:
+        return None
+    workspace_resolver = SessionBoundWorkspaceResolver(
+        session_workspace_lookup=resolved.session_workspace_lookup,
+    )
+    return workspace_resolver, resolved.process_service
+
+
+def exec(deps: CommandToolDeps | Any):
+    runtime = _command_runtime(deps)
+    if runtime is None:
+        return None
+    workspace_resolver, process_service = runtime
 
     async def handler(
         arguments: dict[str, Any],
@@ -147,17 +175,11 @@ def exec(container: Any):
     return handler
 
 
-def process(container: Any):
-    session_workspace_lookup = getattr(container, "session_workspace_lookup", None)
-    process_service = getattr(container, "process_service", None)
-    if session_workspace_lookup is None or not isinstance(
-        process_service,
-        ProcessApplicationService,
-    ):
+def process(deps: CommandToolDeps | Any):
+    runtime = _command_runtime(deps)
+    if runtime is None:
         return None
-    workspace_resolver = SessionBoundWorkspaceResolver(
-        session_workspace_lookup=session_workspace_lookup,
-    )
+    workspace_resolver, process_service = runtime
 
     async def handler(
         arguments: dict[str, Any],

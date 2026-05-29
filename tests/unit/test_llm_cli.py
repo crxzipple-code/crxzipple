@@ -3,8 +3,19 @@ from __future__ import annotations
 from dataclasses import replace
 
 from crxzipple.core.config import load_settings
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.settings import CreateSettingsResourceInput
-from tests.unit.cli_test_support import *
+from tests.unit.cli_test_support import (
+    CliModuleTestCase,
+    Path,
+    SampleLlmApiServer,
+    app,
+    json,
+    os,
+    patch,
+    tempfile,
+    unittest,
+)
 
 
 class LlmCliTestCase(CliModuleTestCase):
@@ -34,8 +45,8 @@ class LlmCliTestCase(CliModuleTestCase):
                     "2",
                     "--concurrency-key",
                     "provider:openai",
-                    "--credential-binding",
-                    "env:OPENAI_API_KEY",
+                    "--credential-binding-id",
+                    "openai-api-key",
                 ],
                 env=self.env,
             )
@@ -51,7 +62,7 @@ class LlmCliTestCase(CliModuleTestCase):
 
         self.assertEqual(list_result.exit_code, 0)
         self.assertIn('"id": "writer"', list_result.stdout)
-        self.assertIn('"credential_binding": "env:OPENAI_API_KEY"', list_result.stdout)
+        self.assertIn('"credential_binding_id": "openai-api-key"', list_result.stdout)
 
     def test_llm_enable_disable_commands_update_runtime_profile(self) -> None:
             register_result = self.runner.invoke(
@@ -63,6 +74,8 @@ class LlmCliTestCase(CliModuleTestCase):
                     "openai",
                     "openai_responses",
                     "gpt-5",
+                    "--credential-binding-id",
+                    "openai-api-key",
                 ],
                 env=self.env,
             )
@@ -98,8 +111,8 @@ class LlmCliTestCase(CliModuleTestCase):
 
     def test_llm_invoke_command_uses_openai_compatible_adapter(self) -> None:
             server = SampleLlmApiServer()
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
             server.start()
             try:
                 register_result = self.runner.invoke(
@@ -113,8 +126,8 @@ class LlmCliTestCase(CliModuleTestCase):
                         "llama3.2",
                         "--base-url",
                         f"{server.base_url}/v1",
-                        "--credential-binding",
-                        "env:OPENAI_COMPATIBLE_TOKEN",
+                        "--credential-binding-id",
+                        "openai-api-key",
                     ],
                     env=self.env,
                 )
@@ -142,9 +155,9 @@ class LlmCliTestCase(CliModuleTestCase):
                 self.assertIn('"name": "search_docs"', invoke_result.stdout)
             finally:
                 if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                    os.environ.pop("OPENAI_API_KEY", None)
                 else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                    os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
 
     def test_llm_sync_profiles_loads_yaml_configs(self) -> None:
@@ -170,7 +183,7 @@ class LlmCliTestCase(CliModuleTestCase):
                             "  extra_body:",
                             "    chat_template_kwargs:",
                             "      enable_thinking: false",
-                            "credential_binding: env:OPENAI_API_KEY",
+                            "credential_binding_id: openai-api-key",
                             "timeout_seconds: 120",
                             "max_concurrency: 2",
                             "concurrency_key: provider:openai",
@@ -219,8 +232,8 @@ class LlmCliTestCase(CliModuleTestCase):
                     database_url=self.harness.database_url,
                     llm_profiles=(),
                 )
-                container = self.harness.build_container(settings=settings)
-                container.settings_action_service.create_resource(
+                container = self.harness.build_runtime_container(settings=settings)
+                container.require(AppKey.SETTINGS_ACTION_SERVICE).create_resource(
                     CreateSettingsResourceInput(
                         resource_id="legacy-openai",
                         resource_kind="llm-profiles",

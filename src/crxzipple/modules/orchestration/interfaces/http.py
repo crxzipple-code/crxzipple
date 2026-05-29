@@ -5,12 +5,13 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationExecutorControlPort,
     OrchestrationRunQueryPort,
-    OrchestrationSchedulerRuntimePort,
+    OrchestrationSchedulerMaintenancePort,
+    OrchestrationSubmissionPort,
 )
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRunNotFoundError,
@@ -47,15 +48,21 @@ def _not_found(exc: OrchestrationRunNotFoundError) -> HTTPException:
 
 
 def _run_query_port(container: AppContainer) -> OrchestrationRunQueryPort:
-    return container.orchestration_run_query_service
+    return container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE)
 
 
-def _scheduler_port(container: AppContainer) -> OrchestrationSchedulerRuntimePort:
-    return container.orchestration_scheduler_service
+def _submission_port(container: AppContainer) -> OrchestrationSubmissionPort:
+    return container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE)
+
+
+def _scheduler_maintenance_port(
+    container: AppContainer,
+) -> OrchestrationSchedulerMaintenancePort:
+    return container.require(AppKey.ORCHESTRATION_SCHEDULER_MAINTENANCE_SERVICE)
 
 
 def _executor_port(container: AppContainer) -> OrchestrationExecutorControlPort:
-    return container.orchestration_executor_service
+    return container.require(AppKey.ORCHESTRATION_EXECUTOR_CONTROL_SERVICE)
 
 
 @router.post(
@@ -67,9 +74,9 @@ def intake_run(
     payload: IntakeOrchestrationRunRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> OrchestrationRunResponse:
-    scheduler_service = _scheduler_port(container)
+    submission_service = _submission_port(container)
     try:
-        run = scheduler_service.submit_turn(
+        run = submission_service.submit_turn(
             payload.to_submit_input(),
             inline_worker_id=(
                 f"http-intake:{payload.run_id or uuid4().hex}"
@@ -153,7 +160,7 @@ def process_assignment_inline(
 def recover_abandoned_runs(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[OrchestrationRunResponse]:
-    scheduler_service = _scheduler_port(container)
+    scheduler_service = _scheduler_maintenance_port(container)
     return [
         OrchestrationRunResponse.from_dto(OrchestrationRunDTO.from_entity(run))
         for run in scheduler_service.recover_abandoned_runs()
@@ -241,7 +248,7 @@ def request_due_heartbeats(
     payload: RequestDueHeartbeatsRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[OrchestrationRunResponse]:
-    scheduler_service = _scheduler_port(container)
+    scheduler_service = _scheduler_maintenance_port(container)
     try:
         runs = scheduler_service.request_due_heartbeats(
             payload.to_input(),
@@ -285,7 +292,7 @@ def resume_run(
     payload: ResumeRunRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> OrchestrationRunResponse:
-    scheduler_service = _scheduler_port(container)
+    scheduler_service = _scheduler_maintenance_port(container)
     try:
         request = payload.to_input(run_id=run_id)
         run = scheduler_service.resume_run(

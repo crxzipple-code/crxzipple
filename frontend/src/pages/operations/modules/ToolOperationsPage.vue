@@ -122,6 +122,7 @@ const activeToolRunsTable = computed(() => page.value?.active_tool_runs ?? empty
 const toolQueueRunsTable = computed(() => page.value?.tool_queue_runs ?? emptyTable("tool_queue_runs", "Queued Tool Runs"));
 const toolWaitingIoTable = computed(() => page.value?.tool_waiting_io ?? emptyTable("tool_waiting_io", "Waiting IO"));
 const toolRunsTable = computed(() => page.value?.tool_runs ?? emptyTable("tool_runs", "Recent Tool Runs"));
+const sourceHealthTable = computed(() => page.value?.source_health ?? emptyTable("source_health", "Source Health"));
 const riskTable = computed(() => page.value?.auth_missing ?? emptyTable("auth_missing", "Runtime Risk / Access"));
 const workersTable = computed(() => page.value?.workers ?? emptyTable("workers", "Workers"));
 const capabilityLimitsTable = computed(() => page.value?.capability_limits ?? emptyTable("capability_limits", "Capability Concurrency"));
@@ -275,12 +276,13 @@ const headerControlItems = computed<ToolInfoItem[]>(() => [
   {
     id: "concurrency",
     label: t("operations.tool.dashboard.concurrencyLimit"),
-    value: workerCapacity.value ? String(workerCapacity.value) : "-",
+    value: metricCard("worker_policy")?.value
+      ?? (workerCapacity.value ? String(workerCapacity.value) : "-"),
   },
   {
     id: "retry_strategy",
     label: t("operations.tool.dashboard.retryStrategy"),
-    value: dominantStrategyLabel.value,
+    value: metricCard("retry_policy")?.value ?? dominantStrategyLabel.value,
   },
 ]);
 const artifactDetailItems = computed<ToolArtifactPreviewItem[]>(() => (
@@ -397,6 +399,8 @@ const compactQueueTable = computed<UiTableSection>(() => ({
 }));
 const mainTable = computed<UiTableSection>(() => {
   switch (activeTab.value) {
+    case "sources":
+      return sourceHealthTable.value;
     case "workers":
       return compactWorkersTable.value;
     case "queue":
@@ -956,6 +960,14 @@ function detailSummaryLabel(label: string): string {
     "Source": t("table.source"),
     "Trace": t("table.trace"),
     "Worker Load": t("table.workerLoad"),
+    "Browser Profile": t("operations.toolDetail.browserProfile"),
+    "Profile Source": t("operations.toolDetail.profileSource"),
+    "Host Service": t("table.serviceKey"),
+    "Host Generation": t("table.hostGeneration"),
+    "Target": t("table.target"),
+    "Page Generation": t("table.pageGeneration"),
+    "Snapshot Generation": t("table.snapshotGeneration"),
+    "Ref Generation": t("table.refGeneration"),
     "Current Run": t("table.currentRun"),
     "Last Heartbeat": t("table.lastHeartbeat"),
     "Lease Expires At": t("table.leaseExpiresAt"),
@@ -1214,7 +1226,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="operations-module-console tool-console scroll-area">
+  <main
+    class="operations-module-console tool-console scroll-area"
+    :class="{ 'tool-console--loading': loading && !page }"
+    :aria-busy="loading ? 'true' : 'false'"
+  >
     <header class="tool-header">
       <div class="tool-title-block">
         <h2>{{ toolText(page?.title ?? "Tool Runtime") }}</h2>
@@ -1891,12 +1907,49 @@ onUnmounted(() => {
   --tool-main-card-min-height: clamp(330px, calc(100dvh - var(--shell-topbar-height) - 430px), 500px);
   --tool-side-card-min-height: 126px;
   --tool-bottom-card-min-height: 104px;
+  position: relative;
   height: calc(100dvh - var(--shell-topbar-height));
   min-width: 0;
   padding: 7px 10px 10px;
   overflow: auto;
   scrollbar-gutter: stable;
   background: linear-gradient(180deg, var(--surface-page-gradient-start), var(--surface-page) 260px);
+}
+
+.tool-console--loading .metric,
+.tool-console--loading .tool-runs-panel,
+.tool-console--loading .tool-side-stack > article {
+  position: relative;
+}
+
+.tool-console--loading .metric::after,
+.tool-console--loading .tool-runs-panel::after,
+.tool-console--loading .tool-side-stack > article::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    color-mix(in srgb, var(--surface-raised) 42%, transparent) 42%,
+    transparent 78%
+  );
+  background-size: 220% 100%;
+  opacity: 0.45;
+  animation: tool-loading-sheen 1.1s ease-in-out infinite;
+}
+
+@keyframes tool-loading-sheen {
+  from {
+    background-position: 120% 0;
+  }
+
+  to {
+    background-position: -120% 0;
+  }
 }
 
 .tool-header,

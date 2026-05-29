@@ -1,4 +1,9 @@
-from crxzipple.modules.memory.domain.entities import IndexedMemoryFile, MemoryItem
+from crxzipple.modules.memory.domain.entities import (
+    IndexedMemoryFile,
+    MemoryItem,
+    MemoryPolicy,
+    MemorySpace,
+)
 from crxzipple.modules.memory.domain.services import (
     MemoryChunkingPolicy,
     MemoryIndexPlanner,
@@ -13,6 +18,10 @@ from crxzipple.modules.memory.domain.value_objects import (
     IndexedChunk,
     IndexSyncPlan,
     MemoryFileKind,
+    MemoryPolicyStatus,
+    MemoryPolicyTargetKind,
+    MemorySpaceOwnerKind,
+    MemorySpaceStatus,
 )
 
 __all__ = [
@@ -24,6 +33,12 @@ __all__ = [
     "MemoryFileKind",
     "MemoryIndexPlanner",
     "MemoryItem",
+    "MemoryPolicy",
+    "MemoryPolicyStatus",
+    "MemoryPolicyTargetKind",
+    "MemorySpace",
+    "MemorySpaceOwnerKind",
+    "MemorySpaceStatus",
     "infer_memory_file_kind",
     "is_memory_relative_path",
     "preview_text",

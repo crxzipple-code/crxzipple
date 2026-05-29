@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.channels.domain import (
     ChannelAccountProfile,
@@ -25,6 +25,7 @@ from crxzipple.modules.channels.domain import (
     channel_dead_letter_topic,
 )
 from crxzipple.modules.channels.application.bindings import (
+    ChannelCredentialResolutionError,
     resolve_channel_metadata_binding,
 )
 from crxzipple.modules.events import Event, EventAddress, EventTopicWatch
@@ -344,6 +345,12 @@ def _channel_access_consumer(
     )
 
 
+def _access_not_ready_http_exception(
+    exc: ChannelCredentialResolutionError,
+) -> HTTPException:
+    return HTTPException(status_code=503, detail=exc.to_payload())
+
+
 def _webhook_signature_config(
     profile: ChannelProfile | None,
     *,
@@ -369,20 +376,6 @@ def _webhook_signature_config(
             field="webhook_signing_secret",
         ),
     )
-    if not secret:
-        secret = resolve_channel_metadata_binding(
-            profile_metadata,
-            key="webhook_signing_secret",
-            description="Webhook signing secret",
-            required=False,
-            credential_provider=credential_provider,
-            consumer=_channel_access_consumer(
-                channel_type="webhook",
-                component="inbound_signature",
-                channel_account_id=channel_account_id,
-                field="webhook_signing_secret",
-            ),
-        )
     if not secret:
         return None
     raw_header = account_metadata.get("webhook_signature_header")
@@ -508,12 +501,13 @@ def _ensure_profile_accepts_account(
 
 
 def _channel_profile_response(profile: ChannelProfile) -> ChannelProfileResponse:
+    payload = profile.to_payload()
     return ChannelProfileResponse(
-        channel_type=profile.channel_type,
-        enabled=profile.enabled,
-        capabilities=profile.capabilities.to_payload(),
-        accounts=[account.to_payload() for account in profile.accounts],
-        metadata=dict(profile.metadata),
+        channel_type=str(payload["channel_type"]),
+        enabled=bool(payload["enabled"]),
+        capabilities=dict(payload["capabilities"]),
+        accounts=list(payload["accounts"]),
+        metadata=dict(payload["metadata"]),
     )
 
 
@@ -725,10 +719,10 @@ def _runtime_summary_response(
     container: AppContainer,
     runtime,
 ) -> ChannelRuntimeSummaryResponse:
-    account_bindings = container.channel_runtime_manager.list_account_bindings(
+    account_bindings = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).list_account_bindings(
         runtime_id=runtime.runtime_id,
     )
-    connection_bindings = container.channel_runtime_manager.list_connection_bindings(
+    connection_bindings = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).list_connection_bindings(
         runtime_id=runtime.runtime_id,
     )
     return ChannelRuntimeSummaryResponse(
@@ -749,7 +743,7 @@ def list_channel_profiles(
 ) -> list[ChannelProfileResponse]:
     return [
         _channel_profile_response(profile)
-        for profile in container.channel_profile_service.list_profiles()
+        for profile in container.require(AppKey.CHANNEL_PROFILE_SERVICE).list_profiles()
     ]
 
 
@@ -758,7 +752,7 @@ def get_channel_profile(
     channel_type: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ChannelProfileResponse:
-    profile = container.channel_profile_service.get_profile(channel_type)
+    profile = container.require(AppKey.CHANNEL_PROFILE_SERVICE).get_profile(channel_type)
     if profile is None:
         raise HTTPException(status_code=404, detail="Channel profile not found.")
     return _channel_profile_response(profile)
@@ -793,7 +787,7 @@ def upsert_channel_profile(
                 "metadata": dict(payload.metadata),
             },
         )
-        saved = container.channel_profile_service.upsert_profile(profile)
+        saved = container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(profile)
     except (ChannelValidationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _channel_profile_response(saved)
@@ -805,7 +799,7 @@ def enable_channel_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ChannelProfileResponse:
     try:
-        profile = container.channel_profile_service.enable_profile(channel_type)
+        profile = container.require(AppKey.CHANNEL_PROFILE_SERVICE).enable_profile(channel_type)
     except ChannelValidationError as exc:
         raise HTTPException(
             status_code=404 if exc.code == "channel_profile_not_found" else 400,
@@ -820,7 +814,7 @@ def disable_channel_profile(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ChannelProfileResponse:
     try:
-        profile = container.channel_profile_service.disable_profile(channel_type)
+        profile = container.require(AppKey.CHANNEL_PROFILE_SERVICE).disable_profile(channel_type)
     except ChannelValidationError as exc:
         raise HTTPException(
             status_code=404 if exc.code == "channel_profile_not_found" else 400,
@@ -834,7 +828,7 @@ def remove_channel_profile(
     channel_type: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[ChannelProfileResponse]:
-    config = container.channel_profile_service.remove_profile(channel_type)
+    config = container.require(AppKey.CHANNEL_PROFILE_SERVICE).remove_profile(channel_type)
     return [_channel_profile_response(profile) for profile in config.profiles]
 
 
@@ -843,7 +837,7 @@ def list_channel_runtimes(
     container: Annotated[AppContainer, Depends(get_container)],
     channel_type: str | None = Query(default=None),
 ) -> list[ChannelRuntimeSummaryResponse]:
-    runtimes = container.channel_runtime_manager.list_runtimes(
+    runtimes = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).list_runtimes(
         channel_type=channel_type,
     )
     return [
@@ -857,13 +851,13 @@ def get_channel_runtime(
     runtime_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> ChannelRuntimeDetailResponse:
-    runtime = container.channel_runtime_manager.get_runtime(runtime_id)
+    runtime = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).get_runtime(runtime_id)
     if runtime is None:
         raise HTTPException(status_code=404, detail="Channel runtime not found.")
-    account_bindings = container.channel_runtime_manager.list_account_bindings(
+    account_bindings = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).list_account_bindings(
         runtime_id=runtime.runtime_id,
     )
-    connection_bindings = container.channel_runtime_manager.list_connection_bindings(
+    connection_bindings = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).list_connection_bindings(
         runtime_id=runtime.runtime_id,
     )
     return ChannelRuntimeDetailResponse(
@@ -909,7 +903,7 @@ def list_channel_dead_letters(
     after_cursor: str | None = Query(default=None),
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> list[ChannelDeadLetterRecordResponse]:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     if events_service is None:
         raise HTTPException(
             status_code=503,
@@ -947,7 +941,7 @@ def replay_channel_dead_letter(
 ) -> ChannelDeadLetterReplayResponse:
     if channel_type.strip().lower() == "webhook":
         try:
-            result = container.webhook_channel_runtime_service.replay_dead_letter_record(
+            result = container.require(AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE).replay_dead_letter_record(
                 runtime_id=payload.runtime_id,
                 cursor=payload.cursor,
                 event_id=payload.event_id,
@@ -996,7 +990,7 @@ async def submit_lark_event(
         raise HTTPException(status_code=400, detail="Invalid Lark event payload.") from exc
     if not isinstance(raw_payload, dict):
         raise HTTPException(status_code=400, detail="Lark event payload must be an object.")
-    lark_profile = container.channel_profile_service.get_profile("lark")
+    lark_profile = container.require(AppKey.CHANNEL_PROFILE_SERVICE).get_profile("lark")
     _ensure_profile_accepts_account(
         lark_profile,
         channel_type="lark",
@@ -1006,19 +1000,22 @@ async def submit_lark_event(
         lark_profile,
         channel_account_id=normalized_account,
     )
-    encrypt_key = resolve_channel_metadata_binding(
-        account_metadata,
-        key="lark_encrypt_key",
-        description="Lark encrypt key",
-        required=False,
-        credential_provider=container.access_service,
-        consumer=_channel_access_consumer(
-            channel_type="lark",
-            component="event_signature",
-            channel_account_id=normalized_account,
-            field="lark_encrypt_key",
-        ),
-    ) or ""
+    try:
+        encrypt_key = resolve_channel_metadata_binding(
+            account_metadata,
+            key="lark_encrypt_key",
+            description="Lark encrypt key",
+            required=False,
+            credential_provider=container.require(AppKey.ACCESS_SERVICE),
+            consumer=_channel_access_consumer(
+                channel_type="lark",
+                component="event_signature",
+                channel_account_id=normalized_account,
+                field="lark_encrypt_key",
+            ),
+        ) or ""
+    except ChannelCredentialResolutionError as exc:
+        raise _access_not_ready_http_exception(exc) from exc
     raw_encrypt = raw_payload.get("encrypt")
     if isinstance(raw_encrypt, str) and raw_encrypt.strip():
         if not encrypt_key:
@@ -1046,19 +1043,22 @@ async def submit_lark_event(
             raw_payload = _decrypt_lark_event(raw_encrypt.strip(), encrypt_key)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-    verification_token = resolve_channel_metadata_binding(
-        account_metadata,
-        key="lark_verification_token",
-        description="Lark verification token",
-        required=False,
-        credential_provider=container.access_service,
-        consumer=_channel_access_consumer(
-            channel_type="lark",
-            component="event_verification",
-            channel_account_id=normalized_account,
-            field="lark_verification_token",
-        ),
-    ) or ""
+    try:
+        verification_token = resolve_channel_metadata_binding(
+            account_metadata,
+            key="lark_verification_token",
+            description="Lark verification token",
+            required=False,
+            credential_provider=container.require(AppKey.ACCESS_SERVICE),
+            consumer=_channel_access_consumer(
+                channel_type="lark",
+                component="event_verification",
+                channel_account_id=normalized_account,
+                field="lark_verification_token",
+            ),
+        ) or ""
+    except ChannelCredentialResolutionError as exc:
+        raise _access_not_ready_http_exception(exc) from exc
     payload_header = raw_payload.get("header")
     header_payload = payload_header if isinstance(payload_header, dict) else {}
     payload_token = str(raw_payload.get("token") or header_payload.get("token") or "").strip()
@@ -1083,7 +1083,7 @@ async def submit_lark_event(
     sender_id_payload = sender_payload.get("sender_id")
     sender_ids = sender_id_payload if isinstance(sender_id_payload, dict) else {}
     try:
-        result = container.lark_channel_runtime_service.submit_message_event(
+        result = container.require(AppKey.LARK_CHANNEL_RUNTIME_SERVICE).submit_message_event(
             normalized_account,
             event_id=str(header_payload.get("event_id") or "").strip() or None,
             sender_open_id=str(sender_ids.get("open_id") or "").strip() or None,
@@ -1101,17 +1101,20 @@ async def submit_webhook_inbound(
     payload: WebhookInboundRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> WebhookInboundAcceptedResponse:
-    webhook_profile = container.channel_profile_service.get_profile("webhook")
+    webhook_profile = container.require(AppKey.CHANNEL_PROFILE_SERVICE).get_profile("webhook")
     _ensure_profile_accepts_account(
         webhook_profile,
         channel_type="webhook",
         channel_account_id=channel_account_id,
     )
-    signature_config = _webhook_signature_config(
-        webhook_profile,
-        channel_account_id=channel_account_id,
-        credential_provider=container.access_service,
-    )
+    try:
+        signature_config = _webhook_signature_config(
+            webhook_profile,
+            channel_account_id=channel_account_id,
+            credential_provider=container.require(AppKey.ACCESS_SERVICE),
+        )
+    except ChannelCredentialResolutionError as exc:
+        raise _access_not_ready_http_exception(exc) from exc
     if signature_config is not None:
         secret, header_name = signature_config
         provided_signature = request.headers.get(header_name)
@@ -1128,7 +1131,7 @@ async def submit_webhook_inbound(
         ):
             raise HTTPException(status_code=401, detail="Invalid webhook signature.")
     try:
-        result = container.webhook_channel_runtime_service.submit_inbound(
+        result = container.require(AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE).submit_inbound(
             channel_account_id,
             content=payload.content,
             callback_url=payload.callback_url,
@@ -1206,7 +1209,7 @@ def update_web_channel_subscription(
         if isinstance(payload.channel_account_id, str) and payload.channel_account_id.strip()
         else "default"
     )
-    existing_binding = container.channel_runtime_manager.resolve_connection_binding(
+    existing_binding = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
         channel_type="web",
         connection_id=normalized_connection_id,
     )
@@ -1215,17 +1218,17 @@ def update_web_channel_subscription(
         if existing_binding is not None
         else None
     )
-    binding = container.channel_runtime_manager.update_connection_subscription(
+    binding = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).update_connection_subscription(
         channel_type="web",
         connection_id=normalized_connection_id,
         conversation_id=normalized_conversation_id,
     )
     if binding is None:
-        runtime = container.channel_runtime_manager.resolve_account_runtime(
+        runtime = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_account_runtime(
             channel_type="web",
             channel_account_id=normalized_channel_account_id,
         )
-        binding = container.web_channel_runtime_service.bind_connection(
+        binding = container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).bind_connection(
             connection_id=normalized_connection_id,
             channel_account_id=normalized_channel_account_id,
             conversation_id=normalized_conversation_id,
@@ -1238,14 +1241,14 @@ def update_web_channel_subscription(
     )
     if conversation_changed and binding.conversation_id:
         binding = (
-            container.web_channel_runtime_service.ensure_connection_source_cursors(
+            container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_connection_source_cursors(
                 connection_id=binding.connection_id,
                 conversation_id=binding.conversation_id,
             )
             or binding
         )
     if conversation_changed or existing_binding is None:
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=channel_connection_control_topic(
                     "web",
@@ -1277,12 +1280,12 @@ def update_web_channel_subscription(
 @router.get("/web/events")
 def stream_web_channel_events(
     container: Annotated[AppContainer, Depends(get_container)],
-    timeout_seconds: Annotated[float, Query(ge=1.0)] = 30.0,
+    timeout_seconds: Annotated[float, Query(gt=0.0, le=300.0)] = 30.0,
     channel_account_id: str | None = Query(default=None),
     connection_id: str | None = Query(default=None),
     conversation_id: str | None = Query(default=None),
 ) -> StreamingResponse:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     web_channel_account_id = (
         channel_account_id.strip()
         if isinstance(channel_account_id, str) and channel_account_id.strip()
@@ -1298,11 +1301,11 @@ def stream_web_channel_events(
         if isinstance(conversation_id, str) and conversation_id.strip()
         else None
     )
-    existing_binding = container.channel_runtime_manager.resolve_connection_binding(
+    existing_binding = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
         channel_type="web",
         connection_id=web_connection_id,
     )
-    connection_binding = container.web_channel_runtime_service.bind_connection(
+    connection_binding = container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).bind_connection(
         connection_id=web_connection_id,
         channel_account_id=(
             existing_binding.channel_account_id
@@ -1330,13 +1333,13 @@ def stream_web_channel_events(
     )
     if connection_binding.conversation_id:
         connection_binding = (
-            container.web_channel_runtime_service.ensure_connection_source_cursors(
+            container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).ensure_connection_source_cursors(
                 connection_id=connection_binding.connection_id,
                 conversation_id=connection_binding.conversation_id,
             )
             or connection_binding
         )
-    runtime = container.channel_runtime_manager.get_runtime(connection_binding.runtime_id)
+    runtime = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).get_runtime(connection_binding.runtime_id)
     broadcast_topics = tuple(
         dict.fromkeys(
             (
@@ -1377,7 +1380,7 @@ def stream_web_channel_events(
             )
 
             while time.monotonic() < deadline:
-                latest_binding = container.channel_runtime_manager.resolve_connection_binding(
+                latest_binding = container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
                     channel_type="web",
                     connection_id=web_connection_id,
                 )
@@ -1410,7 +1413,7 @@ def stream_web_channel_events(
                 )
                 if direct_observe_topic is not None:
                     direct_observe_records = (
-                        container.web_channel_runtime_service.read_connection_observe_records(
+                        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).read_connection_observe_records(
                             connection_id=web_connection_id,
                             conversation_id=direct_live_conversation_id,
                             limit=100,
@@ -1433,7 +1436,7 @@ def stream_web_channel_events(
                         )
                 if direct_live_topic is not None:
                     direct_live_records = (
-                        container.web_channel_runtime_service.read_connection_live_records(
+                        container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).read_connection_live_records(
                             connection_id=web_connection_id,
                             conversation_id=direct_live_conversation_id,
                             limit=1,
@@ -1491,7 +1494,7 @@ def stream_web_channel_events(
                     break
                 wait_timeout = remaining
                 wait_binding = (
-                    container.channel_runtime_manager.resolve_connection_binding(
+                    container.require(AppKey.CHANNEL_RUNTIME_MANAGER).resolve_connection_binding(
                         channel_type="web",
                         connection_id=web_connection_id,
                     )
@@ -1505,7 +1508,7 @@ def stream_web_channel_events(
                     else None
                 )
                 wait_items.extend(
-                    container.web_channel_runtime_service.build_connection_wait_watches(
+                    container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).build_connection_wait_watches(
                         connection_id=web_connection_id,
                         conversation_id=wait_conversation_id,
                         broadcast_topics=broadcast_topics,
@@ -1531,7 +1534,7 @@ def stream_web_channel_events(
                 },
             )
         finally:
-            container.web_channel_runtime_service.unbind_connection(web_connection_id)
+            container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE).unbind_connection(web_connection_id)
 
     return StreamingResponse(
         event_stream(),

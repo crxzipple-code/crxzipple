@@ -18,6 +18,7 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
 from crxzipple.shared.access import (
     AccessConsumerRef,
+    AccessCredentialKind,
     CredentialBindingRef,
     CredentialProvider,
 )
@@ -91,6 +92,7 @@ def register_openapi_remote_handlers(
     *,
     credential_provider: CredentialProvider,
     max_concurrency: int | None = None,
+    replace: bool = False,
 ) -> None:
     invoker = OpenApiRemoteInvoker(credential_provider)
     for operation in operations:
@@ -108,6 +110,7 @@ def register_openapi_remote_handlers(
             handler,
             concurrency_key=f"openapi:{operation.provider_name}",
             max_concurrency=max_concurrency,
+            replace=replace,
         )
 
 
@@ -255,10 +258,11 @@ def _apply_security_requirement(
             )
 
         if scheme.scheme_type == "apiKey":
-            secret = _resolve_secret_source(
-                binding.source,
+            secret = _resolve_credential_binding(
+                binding.credential_binding_id,
                 scheme_name=scheme_name,
                 operation=operation,
+                expected_kind=_credential_kind_for_scheme(scheme),
                 credential_provider=credential_provider,
             )
             if scheme.location == "header":
@@ -288,18 +292,20 @@ def _apply_security_requirement(
         if scheme.scheme_type == "http":
             http_scheme = (scheme.http_scheme or "").lower()
             if http_scheme == "basic":
-                username = _resolve_secret_source(
-                    binding.username_source,
+                username = _resolve_credential_binding(
+                    binding.username_binding_id,
                     scheme_name=scheme_name,
-                    field_name="username_source",
+                    field_name="username_binding_id",
                     operation=operation,
+                    expected_kind=_credential_kind_for_scheme(scheme),
                     credential_provider=credential_provider,
                 )
-                password = _resolve_secret_source(
-                    binding.password_source,
+                password = _resolve_credential_binding(
+                    binding.password_binding_id,
                     scheme_name=scheme_name,
-                    field_name="password_source",
+                    field_name="password_binding_id",
                     operation=operation,
+                    expected_kind=_credential_kind_for_scheme(scheme),
                     credential_provider=credential_provider,
                 )
                 token = base64.b64encode(
@@ -308,10 +314,11 @@ def _apply_security_requirement(
                 draft_headers["Authorization"] = f"Basic {token}"
                 continue
 
-            token = _resolve_secret_source(
-                binding.source,
+            token = _resolve_credential_binding(
+                binding.credential_binding_id,
                 scheme_name=scheme_name,
                 operation=operation,
+                expected_kind=_credential_kind_for_scheme(scheme),
                 credential_provider=credential_provider,
             )
             if http_scheme == "bearer":
@@ -325,10 +332,11 @@ def _apply_security_requirement(
             continue
 
         if scheme.scheme_type in {"oauth2", "openIdConnect"}:
-            token = _resolve_secret_source(
-                binding.source,
+            token = _resolve_credential_binding(
+                binding.credential_binding_id,
                 scheme_name=scheme_name,
                 operation=operation,
+                expected_kind=_credential_kind_for_scheme(scheme),
                 credential_provider=credential_provider,
             )
             draft_headers["Authorization"] = f"Bearer {token}"
@@ -345,25 +353,28 @@ def _apply_security_requirement(
     return query_items
 
 
-def _resolve_secret_source(
-    source: str | None,
+def _resolve_credential_binding(
+    binding_id: str | None,
     *,
     scheme_name: str,
-    field_name: str = "source",
+    field_name: str = "credential_binding_id",
     operation: OpenApiOperation,
+    expected_kind: AccessCredentialKind | None = None,
     credential_provider: CredentialProvider,
 ) -> str:
-    if source is None or not source.strip():
+    if binding_id is None or not binding_id.strip():
         raise ToolValidationError(
             f"OpenAPI credential binding for security scheme '{scheme_name}' is missing {field_name}.",
         )
+    normalized_binding_id = binding_id.strip()
 
     try:
         return credential_provider.resolve_credential(
             CredentialBindingRef(
-                binding_id=f"openapi:{operation.provider_name}:{scheme_name}:{field_name}",
-                source_type=_credential_source_type(source),
-                source_ref=source,
+                binding_id=normalized_binding_id,
+                source_type="binding",
+                source_ref=normalized_binding_id,
+                expected_kind=expected_kind,
                 metadata={
                     "provider": operation.provider_name,
                     "scheme_name": scheme_name,
@@ -388,17 +399,23 @@ def _resolve_secret_source(
         ) from exc
 
 
-def _credential_source_type(binding: str) -> str:
-    if binding.startswith("env:"):
-        return "env"
-    if binding.startswith("file:"):
-        return "file"
-    if binding.startswith("codex_auth_json") or binding in {
-        "codex-cli",
-        "codex_auth_json",
-    }:
-        return "codex_auth_json"
-    return "binding"
+def _credential_kind_for_scheme(
+    scheme: OpenApiSecurityScheme,
+) -> AccessCredentialKind | None:
+    scheme_type = scheme.scheme_type.strip().lower()
+    if scheme_type == "apikey":
+        return AccessCredentialKind.API_KEY
+    if scheme_type == "http":
+        http_scheme = (scheme.http_scheme or "").strip().lower()
+        if http_scheme == "bearer":
+            return AccessCredentialKind.BEARER_TOKEN
+        if http_scheme == "basic":
+            return AccessCredentialKind.BASIC
+    if scheme_type == "oauth2":
+        return AccessCredentialKind.OAUTH2_ACCOUNT
+    if scheme_type == "openidconnect":
+        return AccessCredentialKind.OPENID_CONNECT
+    return None
 
 
 def _sanitize_request_url(url: str, operation: OpenApiOperation) -> str:

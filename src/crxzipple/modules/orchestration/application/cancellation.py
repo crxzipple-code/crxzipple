@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from crxzipple.core.logger import get_logger
+from crxzipple.modules.orchestration.application.ports import (
+    RunDispatchPort,
+    SessionCatalogPort,
+)
 from crxzipple.modules.orchestration.application.unit_of_work import (
     OrchestrationUnitOfWork,
 )
@@ -17,9 +22,70 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
     OrchestrationValidationError,
 )
-from crxzipple.modules.session.application import SessionApplicationService
 
 logger = get_logger(__name__)
+
+
+def cancel_run_record(
+    uow_factory: Callable[[], Any],
+    dispatch_port: RunDispatchPort,
+    run_id: str,
+    *,
+    reason: str | None = None,
+) -> OrchestrationRun:
+    with uow_factory() as uow:
+        run = uow.orchestration_runs.get(run_id)
+        if run is None:
+            raise OrchestrationRunNotFoundError(
+                f"Orchestration run '{run_id}' was not found.",
+            )
+        run.cancel(reason=reason)
+        dispatch_port.cancel(uow.dispatch_tasks, uow, run)
+        uow.orchestration_waits.delete_for_run(run.id)
+        uow.orchestration_runs.add(run)
+        uow.collect(run)
+        uow.commit()
+        return run
+
+
+def fail_run_record(
+    uow_factory: Callable[[], Any],
+    dispatch_port: RunDispatchPort,
+    run_id: str,
+    *,
+    worker_id: str,
+    message: str,
+    code: str,
+    details: dict[str, object],
+) -> OrchestrationRun | None:
+    with uow_factory() as uow:
+        run = uow.orchestration_runs.get(run_id)
+        if run is None:
+            return None
+        run.fail(
+            worker_id=worker_id,
+            message=message,
+            code=code,
+            details=details,
+        )
+        dispatch_port.fail(uow.dispatch_tasks, uow, run)
+        uow.orchestration_waits.delete_for_run(run.id)
+        uow.orchestration_runs.add(run)
+        uow.collect(run)
+        uow.commit()
+        return run
+
+
+def release_executor_assignment_capacity(
+    uow_factory: Callable[[], Any],
+    *,
+    worker_id: str,
+) -> None:
+    with uow_factory() as uow:
+        uow.orchestration_executor_leases.release_assignment_capacity(
+            worker_id=worker_id,
+        )
+        uow.commit()
 
 
 @dataclass(slots=True)
@@ -27,7 +93,7 @@ class RunCancellationService:
     """Owns run and session-tree cancellation semantics."""
 
     uow_factory: Callable[[], OrchestrationUnitOfWork]
-    session_service: SessionApplicationService | None
+    session_service: SessionCatalogPort | None
     get_run: Callable[[str], OrchestrationRun]
     list_runs: Callable[[], list[OrchestrationRun]]
     cancel_run_record: Callable[..., OrchestrationRun]
@@ -188,3 +254,34 @@ class RunCancellationService:
                 f"Orchestration run '{run_id}' was not found.",
             )
         return run
+
+
+def build_run_cancellation_service(
+    *,
+    uow_factory: Callable[[], Any],
+    session_service: SessionCatalogPort | None,
+    run_query_service,
+    dispatch_port: RunDispatchPort,
+    cancel_tool_run: Callable[[str], object] | None = None,
+) -> RunCancellationService:
+    return RunCancellationService(
+        uow_factory=uow_factory,
+        session_service=session_service,
+        get_run=run_query_service.get_run,
+        list_runs=run_query_service.list_runs,
+        cancel_run_record=(
+            lambda run_id, *, reason=None: cancel_run_record(
+                uow_factory,
+                dispatch_port,
+                run_id,
+                reason=reason,
+            )
+        ),
+        release_executor_assignment=(
+            lambda *, worker_id: release_executor_assignment_capacity(
+                uow_factory,
+                worker_id=worker_id,
+            )
+        ),
+        cancel_tool_run=cancel_tool_run,
+    )

@@ -10,6 +10,8 @@ class AccessReadinessStatus(StrEnum):
     SETUP_NEEDED = "setup_needed"
     WAITING_USER = "waiting_user"
     EXPIRED = "expired"
+    CREDENTIAL_KIND_MISMATCH = "credential_kind_mismatch"
+    CREDENTIAL_SOURCE_KIND_MISMATCH = "credential_source_kind_mismatch"
     UNSUPPORTED = "unsupported"
 
 

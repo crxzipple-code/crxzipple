@@ -4,8 +4,9 @@ import os
 import unittest
 
 from crxzipple.modules import MODULE_NAMES
-from crxzipple.modules.tool.application import RegisterToolInput
-from crxzipple.shared.domain.events import Event
+from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.tool.domain.exceptions import ToolNotFoundError
+from tests.unit.tool_catalog_seed import seed_catalog_tool
 from tests.unit.support import SqliteTestHarness
 
 
@@ -16,10 +17,11 @@ class SkeletonTestCase(unittest.TestCase):
         )
         os.environ["APP_TOOL_OPENAPI_PROVIDER_PATHS"] = os.pathsep
         self.harness = SqliteTestHarness()
-        self.container = self.harness.build_container()
+        self.container = self.harness.build_runtime_container()
+        self.tool_service = self.container.require(AppKey.TOOL_SERVICE)
+        self.event_bus = self.container.require(AppKey.EVENTS_BUS)
 
     def tearDown(self) -> None:
-        self.container.engine.dispose()
         self.harness.close()
         if self.previous_openapi_provider_paths is None:
             os.environ.pop("APP_TOOL_OPENAPI_PROVIDER_PATHS", None)
@@ -44,27 +46,19 @@ class SkeletonTestCase(unittest.TestCase):
             ),
         )
 
-    def test_tool_service_registers_runtime_tool_and_publishes_event(self) -> None:
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="search",
-                name="Search",
-                description="Query external knowledge",
-            ),
+    def test_tool_service_reads_catalog_tool(self) -> None:
+        with self.assertRaises(ToolNotFoundError):
+            self.tool_service.get_tool("search")
+
+        tool = seed_catalog_tool(
+            self.container,
+            tool_id="search",
+            name="Search",
+            description="Query external knowledge",
         )
 
         self.assertEqual(tool.id, "search")
-        self.assertEqual(self.container.tool_service.get_tool("search"), tool)
-        published_events = [
-            event
-            for event in self.container.event_bus.published_events
-            if isinstance(event, Event) and bool(event.name)
-        ]
-        self.assertEqual(len(published_events), 1)
-        self.assertEqual(
-            published_events[0].event_name,
-            "tool.registered",
-        )
+        self.assertEqual(self.tool_service.get_tool("search"), tool)
 
 
 if __name__ == "__main__":

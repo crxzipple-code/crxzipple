@@ -301,6 +301,16 @@ class OperationsObservationStore(Protocol):
     def snapshot(self) -> OperationsObservationSnapshot:
         ...
 
+    def list_event_buckets(
+        self,
+        *,
+        module: str | None = None,
+        event_name: str | None = None,
+        since: datetime | None = None,
+        limit: int = 500,
+    ) -> tuple[dict[str, Any], ...]:
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class OperationsEventObserver:
@@ -443,6 +453,11 @@ def _entity_id(payload: dict[str, Any], *, fallback: str) -> str:
         "source_event_id",
         "connection_id",
         "runtime_id",
+        "resource_id",
+        "target_id",
+        "binding_id",
+        "credential_binding_id",
+        "audit_ref",
     ):
         value = _optional_text(payload.get(key))
         if value:

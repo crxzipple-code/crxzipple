@@ -3,6 +3,7 @@ import {
   Brain,
   ChevronRight,
   Database,
+  Globe2,
   Grid2X2,
   LayoutGrid,
   MessageCircle,
@@ -50,6 +51,7 @@ const eventDrivenRefreshTimers = new Map<OperationsModuleId | "runtime", number>
 const moduleNav: ModuleNavItem[] = [
   { id: "orchestration", labelKey: "operations.module.orchestration", tone: "success", healthy: 0, warning: 0, error: 0, icon: Grid2X2 },
   { id: "tool", labelKey: "operations.module.tool", tone: "success", healthy: 0, warning: 0, error: 0, icon: Wrench },
+  { id: "browser", labelKey: "operations.module.browser", tone: "success", healthy: 0, warning: 0, error: 0, icon: Globe2 },
   { id: "llm", labelKey: "operations.module.llm", tone: "success", healthy: 0, warning: 0, error: 0, icon: Brain },
   { id: "access", labelKey: "operations.module.access", tone: "success", healthy: 0, warning: 0, error: 0, icon: Shield },
   { id: "channels", labelKey: "operations.module.channels", tone: "success", healthy: 0, warning: 0, error: 0, icon: MessageCircle },
@@ -62,6 +64,7 @@ const moduleNav: ModuleNavItem[] = [
 const moduleComponents = {
   orchestration: defineAsyncComponent(() => import("./modules/OrchestrationOperationsPage.vue")),
   tool: defineAsyncComponent(() => import("./modules/ToolOperationsPage.vue")),
+  browser: defineAsyncComponent(() => import("./modules/BrowserOperationsPage.vue")),
   llm: defineAsyncComponent(() => import("./modules/LlmOperationsPage.vue")),
   access: defineAsyncComponent(() => import("./modules/AccessOperationsPage.vue")),
   channels: defineAsyncComponent(() => import("./modules/ChannelsOperationsPage.vue")),

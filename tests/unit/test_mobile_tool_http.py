@@ -7,6 +7,7 @@ import unittest
 
 from crxzipple.modules.mobile.domain import MobileExecutionError, MobileValidationError
 from tools.mobile.local import (
+    MobileToolDeps,
     mobile_screenshot,
     mobile_script,
     mobile_snapshot,
@@ -16,13 +17,16 @@ from tools.mobile.local import (
 )
 
 
+def _mobile_deps(facade: object, serializer: object) -> MobileToolDeps:
+    return MobileToolDeps(
+        mobile_facade=facade,
+        mobile_result_serializer=serializer,
+    )
+
+
 class MobileToolHttpTestCase(unittest.TestCase):
     def test_mobile_type_handler_requires_ref_or_selector(self) -> None:
-        container = SimpleNamespace(
-            mobile_facade=SimpleNamespace(),
-            mobile_result_serializer=SimpleNamespace(),
-        )
-        handler = mobile_type(container)
+        handler = mobile_type(_mobile_deps(SimpleNamespace(), SimpleNamespace()))
         assert handler is not None
 
         with self.assertRaises(MobileValidationError) as context:
@@ -70,13 +74,9 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
         from tools.mobile.local import mobile_devices
 
-        handler = mobile_devices(container)
+        handler = mobile_devices(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(handler({}))
@@ -113,11 +113,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_snapshot(container)
+        handler = mobile_snapshot(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -161,11 +157,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_screenshot(container)
+        handler = mobile_screenshot(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -204,11 +196,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_swipe(container)
+        handler = mobile_swipe(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -273,11 +261,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_tap(container)
+        handler = mobile_tap(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(handler({"device": "pixel", "ref": "g1-m1"}))
@@ -318,11 +302,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_tap(container)
+        handler = mobile_tap(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -372,11 +352,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_tap(container)
+        handler = mobile_tap(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -423,11 +399,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_tap(container)
+        handler = mobile_tap(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(handler({"device": "pixel", "ref": "g1-m1"}))
@@ -477,11 +449,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_script(container)
+        handler = mobile_script(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -556,11 +524,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
                     "value": result.value,
                 }
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_script(container)
+        handler = mobile_script(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         result = asyncio.run(
@@ -593,11 +557,7 @@ class MobileToolHttpTestCase(unittest.TestCase):
             def serialize(result):  # noqa: ANN001, ANN201
                 raise AssertionError(f"unexpected result: {result}")
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=_Serializer(),
-        )
-        handler = mobile_script(container)
+        handler = mobile_script(_mobile_deps(_Facade(), _Serializer()))
         assert handler is not None
 
         with self.assertRaisesRegex(

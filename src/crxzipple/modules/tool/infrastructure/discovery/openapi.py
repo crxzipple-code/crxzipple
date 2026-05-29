@@ -1,16 +1,29 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from crxzipple.modules.tool.application.capabilities import (
+    DEFAULT_TOOL_CAPABILITY_CATALOG,
+)
 from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.core.config import OpenApiCredentialBinding, OpenApiProviderSettings
-from crxzipple.modules.tool.domain import ToolSourceKind
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    AccessCredentialKind,
+    AccessCredentialRequirementDeclaration,
+    AccessCredentialRequirementSet,
+    AccessCredentialSlotRef,
+    AccessCredentialTransport,
+    AccessSetupFlowHint,
+    AccessSetupFlowKind,
+)
+from crxzipple.modules.tool.domain import ToolDefinitionOrigin
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.domain.value_objects import (
     ToolEnvironment,
@@ -33,11 +46,13 @@ class OpenApiSecurityScheme:
     parameter_name: str | None = None
     location: str | None = None
     http_scheme: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class OpenApiSecurityRequirement:
     scheme_names: tuple[str, ...]
+    scopes_by_scheme: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +75,7 @@ class OpenApiOperation:
     security_requirements: tuple[OpenApiSecurityRequirement, ...] = ()
     credential_bindings: tuple[OpenApiCredentialBinding, ...] = ()
     required_effect_ids: tuple[str, ...] = ()
+    capability_ids: tuple[str, ...] = ()
 
     def to_tool_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -72,6 +88,8 @@ class OpenApiOperation:
             tags=self.tags,
             required_effect_ids=self.required_effect_ids,
             access_requirement_sets=_operation_access_requirement_sets(self),
+            credential_requirements=_operation_credential_requirement_sets(self),
+            capability_ids=self.capability_ids,
             execution_policy=ToolExecutionPolicy(
                 timeout_seconds=self.timeout_seconds,
                 requires_confirmation=False,
@@ -82,17 +100,25 @@ class OpenApiOperation:
                 supported_strategies=(ToolExecutionStrategy.ASYNC,),
                 supported_environments=(ToolEnvironment.REMOTE,),
             ),
-            source_kind=ToolSourceKind.REMOTE_REGISTRY,
+            definition_origin=ToolDefinitionOrigin.REMOTE_DISCOVERY,
             runtime_key=self.runtime_key,
             enabled=True,
         )
 
 
 class OpenApiDiscoveryProvider:
-    source_kind = ToolSourceKind.REMOTE_REGISTRY
+    definition_origin = ToolDefinitionOrigin.REMOTE_DISCOVERY
 
-    def __init__(self, config: OpenApiProviderSettings) -> None:
+    def __init__(
+        self,
+        config: OpenApiProviderSettings,
+        *,
+        capability_ids: tuple[str, ...] = (),
+    ) -> None:
         self.config = config
+        self.capability_ids = DEFAULT_TOOL_CAPABILITY_CATALOG.validate_capability_ids(
+            capability_ids,
+        )
         self.name = config.name
         self.description = (
             config.description
@@ -105,7 +131,12 @@ class OpenApiDiscoveryProvider:
 
     def operations(self) -> tuple[OpenApiOperation, ...]:
         if self._operations_cache is None:
-            self._operations_cache = tuple(_parse_operations(self.config))
+            self._operations_cache = tuple(
+                _parse_operations(
+                    self.config,
+                    capability_ids=self.capability_ids,
+                ),
+            )
         return self._operations_cache
 
 
@@ -141,9 +172,9 @@ def _credential_binding_requirements(
     binding: OpenApiCredentialBinding,
 ) -> tuple[str, ...]:
     values = (
-        binding.source,
-        binding.username_source,
-        binding.password_source,
+        binding.credential_binding_id,
+        binding.username_binding_id,
+        binding.password_binding_id,
     )
     return tuple(
         dict.fromkeys(
@@ -154,7 +185,220 @@ def _credential_binding_requirements(
     )
 
 
-def _parse_operations(config: OpenApiProviderSettings) -> list[OpenApiOperation]:
+def _operation_credential_requirement_sets(
+    operation: OpenApiOperation,
+) -> tuple[AccessCredentialRequirementSet, ...]:
+    if not operation.security_requirements:
+        return ()
+
+    schemes_by_name = {scheme.name: scheme for scheme in operation.security_schemes}
+    bindings_by_name = {
+        binding.scheme_name: binding for binding in operation.credential_bindings
+    }
+    consumer = AccessConsumerRef(
+        consumer_id=operation.tool_id,
+        module="tool",
+        component="openapi",
+        runtime_ref=operation.runtime_key,
+        metadata={"provider_name": operation.provider_name},
+    )
+    requirement_sets: list[AccessCredentialRequirementSet] = []
+    for index, requirement in enumerate(operation.security_requirements):
+        declarations: list[AccessCredentialRequirementDeclaration] = []
+        for scheme_name in requirement.scheme_names:
+            scheme = schemes_by_name.get(scheme_name)
+            if scheme is None:
+                continue
+            declarations.extend(
+                _credential_requirement_declarations(
+                    operation=operation,
+                    consumer=consumer,
+                    scheme=scheme,
+                    binding=bindings_by_name.get(scheme_name),
+                    scopes=requirement.scopes_by_scheme.get(scheme_name, ()),
+                ),
+            )
+        requirement_sets.append(
+            AccessCredentialRequirementSet(
+                requirement_set_id=f"{operation.tool_id}.security.{index}",
+                consumer=consumer,
+                requirements=tuple(declarations),
+                alternative=len(operation.security_requirements) > 1,
+                metadata={"security_requirement_index": index},
+            ),
+        )
+    if any(not requirement_set.requirements for requirement_set in requirement_sets):
+        return (
+            AccessCredentialRequirementSet(
+                requirement_set_id=f"{operation.tool_id}.security.none",
+                consumer=consumer,
+                requirements=(),
+                alternative=True,
+                metadata={"openapi_security": "optional"},
+            ),
+        )
+    return tuple(requirement_sets)
+
+
+def _credential_requirement_declarations(
+    *,
+    operation: OpenApiOperation,
+    consumer: AccessConsumerRef,
+    scheme: OpenApiSecurityScheme,
+    binding: OpenApiCredentialBinding | None,
+    scopes: tuple[str, ...],
+) -> tuple[AccessCredentialRequirementDeclaration, ...]:
+    kind = _credential_kind_for_scheme(scheme)
+    if kind is None:
+        return ()
+    transport = _credential_transport_for_scheme(scheme)
+    if kind is AccessCredentialKind.BASIC:
+        return (
+            _credential_requirement_declaration(
+                operation=operation,
+                consumer=consumer,
+                scheme=scheme,
+                slot=f"{scheme.name}.username",
+                kind=kind,
+                transport=transport,
+                scopes=scopes,
+                binding_id=binding.username_binding_id if binding else None,
+                metadata={"basic_part": "username"},
+            ),
+            _credential_requirement_declaration(
+                operation=operation,
+                consumer=consumer,
+                scheme=scheme,
+                slot=f"{scheme.name}.password",
+                kind=kind,
+                transport=transport,
+                scopes=scopes,
+                binding_id=binding.password_binding_id if binding else None,
+                metadata={"basic_part": "password"},
+            ),
+        )
+    return (
+        _credential_requirement_declaration(
+            operation=operation,
+            consumer=consumer,
+            scheme=scheme,
+            slot=scheme.name,
+            kind=kind,
+            transport=transport,
+            scopes=scopes,
+            binding_id=binding.credential_binding_id if binding else None,
+            metadata={},
+        ),
+    )
+
+
+def _credential_requirement_declaration(
+    *,
+    operation: OpenApiOperation,
+    consumer: AccessConsumerRef,
+    scheme: OpenApiSecurityScheme,
+    slot: str,
+    kind: AccessCredentialKind,
+    transport: AccessCredentialTransport,
+    scopes: tuple[str, ...],
+    binding_id: str | None,
+    metadata: dict[str, Any],
+) -> AccessCredentialRequirementDeclaration:
+    return AccessCredentialRequirementDeclaration(
+        requirement_id=f"{operation.tool_id}.{slot}",
+        consumer=consumer,
+        slot=AccessCredentialSlotRef(
+            slot=slot,
+            expected_kind=kind,
+            binding_id=binding_id,
+            display_name=slot,
+            scopes=scopes,
+            metadata={"openapi_security_scheme": scheme.name},
+        ),
+        provider=operation.provider_name,
+        transport=transport,
+        parameter_name=scheme.parameter_name,
+        setup_flow_hint=_setup_flow_hint_for_scheme(scheme),
+        metadata={
+            "openapi_security_scheme": scheme.name,
+            "openapi_security_type": scheme.scheme_type,
+            **scheme.metadata,
+            **metadata,
+        },
+    )
+
+
+def _credential_kind_for_scheme(
+    scheme: OpenApiSecurityScheme,
+) -> AccessCredentialKind | None:
+    scheme_type = scheme.scheme_type.strip().lower()
+    if scheme_type == "apikey":
+        return AccessCredentialKind.API_KEY
+    if scheme_type == "http":
+        if scheme.http_scheme == "bearer":
+            return AccessCredentialKind.BEARER_TOKEN
+        if scheme.http_scheme == "basic":
+            return AccessCredentialKind.BASIC
+    if scheme_type == "oauth2":
+        return AccessCredentialKind.OAUTH2_ACCOUNT
+    if scheme_type == "openidconnect":
+        return AccessCredentialKind.OPENID_CONNECT
+    return None
+
+
+def _credential_transport_for_scheme(
+    scheme: OpenApiSecurityScheme,
+) -> AccessCredentialTransport:
+    scheme_type = scheme.scheme_type.strip().lower()
+    if scheme_type == "apikey":
+        location = (scheme.location or "").strip().lower()
+        if location == "header":
+            return AccessCredentialTransport.HEADER
+        if location == "query":
+            return AccessCredentialTransport.QUERY
+        if location == "cookie":
+            return AccessCredentialTransport.COOKIE
+    if scheme_type in {"oauth2", "openidconnect"}:
+        return AccessCredentialTransport.OAUTH_AUTHORIZATION_HEADER
+    if scheme_type == "http" and scheme.http_scheme == "bearer":
+        return AccessCredentialTransport.OAUTH_AUTHORIZATION_HEADER
+    if scheme_type == "http" and scheme.http_scheme == "basic":
+        return AccessCredentialTransport.HEADER
+    return AccessCredentialTransport.RUNTIME_CONTEXT
+
+
+def _setup_flow_hint_for_scheme(scheme: OpenApiSecurityScheme) -> AccessSetupFlowHint:
+    if scheme.scheme_type.strip().lower() == "oauth2":
+        return AccessSetupFlowHint(
+            flow_kind=AccessSetupFlowKind.BROWSER_OAUTH,
+            provider=scheme.name,
+            authorization_url=_optional_metadata_text(scheme.metadata, "authorization_url"),
+            token_url=_optional_metadata_text(scheme.metadata, "token_url"),
+        )
+    if scheme.scheme_type.strip().lower() == "openidconnect":
+        return AccessSetupFlowHint(
+            flow_kind=AccessSetupFlowKind.BROWSER_OAUTH,
+            provider=scheme.name,
+            authorization_url=_optional_metadata_text(
+                scheme.metadata,
+                "open_id_connect_url",
+            ),
+        )
+    return AccessSetupFlowHint(flow_kind=AccessSetupFlowKind.MANUAL)
+
+
+def _optional_metadata_text(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def _parse_operations(
+    config: OpenApiProviderSettings,
+    *,
+    capability_ids: tuple[str, ...] = (),
+) -> list[OpenApiOperation]:
     document = _load_document(config.spec_location)
     if not isinstance(document, dict):
         raise ToolValidationError(
@@ -279,6 +523,7 @@ def _parse_operations(config: OpenApiProviderSettings) -> list[OpenApiOperation]
                     security_requirements=effective_security,
                     credential_bindings=config.credential_bindings,
                     required_effect_ids=config.default_effect_ids,
+                    capability_ids=capability_ids,
                 ),
             )
 
@@ -436,8 +681,48 @@ def _parse_security_schemes(
                 if payload.get("scheme") is not None
                 else None
             ),
+            metadata=_security_scheme_metadata(payload),
         )
     return schemes
+
+
+def _security_scheme_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    description = payload.get("description")
+    if isinstance(description, str) and description.strip():
+        metadata["description"] = description.strip()
+    open_id_connect_url = payload.get("openIdConnectUrl")
+    if isinstance(open_id_connect_url, str) and open_id_connect_url.strip():
+        metadata["open_id_connect_url"] = open_id_connect_url.strip()
+    flows = payload.get("flows")
+    if not isinstance(flows, dict):
+        return metadata
+    flow_metadata: dict[str, dict[str, Any]] = {}
+    for flow_name, flow_payload in flows.items():
+        if not isinstance(flow_payload, dict):
+            continue
+        normalized_flow_name = str(flow_name).strip()
+        if not normalized_flow_name:
+            continue
+        resolved_flow: dict[str, Any] = {}
+        for source_key, target_key in (
+            ("authorizationUrl", "authorization_url"),
+            ("tokenUrl", "token_url"),
+            ("refreshUrl", "refresh_url"),
+        ):
+            value = flow_payload.get(source_key)
+            if isinstance(value, str) and value.strip():
+                resolved_flow[target_key] = value.strip()
+                metadata.setdefault(target_key, value.strip())
+        scopes = flow_payload.get("scopes")
+        if isinstance(scopes, dict):
+            resolved_flow["scopes"] = tuple(
+                str(scope).strip() for scope in scopes if str(scope).strip()
+            )
+        flow_metadata[normalized_flow_name] = resolved_flow
+    if flow_metadata:
+        metadata["flows"] = flow_metadata
+    return metadata
 
 
 def _parse_security_requirements(
@@ -462,16 +747,44 @@ def _parse_security_requirements(
                 f"OpenAPI provider '{provider_name}' security requirements must be objects.",
             )
         scheme_names: list[str] = []
-        for scheme_name in item:
+        scopes_by_scheme: dict[str, tuple[str, ...]] = {}
+        for scheme_name, raw_scopes in item.items():
             normalized_scheme_name = str(scheme_name)
             if normalized_scheme_name not in security_schemes:
                 raise ToolValidationError(
                     f"OpenAPI provider '{provider_name}' security requirement references unknown scheme '{normalized_scheme_name}'.",
                 )
             scheme_names.append(normalized_scheme_name)
+            scopes_by_scheme[normalized_scheme_name] = _parse_security_scopes(
+                raw_scopes,
+                provider_name=provider_name,
+                scheme_name=normalized_scheme_name,
+            )
         requirements.append(
             OpenApiSecurityRequirement(
                 scheme_names=tuple(scheme_names),
+                scopes_by_scheme=scopes_by_scheme,
             ),
         )
     return tuple(requirements)
+
+
+def _parse_security_scopes(
+    raw_scopes: Any,
+    *,
+    provider_name: str,
+    scheme_name: str,
+) -> tuple[str, ...]:
+    if raw_scopes is None:
+        return ()
+    if not isinstance(raw_scopes, list):
+        raise ToolValidationError(
+            f"OpenAPI provider '{provider_name}' security requirement for scheme '{scheme_name}' scopes must be a list.",
+        )
+    return tuple(
+        dict.fromkeys(
+            str(scope).strip()
+            for scope in raw_scopes
+            if str(scope).strip()
+        ),
+    )

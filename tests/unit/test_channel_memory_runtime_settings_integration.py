@@ -15,7 +15,7 @@ from crxzipple.modules.memory.application.settings_integration import (
     MemorySettingsBootstrapConfig,
     memory_bootstrap_config_from_settings,
 )
-from crxzipple.modules.orchestration.application.settings_integration import (
+from crxzipple.app.assembly.runtime_defaults import (
     RuntimeSettingsBootstrapConfig,
     runtime_bootstrap_config_from_settings,
 )
@@ -41,7 +41,11 @@ class ChannelMemoryRuntimeSettingsIntegrationTestCase(unittest.TestCase):
                         "account_id": "team-a",
                         "enabled": False,
                         "transport_mode": "pull",
-                        "auth_ref": "credential:lark",
+                        "credential_bindings": {
+                            "lark_app_id": "access-binding:lark-app-id",
+                            "lark_app_secret": "access-binding:lark-app-secret",
+                            "lark_verification_token": "access-binding:lark-token",
+                        },
                         "metadata": {"tenant": "cn"},
                     },
                 ],
@@ -54,6 +58,22 @@ class ChannelMemoryRuntimeSettingsIntegrationTestCase(unittest.TestCase):
         self.assertTrue(profile.capabilities.supports_ack)
         self.assertEqual(profile.accounts[0].account_id, "team-a")
         self.assertFalse(profile.accounts[0].enabled)
+        self.assertEqual(
+            profile.accounts[0].credential_bindings,
+            {
+                "lark_app_id": "access-binding:lark-app-id",
+                "lark_app_secret": "access-binding:lark-app-secret",
+                "lark_verification_token": "access-binding:lark-token",
+            },
+        )
+        self.assertEqual(
+            profile.accounts[0].metadata["lark_app_secret_binding"],
+            "access-binding:lark-app-secret",
+        )
+        credential_requirements = profile.accounts[0].credential_requirements
+        self.assertIsNotNone(credential_requirements)
+        assert credential_requirements is not None
+        self.assertEqual(len(credential_requirements.requirements), 5)
         self.assertEqual(profile.metadata["source"], "bootstrap")
 
     def test_legacy_channel_payload_maps_to_domain_profile(self) -> None:
@@ -102,7 +122,7 @@ class ChannelMemoryRuntimeSettingsIntegrationTestCase(unittest.TestCase):
                 "vector_provider": "openai_compatible",
                 "vector_model": "text-embedding-3-small",
                 "vector_base_url": "https://api.openai.test/v1",
-                "vector_credential_binding": "env:OPENAI_API_KEY",
+                "vector_credential_binding_id": "memory-openai-api-key",
                 "vector_timeout_seconds": "45",
                 "watch_interval_seconds": "12.5",
             },
@@ -115,7 +135,7 @@ class ChannelMemoryRuntimeSettingsIntegrationTestCase(unittest.TestCase):
                 vector_provider="openai_compatible",
                 vector_model="text-embedding-3-small",
                 vector_base_url="https://api.openai.test/v1",
-                vector_credential_binding="env:OPENAI_API_KEY",
+                vector_credential_binding_id="memory-openai-api-key",
                 vector_timeout_seconds=45,
                 watch_interval_seconds=12.5,
             ),
@@ -144,20 +164,24 @@ class ChannelMemoryRuntimeSettingsIntegrationTestCase(unittest.TestCase):
     def test_runtime_bootstrap_payload_maps_to_bootstrap_config(self) -> None:
         config = runtime_bootstrap_config_from_settings(
             {
-                "orchestration_run_lease_seconds": 45,
-                "orchestration_run_heartbeat_seconds": 6.5,
-                "orchestration_executor_max_concurrent_assignments": 8,
-                "orchestration_auto_compaction_enabled": "false",
-                "orchestration_auto_compaction_reserve_tokens": 30_000,
-                "orchestration_auto_compaction_soft_threshold_tokens": 5_000,
-                "tool_run_max_attempts": 5,
-                "tool_run_lease_seconds": 55,
-                "tool_run_heartbeat_seconds": 7.5,
-                "tool_worker_max_in_flight": 9,
-                "tool_worker_default_run_concurrency": 6,
-                "tool_worker_image_run_concurrency": 3,
-                "tool_worker_shared_state_run_concurrency": 2,
-                "tool_remote_default_max_concurrency": 12,
+                "orchestration": {
+                    "run_lease_seconds": 45,
+                    "run_heartbeat_seconds": 6.5,
+                    "executor_max_concurrent_assignments": 8,
+                    "auto_compaction_enabled": "false",
+                    "auto_compaction_reserve_tokens": 30_000,
+                    "auto_compaction_soft_threshold_tokens": 5_000,
+                },
+                "tool_worker": {
+                    "run_max_attempts": 5,
+                    "run_lease_seconds": 55,
+                    "run_heartbeat_seconds": 7.5,
+                    "max_in_flight": 9,
+                    "default_run_concurrency": 6,
+                    "image_run_concurrency": 3,
+                    "shared_state_run_concurrency": 2,
+                    "remote_default_max_concurrency": 12,
+                },
             },
         )
 

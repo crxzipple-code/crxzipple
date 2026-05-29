@@ -1,87 +1,58 @@
 from __future__ import annotations
 
-from crxzipple.modules.tool.application import ToolDiscoveryProviderDescriptor
-from crxzipple.modules.tool.application.specifications import ToolSpec
+import os
+import sqlite3
+from unittest.mock import patch
+
+from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.tool.domain import (
+    ToolDefinitionOrigin,
+    ToolEnvironment,
+    ToolExecutionStrategy,
+    ToolKind,
+    ToolMode,
+    ToolParameter,
+)
 from crxzipple.shared.domain.events import Event
 
-from tests.unit.tool_test_support import *  # noqa: F403
-
-
-class _CountingDiscoveryGateway:
-    def __init__(
-        self,
-        *,
-        specs_by_provider: dict[str, list[ToolSpec]] | None = None,
-    ) -> None:
-        self.calls: list[str | None] = []
-        self.specs_by_provider = specs_by_provider or {}
-
-    def list_providers(self) -> list[ToolDiscoveryProviderDescriptor]:
-        return [
-            ToolDiscoveryProviderDescriptor(
-                name="local_builtin",
-                description="Local builtins",
-                source_kind=ToolSourceKind.LOCAL_DISCOVERY,
-            ),
-            ToolDiscoveryProviderDescriptor(
-                name="local_filesystem",
-                description="Local filesystem",
-                source_kind=ToolSourceKind.LOCAL_DISCOVERY,
-            ),
-            ToolDiscoveryProviderDescriptor(
-                name="sample_api",
-                description="Sample API",
-                source_kind=ToolSourceKind.REMOTE_REGISTRY,
-            ),
-        ]
-
-    def discover(self, *, provider_name: str | None = None) -> list[ToolSpec]:
-        self.calls.append(provider_name)
-        if provider_name is None:
-            specs: list[ToolSpec] = []
-            for provider_specs in self.specs_by_provider.values():
-                specs.extend(provider_specs)
-            return specs
-        return list(self.specs_by_provider.get(provider_name, []))
+from tests.unit.tool_test_support import ToolTestCaseBase
 
 
 class ToolCatalogTestCase(ToolTestCaseBase):
-    def test_registers_rich_tool_definition_without_persisting_definition(self) -> None:
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="web_search",
-                name="Web Search",
-                description="Searches external knowledge sources.",
-                kind=ToolKind.HTTP,
-                parameters=(
-                    RegisterToolParameterInput(
-                        name="query",
-                        data_type="string",
-                        description="Search query text.",
-                    ),
-                    RegisterToolParameterInput(
-                        name="limit",
-                        data_type="integer",
-                        description="Maximum number of results.",
-                        required=False,
-                    ),
+    def test_catalog_reads_rich_tool_function_record(self) -> None:
+        tool = self.seed_tool(
+            tool_id="web_search",
+            name="Web Search",
+            description="Searches external knowledge sources.",
+            kind=ToolKind.HTTP,
+            parameters=(
+                ToolParameter(
+                    name="query",
+                    data_type="string",
+                    description="Search query text.",
                 ),
-                tags=("search", "external", "search"),
-                timeout_seconds=45,
-                requires_confirmation=True,
-                mutates_state=False,
-                supported_modes=(ToolMode.INLINE, ToolMode.BACKGROUND),
-                supported_strategies=(
-                    ToolExecutionStrategy.ASYNC,
-                    ToolExecutionStrategy.THREAD,
+                ToolParameter(
+                    name="limit",
+                    data_type="integer",
+                    description="Maximum number of results.",
+                    required=False,
                 ),
-                supported_environments=(
-                    ToolEnvironment.LOCAL,
-                    ToolEnvironment.REMOTE,
-                ),
-                source_kind=ToolSourceKind.REMOTE_REGISTRY,
-                runtime_key="search.http",
             ),
+            tags=("search", "external", "search"),
+            timeout_seconds=45,
+            requires_confirmation=True,
+            mutates_state=False,
+            supported_modes=(ToolMode.INLINE, ToolMode.BACKGROUND),
+            supported_strategies=(
+                ToolExecutionStrategy.ASYNC,
+                ToolExecutionStrategy.THREAD,
+            ),
+            supported_environments=(
+                ToolEnvironment.LOCAL,
+                ToolEnvironment.REMOTE,
+            ),
+            definition_origin=ToolDefinitionOrigin.REMOTE_DISCOVERY,
+            runtime_key="search.http",
         )
 
         self.assertEqual(tool.kind, ToolKind.HTTP)
@@ -96,10 +67,10 @@ class ToolCatalogTestCase(ToolTestCaseBase):
             tool.execution_support.supported_modes,
             (ToolMode.INLINE, ToolMode.BACKGROUND),
         )
-        self.assertEqual(tool.source_kind, ToolSourceKind.REMOTE_REGISTRY)
+        self.assertEqual(tool.definition_origin, ToolDefinitionOrigin.REMOTE_DISCOVERY)
         self.assertEqual(tool.runtime_key, "search.http")
 
-        resolved = self.container.tool_service.get_tool("web_search")
+        resolved = self.tool_service.get_tool("web_search")
         self.assertEqual(resolved.kind, ToolKind.HTTP)
         self.assertEqual(resolved.tags, ("search", "external"))
         self.assertEqual(resolved.execution_policy.timeout_seconds, 45)
@@ -109,24 +80,20 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         )
 
     def test_list_enabled_tools_respects_availability(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="read_docs",
-                name="Read Docs",
-                description="Reads internal documentation.",
-            ),
+        self.seed_tool(
+            tool_id="read_docs",
+            name="Read Docs",
+            description="Reads internal documentation.",
         )
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="dangerous_write",
-                name="Dangerous Write",
-                description="Writes to external systems.",
-                mutates_state=True,
-                enabled=False,
-            ),
+        self.seed_tool(
+            tool_id="dangerous_write",
+            name="Dangerous Write",
+            description="Writes to external systems.",
+            mutates_state=True,
+            enabled=False,
         )
 
-        enabled_tools = self.container.tool_service.list_enabled_tools()
+        enabled_tools = self.tool_service.list_enabled_tools()
 
         enabled_ids = [tool.id for tool in enabled_tools]
         self.assertIn("read_docs", enabled_ids)
@@ -147,39 +114,37 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("sessions_yield", enabled_ids)
         self.assertNotIn("mobile_session", enabled_ids)
 
-    def test_list_enabled_tools_refreshes_filesystem_discovery_once(self) -> None:
-        gateway = _CountingDiscoveryGateway()
-        self.container.tool_service.discovery_gateway = gateway
-
-        self.container.tool_service.list_enabled_tools()
-        self.container.tool_service.list_enabled_tools()
-
-        self.assertEqual(gateway.calls, ["local_filesystem", "sample_api", "sample_api"])
-
-    def test_explicit_filesystem_discovery_refreshes_after_hot_path_resolution(self) -> None:
-        gateway = _CountingDiscoveryGateway()
-        self.container.tool_service.discovery_gateway = gateway
-
-        self.container.tool_service.list_enabled_tools()
-        self.container.tool_service.discover_tools(provider_name="local_filesystem")
-        self.container.tool_service.list_enabled_tools()
-
-        self.assertEqual(
-            gateway.calls,
-            [
-                "local_filesystem",
-                "sample_api",
-                "local_filesystem",
-                "sample_api",
-            ],
+    def test_catalog_service_has_no_runtime_discovery_entrypoints(self) -> None:
+        self.assertFalse(hasattr(self.tool_service.catalog_service, "discover_tools"))
+        self.assertFalse(
+            hasattr(self.tool_service.catalog_service, "list_discovery_providers"),
         )
 
-    def test_discovers_local_tools_without_persisting_definitions(self) -> None:
-        discovered = self.container.tool_service.discover_local_tools()
+        self.tool_service.list_enabled_tools()
+        self.tool_service.list_enabled_tools()
 
-        self.assertEqual([tool.id for tool in discovered], ["echo"])
-        self.assertEqual(discovered[0].source_kind, ToolSourceKind.LOCAL_DISCOVERY)
-        self.assertEqual(discovered[0].runtime_key, "echo")
+    def test_runtime_pool_filters_access_readiness_for_call_context(self) -> None:
+        runtime_context = {"caller": "tool-worker", "agent_id": "assistant"}
+
+        with patch.dict(os.environ, {}, clear=True):
+            blocked_ids = {
+                tool.id
+                for tool in self.tool_service.list_runtime_pool_tools(
+                    runtime_context=runtime_context,
+                )
+            }
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-openai-key"}, clear=True):
+            ready_ids = {
+                tool.id
+                for tool in self.tool_service.list_runtime_pool_tools(
+                    runtime_context=runtime_context,
+                )
+            }
+
+        self.assertNotIn("openai_image_generate", blocked_ids)
+        self.assertNotIn("openai_image_edit", blocked_ids)
+        self.assertIn("openai_image_generate", ready_ids)
+        self.assertIn("openai_image_edit", ready_ids)
 
     def test_fresh_schema_omits_legacy_tools_table(self) -> None:
         database_path = self.harness.database_url.removeprefix("sqlite:///")
@@ -200,7 +165,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
     def test_list_tools_uses_runtime_system_managed_definition(self) -> None:
         tools = {
             tool.id: tool
-            for tool in self.container.tool_service.list_tools()
+            for tool in self.tool_service.list_tools()
         }
 
         persisted = tools["memory_write_daily"]
@@ -211,31 +176,64 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("surface:interactive", persisted.tags)
         self.assertIn("surface:maintenance_write", persisted.tags)
 
-    def test_ensure_local_system_tools_registered_excludes_legacy_memory_get(self) -> None:
-        managed_tools = self.container.tool_service.ensure_local_system_tools_registered()
+    def test_catalog_excludes_retired_legacy_memory_get_tool(self) -> None:
+        managed_tools = self.tool_service.list_tools()
 
         self.assertIn("memory_search", [tool.id for tool in managed_tools])
         self.assertNotIn(
             "memory_get",
-            [tool.id for tool in self.container.tool_service.list_tools()],
+            [tool.id for tool in self.tool_service.list_tools()],
         )
 
-    def test_get_tool_returns_runtime_system_managed_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("memory_search")
+    def test_get_tool_returns_local_package_memory_search_tool(self) -> None:
+        tool = self.tool_service.get_tool("memory_search")
 
         self.assertEqual(tool.id, "memory_search")
         self.assertIn("system-managed", tool.tags)
+        self.assertEqual(tool.context_requirements, ("agent_id",))
 
-    def test_get_tool_returns_workspace_read_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("read")
+    def test_runtime_pool_filters_tools_missing_declared_context(self) -> None:
+        without_agent = {
+            tool.id
+            for tool in self.tool_service.list_runtime_pool_tools(
+                runtime_context={"caller": "orchestration"},
+            )
+        }
+        with_agent = {
+            tool.id
+            for tool in self.tool_service.list_runtime_pool_tools(
+                runtime_context={"caller": "orchestration", "agent_id": "assistant"},
+            )
+        }
+
+        self.assertNotIn("memory_search", without_agent)
+        self.assertNotIn("memory_write_daily", without_agent)
+        self.assertIn("memory_search", with_agent)
+        self.assertIn("memory_write_daily", with_agent)
+
+    def test_tool_readiness_reports_missing_context_requirement(self) -> None:
+        missing = self.tool_service.check_readiness("memory_search")
+        ready = self.tool_service.check_readiness(
+            "memory_search",
+            agent_id="assistant",
+        )
+
+        self.assertFalse(missing["ready"])
+        self.assertEqual(missing["status"], "setup_needed")
+        self.assertEqual(missing["checks"][0]["category"], "context")
+        self.assertEqual(missing["checks"][0]["requirement"], "agent_id")
+        self.assertTrue(ready["ready"])
+
+    def test_get_tool_returns_workspace_read_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("read")
 
         self.assertEqual(tool.id, "read")
         self.assertEqual(tool.required_effect_ids, ("workspace_read",))
         self.assertIn("scope:workspace_bound", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
-    def test_get_tool_returns_workspace_write_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("write")
+    def test_get_tool_returns_workspace_write_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("write")
 
         self.assertEqual(tool.id, "write")
         self.assertEqual(tool.required_effect_ids, ("workspace_write",))
@@ -243,8 +241,8 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("scope:workspace_bound", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
-    def test_get_tool_returns_workspace_edit_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("edit")
+    def test_get_tool_returns_workspace_edit_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("edit")
 
         self.assertEqual(tool.id, "edit")
         self.assertEqual(tool.required_effect_ids, ("workspace_write",))
@@ -252,8 +250,8 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("scope:workspace_bound", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
-    def test_get_tool_returns_workspace_apply_patch_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("apply_patch")
+    def test_get_tool_returns_workspace_apply_patch_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("apply_patch")
 
         self.assertEqual(tool.id, "apply_patch")
         self.assertEqual(tool.required_effect_ids, ("workspace_write",))
@@ -261,24 +259,24 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("scope:workspace_bound", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
-    def test_get_tool_returns_workspace_exec_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("exec")
+    def test_get_tool_returns_workspace_exec_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("exec")
 
         self.assertEqual(tool.id, "exec")
         self.assertEqual(tool.required_effect_ids, ("command_execution",))
         self.assertTrue(tool.execution_policy.mutates_state)
         self.assertIn("system-managed", tool.tags)
 
-    def test_get_tool_returns_background_process_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("process")
+    def test_get_tool_returns_background_process_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("process")
 
         self.assertEqual(tool.id, "process")
         self.assertEqual(tool.required_effect_ids, ("command_execution",))
         self.assertTrue(tool.execution_policy.mutates_state)
         self.assertIn("system-managed", tool.tags)
 
-    def test_get_tool_returns_workspace_search_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("workspace_search")
+    def test_get_tool_returns_workspace_search_tool_from_catalog(self) -> None:
+        tool = self.tool_service.get_tool("workspace_search")
 
         self.assertEqual(tool.id, "workspace_search")
         self.assertEqual(tool.required_effect_ids, ("workspace_read",))
@@ -287,15 +285,47 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("system-managed", tool.tags)
 
     def test_get_tool_returns_mobile_snapshot_tool_from_local_package(self) -> None:
-        tool = self.container.tool_service.get_tool("mobile_snapshot")
+        tool = self.tool_service.get_tool("mobile_snapshot")
 
         self.assertEqual(tool.id, "mobile_snapshot")
         self.assertEqual(tool.runtime_key, "mobile_snapshot")
         self.assertIn("mobile", tool.tags)
         self.assertIn("system-managed", tool.tags)
 
+    def test_browser_catalog_exposes_only_configured_runtime_functions(self) -> None:
+        browser_tools = [
+            tool
+            for tool in self.tool_service.list_tools()
+            if tool.id.startswith("browser.") or tool.id.startswith("mcp.browser")
+        ]
+
+        expected_ids = {
+            "browser.snapshot",
+            "browser.navigate",
+            "browser.click",
+            "browser.type",
+            "browser.evaluate",
+            "browser.screenshot",
+            "browser.tabs.list",
+            "browser.tabs.select",
+            "browser.tabs.close",
+        }
+        self.assertEqual({tool.id for tool in browser_tools}, expected_ids)
+
+        enabled_ids = {item.id for item in self.tool_service.list_enabled_tools()}
+        self.assertTrue(expected_ids.issubset(enabled_ids))
+        self.assertNotIn("browser_cdp_raw", enabled_ids)
+        self.assertNotIn("browser_network_inspect", enabled_ids)
+
+        for tool in browser_tools:
+            self.assertEqual(tool.source_id, "configured.browser")
+            self.assertEqual(tool.runtime_key, tool.id)
+            self.assertEqual(tool.required_effect_ids, ("local_tool_access",))
+            self.assertIn("browser", tool.tags)
+            self.assertIn("system-managed", tool.tags)
+
     def test_get_tool_returns_session_status_tool_from_local_package(self) -> None:
-        tool = self.container.tool_service.get_tool("session_status")
+        tool = self.tool_service.get_tool("session_status")
 
         self.assertEqual(tool.id, "session_status")
         self.assertEqual(tool.runtime_key, "session_status")
@@ -303,7 +333,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("system-managed", tool.tags)
 
     def test_get_tool_returns_workspace_list_tool_without_db_row(self) -> None:
-        tool = self.container.tool_service.get_tool("workspace_list")
+        tool = self.tool_service.get_tool("workspace_list")
 
         self.assertEqual(tool.id, "workspace_list")
         self.assertEqual(tool.required_effect_ids, ("workspace_read",))
@@ -312,28 +342,26 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertIn("system-managed", tool.tags)
 
     def test_enable_and_disable_tool(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="deploy",
-                name="Deploy",
-                description="Deploys a service.",
-                mutates_state=True,
-                enabled=False,
-            ),
+        self.seed_tool(
+            tool_id="deploy",
+            name="Deploy",
+            description="Deploys a service.",
+            mutates_state=True,
+            enabled=False,
         )
 
-        enabled = self.container.tool_service.set_availability(
-            SetToolAvailabilityInput(id="deploy", enabled=True),
-        )
-        self.assertTrue(enabled.enabled)
-        disabled = self.container.tool_service.set_availability(
-            SetToolAvailabilityInput(id="deploy", enabled=False),
-        )
+        command_service = self.container.require(AppKey.TOOL_FUNCTION_COMMAND_SERVICE)
+        enabled = command_service.set_function_enabled("deploy", enabled=True)
+        self.assertTrue(enabled.function.enabled)
+        disabled = command_service.set_function_enabled("deploy", enabled=False)
 
-        self.assertFalse(disabled.enabled)
+        self.assertFalse(disabled.function.enabled)
         event_names = [
             event.event_name
-            for event in self.container.event_bus.published_events
+            for event in self.event_bus.published_events
             if isinstance(event, Event) and bool(event.name)
         ][-2:]
-        self.assertEqual(event_names, ["tool.enabled", "tool.disabled"])
+        self.assertEqual(
+            event_names,
+            ["tool.function.enabled", "tool.function.disabled"],
+        )

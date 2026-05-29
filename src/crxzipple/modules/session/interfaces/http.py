@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.session.application import (
     ListSessionInstancesInput,
@@ -48,7 +48,7 @@ def _not_found(
 def _session_resolution_service(
     container: AppContainer,
 ) -> SessionResolutionService:
-    return container.session_resolution_service
+    return container.require(AppKey.SESSION_RESOLUTION_SERVICE)
 
 
 @router.post(
@@ -61,7 +61,7 @@ def ensure_session(
     payload: SessionRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> SessionResponse:
-    session = container.session_service.ensure_session(
+    session = container.require(AppKey.SESSION_SERVICE).ensure_session(
         payload.to_input(error_factory=_bad_request),
     )
     return SessionResponse.from_dto(SessionDTO.from_entity(session))
@@ -74,7 +74,7 @@ def list_sessions(
 ) -> list[SessionResponse]:
     return [
         SessionResponse.from_dto(SessionDTO.from_entity(session))
-        for session in container.session_service.list_sessions(agent_id=agent_id)
+        for session in container.require(AppKey.SESSION_SERVICE).list_sessions(agent_id=agent_id)
     ]
 
 
@@ -104,7 +104,7 @@ def get_session(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> SessionResponse:
     try:
-        session = container.session_service.get_session(session_key)
+        session = container.require(AppKey.SESSION_SERVICE).get_session(session_key)
     except SessionNotFoundError as exc:
         raise _not_found(exc) from None
     return SessionResponse.from_dto(SessionDTO.from_entity(session))
@@ -121,7 +121,7 @@ def append_message(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> SessionMessageResponse:
     try:
-        message = container.session_service.append_message(
+        message = container.require(AppKey.SESSION_SERVICE).append_message(
             payload.to_input(session_key=session_key),
         )
     except (SessionNotFoundError, SessionInstanceNotFoundError) as exc:
@@ -139,7 +139,7 @@ def list_messages(
     before_sequence_no: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[SessionMessageResponse]:
     try:
-        items = container.session_service.list_messages(
+        items = container.require(AppKey.SESSION_SERVICE).list_messages(
             ListSessionMessagesInput(
                 session_key=session_key,
                 limit=limit,
@@ -163,7 +163,7 @@ def list_instances(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[SessionInstanceResponse]:
     try:
-        items = container.session_service.list_instances(
+        items = container.require(AppKey.SESSION_SERVICE).list_instances(
             ListSessionInstancesInput(session_key=session_key),
         )
     except SessionNotFoundError as exc:
@@ -182,7 +182,7 @@ def reset_session(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> SessionResponse:
     try:
-        session = container.session_service.reset_session(
+        session = container.require(AppKey.SESSION_SERVICE).reset_session(
             payload.to_input(session_key=session_key),
         )
     except SessionNotFoundError as exc:

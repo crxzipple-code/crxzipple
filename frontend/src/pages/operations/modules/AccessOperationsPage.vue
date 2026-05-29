@@ -54,15 +54,17 @@ const metricIconById: Record<string, Component> = {
 };
 const fallbackTabs: OperationsTab[] = [
   { id: "targets", label: "Access Targets" },
+  { id: "requirements", label: "Requirements" },
   { id: "missing", label: "Missing Access" },
   { id: "auth_status", label: "Authentication Status" },
   { id: "usage", label: "Access Usage" },
   { id: "setup", label: "Setup Flows" },
   { id: "events", label: "Access Events" },
+  { id: "audit", label: "Audit Summary" },
   { id: "fallbacks", label: "Fallback Problems" },
 ];
 const knownTabIds = new Set(fallbackTabs.map((tab) => tab.id));
-const selectableTabs = new Set(["targets", "missing", "auth_status", "usage", "setup", "fallbacks"]);
+const selectableTabs = new Set(["targets", "requirements", "missing", "auth_status", "usage", "setup", "audit", "fallbacks"]);
 const accessTextKeys: Record<string, string> = {
   "Access": "operations.access.title",
   "观察凭证绑定、外部访问要求、访问缺口、setup flow 与访问相关事件的运维视图。": "operations.access.subtitle",
@@ -74,11 +76,14 @@ const accessTextKeys: Record<string, string> = {
   "Consumers": "operations.access.metric.usage",
   "Failed Auth": "operations.access.metric.failedAuth",
   "Access Targets": "operations.access.tab.targets",
+  "Requirements": "table.requirements",
+  "Credential Requirements": "operations.access.tab.requirements",
   "Authentication Status": "operations.access.tab.authStatus",
   "Access Usage": "operations.access.tab.usage",
   "Setup Flows": "operations.access.tab.setup",
   "Access Events": "operations.access.tab.events",
   "Recent Access Events": "operations.access.tab.events",
+  "Audit Summary": "operations.access.tab.audit",
   "Fallback Problems": "operations.access.tab.fallbacks",
   "Fallback / Resolver Problems": "operations.access.tab.fallbacks",
   "Credential Health": "operations.access.section.credentialHealth",
@@ -89,7 +94,14 @@ const accessTextKeys: Record<string, string> = {
   "Kind": "table.kind",
   "Status": "table.status",
   "Usage Count": "operations.access.kv.usageCount",
-  "Requirements": "table.requirements",
+  "Consumer": "table.consumer",
+  "Module": "table.module",
+  "Slot": "table.slot",
+  "Expected Kind": "table.expectedKind",
+  "Binding": "table.binding",
+  "Readiness": "table.readiness",
+  "Setup": "table.setup",
+  "Last Checked": "table.lastChecked",
   "Reason": "table.reason",
   "Yes": "common.yes",
   "No": "common.no",
@@ -100,6 +112,9 @@ const accessTextKeys: Record<string, string> = {
   "warning": "text.warning",
   "error": "text.error",
   "Ready": "text.ready",
+  "Missing binding": "operations.access.empty.missingBinding",
+  "missing_binding": "operations.access.empty.missingBinding",
+  "Not reported": "operations.access.empty.requirementNotReported",
   "Blocked": "text.blocked",
   "ready": "text.ready",
   "blocked": "text.blocked",
@@ -115,8 +130,8 @@ const accessTextKeys: Record<string, string> = {
   "env": "text.env",
   "File Credential": "text.fileCredential",
   "file_credential": "text.fileCredential",
-  "Codex Auth JSON": "text.codexAuthJson",
-  "codex_auth_json": "text.codexAuthJson",
+  "OAuth Account": "text.oauthAccount",
+  "oauth_account": "text.oauthAccount",
   "Inline Credential": "text.inlineCredential",
   "inline_credential": "text.inlineCredential",
   "Credential Set": "text.credentialSet",
@@ -129,10 +144,13 @@ const accessTextKeys: Record<string, string> = {
   "channel": "text.channel",
   "Unknown": "status.unknown",
   "No missing access.": "operations.access.empty.noMissing",
+  "No credential requirements declared.": "operations.access.empty.noRequirements",
+  "Credential requirements were not reported.": "operations.access.empty.requirementNotReported",
   "No provider access blockers.": "operations.access.empty.noProviderBlockers",
   "No access usage records.": "operations.access.empty.noUsage",
   "No setup flows.": "operations.access.empty.noSetup",
   "No access events.": "operations.access.empty.noEvents",
+  "No access audit records.": "operations.access.empty.noAudit",
   "No fallback problems.": "operations.access.empty.noFallbacks",
   "No check records.": "operations.access.empty.noChecks",
   "No usages.": "operations.access.empty.noUsages",
@@ -151,6 +169,7 @@ const statusFilter = ref("all");
 const kindFilter = ref("all");
 const usageTypeFilter = ref("all");
 const refreshTimer = ref<number | null>(null);
+const selectedAuditRowId = ref<string | null>(null);
 const router = useRouter();
 
 const displayMetrics = computed(() => page.value?.metrics ?? []);
@@ -165,13 +184,21 @@ const activeTab = computed(() => {
   return knownTabIds.has(candidate) ? candidate : "targets";
 });
 const mainTable = computed(() => {
+  if (activeTab.value === "requirements") return accessRequirements.value;
   if (activeTab.value === "missing") return page.value?.missing_access ?? emptyTable("missing_access", "Missing Access");
   if (activeTab.value === "auth_status") return page.value?.authentication_status ?? emptyTable("authentication_status", "Authentication Status");
   if (activeTab.value === "usage") return page.value?.access_usage ?? emptyTable("access_usage", "Access Usage");
   if (activeTab.value === "setup") return page.value?.setup_flows ?? emptyTable("setup_flows", "Setup Flows");
   if (activeTab.value === "events") return page.value?.recent_access_events ?? emptyTable("recent_access_events", "Recent Access Events");
+  if (activeTab.value === "audit") return auditSummary.value;
   if (activeTab.value === "fallbacks") return page.value?.fallback_problems ?? emptyTable("fallback_problems", "Fallback / Resolver Problems");
   return page.value?.access_targets ?? emptyTable("access_targets", "Access Targets");
+});
+const accessRequirements = computed(() => {
+  return page.value?.access_requirements ?? emptyTable("access_requirements", "Requirements", "Credential requirements were not reported.");
+});
+const auditSummary = computed(() => {
+  return page.value?.access_audit_summary ?? emptyTable("access_audit_summary", "Audit Summary", "No access audit records.");
 });
 const filteredMainRows = computed(() => {
   const rows = mainTable.value.rows;
@@ -226,16 +253,27 @@ const drawerDetail = computed<OperationsAccessTargetDetail | null>(() => {
   if (!selectedTargetId.value) return null;
   return page.value?.target_details.find((item) => item.target_id === selectedTargetId.value) ?? null;
 });
-const drawerOpen = computed(() => Boolean(drawerDetail.value));
+const auditDrawerRow = computed(() => {
+  if (!selectedAuditRowId.value) return null;
+  return auditSummary.value.rows.find((row) => row.id === selectedAuditRowId.value) ?? null;
+});
+const drawerOpen = computed(() => Boolean(drawerDetail.value || auditDrawerRow.value));
 
 function selectTab(tabId: string) {
   selectedTabId.value = tabId;
   selectedTargetId.value = null;
+  selectedAuditRowId.value = null;
 }
 
 function selectRow(row: DataTableRow) {
   if (!selectableTabs.has(activeTab.value)) return;
+  if (activeTab.value === "audit") {
+    selectedAuditRowId.value = rowId(row);
+    selectedTargetId.value = null;
+    return;
+  }
   selectedTargetId.value = resolveTargetId(row);
+  selectedAuditRowId.value = null;
 }
 
 function openProviderBlocked(row: DataTableRow) {
@@ -358,6 +396,15 @@ function detailItems(items: UiKeyValueItem[]) {
   }));
 }
 
+function auditRowItems(row: UiTableRow | null) {
+  if (!row) return [];
+  return Object.entries(row.cells).map(([label, value]) => ({
+    label: accessText(label),
+    value: accessText(cellValueText(value)),
+    tone: label === "status" ? row.tone : undefined,
+  }));
+}
+
 function detailPayload(value: unknown): string {
   try {
     return JSON.stringify(redactAccessPayload(value ?? {}), null, 2);
@@ -397,14 +444,14 @@ function accessText(value: string | null | undefined): string {
   return formatRawKeyLabel(value);
 }
 
-function emptyTable(id: string, title: string): UiTableSection {
+function emptyTable(id: string, title: string, emptyState = "No records."): UiTableSection {
   return {
     id,
     title,
     columns: [],
     rows: [],
     total: 0,
-    empty_state: "No records.",
+    empty_state: emptyState,
   };
 }
 
@@ -692,59 +739,100 @@ onUnmounted(() => {
           <DataTable :columns="recentEvents.columns" :rows="recentEvents.rows" section-id="recent-access-events" :page-size="4" />
           <p v-if="!recentEvents.rows.length" class="panel-empty">{{ emptyState(recentEvents) }}</p>
         </article>
+
+        <article class="audit-panel">
+          <div class="panel-heading">
+            <h3>{{ sectionTitle(auditSummary) }}</h3>
+            <a href="/operations/access?tab=audit" @click.prevent="selectTab('audit')">{{ t("common.viewAll") }}</a>
+          </div>
+          <DataTable
+            :columns="auditSummary.columns"
+            :rows="auditSummary.rows"
+            section-id="access-audit-summary"
+            :page-size="4"
+            :clickable-rows="true"
+            @row-click="selectRow"
+          />
+          <p v-if="!auditSummary.rows.length" class="panel-empty">{{ emptyState(auditSummary) }}</p>
+        </article>
       </aside>
     </section>
 
-    <aside v-if="drawerDetail" class="detail-drawer">
-      <header>
-        <div>
-          <span>{{ t("operations.access.drawer.target") }}</span>
-          <h3>{{ drawerDetail.title }}</h3>
-          <p><StatusDot :tone="drawerDetail.tone" />{{ accessText(drawerDetail.status) }}</p>
-        </div>
-        <button type="button" :aria-label="t('common.collapseDetails')" @click="selectedTargetId = null">
-          <X :size="16" />
-        </button>
-      </header>
-
-      <section class="drawer-section">
-        <h4>{{ t("operations.access.drawer.summary") }}</h4>
-        <dl class="drawer-kv">
-          <div v-for="item in detailItems(drawerDetail.summary)" :key="item.label">
-            <dt>{{ item.label }}</dt>
-            <dd :class="`tone-${item.tone ?? 'neutral'}`">{{ item.value }}</dd>
+    <aside v-if="drawerDetail || auditDrawerRow" class="detail-drawer">
+      <template v-if="drawerDetail">
+        <header>
+          <div>
+            <span>{{ t("operations.access.drawer.target") }}</span>
+            <h3>{{ drawerDetail.title }}</h3>
+            <p><StatusDot :tone="drawerDetail.tone" />{{ accessText(drawerDetail.status) }}</p>
           </div>
-        </dl>
-      </section>
+          <button type="button" :aria-label="t('common.collapseDetails')" @click="selectedTargetId = null">
+            <X :size="16" />
+          </button>
+        </header>
 
-      <section class="drawer-section">
-        <h4>{{ t("operations.access.drawer.checks") }}</h4>
-        <DataTable :columns="drawerDetail.checks.columns" :rows="drawerDetail.checks.rows" section-id="access-detail-checks" :page-size="5" />
-        <p v-if="!drawerDetail.checks.rows.length" class="panel-empty">{{ emptyState(drawerDetail.checks) }}</p>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.access.drawer.summary") }}</h4>
+          <dl class="drawer-kv">
+            <div v-for="item in detailItems(drawerDetail.summary)" :key="item.label">
+              <dt>{{ item.label }}</dt>
+              <dd :class="`tone-${item.tone ?? 'neutral'}`">{{ item.value }}</dd>
+            </div>
+          </dl>
+        </section>
 
-      <section class="drawer-section">
-        <h4>{{ t("operations.access.drawer.usages") }}</h4>
-        <DataTable :columns="drawerDetail.usages.columns" :rows="drawerDetail.usages.rows" section-id="access-detail-usages" :page-size="5" />
-        <p v-if="!drawerDetail.usages.rows.length" class="panel-empty">{{ emptyState(drawerDetail.usages) }}</p>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.access.drawer.checks") }}</h4>
+          <DataTable :columns="drawerDetail.checks.columns" :rows="drawerDetail.checks.rows" section-id="access-detail-checks" :page-size="5" />
+          <p v-if="!drawerDetail.checks.rows.length" class="panel-empty">{{ emptyState(drawerDetail.checks) }}</p>
+        </section>
 
-      <section class="drawer-section">
-        <h4>{{ t("operations.access.drawer.setup") }}</h4>
-        <DataTable :columns="drawerDetail.setup.columns" :rows="drawerDetail.setup.rows" section-id="access-detail-setup" :page-size="5" />
-        <p v-if="!drawerDetail.setup.rows.length" class="panel-empty">{{ emptyState(drawerDetail.setup) }}</p>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.access.drawer.usages") }}</h4>
+          <DataTable :columns="drawerDetail.usages.columns" :rows="drawerDetail.usages.rows" section-id="access-detail-usages" :page-size="5" />
+          <p v-if="!drawerDetail.usages.rows.length" class="panel-empty">{{ emptyState(drawerDetail.usages) }}</p>
+        </section>
 
-      <section class="drawer-section">
-        <h4>{{ t("operations.access.drawer.events") }}</h4>
-        <DataTable :columns="drawerDetail.events.columns" :rows="drawerDetail.events.rows" section-id="access-detail-events" :page-size="4" />
-        <p v-if="!drawerDetail.events.rows.length" class="panel-empty">{{ emptyState(drawerDetail.events) }}</p>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.access.drawer.setup") }}</h4>
+          <DataTable :columns="drawerDetail.setup.columns" :rows="drawerDetail.setup.rows" section-id="access-detail-setup" :page-size="5" />
+          <p v-if="!drawerDetail.setup.rows.length" class="panel-empty">{{ emptyState(drawerDetail.setup) }}</p>
+        </section>
 
-      <section class="drawer-section raw-section">
-        <h4>{{ t("operations.access.drawer.raw") }}</h4>
-        <pre>{{ detailPayload(drawerDetail.raw_payload) }}</pre>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.access.drawer.events") }}</h4>
+          <DataTable :columns="drawerDetail.events.columns" :rows="drawerDetail.events.rows" section-id="access-detail-events" :page-size="4" />
+          <p v-if="!drawerDetail.events.rows.length" class="panel-empty">{{ emptyState(drawerDetail.events) }}</p>
+        </section>
+
+        <section class="drawer-section raw-section">
+          <h4>{{ t("operations.access.drawer.raw") }}</h4>
+          <pre>{{ detailPayload(drawerDetail.raw_payload) }}</pre>
+        </section>
+      </template>
+
+      <template v-else-if="auditDrawerRow">
+        <header>
+          <div>
+            <span>{{ t("operations.access.drawer.audit") }}</span>
+            <h3>{{ cellValueText(auditDrawerRow.cells.action) }}</h3>
+            <p><StatusDot :tone="auditDrawerRow.tone ?? 'neutral'" />{{ accessText(cellValueText(auditDrawerRow.cells.status)) }}</p>
+          </div>
+          <button type="button" :aria-label="t('common.collapseDetails')" @click="selectedAuditRowId = null">
+            <X :size="16" />
+          </button>
+        </header>
+
+        <section class="drawer-section">
+          <h4>{{ t("operations.access.drawer.audit") }}</h4>
+          <dl class="drawer-kv">
+            <div v-for="item in auditRowItems(auditDrawerRow)" :key="item.label">
+              <dt>{{ item.label }}</dt>
+              <dd :class="`tone-${item.tone ?? 'neutral'}`">{{ item.value }}</dd>
+            </div>
+          </dl>
+        </section>
+      </template>
     </aside>
   </main>
 </template>
@@ -1308,7 +1396,8 @@ h4 {
 }
 
 .events-panel,
-.setup-panel {
+.setup-panel,
+.audit-panel {
   min-height: 196px;
 }
 

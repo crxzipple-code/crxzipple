@@ -51,6 +51,10 @@ class MemoryFileDetailModel:
     raw_payload: dict[str, Any]
 
 
+def defer_memory_file_details_payload(payload: dict[str, Any]) -> None:
+    payload["file_details"] = []
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryOperationsPage:
     module: str
@@ -84,7 +88,9 @@ class _MemoryContextRecord:
     agent_id: str
     agent_name: str
     enabled: bool
-    context: Any | None
+    scope_ref: str
+    storage_root: str
+    retrieval_backend: str
     files: tuple[Any, ...]
     indexed_file_count: int
     index_db_path: str
@@ -96,8 +102,7 @@ class _MemoryContextRecord:
 @dataclass(slots=True)
 class MemoryOperationsReadModelProvider:
     agent_service: Any | None
-    file_memory_service: Any | None
-    memory_context_resolver: Any | None
+    memory_query_service: Any | None
     memory_watch_registry: Any | None = None
     events_service: Any | None = None
     event_definition_registry: Any | None = None
@@ -133,7 +138,6 @@ class MemoryOperationsReadModelProvider:
             selected_agent_id=selected_agent_id,
         )
         selected_record = _record_for_agent(records, selected_agent_id)
-        selected_context = selected_record.context if selected_record else None
         selected_files = selected_record.files if selected_record else ()
         filtered_files = _filter_files(selected_files, query)
         visible_files = filtered_files[query.offset : query.offset + query.limit]
@@ -143,14 +147,14 @@ class MemoryOperationsReadModelProvider:
             definition_registry=self.event_definition_registry,
         )
         search_hits = _search_hits(
-            self.file_memory_service,
-            context=selected_context,
+            self.memory_query_service,
+            agent_id=selected_record.agent_id if selected_record else "",
             query=query.search,
             limit=min(query.limit, 50),
         )
         watch_metrics = _watch_metrics(self.memory_watch_registry)
         health = _health(
-            service_available=self.file_memory_service is not None,
+            service_available=self.memory_query_service is not None,
             selected_record=selected_record,
             records=records,
             watch_metrics=watch_metrics,
@@ -222,7 +226,7 @@ class MemoryOperationsReadModelProvider:
             file_details=_file_details(
                 visible_files,
                 record=selected_record,
-                file_memory_service=self.file_memory_service,
+                memory_query_service=self.memory_query_service,
                 events=events,
             ),
         )
@@ -255,133 +259,78 @@ def _context_records(
             *profiles,
             _AdHocProfile(selected_agent_id),
         )
-    dirty_keys = _dirty_context_keys(provider.file_memory_service)
     for profile in profiles:
         agent_id = _text(getattr(profile, "id", ""), "")
         if not agent_id:
             continue
         agent_name = _text(getattr(profile, "name", None) or agent_id)
         enabled = bool(getattr(profile, "enabled", True))
-        context = _resolve_context(provider.memory_context_resolver, agent_id)
-        if context is None:
+        inventory = _agent_scope_inventory(provider.memory_query_service, agent_id)
+        if inventory is None or _text(getattr(inventory, "error", ""), ""):
             records.append(
                 _MemoryContextRecord(
                     agent_id=agent_id,
                     agent_name=agent_name,
                     enabled=enabled,
-                    context=None,
+                    scope_ref=_text(getattr(inventory, "scope_ref", ""), ""),
+                    storage_root=_text(getattr(inventory, "storage_root", ""), ""),
+                    retrieval_backend=_text(getattr(inventory, "retrieval_backend", ""), ""),
                     files=(),
                     indexed_file_count=0,
-                    index_db_path="-",
+                    index_db_path=_text(getattr(inventory, "index_db_path", "-"), "-"),
                     index_db_exists=False,
-                    dirty=False,
-                    error="memory context is not resolved",
+                    dirty=bool(getattr(inventory, "dirty", False)),
+                    error=_text(
+                        getattr(inventory, "error", ""),
+                        "memory context is not resolved",
+                    ),
                 )
             )
             continue
-        files = tuple(_safe_list_files(provider.file_memory_service, context=context, limit=240))
-        indexed_file_count = _indexed_file_count(provider.file_memory_service, context)
-        index_db_path = _index_db_path(provider.file_memory_service, context)
         records.append(
             _MemoryContextRecord(
                 agent_id=agent_id,
                 agent_name=agent_name,
                 enabled=enabled,
-                context=context,
-                files=files,
-                indexed_file_count=indexed_file_count,
-                index_db_path=index_db_path,
-                index_db_exists=Path(index_db_path).is_file() if index_db_path != "-" else False,
-                dirty=_context_key(context) in dirty_keys,
+                scope_ref=_text(getattr(inventory, "scope_ref", ""), ""),
+                storage_root=_text(getattr(inventory, "storage_root", ""), ""),
+                retrieval_backend=_text(getattr(inventory, "retrieval_backend", ""), ""),
+                files=tuple(getattr(inventory, "files", ()) or ()),
+                indexed_file_count=int(getattr(inventory, "indexed_file_count", 0) or 0),
+                index_db_path=_text(getattr(inventory, "index_db_path", "-"), "-"),
+                index_db_exists=bool(getattr(inventory, "index_db_exists", False)),
+                dirty=bool(getattr(inventory, "dirty", False)),
             )
         )
     return tuple(records)
 
 
-def _resolve_context(resolver: Any | None, agent_id: str) -> Any | None:
-    resolve = getattr(resolver, "resolve", None)
-    if not callable(resolve):
+def _agent_scope_inventory(memory_query_service: Any | None, agent_id: str) -> Any | None:
+    inventory = getattr(memory_query_service, "agent_scope_inventory", None)
+    if not callable(inventory):
         return None
     try:
-        return resolve(agent_id)
+        return inventory(agent_id, file_limit=240)
     except Exception:
         return None
-
-
-def _safe_list_files(
-    service: Any | None,
-    *,
-    context: Any,
-    limit: int,
-) -> list[Any]:
-    list_files = getattr(service, "list_files", None)
-    if not callable(list_files):
-        return []
-    try:
-        return list(list_files(context=context, limit=limit))
-    except Exception:
-        return []
 
 
 def _search_hits(
-    service: Any | None,
+    memory_query_service: Any | None,
     *,
-    context: Any | None,
+    agent_id: str,
     query: str,
     limit: int,
 ) -> tuple[Any, ...]:
-    if context is None or not query:
+    if not agent_id or not query:
         return ()
-    search = getattr(service, "search", None)
+    search = getattr(memory_query_service, "search_agent", None)
     if not callable(search):
         return ()
     try:
-        return tuple(search(context=context, query=query, limit=limit))
+        return tuple(search(agent_id, query=query, limit=limit))
     except Exception:
         return ()
-
-
-def _indexed_file_count(service: Any | None, context: Any) -> int:
-    index_store = _index_store(service)
-    indexed_file_hashes = getattr(index_store, "indexed_file_hashes", None)
-    if not callable(indexed_file_hashes):
-        return 0
-    try:
-        return len(
-            indexed_file_hashes(
-                storage_root=getattr(context, "storage_root", ""),
-                space_id=getattr(context, "space_id", ""),
-            )
-        )
-    except Exception:
-        return 0
-
-
-def _index_db_path(service: Any | None, context: Any) -> str:
-    manager = getattr(service, "index_manager", None)
-    index_db_path = getattr(manager, "index_db_path", None)
-    if not callable(index_db_path):
-        return "-"
-    try:
-        return str(
-            index_db_path(
-                getattr(context, "storage_root", ""),
-                getattr(context, "space_id", ""),
-            )
-        )
-    except Exception:
-        return "-"
-
-
-def _index_store(service: Any | None) -> Any | None:
-    manager = getattr(service, "index_manager", None)
-    return getattr(manager, "index_store", None)
-
-
-def _dirty_context_keys(service: Any | None) -> set[str]:
-    sync_index = getattr(service, "sync_index", None)
-    raw = getattr(sync_index, "_dirty_context_keys", set())
-    return set(raw) if isinstance(raw, set) else set()
 
 
 def _watch_metrics(registry: Any | None) -> Any | None:
@@ -526,7 +475,7 @@ def _health(
 ) -> str:
     if not service_available:
         return "error"
-    if selected_record is None or selected_record.context is None:
+    if selected_record is None or not _record_resolved(selected_record):
         return "warning"
     if any(item.error for item in records):
         return "warning"
@@ -547,17 +496,30 @@ def _metrics(
     watch_metrics: Any | None,
     events: tuple[OperationsObservedEvent, ...],
 ) -> tuple[MetricCardModel, ...]:
-    resolved = sum(1 for item in records if item.context is not None)
+    resolved = sum(1 for item in records if _record_resolved(item))
     indexed = selected_record.indexed_file_count if selected_record else 0
     total_files = len(filtered_files)
     failures = _watch_failures(watch_metrics)
     event_errors = sum(1 for event in events if event.level == "error" or event.status in {"failed", "error"})
+    stale_indexes = sum(
+        1 for record in records if _index_status(record) in {"Dirty", "Missing Index"}
+    )
+    rebuilds = sum(
+        1
+        for event in events
+        if event.event_name == "memory.index.sync_succeeded"
+        and bool(event.payload.get("force"))
+    )
+    credential_blocked = _credential_readiness_blocked(events)
     return (
         MetricCardModel("health", "Overall Health", _health_label(health), _health_delta(health), _health_tone(health)),
         MetricCardModel("memory_stores", "Memory Stores", str(resolved), f"{len(records)} agents", "info" if resolved else "warning"),
         MetricCardModel("source_documents", "Source Documents", str(total_files), "selected memory files", "info" if total_files else "neutral"),
         MetricCardModel("indexed_files", "Indexed Files", str(indexed), "files present in index store", "success" if indexed >= total_files and total_files else "neutral"),
         MetricCardModel("retrieval_hits", "Retrieval Hits", str(len(search_hits)), "current retrieval trace query", "info" if search_hits else "neutral"),
+        MetricCardModel("stale_indexes", "Stale Indexes", str(stale_indexes), "dirty or missing indexes", "warning" if stale_indexes else "success"),
+        MetricCardModel("rebuilds", "Rebuilds", str(rebuilds), "forced index sync events", "info" if rebuilds else "neutral"),
+        MetricCardModel("credential_readiness", "Credential Readiness", "Blocked" if credential_blocked else "Ready", "memory engine credential checks", "danger" if credential_blocked else "success"),
         MetricCardModel("watch_failures", "Watch Failures", str(failures + event_errors), "watcher and observed memory errors", "danger" if failures + event_errors else "success"),
     )
 
@@ -587,6 +549,28 @@ def _tabs(
         OperationsTabModel("scan", "Source Scan Status", scans),
         OperationsTabModel("events", "Retrieval Logs", events),
     )
+
+
+def _credential_readiness_blocked(
+    events: tuple[OperationsObservedEvent, ...],
+) -> bool:
+    readiness_events = tuple(
+        event
+        for event in events
+        if event.event_name.startswith("memory.engine.readiness_")
+    )
+    if not readiness_events:
+        return False
+    latest = max(readiness_events, key=lambda event: coerce_utc_datetime(event.occurred_at))
+    status = _text(
+        latest.payload.get("readiness_status")
+        or latest.status,
+        "",
+    ).lower()
+    requires_credentials = bool(latest.payload.get("requires_credentials"))
+    if latest.event_name == "memory.engine.readiness_failed":
+        return True
+    return requires_credentials and status not in {"ready", "succeeded", "observed"}
 
 
 def _actions(agent_id: str) -> tuple[RuntimeActionModel, ...]:
@@ -628,14 +612,14 @@ def _memory_stores_table(
             id=record.agent_id,
             cells={
                 "agent": record.agent_id,
-                "space_id": _context_attr(record.context, "space_id"),
+                "space_id": record.scope_ref or "-",
                 "backend": "file-backed",
                 "status": _record_status(record),
                 "files": str(len(record.files)),
                 "indexed_files": str(record.indexed_file_count),
-                "retrieval_backend": _context_attr(record.context, "retrieval_backend"),
-                "watcher": "Watching" if record.context is not None else "-",
-                "storage_root": _short(_context_attr(record.context, "storage_root"), 80),
+                "retrieval_backend": record.retrieval_backend or "-",
+                "watcher": "Watching" if _record_resolved(record) else "-",
+                "storage_root": _short(record.storage_root or "-", 80),
             },
             status=_record_status(record),
             tone=_record_tone(record),
@@ -697,15 +681,15 @@ def _context_resolution_table(
                 cells={
                     "time": "-",
                     "agent": record.agent_id,
-                    "space_id": _context_attr(record.context, "space_id"),
-                    "backend": _context_attr(record.context, "retrieval_backend"),
-                    "status": "Resolved" if record.context is not None else "Resolve Failed",
+                    "space_id": record.scope_ref or "-",
+                    "backend": record.retrieval_backend or "-",
+                    "status": "Resolved" if _record_resolved(record) else "Resolve Failed",
                     "reason": record.error or "Current Context",
-                    "storage_root": _short(_context_attr(record.context, "storage_root"), 72),
+                    "storage_root": _short(record.storage_root or "-", 72),
                     "trace": "-",
                 },
-                status="resolved" if record.context is not None else "failed",
-                tone="success" if record.context is not None else "warning",
+                status="resolved" if _record_resolved(record) else "failed",
+                tone="success" if _record_resolved(record) else "warning",
             )
             for record in records
         )
@@ -907,7 +891,10 @@ def _write_flush_table(
     filtered = tuple(
         event
         for event in events
-        if any(token in event.event_name.lower() for token in ("write", "flush", "memory.daily", "memory.long"))
+        if any(
+            token in event.event_name.lower()
+            for token in ("remember", "write", "flush", "memory.daily", "memory.long")
+        )
     )
     rows = [
         OperationsTableRowModel(
@@ -1026,7 +1013,7 @@ def _source_scan_table(
         OperationsTableRowModel(
             id=f"scan:{record.agent_id}",
             cells={
-                "source": _short(_context_attr(record.context, "storage_root"), 80),
+                "source": _short(record.storage_root or "-", 80),
                 "agent": record.agent_id,
                 "type": "directory",
                 "status": _record_status(record),
@@ -1094,9 +1081,9 @@ def _retrieval_performance(
         )
         return OperationsChartSectionModel("retrieval_performance", "Current Retrieval Trace", "donut", max(len(search_hits), 1), segments)
     counts = Counter(
-        _context_attr(record.context, "retrieval_backend", "unknown")
+        record.retrieval_backend or "unknown"
         for record in records
-        if record.context is not None
+        if _record_resolved(record)
     )
     return OperationsChartSectionModel(
         "retrieval_performance",
@@ -1114,14 +1101,14 @@ def _file_details(
     files: tuple[Any, ...],
     *,
     record: _MemoryContextRecord | None,
-    file_memory_service: Any | None,
+    memory_query_service: Any | None,
     events: tuple[OperationsObservedEvent, ...],
 ) -> tuple[MemoryFileDetailModel, ...]:
     details: list[MemoryFileDetailModel] = []
     for item in files[:80]:
         file_id = _file_id(record, item)
         path = _text(getattr(item, "path", ""))
-        excerpt = _excerpt_text(file_memory_service, record=record, path=path)
+        excerpt = _excerpt_text(memory_query_service, record=record, path=path)
         details.append(
             MemoryFileDetailModel(
                 file_id=file_id,
@@ -1136,7 +1123,7 @@ def _file_details(
                     OperationsKeyValueItemModel("Updated At", _text(getattr(item, "updated_at", ""))),
                     OperationsKeyValueItemModel("Size", _file_size(record, item)),
                     OperationsKeyValueItemModel("Agent", record.agent_id if record else "-"),
-                    OperationsKeyValueItemModel("Space ID", _context_attr(record.context if record else None, "space_id")),
+                    OperationsKeyValueItemModel("Space ID", record.scope_ref if record else "-"),
                 ),
                 excerpt=excerpt,
                 related=_events_for_file_table(events, path),
@@ -1148,7 +1135,7 @@ def _file_details(
                         "preview": _text(getattr(item, "preview", "")),
                         "updated_at": _text(getattr(item, "updated_at", "")),
                     },
-                    "context": _context_payload(record.context if record else None),
+                    "context": _context_payload(record),
                 },
             )
         )
@@ -1233,9 +1220,9 @@ def _record_for_agent(
 ) -> _MemoryContextRecord | None:
     if agent_id:
         for record in records:
-            if record.agent_id == agent_id or _context_attr(record.context, "space_id") == agent_id:
+            if record.agent_id == agent_id or record.scope_ref == agent_id:
                 return record
-    return next((record for record in records if record.context is not None), records[0] if records else None)
+    return next((record for record in records if _record_resolved(record)), records[0] if records else None)
 
 
 def _select_profile(profiles: tuple[Any, ...], agent_id: str) -> Any | None:
@@ -1253,13 +1240,17 @@ def _overview_rows(section: OperationsTableSectionModel) -> tuple[dict[str, str]
 
 
 def _record_status(record: _MemoryContextRecord) -> str:
-    if record.context is None:
+    if not _record_resolved(record):
         return "No Context"
     if record.dirty:
         return "Dirty"
     if record.files and not record.index_db_exists:
         return "Missing Index"
     return "Ready"
+
+
+def _record_resolved(record: _MemoryContextRecord) -> bool:
+    return not record.error and bool(record.scope_ref and record.storage_root)
 
 
 def _record_tone(record: _MemoryContextRecord) -> str:
@@ -1294,7 +1285,7 @@ def _file_is_indexed(record: _MemoryContextRecord | None, item: Any) -> bool:
 
 
 def _file_id(record: _MemoryContextRecord | None, item: Any) -> str:
-    space_id = _context_attr(record.context if record else None, "space_id", "-")
+    space_id = record.scope_ref if record else "-"
     return f"{space_id}:{_text(getattr(item, 'path', ''))}"
 
 
@@ -1303,8 +1294,7 @@ def _file_size(record: _MemoryContextRecord | None, item: Any) -> str:
 
 
 def _file_size_bytes(record: _MemoryContextRecord | None, item: Any) -> int:
-    context = record.context if record is not None else None
-    root = _context_attr(context, "storage_root", "")
+    root = record.storage_root if record is not None else ""
     path = _text(getattr(item, "path", ""), "")
     if not root or not path:
         return len(_text(getattr(item, "preview", ""), ""))
@@ -1316,40 +1306,30 @@ def _file_size_bytes(record: _MemoryContextRecord | None, item: Any) -> int:
 
 
 def _excerpt_text(
-    service: Any | None,
+    memory_query_service: Any | None,
     *,
     record: _MemoryContextRecord | None,
     path: str,
 ) -> str:
-    if record is None or record.context is None or not path:
+    if record is None or not _record_resolved(record) or not path:
         return ""
-    get = getattr(service, "get", None)
+    get = getattr(memory_query_service, "get_agent_excerpt", None)
     if not callable(get):
         return ""
     try:
-        excerpt = get(context=record.context, path=path, start_line=1, line_count=60)
+        excerpt = get(record.agent_id, path=path, start_line=1, line_count=60)
     except Exception:
         return ""
     return _text(getattr(excerpt, "text", ""), "")
 
 
-def _context_attr(context: Any | None, name: str, default: str = "-") -> str:
-    if context is None:
-        return default
-    return _text(getattr(context, name, default), default)
-
-
-def _context_key(context: Any) -> str:
-    return f"{getattr(context, 'space_id', '')}::{getattr(context, 'storage_root', '')}"
-
-
-def _context_payload(context: Any | None) -> dict[str, str]:
-    if context is None:
+def _context_payload(record: _MemoryContextRecord | None) -> dict[str, str]:
+    if record is None or not _record_resolved(record):
         return {}
     return {
-        "space_id": _context_attr(context, "space_id"),
-        "storage_root": _context_attr(context, "storage_root"),
-        "retrieval_backend": _context_attr(context, "retrieval_backend"),
+        "space_id": record.scope_ref,
+        "storage_root": record.storage_root,
+        "retrieval_backend": record.retrieval_backend,
     }
 
 
@@ -1360,7 +1340,7 @@ def _watch_failures(metrics: Any | None) -> int:
 
 
 def _watcher_label(record: _MemoryContextRecord, metrics: Any | None) -> str:
-    if record.context is None:
+    if not _record_resolved(record):
         return "-"
     if metrics is None:
         return "Not Configured"

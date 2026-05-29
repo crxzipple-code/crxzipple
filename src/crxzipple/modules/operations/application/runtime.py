@@ -7,14 +7,21 @@ from threading import Event as StopEvent
 import time
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
+from crxzipple.modules.access.application.events import ACCESS_OPERATION_EVENT_NAMES
+from crxzipple.modules.browser.application.events import BROWSER_OPERATION_EVENT_NAMES
+from crxzipple.modules.memory.application.events import MEMORY_OPERATION_EVENT_NAMES
 from crxzipple.modules.events.domain import EventTopicRecord, EventTopicWatch
 from crxzipple.modules.operations.application.observation import (
     OperationsObserverHeartbeat,
 )
+from crxzipple.modules.operations.application.event_contracts import (
+    OPERATIONS_PROJECTION_INVALIDATED_EVENT,
+)
+from crxzipple.modules.operations.application.ports import OperationsEventStreamPort
 from crxzipple.modules.operations.application.orchestration_observation import (
     ORCHESTRATION_OPERATIONAL_EVENT_NAMES,
 )
+from crxzipple.modules.skills.application.events import SKILL_OPERATION_EVENT_NAMES
 from crxzipple.shared import (
     ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
     ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
@@ -25,7 +32,12 @@ from crxzipple.shared import (
     TOOL_RUN_OBSERVATION_SOURCE_EVENT_NAMES,
 )
 from crxzipple.shared.domain.events import named_event_topic
-from crxzipple.shared.event_contracts import EventDefinitionRegistry
+from crxzipple.shared.event_contracts import (
+    EventDefinitionRegistry,
+    TOOL_CLI_EVENT_NAMES,
+    TOOL_FUNCTION_EVENT_NAMES,
+    TOOL_SOURCE_EVENT_NAMES,
+)
 
 logger = get_logger(__name__)
 
@@ -48,6 +60,9 @@ _OPERATIONS_OBSERVER_STATIC_EVENT_NAMES: tuple[str, ...] = (
     "dispatch.task.recovered",
     "tool.enabled",
     "tool.disabled",
+    *TOOL_SOURCE_EVENT_NAMES,
+    *TOOL_FUNCTION_EVENT_NAMES,
+    *TOOL_CLI_EVENT_NAMES,
     "tool.assignment.created",
     "tool.assignment.started",
     "tool.assignment.succeeded",
@@ -68,6 +83,10 @@ _OPERATIONS_OBSERVER_STATIC_EVENT_NAMES: tuple[str, ...] = (
     "orchestration.llm_resolved",
     "channel.connection.subscription_updated",
     "channel.observation.dead_lettered",
+    *MEMORY_OPERATION_EVENT_NAMES,
+    *ACCESS_OPERATION_EVENT_NAMES,
+    *SKILL_OPERATION_EVENT_NAMES,
+    *BROWSER_OPERATION_EVENT_NAMES,
 )
 
 
@@ -85,18 +104,20 @@ class OperationsObserverRuntimeService:
     def __init__(
         self,
         *,
-        events_service: EventsApplicationService,
+        events_service: OperationsEventStreamPort,
         subscriptions: tuple[OperationsObserverSubscription, ...] = (),
         runtime_name: str = "operations.observer",
         heartbeat_handler: OperationsObserverHeartbeatHandler | None = None,
         maintenance_handler: OperationsObserverMaintenanceHandler | None = None,
         full_scan_interval_seconds: float = 60.0,
+        start_at_tail_when_no_cursor: bool = False,
     ) -> None:
         self.events_service = events_service
         self.runtime_name = runtime_name
         self._heartbeat_handler = heartbeat_handler
         self._maintenance_handler = maintenance_handler
         self._full_scan_interval_seconds = max(float(full_scan_interval_seconds), 1.0)
+        self._start_at_tail_when_no_cursor = bool(start_at_tail_when_no_cursor)
         self._full_scan_completed = False
         self._last_full_scan_at = 0.0
         self._wakeup_topics: set[str] = set()
@@ -132,14 +153,15 @@ class OperationsObserverRuntimeService:
         handler: OperationsObserverHandler,
         batch_handler: OperationsObserverBatchHandler | None = None,
     ) -> None:
-        self._subscriptions.append(
-            OperationsObserverSubscription(
-                subscription_id=subscription_id,
-                source_topic=source_topic,
-                handler=handler,
-                batch_handler=batch_handler,
-            ),
+        subscription = OperationsObserverSubscription(
+            subscription_id=subscription_id,
+            source_topic=source_topic,
+            handler=handler,
+            batch_handler=batch_handler,
         )
+        self._subscriptions.append(subscription)
+        if self._start_at_tail_when_no_cursor:
+            self._subscription_cursor(subscription)
         self._full_scan_completed = False
 
     def process_available_events(
@@ -315,7 +337,20 @@ class OperationsObserverRuntimeService:
                 subscription.subscription_id,
                 source_topic=subscription.source_topic,
             )
-            self._subscription_cursors[key] = state.cursor if state is not None else None
+            if state is not None:
+                self._subscription_cursors[key] = state.cursor
+            elif self._start_at_tail_when_no_cursor:
+                cursor = self.events_service.snapshot_event_topic(
+                    subscription.source_topic,
+                )
+                self.events_service.set_subscription_cursor(
+                    subscription.subscription_id,
+                    source_topic=subscription.source_topic,
+                    cursor=cursor,
+                )
+                self._subscription_cursors[key] = cursor
+            else:
+                self._subscription_cursors[key] = None
         return self._subscription_cursors[key]
 
     def _set_subscription_cursor(
@@ -460,18 +495,20 @@ class OperationsObserverRuntimeService:
 def operations_observer_event_names(
     definition_registry: EventDefinitionRegistry | None = None,
 ) -> tuple[str, ...]:
+    excluded = {OPERATIONS_PROJECTION_INVALIDATED_EVENT}
     names: list[str] = []
     if definition_registry is not None:
         names.extend(
             definition.event_name
             for definition in definition_registry.list_definitions()
             if definition.durability == "persistent"
+            and definition.event_name not in excluded
         )
     names.extend(_OPERATIONS_OBSERVER_STATIC_EVENT_NAMES)
     return tuple(
         dict.fromkeys(
             name.strip()
             for name in names
-            if isinstance(name, str) and name.strip()
+            if isinstance(name, str) and name.strip() and name not in excluded
         ),
     )

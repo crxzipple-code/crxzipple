@@ -8,6 +8,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 from crxzipple.shared.time import format_datetime_utc
@@ -92,7 +93,6 @@ class AgentRuntimePreferencesDTO:
     workdir: str | None
     workspace: str | None
     sandbox_mode: str | None
-    memory_retrieval_backend: str | None
     attrs: dict[str, object]
 
     @classmethod
@@ -105,8 +105,22 @@ class AgentRuntimePreferencesDTO:
             workdir=value.resolved_workdir,
             workspace=value.compat_workspace,
             sandbox_mode=value.sandbox_mode,
-            memory_retrieval_backend=value.memory_retrieval_backend,
             attrs=dict(value.attrs),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentMemoryBindingDTO:
+    enabled: bool
+    scope_ref: str | None
+    access: str
+
+    @classmethod
+    def from_value(cls, value: AgentMemoryBinding) -> "AgentMemoryBindingDTO":
+        return cls(
+            enabled=value.enabled,
+            scope_ref=value.scope_ref,
+            access=value.access,
         )
 
 
@@ -114,7 +128,6 @@ class AgentRuntimePreferencesDTO:
 class AgentProfileDTO:
     id: str
     name: str
-    description: str
     enabled: bool
     created_at: str
     updated_at: str
@@ -123,13 +136,13 @@ class AgentProfileDTO:
     llm_routing_policy: AgentLlmRoutingPolicyDTO
     execution_policy: AgentExecutionPolicyDTO
     runtime_preferences: AgentRuntimePreferencesDTO
+    memory: AgentMemoryBindingDTO
 
     @classmethod
     def from_entity(cls, profile: AgentProfile) -> "AgentProfileDTO":
         return cls(
             id=profile.id,
             name=profile.name,
-            description=profile.description,
             enabled=profile.enabled,
             created_at=format_datetime_utc(profile.created_at),
             updated_at=format_datetime_utc(profile.updated_at),
@@ -146,4 +159,5 @@ class AgentProfileDTO:
             runtime_preferences=AgentRuntimePreferencesDTO.from_value(
                 profile.runtime_preferences,
             ),
+            memory=AgentMemoryBindingDTO.from_value(profile.memory),
         )

@@ -1,5 +1,14 @@
 kind: local_package
 namespace: workspace
+capabilities:
+  - workspace.lookup
+  - workspace.read
+  - workspace.write
+  - session.read
+dependencies:
+  - id: session_workspace_lookup
+    kind: service_dependency
+    description: Resolves session keys to their bound workspace directories.
 local_tools:
   - id: workspace_list
     name: Workspace List

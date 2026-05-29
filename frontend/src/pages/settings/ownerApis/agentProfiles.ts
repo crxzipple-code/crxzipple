@@ -5,7 +5,6 @@ export type AgentOwnerJsonRecord = Record<string, unknown>;
 export interface AgentProfileApiPayload {
   id: string;
   name: string;
-  description: string;
   enabled: boolean;
   created_at?: string | null;
   updated_at?: string | null;
@@ -37,21 +36,25 @@ export interface AgentProfileApiPayload {
     workdir?: string | null;
     workspace?: string | null;
     sandbox_mode?: string | null;
-    memory_retrieval_backend?: string | null;
     attrs?: AgentOwnerJsonRecord;
+  };
+  memory: AgentOwnerJsonRecord & {
+    enabled?: boolean;
+    scope_ref?: string | null;
+    access?: string;
   };
 }
 
 export interface AgentProfileWritePayload {
   id?: string;
   name?: string;
-  description?: string;
   enabled?: boolean;
   identity?: AgentOwnerJsonRecord;
   instruction_policy?: AgentOwnerJsonRecord;
   llm_routing_policy?: AgentOwnerJsonRecord;
   execution_policy?: AgentOwnerJsonRecord;
   runtime_preferences?: AgentOwnerJsonRecord;
+  memory?: AgentOwnerJsonRecord;
   reason?: string | null;
   actor?: string | null;
 }
@@ -87,7 +90,6 @@ export interface AgentResolutionSummaryApiPayload {
   status: string;
   llm_routes: number;
   tools: number;
-  skills: number;
   access_grants: number;
   authorization_grants: number;
   issues: number;
@@ -111,24 +113,12 @@ export interface AgentResolvedToolApiPayload {
   enabled: boolean;
   name?: string | null;
   kind?: string | null;
-  source_kind?: string | null;
+  definition_origin?: string | null;
   access_requirements: string[];
   access_requirement_sets: string[][];
   required_effect_ids: string[];
   requires_confirmation: boolean;
   mutates_state: boolean;
-}
-
-export interface AgentResolvedSkillApiPayload {
-  skill_id: string;
-  resolved: boolean;
-  name?: string | null;
-  source?: string | null;
-  required_tools: string[];
-  optional_tools: string[];
-  suggested_tools: string[];
-  required_effects: string[];
-  access_requirements: string[];
 }
 
 export interface AgentAccessGrantApiPayload {
@@ -153,6 +143,27 @@ export interface AgentAuthorizationGrantApiPayload {
   description: string;
 }
 
+export type AgentAuthorizationGrantKind = "effect" | "tool";
+
+export interface AgentAuthorizationGrantMutationPayload {
+  agent_id: string;
+  kind: AgentAuthorizationGrantKind;
+  id: string;
+  reason?: string;
+  actor?: {
+    type?: string | null;
+    id?: string | null;
+  };
+}
+
+export interface AgentAuthorizationGrantMutationResult {
+  agent_id: string;
+  kind: AgentAuthorizationGrantKind;
+  id: string;
+  policy_id: string;
+  status: "enabled" | "revoked" | "not_found";
+}
+
 export interface AgentValidationIssueApiPayload {
   severity: string;
   code: string;
@@ -172,76 +183,63 @@ export interface AgentProfileResolutionApiPayload {
   summary: AgentResolutionSummaryApiPayload;
   llm_routes: AgentResolvedLlmApiPayload[];
   tools: AgentResolvedToolApiPayload[];
-  skills: AgentResolvedSkillApiPayload[];
   access_grants: AgentAccessGrantApiPayload[];
   authorization_grants: AgentAuthorizationGrantApiPayload[];
   validation: AgentValidationIssueApiPayload[];
   trace: AgentResolutionTraceApiPayload[];
 }
 
-export interface EventRecordApiPayload {
-  cursor: string;
-  event_id: string;
-  event_name: string;
-  topic: string | null;
-  kind: string;
-  source_event_name: string;
-  source_payload: AgentOwnerJsonRecord;
-  source_created_at: string;
-  created_at: string;
-}
-
-export interface EventRecordsApiPayload {
-  filters: Record<string, string>;
-  topic_count: number;
-  records: EventRecordApiPayload[];
-}
-
 export async function listAgentProfiles(): Promise<AgentProfileApiPayload[]> {
-  return requestJson<AgentProfileApiPayload[]>("/agents");
+  const payload = await requestJson<unknown[]>("/agents");
+  return payload.map(normalizeAgentProfilePayload);
 }
 
 export async function getAgentProfile(profileId: string): Promise<AgentProfileApiPayload> {
-  return requestJson<AgentProfileApiPayload>(`/agents/${encodeURIComponent(profileId)}`);
+  const payload = await requestJson<unknown>(`/agents/${encodeURIComponent(profileId)}`);
+  return normalizeAgentProfilePayload(payload);
 }
 
 export async function createAgentProfile(
   payload: AgentProfileWritePayload & { id: string; name: string; llm_routing_policy: AgentOwnerJsonRecord },
 ): Promise<AgentProfileApiPayload> {
-  return requestJson<AgentProfileApiPayload>("/agents", {
+  const result = await requestJson<unknown>("/agents", {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  return normalizeAgentProfilePayload(result);
 }
 
 export async function updateAgentProfile(
   profileId: string,
   payload: AgentProfileWritePayload,
 ): Promise<AgentProfileApiPayload> {
-  return requestJson<AgentProfileApiPayload>(`/agents/${encodeURIComponent(profileId)}`, {
+  const result = await requestJson<unknown>(`/agents/${encodeURIComponent(profileId)}`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
+  return normalizeAgentProfilePayload(result);
 }
 
 export async function enableAgentProfile(
   profileId: string,
   payload?: AgentProfileActionPayload,
 ): Promise<AgentProfileApiPayload> {
-  return requestJson<AgentProfileApiPayload>(`/agents/${encodeURIComponent(profileId)}/enable`, {
+  const result = await requestJson<unknown>(`/agents/${encodeURIComponent(profileId)}/enable`, {
     method: "POST",
     ...(hasActionPayload(payload) ? { body: JSON.stringify(payload) } : {}),
   });
+  return normalizeAgentProfilePayload(result);
 }
 
 export async function disableAgentProfile(
   profileId: string,
   payload?: AgentProfileActionPayload,
 ): Promise<AgentProfileApiPayload> {
-  return requestJson<AgentProfileApiPayload>(`/agents/${encodeURIComponent(profileId)}/disable`, {
+  const result = await requestJson<unknown>(`/agents/${encodeURIComponent(profileId)}/disable`, {
     method: "POST",
     ...(hasActionPayload(payload) ? { body: JSON.stringify(payload) } : {}),
   });
+  return normalizeAgentProfilePayload(result);
 }
 
 export async function deleteAgentProfile(
@@ -277,6 +275,24 @@ export async function getAgentProfileResolution(
   );
 }
 
+export async function grantAgentAuthorization(
+  payload: AgentAuthorizationGrantMutationPayload,
+): Promise<AgentAuthorizationGrantMutationResult> {
+  return requestJson<AgentAuthorizationGrantMutationResult>("/authorization/agent-grants", {
+    method: "POST",
+    body: JSON.stringify(withSettingsActor(payload)),
+  });
+}
+
+export async function revokeAgentAuthorization(
+  payload: AgentAuthorizationGrantMutationPayload,
+): Promise<AgentAuthorizationGrantMutationResult> {
+  return requestJson<AgentAuthorizationGrantMutationResult>("/authorization/agent-grants/revoke", {
+    method: "POST",
+    body: JSON.stringify(withSettingsActor(payload)),
+  });
+}
+
 export async function updateAgentHomeFiles(
   profileId: string,
   files: Array<{ name: string; content: string }>,
@@ -288,34 +304,128 @@ export async function updateAgentHomeFiles(
 }
 
 export async function syncAgentHome(profileId: string): Promise<AgentHomeConfigApiPayload> {
-  return requestJson<AgentHomeConfigApiPayload>(`/agents/${encodeURIComponent(profileId)}/sync-home`, {
+  const result = await requestJson<AgentHomeConfigApiPayload>(`/agents/${encodeURIComponent(profileId)}/sync-home`, {
     method: "POST",
     body: JSON.stringify({}),
   });
+  return {
+    ...result,
+    profile: normalizeAgentProfilePayload(result.profile),
+  };
 }
 
 export async function exportAgentHome(profileId: string): Promise<AgentHomeConfigApiPayload> {
-  return requestJson<AgentHomeConfigApiPayload>(`/agents/${encodeURIComponent(profileId)}/export-home`, {
+  const result = await requestJson<AgentHomeConfigApiPayload>(`/agents/${encodeURIComponent(profileId)}/export-home`, {
     method: "POST",
     body: JSON.stringify({}),
   });
-}
-
-export async function listAgentProfileEvents(
-  profileId: string,
-  limit = 25,
-): Promise<EventRecordsApiPayload> {
-  const query = new URLSearchParams({
-    topic_prefix: "events.named.agent.profile",
-    payload_key: "agent_profile_id",
-    payload_value: profileId,
-    limit: String(limit),
-  });
-  return requestJson<EventRecordsApiPayload>(`/events/records?${query.toString()}`);
+  return {
+    ...result,
+    profile: normalizeAgentProfilePayload(result.profile),
+  };
 }
 
 function hasActionPayload(payload: AgentProfileActionPayload | undefined): payload is AgentProfileActionPayload {
   return Boolean(payload?.reason || payload?.actor);
+}
+
+function normalizeAgentProfilePayload(value: unknown): AgentProfileApiPayload {
+  const payload = recordValue(value);
+  if (!payload) {
+    throw new Error("Expected agent profile response.");
+  }
+  const id = stringValue(payload.id);
+  const name = stringValue(payload.name, id || "Agent");
+  const identity = recordValue(payload.identity) ?? {};
+  const instructionPolicy = recordValue(payload.instruction_policy) ?? {};
+  const llmRoutingPolicy = recordValue(payload.llm_routing_policy) ?? {};
+  const executionPolicy = recordValue(payload.execution_policy) ?? {};
+  const runtimePreferences = recordValue(payload.runtime_preferences) ?? {};
+  const memory = recordValue(payload.memory) ?? {};
+  const attrs = recordValue(runtimePreferences.attrs) ?? {};
+
+  return {
+    ...(payload as Partial<AgentProfileApiPayload>),
+    id,
+    name,
+    enabled: payload.enabled !== false,
+    created_at: stringOrNull(payload.created_at),
+    updated_at: stringOrNull(payload.updated_at),
+    identity: {
+      ...identity,
+      display_name: stringOrNull(identity.display_name),
+      theme: stringOrNull(identity.theme),
+      emoji: stringOrNull(identity.emoji),
+      avatar: stringOrNull(identity.avatar),
+    },
+    instruction_policy: {
+      ...instructionPolicy,
+      system_prompt: stringValue(instructionPolicy.system_prompt),
+      response_style: stringOrNull(instructionPolicy.response_style),
+      thinking_default: stringOrNull(instructionPolicy.thinking_default),
+      stream_by_default: instructionPolicy.stream_by_default === true,
+    },
+    llm_routing_policy: {
+      ...llmRoutingPolicy,
+      default_llm_id: stringOrNull(llmRoutingPolicy.default_llm_id),
+      fallback_llm_ids: Array.isArray(llmRoutingPolicy.fallback_llm_ids)
+        ? llmRoutingPolicy.fallback_llm_ids.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+      image_llm_id: stringOrNull(llmRoutingPolicy.image_llm_id),
+      document_llm_id: stringOrNull(llmRoutingPolicy.document_llm_id),
+    },
+    execution_policy: {
+      ...executionPolicy,
+      timeout_seconds: positiveNumber(executionPolicy.timeout_seconds, 120),
+      max_turns: positiveNumber(executionPolicy.max_turns, 99),
+    },
+    runtime_preferences: {
+      ...runtimePreferences,
+      home_dir: stringOrNull(runtimePreferences.home_dir),
+      workdir: stringOrNull(runtimePreferences.workdir),
+      workspace: stringOrNull(runtimePreferences.workspace),
+      sandbox_mode: stringOrNull(runtimePreferences.sandbox_mode),
+      attrs,
+    },
+    memory: {
+      ...memory,
+      enabled: memory.enabled !== false,
+      scope_ref: stringOrNull(memory.scope_ref),
+      access: stringValue(memory.access, "read_write"),
+    },
+  };
+}
+
+function recordValue(value: unknown): AgentOwnerJsonRecord | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as AgentOwnerJsonRecord;
+  }
+  return null;
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback;
+}
+
+function stringOrNull(value: unknown): string | null {
+  const text = stringValue(value).trim();
+  return text ? text : null;
+}
+
+function positiveNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function withSettingsActor(
+  payload: AgentAuthorizationGrantMutationPayload,
+): AgentAuthorizationGrantMutationPayload {
+  return {
+    ...payload,
+    actor: payload.actor ?? { type: "settings-ui", id: "operator" },
+  };
 }
 
 async function readErrorPayload(

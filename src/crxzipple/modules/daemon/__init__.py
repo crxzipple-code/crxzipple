@@ -16,6 +16,7 @@ from .infrastructure import (
     FileBackedDaemonLeaseEventLog,
     FileBackedDaemonLeaseStore,
     FileBackedDaemonServiceSpecStore,
+    apply_daemon_state_migrations,
     bootstrap_daemon_state_root,
 )
 
@@ -34,5 +35,6 @@ __all__ = [
     "FileBackedDaemonLeaseEventLog",
     "FileBackedDaemonLeaseStore",
     "FileBackedDaemonServiceSpecStore",
+    "apply_daemon_state_migrations",
     "bootstrap_daemon_state_root",
 ]

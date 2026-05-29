@@ -12,16 +12,18 @@ from crxzipple.modules.dispatch.domain import (
     DispatchTask,
     DispatchTaskStatus,
 )
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
 from crxzipple.modules.tool.application.catalog_service import ToolCatalogService
 from crxzipple.modules.tool.application.concurrency import ToolRunConcurrencyPolicy
+from crxzipple.modules.tool.application.ports import ToolEventWaitPort
 from crxzipple.modules.tool.application.service_support import (
     DISPATCH_LEASE_EXPIRED_REASON,
     ToolServiceBase,
     ToolServiceDependencies,
+    build_tool_from_function,
 )
 from crxzipple.modules.tool.domain.entities import (
+    Tool,
     ToolRun,
     ToolRunAssignment,
     ToolWorkerRegistration,
@@ -100,7 +102,7 @@ class ToolBackgroundSchedulerService(ToolServiceBase):
         max_runs: int | None = None,
         max_idle_cycles: int | None = None,
         stop_event: ThreadEvent | None = None,
-        events_service: EventsApplicationService | None = None,
+        events_service: ToolEventWaitPort | None = None,
     ) -> int:
         processed_runs = 0
         idle_cycles = 0
@@ -208,7 +210,7 @@ class ToolBackgroundSchedulerService(ToolServiceBase):
             run = uow.tool_runs.get(task.owner_id)
             if run is None:
                 raise ToolRunNotFoundError(f"Tool run '{task.owner_id}' was not found.")
-            tool = self.catalog_service.resolve_tool(run.tool_id)
+            tool = self._resolve_run_tool_for_concurrency(uow, run)
             if not self.concurrency_policy.can_start(
                 run=run,
                 tool=tool,
@@ -252,13 +254,20 @@ class ToolBackgroundSchedulerService(ToolServiceBase):
             run = runs_by_id.get(assignment.run_id)
             if run is None or run.is_terminal():
                 continue
-            tool = self.catalog_service.resolve_tool(run.tool_id)
+            tool = self._resolve_run_tool_for_concurrency(uow, run)
             self.concurrency_policy.reserve(
                 run=run,
                 tool=tool,
                 active_counts=counts,
             )
         return counts
+
+    def _resolve_run_tool_for_concurrency(self, uow, run: ToolRun) -> Tool | None:
+        if run.function_id is not None:
+            function = uow.tool_functions.get(run.function_id)
+            if function is not None:
+                return build_tool_from_function(function)
+        return self.catalog_service.resolve_tool(run.tool_id)
 
     def _queued_dispatch_candidates(self, uow) -> list[DispatchTask]:
         active_lane_keys = {
@@ -348,7 +357,7 @@ class ToolBackgroundSchedulerService(ToolServiceBase):
 
     @staticmethod
     def _build_wait_watches(
-        events_service: EventsApplicationService,
+        events_service: ToolEventWaitPort,
     ) -> tuple[EventTopicWatch, ...]:
         topics = (
             dispatch_wakeup_topic("tool_run"),

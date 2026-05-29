@@ -1,4 +1,4 @@
-from .action_engines import CdpBackedPlaywrightActionEngine, McpBackedActionEngine
+from .action_engines import CdpBackedPlaywrightActionEngine
 from .cdp_urls import (
     append_cdp_path,
     browser_ref_to_cdp_http_base,
@@ -8,18 +8,34 @@ from .cdp_urls import (
     normalize_cdp_http_base,
     normalize_cdp_ws_url,
 )
-from .chrome_mcp import ChromeMcpClientPool
+from .cdp_sessions import BrowserCdpSessionBroker, BrowserCdpSessionLease
 from .engines import (
     CdpControlEngine,
     InMemoryCdpBackedPlaywrightActionEngine,
     InMemoryCdpControlEngine,
-    InMemoryMcpActionEngine,
-    InMemoryMcpControlEngine,
-    McpControlEngine,
 )
+from .diagnostics import BrowserDiagnosticsService
+from .environment_control import BrowserEnvironmentControlService
+from .host_runner import BrowserHostProcessRunner
+from .network_capture import (
+    DefaultBrowserNetworkRedactor,
+    InMemoryBrowserNetworkCaptureStore,
+)
+from .network_cdp_capture import CdpNetworkCaptureController
+from .network_page_fetch import BrowserPageNetworkFetchService
 from .playwright import PlaywrightCdpSessionPool
+from .proxy_adapter import (
+    BasicProxyCredential,
+    BearerProxyCredential,
+    BrowserLocalProxyAdapter,
+    normalize_upstream_proxy_endpoint,
+    parse_basic_proxy_credential,
+    parse_bearer_proxy_credential,
+    parse_proxy_credential,
+)
 from .profile_probe import BrowserProfileProbeService
 from .registry import StaticBrowserEngineRegistry
+from .storage_inspection import BrowserStorageInspectionService
 from .state_root import (
     BrowserStateRoot,
     bootstrap_browser_state_root,
@@ -29,9 +45,13 @@ from .state_root import (
     persist_browser_system_config,
 )
 from .stores import (
+    FileBackedBrowserProfileAllocationStore,
+    FileBackedBrowserProfilePoolStore,
     FileBackedBrowserRefStore,
     FileBackedBrowserRuntimeStateStore,
     FileBackedBrowserSystemConfigStore,
+    InMemoryBrowserProfileAllocationStore,
+    InMemoryBrowserProfilePoolStore,
     InMemoryBrowserRefStore,
     InMemoryBrowserRuntimeStateStore,
     InMemoryBrowserSystemConfigStore,
@@ -39,27 +59,43 @@ from .stores import (
 
 __all__ = [
     "BrowserStateRoot",
+    "BrowserCdpSessionBroker",
+    "BrowserCdpSessionLease",
     "BrowserProfileProbeService",
+    "BrowserPageNetworkFetchService",
+    "BrowserDiagnosticsService",
+    "BrowserEnvironmentControlService",
+    "BrowserStorageInspectionService",
     "CdpBackedPlaywrightActionEngine",
     "CdpControlEngine",
-    "ChromeMcpClientPool",
+    "BrowserHostProcessRunner",
     "append_cdp_path",
     "browser_ref_to_cdp_http_base",
     "build_cdp_json_new_endpoint",
     "candidate_cdp_http_bases",
     "FileBackedBrowserRefStore",
+    "FileBackedBrowserProfileAllocationStore",
+    "FileBackedBrowserProfilePoolStore",
     "FileBackedBrowserSystemConfigStore",
     "FileBackedBrowserRuntimeStateStore",
     "InMemoryBrowserRefStore",
+    "InMemoryBrowserProfileAllocationStore",
+    "InMemoryBrowserProfilePoolStore",
     "InMemoryBrowserRuntimeStateStore",
     "InMemoryBrowserSystemConfigStore",
+    "DefaultBrowserNetworkRedactor",
+    "CdpNetworkCaptureController",
+    "InMemoryBrowserNetworkCaptureStore",
     "InMemoryCdpBackedPlaywrightActionEngine",
     "InMemoryCdpControlEngine",
-    "InMemoryMcpActionEngine",
-    "InMemoryMcpControlEngine",
-    "McpBackedActionEngine",
-    "McpControlEngine",
     "PlaywrightCdpSessionPool",
+    "BasicProxyCredential",
+    "BearerProxyCredential",
+    "BrowserLocalProxyAdapter",
+    "normalize_upstream_proxy_endpoint",
+    "parse_basic_proxy_credential",
+    "parse_bearer_proxy_credential",
+    "parse_proxy_credential",
     "StaticBrowserEngineRegistry",
     "bootstrap_browser_state_root",
     "ensure_browser_state_root",

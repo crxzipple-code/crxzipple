@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest
 
 from crxzipple.core.config import load_settings
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.interfaces.authorization import (
     authorize_llm_action,
     authorize_tool_run,
@@ -42,13 +43,14 @@ from crxzipple.modules.llm.domain import (
     LlmResult,
 )
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
-from crxzipple.modules.tool.application import ExecuteToolInput, RegisterToolInput
+from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import (
     ToolEnvironment,
     ToolExecutionStrategy,
     ToolMode,
 )
 from tests.unit.support import SqliteTestHarness
+from tests.unit.tool_catalog_seed import seed_catalog_tool
 
 
 class _FakeLlmAdapter:
@@ -89,23 +91,28 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        policies = container.authorization_service.list_policies()
+        policies = container.require(AppKey.AUTHORIZATION_SERVICE).list_policies()
         self.assertEqual(
             [item.id for item in policies],
             [
+                "allow_browser_local_tool_access_effect",
+                "allow_browser_tool_execution",
+                "allow_cli_source_cancel_from_cli_interface",
                 "allow_llm_invocation",
                 "allow_safe_tool_execution",
                 "allow_session_context_tool_execution",
                 "allow_session_context_tool_mutation_effect",
+                "allow_skill_authoring_draft_lifecycle_effects",
+                "allow_skill_authoring_draft_tool_execution",
                 "deny_tool_access_when_required_scope_missing",
                 "deny_tool_access_when_surface_mismatch",
                 "deny_tool_access_when_surface_requires_explicit_declaration",
             ],
         )
 
-        llm_decision = container.authorization_service.check(
+        llm_decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="llm.invoke",
@@ -113,7 +120,7 @@ class AuthorizationTestCase(unittest.TestCase):
                 context=AuthorizationContext(attrs={"interface": "http"}),
             ),
         )
-        denied_decision = container.authorization_service.check(
+        denied_decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="cli"),
                 action="tool.run",
@@ -131,6 +138,162 @@ class AuthorizationTestCase(unittest.TestCase):
         self.assertFalse(denied_decision.allowed)
         self.assertEqual(denied_decision.matched_policy_ids, ())
 
+    def test_default_policy_allows_configured_browser_source_execution(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_runtime_container(settings=settings)
+
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="browser.navigate",
+                    attrs={
+                        "source_id": "configured.browser",
+                        "mutates_state": True,
+                        "required_effect_ids": ["local_tool_access"],
+                        "authorization_effect_ids": ["local_tool_access"],
+                        "capability_ids": ["browser.control", "browser.page_action"],
+                    },
+                ),
+                context=AuthorizationContext(attrs={"interface": "http"}),
+                required_effect_ids=("local_tool_access",),
+            ),
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertIn("allow_browser_tool_execution", decision.matched_policy_ids)
+        self.assertIn(
+            "allow_browser_local_tool_access_effect",
+            decision.matched_policy_ids,
+        )
+
+    def test_tool_run_authorization_exposes_browser_profile_context(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_runtime_container(settings=settings)
+        seed_catalog_tool(
+            container,
+            tool_id="browser.navigate",
+            name="Browser Navigate",
+            mutates_state=True,
+            source_id="configured.browser",
+        )
+        container.require(AppKey.AUTHORIZATION_SERVICE).upsert_policy(
+            AuthorizationPolicy(
+                id="deny_user_browser_profile",
+                description="Block direct execution against the user's browser profile.",
+                effect=AuthorizationEffect.DENY,
+                actions=("tool.run",),
+                resource_kind="tool",
+                resource_match={"source_id": "configured.browser"},
+                context_match={"browser_profile": "user"},
+                priority=1000,
+                source_kind="local_managed",
+            ),
+        )
+
+        with self.assertRaises(AuthorizationDeniedError):
+            authorize_tool_run(
+                container,
+                tool_id="browser.navigate",
+                mode=ToolMode.INLINE,
+                strategy=ToolExecutionStrategy.ASYNC,
+                environment=ToolEnvironment.LOCAL,
+                interface_name="http",
+                arguments={"profile": "user"},
+            )
+
+        authorize_tool_run(
+            container,
+            tool_id="browser.navigate",
+            mode=ToolMode.INLINE,
+            strategy=ToolExecutionStrategy.ASYNC,
+            environment=ToolEnvironment.LOCAL,
+            interface_name="http",
+            arguments={"profile": "crxzipple"},
+        )
+
+    def test_default_policy_allows_skill_draft_lifecycle_but_requires_apply_approval(
+        self,
+    ) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_runtime_container(settings=settings)
+
+        create_decision = container.require(
+            AppKey.AUTHORIZATION_SERVICE,
+        ).check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="skill_draft_create",
+                    attrs={
+                        "mutates_state": True,
+                        "required_effect_ids": ["skill_authoring.create"],
+                        "authorization_effect_ids": ["skill_authoring.create"],
+                        "tags": ["skill", "authoring"],
+                    },
+                ),
+                context=AuthorizationContext(attrs={"interface": "http"}),
+                required_effect_ids=("skill_authoring.create",),
+            ),
+        )
+        apply_decision = container.require(
+            AppKey.AUTHORIZATION_SERVICE,
+        ).check_tool_execution(
+            ToolExecutionAuthorizationRequest(
+                subject=AuthorizationSubject(type="interface", id="http"),
+                resource=AuthorizationResource(
+                    kind="tool",
+                    id="skill_draft_apply",
+                    attrs={
+                        "mutates_state": True,
+                        "required_effect_ids": ["skill_authoring.apply"],
+                        "authorization_effect_ids": ["skill_authoring.apply"],
+                        "tags": ["skill", "authoring", "approval:required"],
+                    },
+                ),
+                context=AuthorizationContext(attrs={"interface": "http"}),
+                required_effect_ids=("skill_authoring.apply",),
+            ),
+        )
+
+        self.assertTrue(create_decision.allowed)
+        self.assertIn(
+            "allow_skill_authoring_draft_lifecycle_effects",
+            create_decision.matched_policy_ids,
+        )
+        self.assertFalse(apply_decision.allowed)
+        self.assertEqual(apply_decision.code, AuthorizationDecisionCode.APPROVAL_REQUIRED)
+        self.assertEqual(
+            apply_decision.details["missing_effect_ids"],
+            ["skill_authoring.apply"],
+        )
+
     def test_tool_service_is_decoupled_and_interface_guard_denies_mutating_tool(self) -> None:
         settings = replace(
             load_settings(),
@@ -141,19 +304,18 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        container.tool_service.register(
-            RegisterToolInput(
-                id="dangerous_write",
-                name="Dangerous Write",
-                description="Mutates external state.",
-                mutates_state=True,
-            ),
+        seed_catalog_tool(
+            container,
+            tool_id="dangerous_write",
+            name="Dangerous Write",
+            description="Mutates external state.",
+            mutates_state=True,
         )
 
         direct_run = asyncio.run(
-            container.tool_service.execute(
+            container.require(AppKey.TOOL_SERVICE).execute(
                 ExecuteToolInput(
                     tool_id="dangerous_write",
                     arguments={},
@@ -173,6 +335,46 @@ class AuthorizationTestCase(unittest.TestCase):
                 interface_name="http",
             )
 
+    def test_default_policy_allows_cli_source_cancel_only_from_cli_interface(self) -> None:
+        settings = replace(
+            load_settings(),
+            database_url=self.harness.database_url,
+            authorization_enabled=True,
+            authorization_policy_paths=(self.policy_path,),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        container = self.harness.build_runtime_container(settings=settings)
+        seed_catalog_tool(
+            container,
+            tool_id="configured_cli_cancel",
+            name="Configured CLI Cancel",
+            description="Cancel a governed CLI source process.",
+            required_effect_ids=("tool.cli.cancel",),
+            mutates_state=True,
+            supported_environments=(ToolEnvironment.REMOTE,),
+        )
+
+        authorize_tool_run(
+            container,
+            tool_id="configured_cli_cancel",
+            mode=ToolMode.INLINE,
+            strategy=ToolExecutionStrategy.ASYNC,
+            environment=ToolEnvironment.REMOTE,
+            interface_name="cli",
+        )
+
+        with self.assertRaises(AuthorizationDeniedError):
+            authorize_tool_run(
+                container,
+                tool_id="configured_cli_cancel",
+                mode=ToolMode.INLINE,
+                strategy=ToolExecutionStrategy.ASYNC,
+                environment=ToolEnvironment.REMOTE,
+                interface_name="http",
+            )
+
     def test_llm_service_is_decoupled_and_interface_guard_denies_without_policy(self) -> None:
         allowed_settings = replace(
             load_settings(),
@@ -183,11 +385,11 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        allowed_container = self.harness.build_container(settings=allowed_settings)
+        allowed_container = self.harness.build_runtime_container(settings=allowed_settings)
         registry = LlmAdapterRegistry()
         registry.register(LlmApiFamily.OPENAI_RESPONSES, _FakeLlmAdapter())
         service = LlmApplicationService(
-            allowed_container.uow_factory,
+            allowed_container.require(AppKey.UNIT_OF_WORK_FACTORY),
             registry,
         )
 
@@ -228,11 +430,11 @@ class AuthorizationTestCase(unittest.TestCase):
                 llm_profiles=(),
             )
             denied_harness.initialize_schema(settings=denied_settings)
-            denied_container = denied_harness.build_container(settings=denied_settings)
+            denied_container = denied_harness.build_runtime_container(settings=denied_settings)
             denied_registry = LlmAdapterRegistry()
             denied_registry.register(LlmApiFamily.OPENAI_RESPONSES, _FakeLlmAdapter())
             denied_service = LlmApplicationService(
-                denied_container.uow_factory,
+                denied_container.require(AppKey.UNIT_OF_WORK_FACTORY),
                 denied_registry,
             )
             denied_service.register_profile(
@@ -275,16 +477,16 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        policy = container.authorization_service.grant_agent_effect_authorization(
+        policy = container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_effect_authorization(
             agent_id="assistant",
             effect_id="network_search",
         )
 
         self.assertEqual(policy.actions, ("tool.effect.authorize",))
         self.assertFalse(runtime_policy_path.exists())
-        with container.session_factory() as session:
+        with container.require(AppKey.DATABASE_SESSION_FACTORY)() as session:
             stored = session.get(AuthorizationPolicyModel, policy.id)
         self.assertIsNotNone(stored)
         assert stored is not None
@@ -295,7 +497,7 @@ class AuthorizationTestCase(unittest.TestCase):
             ["network_search"],
         )
 
-        allowed = container.authorization_service.check(
+        allowed = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="tool.effect.authorize",
@@ -309,7 +511,7 @@ class AuthorizationTestCase(unittest.TestCase):
                 ),
             ),
         )
-        denied = container.authorization_service.check(
+        denied = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="tool.effect.authorize",
@@ -339,15 +541,15 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        policy = container.authorization_service.grant_agent_tool_authorization(
+        policy = container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_tool_authorization(
             agent_id="assistant",
             tool_id="filesystem.read_text",
         )
 
         self.assertFalse(runtime_policy_path.exists())
-        with container.session_factory() as session:
+        with container.require(AppKey.DATABASE_SESSION_FACTORY)() as session:
             stored = session.get(AuthorizationPolicyModel, policy.id)
         self.assertIsNotNone(stored)
         assert stored is not None
@@ -355,7 +557,7 @@ class AuthorizationTestCase(unittest.TestCase):
         self.assertEqual(stored.actions_payload, ["tool.authorize"])
         self.assertEqual(stored.resource_id, "filesystem.read_text")
 
-        allowed = container.authorization_service.check(
+        allowed = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="tool.authorize",
@@ -368,7 +570,7 @@ class AuthorizationTestCase(unittest.TestCase):
                 ),
             ),
         )
-        denied = container.authorization_service.check(
+        denied = container.require(AppKey.AUTHORIZATION_SERVICE).check(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="tool.authorize",
@@ -396,7 +598,7 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
         policy = AuthorizationPolicy(
             id="local_allow_echo",
@@ -407,13 +609,13 @@ class AuthorizationTestCase(unittest.TestCase):
             priority=50,
             source_kind="local_managed",
         )
-        container.authorization_service.create_policy(
+        container.require(AppKey.AUTHORIZATION_SERVICE).create_policy(
             policy,
             actor_type="test",
             actor_id="operator",
             reason="unit test",
         )
-        allowed = container.authorization_service.dry_run(
+        allowed = container.require(AppKey.AUTHORIZATION_SERVICE).dry_run(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="tool.run",
@@ -423,13 +625,13 @@ class AuthorizationTestCase(unittest.TestCase):
             actor_type="test",
             actor_id="operator",
         )
-        disabled = container.authorization_service.set_policy_enabled(
+        disabled = container.require(AppKey.AUTHORIZATION_SERVICE).set_policy_enabled(
             "local_allow_echo",
             enabled=False,
             actor_type="test",
             actor_id="operator",
         )
-        denied = container.authorization_service.dry_run(
+        denied = container.require(AppKey.AUTHORIZATION_SERVICE).dry_run(
             AuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 action="tool.run",
@@ -437,7 +639,7 @@ class AuthorizationTestCase(unittest.TestCase):
                 context=AuthorizationContext(attrs={"interface": "http"}),
             ),
         )
-        imported = container.authorization_service.import_policies(
+        imported = container.require(AppKey.AUTHORIZATION_SERVICE).import_policies(
             (
                 AuthorizationPolicy(
                     id="local_allow_llm",
@@ -451,8 +653,8 @@ class AuthorizationTestCase(unittest.TestCase):
             actor_id="operator",
             source="unit",
         )
-        bundle = container.authorization_service.export_policy_bundle()
-        deleted = container.authorization_service.delete_policy(
+        bundle = container.require(AppKey.AUTHORIZATION_SERVICE).export_policy_bundle()
+        deleted = container.require(AppKey.AUTHORIZATION_SERVICE).delete_policy(
             "local_allow_llm",
             actor_type="test",
             actor_id="operator",
@@ -469,7 +671,7 @@ class AuthorizationTestCase(unittest.TestCase):
         )
         self.assertEqual(deleted.id, "local_allow_llm")
 
-        audit_records = container.authorization_service.list_audit_records(limit=20)
+        audit_records = container.require(AppKey.AUTHORIZATION_SERVICE).list_audit_records(limit=20)
         actions = {record.action for record in audit_records}
         self.assertTrue(
             {
@@ -480,7 +682,7 @@ class AuthorizationTestCase(unittest.TestCase):
                 "decision.dry_run",
             }.issubset(actions),
         )
-        with container.session_factory() as session:
+        with container.require(AppKey.DATABASE_SESSION_FACTORY)() as session:
             stored_audit = session.get(AuthorizationAuditModel, audit_records[0].id)
         self.assertIsNotNone(stored_audit)
 
@@ -494,9 +696,9 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(
@@ -533,22 +735,22 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
-        container.authorization_service.grant_run_authorization(
+        container = self.harness.build_runtime_container(settings=settings)
+        container.require(AppKey.AUTHORIZATION_SERVICE).grant_run_authorization(
             run_id="run-weather-1",
             agent_id="assistant",
             approval_request_id="approval-weather-1",
             effect_ids=("weather_data",),
             tool_ids=("open_meteo_weather.forecast_weather",),
         )
-        with container.session_factory() as session:
+        with container.require(AppKey.DATABASE_SESSION_FACTORY)() as session:
             stored_grant = session.get(
                 TemporaryAuthorizationGrantModel,
                 "run:run-weather-1:approval-weather-1",
             )
         self.assertIsNotNone(stored_grant)
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(
@@ -588,13 +790,13 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
-        container.authorization_service.grant_agent_tool_authorization(
+        container = self.harness.build_runtime_container(settings=settings)
+        container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_tool_authorization(
             agent_id="assistant",
             tool_id="open_meteo_weather.forecast_weather",
         )
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(
@@ -631,9 +833,9 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(
@@ -675,9 +877,9 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(
@@ -722,9 +924,9 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(
@@ -770,9 +972,9 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_mcp_providers=(),
             llm_profiles=(),
         )
-        container = self.harness.build_container(settings=settings)
+        container = self.harness.build_runtime_container(settings=settings)
 
-        decision = container.authorization_service.check_tool_execution(
+        decision = container.require(AppKey.AUTHORIZATION_SERVICE).check_tool_execution(
             ToolExecutionAuthorizationRequest(
                 subject=AuthorizationSubject(type="interface", id="http"),
                 resource=AuthorizationResource(

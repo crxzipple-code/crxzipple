@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
+from crxzipple.modules.orchestration.application.coordinators import (
+    RunIntakeCoordinator,
+)
 from crxzipple.modules.orchestration.application.lane import session_lane_key
+from crxzipple.modules.orchestration.application.ports import RunDispatchPort
+from crxzipple.modules.orchestration.application.scheduler import (
+    OrchestrationScheduler,
+)
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationValidationError,
 )
@@ -71,3 +78,53 @@ class SessionRunPreparationWorkflow:
             return None
         value = data.requested_llm_id.strip()
         return value or None
+
+
+def session_start_prompt_flow_hint(
+    bundle: ResolvedSessionBundle,
+) -> dict[str, object] | None:
+    resolution = bundle.resolution.resolution
+    if resolution.created:
+        return {
+            "mode": "session_start",
+            "event": "created",
+            "session_kind": resolution.kind.value,
+        }
+    if resolution.reset:
+        payload: dict[str, object] = {
+            "mode": "session_start",
+            "event": "reset",
+            "session_kind": resolution.kind.value,
+        }
+        if resolution.reset_reason is not None and resolution.reset_reason.strip():
+            payload["reason"] = resolution.reset_reason.strip()
+        return payload
+    return None
+
+
+def build_session_run_preparation_workflow(
+    resolve_session_bundle: Callable[[ResolveSessionInput], ResolvedSessionBundle],
+) -> SessionRunPreparationWorkflow:
+    return SessionRunPreparationWorkflow(
+        resolve_session_bundle=resolve_session_bundle,
+        resolve_session_input_factory=lambda **kwargs: ResolveSessionInput(**kwargs),
+        session_start_prompt_flow_hint=session_start_prompt_flow_hint,
+    )
+
+
+def build_run_intake_coordinator(
+    *,
+    uow_factory: Callable[[], Any],
+    scheduler: OrchestrationScheduler,
+    dispatch_port: RunDispatchPort,
+    resolve_session_bundle: Callable[[ResolveSessionInput], ResolvedSessionBundle],
+) -> RunIntakeCoordinator:
+    session_run_preparation = build_session_run_preparation_workflow(
+        resolve_session_bundle,
+    )
+    return RunIntakeCoordinator(
+        uow_factory=uow_factory,
+        scheduler=scheduler,
+        dispatch_port=dispatch_port,
+        plan_prepared_session_run=session_run_preparation.plan,
+    )

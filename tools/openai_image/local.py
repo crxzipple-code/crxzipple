@@ -3,14 +3,21 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from crxzipple.modules.access.application import CredentialResolver
 from crxzipple.modules.artifacts.domain.entities import ArtifactKind, ArtifactVariant
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
+from crxzipple.shared.access import (
+    AccessConsumerRef,
+    AccessCredentialKind,
+    CredentialBindingRef,
+    CredentialProvider,
+)
 from crxzipple.shared.content_blocks import text_content_block
 
 
@@ -18,27 +25,45 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_FORMAT = "png"
 DEFAULT_TIMEOUT_SECONDS = 300.0
-OPENAI_API_KEY_BINDING = "env:OPENAI_API_KEY"
 MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024
 OPENAI_ORG_VERIFICATION_URL = "https://platform.openai.com/settings/organization/general"
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIImageDeps:
+    credential_provider: CredentialProvider | None
+    artifact_service: Any | None = None
+    http_client_factory: Callable[..., Any] | None = field(
+        default=None,
+        metadata={"dependency_id": "openai_image_http_client_factory"},
+    )
+    base_url: str | None = field(
+        default=None,
+        metadata={"dependency_id": "openai_image_base_url"},
+    )
+    timeout_seconds: float | None = field(
+        default=None,
+        metadata={"dependency_id": "openai_image_timeout_seconds"},
+    )
 
 
 async def _generate_handler(
     arguments: dict[str, Any],
     execution_context: ToolExecutionContext | None = None,
     *,
-    container: Any,
+    deps: OpenAIImageDeps,
 ) -> ToolRunResult:
     prompt = _required_str(arguments, "prompt")
     payload = _base_image_payload(arguments, prompt=prompt)
     response_payload = await _post_openai_json(
-        container,
+        deps,
         "/images/generations",
         payload,
+        tool_id="openai_image_generate",
         execution_context=execution_context,
     )
     return await _tool_result_from_openai_images(
-        container,
+        deps,
         response_payload,
         action="generate",
         request_payload=payload,
@@ -50,12 +75,12 @@ async def _edit_handler(
     arguments: dict[str, Any],
     execution_context: ToolExecutionContext | None = None,
     *,
-    container: Any,
+    deps: OpenAIImageDeps,
 ) -> ToolRunResult:
     prompt = _required_str(arguments, "prompt")
     payload = _base_image_payload(arguments, prompt=prompt)
     image_inputs = _collect_edit_image_inputs(
-        container,
+        deps,
         arguments,
         execution_context=execution_context,
     )
@@ -65,7 +90,7 @@ async def _edit_handler(
         )
     payload["images"] = image_inputs
     mask_input = _collect_mask_input(
-        container,
+        deps,
         arguments,
         execution_context=execution_context,
     )
@@ -73,13 +98,14 @@ async def _edit_handler(
         payload["mask"] = mask_input
 
     response_payload = await _post_openai_json(
-        container,
+        deps,
         "/images/edits",
         payload,
+        tool_id="openai_image_edit",
         execution_context=execution_context,
     )
     return await _tool_result_from_openai_images(
-        container,
+        deps,
         response_payload,
         action="edit",
         request_payload=payload,
@@ -87,7 +113,9 @@ async def _edit_handler(
     )
 
 
-def openai_image_generate(container: Any):
+def openai_image_generate(deps: OpenAIImageDeps | Any):
+    resolved_deps = _coerce_deps(deps)
+
     async def handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
@@ -95,13 +123,15 @@ def openai_image_generate(container: Any):
         return await _generate_handler(
             arguments,
             execution_context,
-            container=container,
+            deps=resolved_deps,
         )
 
     return handler
 
 
-def openai_image_edit(container: Any):
+def openai_image_edit(deps: OpenAIImageDeps | Any):
+    resolved_deps = _coerce_deps(deps)
+
     async def handler(
         arguments: dict[str, Any],
         execution_context: ToolExecutionContext | None = None,
@@ -109,10 +139,18 @@ def openai_image_edit(container: Any):
         return await _edit_handler(
             arguments,
             execution_context,
-            container=container,
+            deps=resolved_deps,
         )
 
     return handler
+
+
+def _coerce_deps(value: OpenAIImageDeps | Any) -> OpenAIImageDeps:
+    if isinstance(value, OpenAIImageDeps):
+        return value
+    raise TypeError(
+        "OpenAI image tools require OpenAIImageDeps.",
+    )
 
 
 def _base_image_payload(arguments: dict[str, Any], *, prompt: str) -> dict[str, Any]:
@@ -134,18 +172,21 @@ def _base_image_payload(arguments: dict[str, Any], *, prompt: str) -> dict[str, 
 
 
 async def _post_openai_json(
-    container: Any,
+    deps: OpenAIImageDeps,
     path: str,
     payload: dict[str, Any],
     *,
+    tool_id: str,
     execution_context: ToolExecutionContext | None,
 ) -> dict[str, Any]:
-    token = _resolve_api_key(container, execution_context=execution_context)
-    base_url = _base_url(container)
-    timeout_seconds = _timeout_seconds(container)
-    client_factory = getattr(container, "openai_image_http_client_factory", None)
-    if client_factory is None:
-        client_factory = httpx.AsyncClient
+    token = _resolve_api_key(
+        deps,
+        tool_id=tool_id,
+        execution_context=execution_context,
+    )
+    base_url = _base_url(deps)
+    timeout_seconds = _timeout_seconds(deps)
+    client_factory = deps.http_client_factory or httpx.AsyncClient
     async with client_factory(timeout=timeout_seconds) as client:
         try:
             response = await client.post(
@@ -166,7 +207,7 @@ async def _post_openai_json(
 
 
 async def _tool_result_from_openai_images(
-    container: Any,
+    deps: OpenAIImageDeps,
     payload: dict[str, Any],
     *,
     action: str,
@@ -174,7 +215,7 @@ async def _tool_result_from_openai_images(
     execution_context: ToolExecutionContext | None,
 ) -> ToolRunResult:
     images = await _extract_generated_images(
-        container,
+        deps,
         payload,
         output_format=str(
             request_payload.get("output_format") or DEFAULT_OUTPUT_FORMAT,
@@ -236,7 +277,7 @@ async def _tool_result_from_openai_images(
 
 
 async def _extract_generated_images(
-    container: Any,
+    deps: OpenAIImageDeps,
     payload: dict[str, Any],
     *,
     output_format: str,
@@ -258,7 +299,7 @@ async def _extract_generated_images(
         if isinstance(url, str) and url.strip():
             images.append(
                 await _download_image_url(
-                    container,
+                    deps,
                     url.strip(),
                     execution_context=execution_context,
                 ),
@@ -277,15 +318,13 @@ def _response_data(payload: dict[str, Any]) -> list[Any]:
 
 
 async def _download_image_url(
-    container: Any,
+    deps: OpenAIImageDeps,
     url: str,
     *,
     execution_context: ToolExecutionContext | None,
 ) -> dict[str, str]:
-    client_factory = getattr(container, "openai_image_http_client_factory", None)
-    if client_factory is None:
-        client_factory = httpx.AsyncClient
-    async with client_factory(timeout=_timeout_seconds(container)) as client:
+    client_factory = deps.http_client_factory or httpx.AsyncClient
+    async with client_factory(timeout=_timeout_seconds(deps)) as client:
         try:
             response = await client.get(url)
         except httpx.TimeoutException as exc:
@@ -302,7 +341,7 @@ async def _download_image_url(
 
 
 def _collect_edit_image_inputs(
-    container: Any,
+    deps: OpenAIImageDeps,
     arguments: dict[str, Any],
     *,
     execution_context: ToolExecutionContext | None,
@@ -315,7 +354,7 @@ def _collect_edit_image_inputs(
     for artifact_id in dict.fromkeys(artifact_ids):
         inputs.append(
             _artifact_image_input(
-                container,
+                deps,
                 artifact_id,
                 execution_context=execution_context,
             ),
@@ -326,7 +365,7 @@ def _collect_edit_image_inputs(
 
 
 def _collect_mask_input(
-    container: Any,
+    deps: OpenAIImageDeps,
     arguments: dict[str, Any],
     *,
     execution_context: ToolExecutionContext | None,
@@ -334,7 +373,7 @@ def _collect_mask_input(
     mask_artifact_id = _optional_str(arguments, "mask_artifact_id")
     if mask_artifact_id is not None:
         return _artifact_image_input(
-            container,
+            deps,
             mask_artifact_id,
             execution_context=execution_context,
         )
@@ -345,12 +384,12 @@ def _collect_mask_input(
 
 
 def _artifact_image_input(
-    container: Any,
+    deps: OpenAIImageDeps,
     artifact_id: str,
     *,
     execution_context: ToolExecutionContext | None,
 ) -> dict[str, Any]:
-    artifact_service = getattr(container, "artifact_service", None)
+    artifact_service = deps.artifact_service
     if artifact_service is None:
         raise RuntimeError("openai_image_edit requires the artifact service to read image artifacts.")
     try:
@@ -382,30 +421,121 @@ def _artifact_image_input(
 
 
 def _resolve_api_key(
-    container: Any,
+    deps: OpenAIImageDeps,
     *,
+    tool_id: str,
     execution_context: ToolExecutionContext | None,
 ) -> str:
-    resolver = getattr(container, "credential_resolver", None)
-    if resolver is None:
-        access_service = getattr(container, "access_service", None)
-        resolver = getattr(access_service, "credential_resolver", None)
-    if resolver is None:
-        resolver = CredentialResolver()
-    workspace_dir = execution_context.get_str("workspace_dir") if execution_context else None
+    credential_provider = deps.credential_provider
+    if credential_provider is None:
+        raise RuntimeError("OpenAI image tools require Access credential binding.")
+    binding_id = _provider_backend_binding_id(
+        execution_context,
+        slot="openai_api_key",
+    )
+    if binding_id is None:
+        raise RuntimeError(
+            "OpenAI image tools require a resolved provider backend credential binding.",
+        )
     try:
-        return resolver.resolve(
-            OPENAI_API_KEY_BINDING,
-            workspace_dir=workspace_dir,
-            allow_literal=False,
+        return credential_provider.resolve_credential(
+            CredentialBindingRef(
+                binding_id=binding_id,
+                source_type="binding",
+                source_ref=binding_id,
+                expected_kind=AccessCredentialKind.API_KEY,
+                metadata={
+                    "provider": "openai",
+                    "slot": "openai_api_key",
+                    "tool_id": tool_id,
+                    "provider_backend_id": _provider_backend_id(execution_context),
+                },
+            ),
+            consumer=AccessConsumerRef(
+                consumer_id=f"tool.local:{tool_id}",
+                module="tool",
+                component="local_package",
+                runtime_ref=tool_id,
+                metadata={
+                    "namespace": "openai_image",
+                    "provider": "openai",
+                },
+            ),
         )
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError("OpenAI image tools require OPENAI_API_KEY.") from exc
+        raise RuntimeError(
+            f"OpenAI image tools require Access binding {binding_id}.",
+        ) from exc
 
 
-def _base_url(container: Any) -> str:
+def _provider_backend_binding_id(
+    execution_context: ToolExecutionContext | None,
+    *,
+    slot: str,
+) -> str | None:
+    backend = _provider_backend_payload(execution_context)
+    if backend is None:
+        return None
+    raw_bindings = backend.get("credential_bindings")
+    if isinstance(raw_bindings, Mapping):
+        value = raw_bindings.get(slot)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for requirement_set in _sequence(backend.get("credential_requirements")):
+        if not isinstance(requirement_set, Mapping):
+            continue
+        for requirement in _sequence(requirement_set.get("requirements")):
+            if not isinstance(requirement, Mapping):
+                continue
+            slot_payload = requirement.get("slot")
+            if not isinstance(slot_payload, Mapping):
+                continue
+            slot_name = slot_payload.get("slot")
+            binding_id = slot_payload.get("binding_id")
+            if (
+                isinstance(slot_name, str)
+                and slot_name.strip() == slot
+                and isinstance(binding_id, str)
+                and binding_id.strip()
+            ):
+                return binding_id.strip()
+    return None
+
+
+def _provider_backend_id(
+    execution_context: ToolExecutionContext | None,
+) -> str | None:
+    backend = _provider_backend_payload(execution_context)
+    if backend is None:
+        return None
+    value = backend.get("backend_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _provider_backend_payload(
+    execution_context: ToolExecutionContext | None,
+) -> Mapping[str, Any] | None:
+    if execution_context is None:
+        return None
+    value = execution_context.attrs.get("provider_backend")
+    if isinstance(value, Mapping):
+        return value
+    return None
+
+
+def _sequence(value: object) -> tuple[object, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, tuple | list):
+        return tuple(value)
+    return (value,)
+
+
+def _base_url(deps: OpenAIImageDeps) -> str:
     value = (
-        getattr(container, "openai_image_base_url", None)
+        deps.base_url
         or os.environ.get("OPENAI_IMAGE_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
         or DEFAULT_BASE_URL
@@ -413,9 +543,9 @@ def _base_url(container: Any) -> str:
     return str(value).strip().rstrip("/") or DEFAULT_BASE_URL
 
 
-def _timeout_seconds(container: Any) -> float:
+def _timeout_seconds(deps: OpenAIImageDeps) -> float:
     value = (
-        getattr(container, "openai_image_timeout_seconds", None)
+        deps.timeout_seconds
         or os.environ.get("OPENAI_IMAGE_TIMEOUT_SECONDS")
         or DEFAULT_TIMEOUT_SECONDS
     )

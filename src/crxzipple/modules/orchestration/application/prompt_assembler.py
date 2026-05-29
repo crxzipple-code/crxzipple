@@ -4,9 +4,7 @@ import base64
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 
-from crxzipple.modules.artifacts.application.services import ArtifactApplicationService
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
-from crxzipple.modules.agent.application import AgentApplicationService
 from crxzipple.modules.llm.domain import (
     LlmCapability,
     LlmMessage,
@@ -14,7 +12,7 @@ from crxzipple.modules.llm.domain import (
     LlmProfile,
     ToolSchema,
 )
-from crxzipple.modules.events import Event, EventsApplicationService
+from crxzipple.modules.memory.application import MemoryRuntimePort
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationValidationError,
@@ -30,8 +28,11 @@ from crxzipple.modules.orchestration.application.llm_resolver import (
 )
 from crxzipple.modules.orchestration.application.ports import (
     AccessReadinessPort,
+    AgentProfileCatalogPort,
+    ArtifactVariantReadPort,
+    EventPublishPort,
     LlmPort,
-    MemoryPort,
+    SessionTranscriptPort,
 )
 from crxzipple.modules.orchestration.application.ports.skill import SkillCatalogPort
 from crxzipple.modules.orchestration.application.prompting import (
@@ -54,16 +55,12 @@ from crxzipple.modules.orchestration.application.prompting import (
 from crxzipple.modules.orchestration.application.prompt_transcript import (
     build_prompt_transcript,
 )
-from crxzipple.modules.orchestration.application.resolve_skill import ResolveSkill
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet
 from crxzipple.modules.orchestration.application.workspace_context import (
     PromptContextFile,
     load_workspace_context_files,
 )
-from crxzipple.modules.session.application import (
-    ListSessionMessagesInput,
-    SessionApplicationService,
-)
+from crxzipple.modules.session.application import ListSessionMessagesInput
 from crxzipple.modules.session.domain import SessionRuntimeBinding
 from crxzipple.modules.session.domain import SessionMessageVisibility
 from crxzipple.modules.skills.application import (
@@ -79,10 +76,13 @@ from crxzipple.shared.content_blocks import (
     normalize_content_blocks,
     text_content_block,
 )
+from crxzipple.shared.domain.events import Event
 from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
     get_runtime_metrics_registry,
 )
+
+DEFAULT_LLM_IMAGE_MAX_BYTES = 1_500_000
 
 
 _TOOL_INTENT_KEYWORDS = (
@@ -148,6 +148,12 @@ def _looks_like_tool_intent(content: object) -> bool:
     return any(keyword.casefold() in normalized for keyword in _TOOL_INTENT_KEYWORDS)
 
 
+def _available_tool_ids(resolved_tools: ResolvedToolSet | None) -> tuple[str, ...]:
+    if resolved_tools is None:
+        return ()
+    return tuple(item.tool.id for item in resolved_tools.tools)
+
+
 @dataclass(frozen=True, slots=True)
 class PromptEnvelope:
     llm_id: str
@@ -166,23 +172,22 @@ class PromptEnvelope:
 
 @dataclass(slots=True)
 class PromptAssembler:
-    agent_service: AgentApplicationService
+    agent_service: AgentProfileCatalogPort
     llm_port: LlmPort
-    memory_port: MemoryPort | None
+    memory_port: MemoryRuntimePort | None
     skill_catalog_port: SkillCatalogPort
-    session_service: SessionApplicationService
-    artifact_service: ArtifactApplicationService | None = None
+    session_service: SessionTranscriptPort
+    artifact_service: ArtifactVariantReadPort | None = None
     access_port: AccessReadinessPort | None = None
-    events_service: EventsApplicationService | None = None
+    events_service: EventPublishPort | None = None
     llm_resolver: LlmResolver | None = None
     system_prompt_max_chars: int = 120_000
     system_prompt_max_tokens: int = 30_000
     system_prompt_context_window_ratio: float = 0.15
     memory_flush_transcript_max_chars: int = 120_000
-    llm_image_max_bytes: int = ArtifactApplicationService.DEFAULT_LLM_IMAGE_MAX_BYTES
+    llm_image_max_bytes: int = DEFAULT_LLM_IMAGE_MAX_BYTES
     llm_file_max_bytes: int = 4_000_000
     llm_text_file_max_chars: int = 20_000
-    skill_resolver: ResolveSkill = field(default_factory=ResolveSkill)
     detailed_phase_metrics_enabled: bool = False
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
@@ -294,6 +299,8 @@ class PromptAssembler:
                 recall_prompt_memories(
                     self.memory_port,
                     run=run,
+                    session_key=session_key,
+                    workspace_dir=workspace_dir,
                 )
                 if surface_policy.auto_recall_memories and self.memory_port is not None
                 else ()
@@ -302,14 +309,15 @@ class PromptAssembler:
             if not surface_policy.include_skills_catalog:
                 skills_catalog = None
             else:
-                raw_skill_packages = self.skill_catalog_port.list_available(
+                resolved_skill_catalog = self.skill_catalog_port.resolve_prompt_catalog(
                     workspace_dir=workspace_dir,
                     surface=surface_policy.surface,
-                )
-                resolved_skill_catalog = self.skill_resolver.resolve(
-                    raw_skill_packages,
-                    resolved_tools=resolved_tools,
-                    workspace_dir=workspace_dir,
+                    available_tool_ids=_available_tool_ids(resolved_tools),
+                    interface=run.inbound_instruction.source,
+                    agent_id=run.agent_id,
+                    run_id=run.id,
+                    session_key=session_key,
+                    active_session_id=run.active_session_id,
                 )
                 self._publish_skill_resolution_event(
                     run=run,
@@ -318,7 +326,7 @@ class PromptAssembler:
                     surface=surface_policy.surface,
                     resolved_skill_catalog=resolved_skill_catalog,
                 )
-                skills_catalog = resolved_skill_catalog.build_prompt_catalog()
+                skills_catalog = resolved_skill_catalog.prompt_catalog
         with self._timed_phase("system_blocks_build"):
             effective_system_max_tokens, system_budget_source = (
                 self._resolve_system_prompt_budget(
@@ -546,6 +554,22 @@ class PromptAssembler:
                 if isinstance(tool_id, str) and tool_id.strip()
             )
         )
+        missing_access = tuple(
+            dict.fromkeys(
+                requirement
+                for item in setup_needed_skills
+                for requirement in tuple(getattr(getattr(item, "readiness", None), "missing_access", ()) or ())
+                if isinstance(requirement, str) and requirement.strip()
+            )
+        )
+        missing_effects = tuple(
+            dict.fromkeys(
+                effect_id
+                for item in setup_needed_skills
+                for effect_id in tuple(getattr(getattr(item, "readiness", None), "missing_effects", ()) or ())
+                if isinstance(effect_id, str) and effect_id.strip()
+            )
+        )
         payload: dict[str, object] = {
             "event_name": SKILL_RESOLUTION_COMPLETED_EVENT,
             "status": "setup_needed" if setup_needed_skills else "ready",
@@ -560,12 +584,16 @@ class PromptAssembler:
             "ready_count": len(ready_skills),
             "setup_needed_count": len(setup_needed_skills),
             "missing_tools": list(missing_tools),
+            "missing_access": list(missing_access),
+            "missing_effects": list(missing_effects),
             "skills": [
                 {
                     "skill": getattr(getattr(item, "package", None), "name", ""),
                     "source": getattr(getattr(item, "package", None), "source", ""),
                     "status": getattr(getattr(item, "readiness", None), "status", ""),
                     "missing_tools": list(getattr(getattr(item, "readiness", None), "missing_tools", ()) or ()),
+                    "missing_access": list(getattr(getattr(item, "readiness", None), "missing_access", ()) or ()),
+                    "missing_effects": list(getattr(getattr(item, "readiness", None), "missing_effects", ()) or ()),
                 }
                 for item in resolved_skills[:40]
             ],

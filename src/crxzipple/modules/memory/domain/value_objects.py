@@ -8,6 +8,10 @@ if TYPE_CHECKING:
 
 
 MemoryFileKind = Literal["long_term", "daily", "archive"]
+MemorySpaceOwnerKind = Literal["agent", "shared", "project", "team", "system"]
+MemorySpaceStatus = Literal["active", "disabled"]
+MemoryPolicyTargetKind = Literal["global", "space", "agent"]
+MemoryPolicyStatus = Literal["active", "disabled"]
 
 
 @dataclass(frozen=True, slots=True)

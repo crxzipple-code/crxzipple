@@ -19,7 +19,7 @@ def operations_event_definitions() -> tuple[EventDefinition, ...]:
             ),
             topics=(named_event_topic(OPERATIONS_PROJECTION_INVALIDATED_EVENT),),
             producers=("OperationsProjectionMaterializer",),
-            consumers=("operations observer", "operations SSE", "web console"),
+            consumers=("operations SSE", "web console"),
             fields=(
                 EventDefinitionField("event_name", "Stable operations refresh event name.", "string", True),
                 EventDefinitionField("module", "Operations module whose projection changed.", "string", True),
@@ -52,7 +52,7 @@ def operations_event_surfaces() -> tuple[EventSurface, ...]:
             description="Operations projection invalidation surface for UI refresh consumers.",
             definition_ids=(OPERATIONS_PROJECTION_INVALIDATED_EVENT,),
             topics=(named_event_topic(OPERATIONS_PROJECTION_INVALIDATED_EVENT),),
-            consumers=("operations SSE", "web console", "operations observer"),
+            consumers=("operations SSE", "web console"),
             notes=(
                 "Consumers should refresh Operations read models by module and projection kind.",
             ),

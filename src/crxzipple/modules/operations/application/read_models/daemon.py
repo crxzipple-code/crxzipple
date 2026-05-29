@@ -162,6 +162,7 @@ class DaemonOperationsReadModelProvider:
     event_definition_registry: Any | None = None
     operations_observation: Any | None = None
     process_service: Any | None = None
+    runtime_bootstrap_config: Any | None = None
 
     def overview(self) -> OperationsModuleOverview:
         page = self.page(DaemonOperationsQuery(limit=40))
@@ -334,6 +335,7 @@ class DaemonOperationsReadModelProvider:
                 process_rows=current_process_rows,
                 instances_by_service=current_instances_by_service,
                 leases_by_service=leases_by_service,
+                runtime_bootstrap_config=self.runtime_bootstrap_config,
             ),
             daemon_events=daemon_events_table,
             quick_actions=actions,
@@ -395,35 +397,9 @@ def _safe_daemon_instances(daemon_manager: Any | None) -> tuple[Any, ...]:
     if not callable(method):
         return ()
     try:
-        value = method(refresh=True)
-    except (DaemonValidationError, DaemonNotFoundError):
-        value = _daemon_instances_without_refresh(method)
-    except Exception:
-        value = _daemon_instances_without_refresh(method)
-    refreshed = tuple(value or ())
-    if refreshed:
-        return refreshed
-    return _daemon_instances_without_refresh(method)
-
-
-def _daemon_instances_without_refresh(method: Any) -> tuple[Any, ...]:
-    try:
         value = method(refresh=False)
-    except Exception:
+    except (DaemonValidationError, DaemonNotFoundError):
         return ()
-    return tuple(value or ())
-
-
-def _safe_process_sessions(process_service: Any | None) -> tuple[Any, ...]:
-    if process_service is None:
-        return ()
-    method = getattr(process_service, "list_sessions_metadata", None)
-    if not callable(method):
-        method = getattr(process_service, "list_sessions", None)
-    if not callable(method):
-        return ()
-    try:
-        value = method()
     except Exception:
         return ()
     return tuple(value or ())
@@ -434,23 +410,16 @@ def _daemon_process_sessions(
     process_service: Any | None,
     instances_by_process_id: dict[str, dict[str, Any]],
 ) -> tuple[Any, ...]:
-    sessions = list(_safe_process_sessions(process_service))
-    seen = {
-        _text(getattr(session, "id", None), "")
-        for session in sessions
-        if _text(getattr(session, "id", None), "")
-    }
     get_session = getattr(process_service, "get_session", None)
-    if callable(get_session):
-        for process_id in instances_by_process_id:
-            if process_id in seen:
-                continue
-            try:
-                session = get_session(process_id=process_id)
-            except Exception:
-                continue
-            sessions.append(session)
-            seen.add(process_id)
+    if not callable(get_session):
+        return ()
+    sessions = []
+    for process_id in instances_by_process_id:
+        try:
+            session = get_session(process_id=process_id)
+        except Exception:
+            continue
+        sessions.append(session)
     return tuple(sessions)
 
 
@@ -1023,6 +992,7 @@ def _instances_table(
         columns=(
             OperationsTableColumnModel("instance_id", "Instance ID"),
             OperationsTableColumnModel("service_key", "Service Key"),
+            OperationsTableColumnModel("runtime", "Runtime"),
             OperationsTableColumnModel("status", "Status"),
             OperationsTableColumnModel("pid", "PID"),
             OperationsTableColumnModel("worker_id", "Worker ID"),
@@ -1051,6 +1021,7 @@ def _instance_row(
             "instance_id": _text(instance.get("id")),
             "service_key": service_key,
             "display_name": _text((service or {}).get("display_name") or service_key),
+            "runtime": _instance_runtime_label(instance, service),
             "status": status,
             "pid": _text(instance.get("pid")),
             "worker_id": _text(instance.get("worker_id")),
@@ -1064,6 +1035,24 @@ def _instance_row(
         status=status,
         tone=_tone_for_status(status),
     )
+
+
+def _instance_runtime_label(
+    instance: dict[str, Any],
+    service: dict[str, Any] | None,
+) -> str:
+    service_key = _text(instance.get("service_key"), "")
+    metadata = _as_dict(instance.get("metadata"))
+    if _is_browser_host_service(service_key):
+        state = _browser_host_manifest_label(metadata)
+        return f"Browser Host · {state}" if state != "-" else "Browser Host"
+    role = _text((service or {}).get("role"), "")
+    group = _text((service or {}).get("service_group"), "")
+    if role != "-" and group != "-":
+        return f"{_status_label(role)} · {group}"
+    if role != "-":
+        return _status_label(role)
+    return "-"
 
 
 def _leases_table(
@@ -1485,6 +1474,7 @@ def _drain_overview(
     process_rows: tuple[dict[str, Any], ...],
     instances_by_service: dict[str, list[dict[str, Any]]],
     leases_by_service: dict[str, list[dict[str, Any]]],
+    runtime_bootstrap_config: Any | None,
 ) -> OperationsKeyValueSectionModel:
     instance_ids = {_text(item.get("id"), "") for item in instances}
     active_leases = [item for item in leases if _text(item.get("status"), "").lower() == "active"]
@@ -1547,8 +1537,35 @@ def _drain_overview(
                 str(release_history),
                 "neutral",
             ),
+            OperationsKeyValueItemModel(
+                "Executor Max Assignments",
+                _runtime_value(runtime_bootstrap_config, "orchestration_executor_max_concurrent_assignments"),
+            ),
+            OperationsKeyValueItemModel(
+                "Tool Worker Max In-flight",
+                _runtime_value(runtime_bootstrap_config, "tool_worker_max_in_flight"),
+            ),
+            OperationsKeyValueItemModel(
+                "Latest Worker Start",
+                _latest_instance_start(instances),
+            ),
         ),
     )
+
+
+def _runtime_value(runtime_bootstrap_config: Any | None, name: str) -> str:
+    value = getattr(runtime_bootstrap_config, name, None)
+    if value is None:
+        return "-"
+    return _text(value)
+
+
+def _latest_instance_start(instances: tuple[dict[str, Any], ...]) -> str:
+    values = sorted(
+        (_text(item.get("started_at"), "") for item in instances),
+        reverse=True,
+    )
+    return values[0] if values else "-"
 
 
 def _instance_details(
@@ -1579,6 +1596,7 @@ def _instance_details(
                 summary=(
                     OperationsKeyValueItemModel("Instance ID", instance_id),
                     OperationsKeyValueItemModel("Service Key", service_key),
+                    *_browser_instance_summary_items(instance, service),
                     OperationsKeyValueItemModel("Status", status, _tone_for_status(status)),
                     OperationsKeyValueItemModel("PID", _text(instance.get("pid"))),
                     OperationsKeyValueItemModel("Worker ID", _text(instance.get("worker_id"))),
@@ -1605,6 +1623,90 @@ def _instance_details(
             )
         )
     return tuple(details)
+
+
+def _browser_instance_summary_items(
+    instance: dict[str, Any],
+    service: dict[str, Any],
+) -> tuple[OperationsKeyValueItemModel, ...]:
+    service_key = _text(instance.get("service_key"), "")
+    if _is_browser_host_service(service_key):
+        return _browser_host_summary_items(instance)
+    del service
+    return ()
+
+
+def _browser_host_summary_items(
+    instance: dict[str, Any],
+) -> tuple[OperationsKeyValueItemModel, ...]:
+    metadata = _as_dict(instance.get("metadata"))
+    manifest_status = _first_text(metadata.get("manifest_status"), "active")
+    stale_reason = _text(metadata.get("stale_reason"), "")
+    items: list[OperationsKeyValueItemModel] = [
+        OperationsKeyValueItemModel("Runtime Kind", "Browser Host"),
+        OperationsKeyValueItemModel("Profile", _text(metadata.get("profile_name"))),
+        OperationsKeyValueItemModel("Host Runner PID", _text(instance.get("pid"))),
+        OperationsKeyValueItemModel("Browser PID", _text(metadata.get("browser_pid"))),
+        OperationsKeyValueItemModel("Host Mode", _text(metadata.get("mode"))),
+        OperationsKeyValueItemModel(
+            "Adopted",
+            _yes_no(_bool(metadata.get("adopted"))),
+            "success" if _bool(metadata.get("adopted")) else "neutral",
+        ),
+        OperationsKeyValueItemModel(
+            "Manifest",
+            _status_label(manifest_status),
+            _browser_manifest_tone(manifest_status),
+        ),
+        OperationsKeyValueItemModel(
+            "CDP Endpoint",
+            _first_text(
+                instance.get("endpoint"),
+                metadata.get("server_url"),
+                metadata.get("cdp_url"),
+            ),
+        ),
+        OperationsKeyValueItemModel("CDP Port", _text(metadata.get("cdp_port"))),
+        OperationsKeyValueItemModel("Profile Directory", _text(metadata.get("profile_directory"))),
+        OperationsKeyValueItemModel("Proxy Mode", _text(metadata.get("proxy_mode"), "none")),
+        OperationsKeyValueItemModel(
+            "Launch Fingerprint",
+            _short(metadata.get("launch_fingerprint"), 40),
+        ),
+    ]
+    user_data_dir = _text(metadata.get("user_data_dir"), "")
+    if user_data_dir and user_data_dir != "-":
+        items.append(OperationsKeyValueItemModel("User Data Dir", _short(user_data_dir, 140)))
+    if stale_reason and stale_reason != "-":
+        items.append(OperationsKeyValueItemModel("Stale Reason", _short(stale_reason, 140), "danger"))
+    return tuple(items)
+
+
+def _is_browser_host_service(service_key: str) -> bool:
+    return service_key.startswith("host:browser:")
+
+
+def _browser_host_manifest_label(metadata: dict[str, Any]) -> str:
+    manifest_status = _text(metadata.get("manifest_status"), "")
+    if manifest_status and manifest_status != "-":
+        return _status_label(manifest_status)
+    if _bool(metadata.get("adopted")):
+        return "Adopted"
+    if _text(metadata.get("browser_pid"), "") != "-":
+        return "Launched"
+    mode = _text(metadata.get("mode"), "")
+    return _status_label(mode) if mode and mode != "-" else "-"
+
+
+def _browser_manifest_tone(value: Any) -> str:
+    normalized = _text(value, "").lower()
+    if normalized in {"stale", "conflict", "failed", "error"}:
+        return "danger"
+    if normalized in {"unknown", "discovering", "starting", "degraded"}:
+        return "warning"
+    if normalized in {"active", "adopted", "ready", "launched"}:
+        return "success"
+    return "neutral"
 
 
 def _lease_details(

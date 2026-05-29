@@ -1,31 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from crxzipple.modules.orchestration.application import (
-    SubmitBoundOrchestrationTurnInput,
-    SubmitOrchestrationTurnInput,
-)
-from crxzipple.modules.orchestration.application.intake_commands import (
-    AcceptOrchestrationRunInput,
-)
-from crxzipple.modules.orchestration.domain import (
-    InboundInstruction,
-    OrchestrationRun,
-    OrchestrationRunStatus,
-)
 from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
     ListSessionInstancesInput,
     ListSessionMessagesInput,
+    SessionRuntimeControlPort,
+    SessionRuntimeRunRecord,
+    SubmitSessionBoundTurnInput,
+    SubmitSessionSpawnTurnInput,
 )
 from crxzipple.modules.session.domain import (
-    DirectSessionScope,
     SessionMessageVisibility,
     SessionNotFoundError,
-    SessionRouteContext,
 )
 from crxzipple.modules.session.interfaces.dto import (
     SessionDTO,
@@ -34,6 +25,9 @@ from crxzipple.modules.session.interfaces.dto import (
 )
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
+
+if TYPE_CHECKING:
+    from crxzipple.modules.session.application import SessionApplicationService
 
 
 SESSION_STATUS_TOOL_ID = "session_status"
@@ -57,23 +51,35 @@ _AGENT_ID_ATTR = "agent_id"
 _RUN_ID_ATTR = "run_id"
 
 
-def _orchestration_run_query_service_lookup(container: Any):
-    return getattr(container, "orchestration_run_query_service_lookup", None)
+@dataclass(frozen=True, slots=True)
+class SessionsToolDeps:
+    session_service: SessionApplicationService
+    session_runtime_control: SessionRuntimeControlPort
 
 
-def _orchestration_cancellation_service_lookup(container: Any):
-    return getattr(container, "orchestration_cancellation_service_lookup", None)
-
-
-def _orchestration_scheduler_service_lookup(container: Any):
-    return getattr(container, "orchestration_scheduler_service_lookup", None)
-
-
-def session_status(container: Any):
-    session_service = getattr(container, "session_service", None)
-    orchestration_run_query_lookup = _orchestration_run_query_service_lookup(container)
-    if session_service is None:
+def _coerce_sessions_deps(value: SessionsToolDeps | Any) -> SessionsToolDeps | None:
+    if isinstance(value, SessionsToolDeps):
+        return value
+    session_service = getattr(value, "session_service", None)
+    session_runtime_control = getattr(
+        value,
+        "session_runtime_control",
+        None,
+    )
+    if session_service is None or session_runtime_control is None:
         return None
+    return SessionsToolDeps(
+        session_service=session_service,
+        session_runtime_control=session_runtime_control,
+    )
+
+
+def session_status(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
+        return None
+    session_service = resolved.session_service
+    session_runtime_control = resolved.session_runtime_control
 
     async def handler(
         arguments: dict[str, Any],
@@ -112,16 +118,11 @@ def session_status(container: Any):
         )
         requester_tree = None
         requester_agent_id = session_dto.runtime_binding.agent_id
-        orchestration_run_query = (
-            orchestration_run_query_lookup()
-            if callable(orchestration_run_query_lookup)
-            else None
-        )
-        if requester_agent_id is not None and orchestration_run_query is not None:
+        if requester_agent_id is not None:
             requester_tree = _build_requester_tree_status(
                 requester_session_key=session.id,
                 requester_agent_id=requester_agent_id,
-                orchestration_run_query=orchestration_run_query,
+                session_runtime_control=session_runtime_control,
                 sessions=session_service.list_sessions(agent_id=requester_agent_id),
             )
         details = {
@@ -159,10 +160,11 @@ def session_status(container: Any):
     return handler
 
 
-def sessions_list(container: Any):
-    session_service = getattr(container, "session_service", None)
-    if session_service is None:
+def sessions_list(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
+    session_service = resolved.session_service
 
     async def handler(
         arguments: dict[str, Any],
@@ -206,10 +208,11 @@ def sessions_list(container: Any):
     return handler
 
 
-def sessions_history(container: Any):
-    session_service = getattr(container, "session_service", None)
-    if session_service is None:
+def sessions_history(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
+    session_service = resolved.session_service
 
     async def handler(
         arguments: dict[str, Any],
@@ -298,11 +301,12 @@ def sessions_history(container: Any):
     return handler
 
 
-def sessions_send(container: Any):
-    session_service = getattr(container, "session_service", None)
-    orchestration_scheduler_lookup = _orchestration_scheduler_service_lookup(container)
-    if session_service is None or not callable(orchestration_scheduler_lookup):
+def sessions_send(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
+    session_service = resolved.session_service
+    session_runtime_control = resolved.session_runtime_control
 
     async def handler(
         arguments: dict[str, Any],
@@ -368,16 +372,12 @@ def sessions_send(container: Any):
 
         queued_run = None
         if enqueue:
-            orchestration_scheduler = orchestration_scheduler_lookup()
-            if orchestration_scheduler is None:
-                raise RuntimeError(
-                    "sessions_send orchestration scheduler is unavailable.",
-                )
-            queued_run = orchestration_scheduler.submit_bound_turn(
-                SubmitBoundOrchestrationTurnInput(
+            queued_run = session_runtime_control.submit_bound_turn(
+                SubmitSessionBoundTurnInput(
                     agent_id=target_agent_id,
                     session_key=session.id,
                     active_session_id=session.active_session_id,
+                    source=SESSIONS_SEND_TOOL_ID,
                     metadata={
                         "sessions_send": {
                             "message_id": message.id,
@@ -385,19 +385,14 @@ def sessions_send(container: Any):
                             "sender_run_id": sender_run_id,
                         },
                     },
-                    accept_input=AcceptOrchestrationRunInput(
-                        inbound_instruction=InboundInstruction(
-                            source="sessions_send",
-                            metadata={
-                                "message_id": message.id,
-                                "sender_session_key": sender_session_key,
-                                "sender_run_id": sender_run_id,
-                                "sender_agent_id": current_agent_id,
-                                "target_session_key": session.id,
-                                "target_active_session_id": session.active_session_id,
-                            },
-                        ),
-                    ),
+                    inbound_metadata={
+                        "message_id": message.id,
+                        "sender_session_key": sender_session_key,
+                        "sender_run_id": sender_run_id,
+                        "sender_agent_id": current_agent_id,
+                        "target_session_key": session.id,
+                        "target_active_session_id": session.active_session_id,
+                    },
                 ),
                 inline_worker_id=f"{SESSIONS_SEND_TOOL_ID}:{uuid4().hex}",
             )
@@ -410,7 +405,7 @@ def sessions_send(container: Any):
             "message": _serialize_message(SessionMessageDTO.from_entity(message)),
             "enqueued": enqueue,
             "run_id": queued_run.id if queued_run is not None else None,
-            "run_status": queued_run.status.value if queued_run is not None else None,
+            "run_status": queued_run.status if queued_run is not None else None,
             "sender_session_key": sender_session_key,
             "sender_run_id": sender_run_id,
         }
@@ -429,11 +424,12 @@ def sessions_send(container: Any):
     return handler
 
 
-def sessions_spawn(container: Any):
-    session_service = getattr(container, "session_service", None)
-    orchestration_scheduler_lookup = _orchestration_scheduler_service_lookup(container)
-    if session_service is None or not callable(orchestration_scheduler_lookup):
+def sessions_spawn(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
+    session_service = resolved.session_service
+    session_runtime_control = resolved.session_runtime_control
 
     async def handler(
         arguments: dict[str, Any],
@@ -470,12 +466,6 @@ def sessions_spawn(container: Any):
                 "sessions_spawn only supports requester sessions owned by the current agent.",
             )
 
-        orchestration_scheduler = orchestration_scheduler_lookup()
-        if orchestration_scheduler is None:
-            raise RuntimeError(
-                "sessions_spawn orchestration scheduler is unavailable.",
-            )
-
         child_suffix = uuid4().hex
         child_main_key = f"subagent:{child_suffix}"
         spawn_metadata = {
@@ -486,43 +476,13 @@ def sessions_spawn(container: Any):
             "spawned_by_tool": SESSIONS_SPAWN_TOOL_ID,
             "child_main_key": child_main_key,
         }
-        normalized_spawn_metadata = {
-            key: value
-            for key, value in spawn_metadata.items()
-            if value is not None
-        }
-        queued_run = orchestration_scheduler.submit_turn(
-            SubmitOrchestrationTurnInput(
-                accept_input=AcceptOrchestrationRunInput(
-                    inbound_instruction=InboundInstruction(
-                        source=SESSIONS_SPAWN_TOOL_ID,
-                        content={
-                            "blocks": [
-                                {
-                                    "type": "text",
-                                    "text": text,
-                                }
-                            ]
-                        },
-                        metadata=spawn_metadata,
-                    ),
-                    metadata={
-                        "sessions_spawn": normalized_spawn_metadata,
-                    },
-                ),
-                context=SessionRouteContext(
-                    agent_id=current_agent_id,
-                    main_key=child_main_key,
-                    direct_scope=DirectSessionScope.MAIN,
-                    label="subagent",
-                    surface="session_tool",
-                    metadata={
-                        "spawn": normalized_spawn_metadata,
-                    },
-                ),
-                prepare_metadata={
-                    "sessions_spawn": normalized_spawn_metadata,
-                },
+        queued_run = session_runtime_control.submit_spawn_turn(
+            SubmitSessionSpawnTurnInput(
+                agent_id=current_agent_id,
+                child_main_key=child_main_key,
+                text=text,
+                source=SESSIONS_SPAWN_TOOL_ID,
+                spawn_metadata=spawn_metadata,
             ),
             inline_worker_id=f"{SESSIONS_SPAWN_TOOL_ID}:{uuid4().hex}",
         )
@@ -540,7 +500,7 @@ def sessions_spawn(container: Any):
             "child_active_session_id": child_session.active_session_id,
             "child_main_key": child_main_key,
             "run_id": queued_run.id,
-            "run_status": queued_run.status.value,
+            "run_status": queued_run.status,
         }
         return ToolRunResult.text(
             _render_sessions_spawn(
@@ -557,11 +517,12 @@ def sessions_spawn(container: Any):
     return handler
 
 
-def subagents(container: Any):
-    session_service = getattr(container, "session_service", None)
-    orchestration_run_query_lookup = _orchestration_run_query_service_lookup(container)
-    if session_service is None:
+def subagents(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
+    session_service = resolved.session_service
+    session_runtime_control = resolved.session_runtime_control
 
     async def handler(
         arguments: dict[str, Any],
@@ -611,13 +572,8 @@ def subagents(container: Any):
             ]
         selected_entries = tree_entries[:limit]
         selected_sessions = [item["session"] for item in selected_entries]
-        orchestration_run_query = (
-            orchestration_run_query_lookup()
-            if callable(orchestration_run_query_lookup)
-            else None
-        )
         run_summaries_by_session_key = _collect_subagent_run_summaries(
-            orchestration_run_query=orchestration_run_query,
+            session_runtime_control=session_runtime_control,
             session_keys={item.id for item in selected_sessions},
         )
         details = {
@@ -651,13 +607,12 @@ def subagents(container: Any):
     return handler
 
 
-def sessions_stop(container: Any):
-    session_service = getattr(container, "session_service", None)
-    orchestration_cancellation_lookup = _orchestration_cancellation_service_lookup(
-        container,
-    )
-    if session_service is None or not callable(orchestration_cancellation_lookup):
+def sessions_stop(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
+    session_service = resolved.session_service
+    session_runtime_control = resolved.session_runtime_control
 
     async def handler(
         arguments: dict[str, Any],
@@ -683,12 +638,7 @@ def sessions_stop(container: Any):
                 "sessions_stop only supports requester sessions owned by the current agent.",
             )
 
-        orchestration_cancellation = orchestration_cancellation_lookup()
-        if orchestration_cancellation is None:
-            raise RuntimeError(
-                "sessions_stop orchestration cancellation service is unavailable.",
-            )
-        summary = orchestration_cancellation.cancel_session_tree(
+        summary = session_runtime_control.cancel_session_tree(
             requester_session.id,
             reason=reason,
         )
@@ -713,9 +663,9 @@ def sessions_stop(container: Any):
     return handler
 
 
-def sessions_yield(container: Any):
-    session_service = getattr(container, "session_service", None)
-    if session_service is None:
+def sessions_yield(deps: SessionsToolDeps | Any):
+    resolved = _coerce_sessions_deps(deps)
+    if resolved is None:
         return None
 
     async def handler(
@@ -956,7 +906,7 @@ def _build_requester_tree_status(
     *,
     requester_session_key: str,
     requester_agent_id: str,
-    orchestration_run_query: Any,
+    session_runtime_control: SessionRuntimeControlPort,
     sessions: list[Any],
 ) -> dict[str, Any]:
     tree_entries = _collect_subagent_tree_entries(
@@ -965,7 +915,7 @@ def _build_requester_tree_status(
     )
     session_keys = {item["session"].id for item in tree_entries}
     run_summaries_by_session_key = _collect_subagent_run_summaries(
-        orchestration_run_query=orchestration_run_query,
+        session_runtime_control=session_runtime_control,
         session_keys=session_keys,
     )
     inflight_child_session_count = 0
@@ -985,7 +935,7 @@ def _build_requester_tree_status(
             inflight_child_run_count += inflight_count
     followup = _collect_requester_followup_status(
         requester_session_key=requester_session_key,
-        orchestration_run_query=orchestration_run_query,
+        session_runtime_control=session_runtime_control,
     )
     return {
         "requester_session_key": requester_session_key,
@@ -1040,14 +990,14 @@ def _collect_subagent_tree_entries(
 
 def _collect_subagent_run_summaries(
     *,
-    orchestration_run_query: Any,
+    session_runtime_control: SessionRuntimeControlPort,
     session_keys: set[str],
 ) -> dict[str, dict[str, Any]]:
-    if orchestration_run_query is None or not session_keys:
+    if not session_keys:
         return {}
     summaries: dict[str, dict[str, Any]] = {}
-    runs = orchestration_run_query.list_runs()
-    runs_by_session_key: dict[str, list[OrchestrationRun]] = {}
+    runs = session_runtime_control.list_runs()
+    runs_by_session_key: dict[str, list[SessionRuntimeRunRecord]] = {}
     for run in runs:
         session_key = run.session_key
         if session_key is None or session_key not in session_keys:
@@ -1065,11 +1015,7 @@ def _collect_subagent_run_summaries(
         inflight = [
             item
             for item in ordered
-            if item.status not in {
-                OrchestrationRunStatus.COMPLETED,
-                OrchestrationRunStatus.FAILED,
-                OrchestrationRunStatus.CANCELLED,
-            }
+            if not _is_terminal_run_status(item.status)
         ]
         summaries[session_key] = {
             "latest_run": _serialize_run_summary(ordered[0]) if ordered else None,
@@ -1082,10 +1028,10 @@ def _collect_subagent_run_summaries(
 def _collect_requester_followup_status(
     *,
     requester_session_key: str,
-    orchestration_run_query: Any,
+    session_runtime_control: SessionRuntimeControlPort,
 ) -> dict[str, Any]:
     runs = []
-    for run in orchestration_run_query.list_runs():
+    for run in session_runtime_control.list_runs():
         if run.session_key != requester_session_key:
             continue
         payload = run.metadata.get("sessions_spawn_followup")
@@ -1103,11 +1049,7 @@ def _collect_requester_followup_status(
     inflight = [
         item
         for item in ordered
-        if item.status not in {
-            OrchestrationRunStatus.COMPLETED,
-            OrchestrationRunStatus.FAILED,
-            OrchestrationRunStatus.CANCELLED,
-        }
+        if not _is_terminal_run_status(item.status)
     ]
     return {
         "run_count": len(ordered),
@@ -1117,16 +1059,15 @@ def _collect_requester_followup_status(
     }
 
 
-def _serialize_run_summary(run: OrchestrationRun) -> dict[str, Any]:
-    prompt_mode = _coerce_optional_text(run.metadata.get("prompt_mode"))
+def _serialize_run_summary(run: SessionRuntimeRunRecord) -> dict[str, Any]:
     return {
         "id": run.id,
-        "status": run.status.value,
-        "stage": run.stage.value,
+        "status": run.status,
+        "stage": run.stage,
         "current_step": run.current_step,
         "max_steps": run.max_steps,
         "waiting_reason": run.waiting_reason,
-        "prompt_mode": prompt_mode,
+        "prompt_mode": run.prompt_mode,
         "worker_id": run.worker_id,
         "updated_at": _isoformat(run.updated_at),
         "queued_at": _isoformat(run.queued_at),
@@ -1135,7 +1076,7 @@ def _serialize_run_summary(run: OrchestrationRun) -> dict[str, Any]:
     }
 
 
-def _serialize_followup_run_summary(run: OrchestrationRun) -> dict[str, Any]:
+def _serialize_followup_run_summary(run: SessionRuntimeRunRecord) -> dict[str, Any]:
     summary = _serialize_run_summary(run)
     payload = (
         dict(run.metadata.get("sessions_spawn_followup", {}))
@@ -1151,6 +1092,10 @@ def _serialize_followup_run_summary(run: OrchestrationRun) -> dict[str, Any]:
         },
     )
     return summary
+
+
+def _is_terminal_run_status(status: str) -> bool:
+    return status in {"completed", "failed", "cancelled"}
 
 
 def _extract_compaction_metadata(metadata: dict[str, object]) -> dict[str, Any] | None:

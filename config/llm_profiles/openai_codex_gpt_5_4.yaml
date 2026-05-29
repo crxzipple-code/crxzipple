@@ -10,7 +10,7 @@ capabilities:
   - reasoning
 default_params:
   reasoning_effort: medium
-credential_binding: codex_auth_json
+credential_binding_id: codex-oauth-default
 timeout_seconds: 120
 source_kind: imported
 enabled: true

@@ -10,9 +10,6 @@ from crxzipple.modules.orchestration.application.lease_manager import (
 from crxzipple.modules.orchestration.application.tool_resume import (
     OrchestrationToolResumeCoordinator,
 )
-from crxzipple.modules.orchestration.application.coordinators.waiting import (
-    RunWaitCoordinator,
-)
 from crxzipple.modules.orchestration.domain import (
     OrchestrationExecutorLease,
     OrchestrationRun,
@@ -43,7 +40,7 @@ class RecoveryCoordinatorUnitOfWork(Protocol):
 class RunRecoveryCoordinator:
     uow_factory: Callable[[], RecoveryCoordinatorUnitOfWork]
     lease_manager: OrchestrationLeaseManager
-    wait_coordinator: RunWaitCoordinator
+    continue_recovery_contract: Callable[[str], OrchestrationRun]
     tool_resume: OrchestrationToolResumeCoordinator | None
 
     def expire_executor_leases(self) -> list[OrchestrationExecutorLease]:
@@ -59,7 +56,7 @@ class RunRecoveryCoordinator:
             )
         for run in waiting_runs:
             try:
-                continued = self.wait_coordinator.continue_recovery_contract(run.id)
+                continued = self.continue_recovery_contract(run.id)
             except Exception:
                 logger.exception(
                     "failed to continue stalled recovery contract",

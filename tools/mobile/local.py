@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from crxzipple.modules.mobile.domain import MobileExecutionError, MobileValidationError
@@ -43,6 +44,18 @@ _MOBILE_TOOL_ACTION_ONLY_MESSAGE = (
     "mobile tools do not expose control or lifecycle steps. "
     "Use action steps only, or use the mobile API/CLI for device-level debugging."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MobileToolDeps:
+    mobile_facade: Any
+    mobile_result_serializer: Any
+
+
+def _coerce_mobile_deps(value: MobileToolDeps | Any) -> MobileToolDeps | None:
+    if isinstance(value, MobileToolDeps):
+        return value
+    return None
 
 
 def _normalize_text(value: object) -> str | None:
@@ -139,14 +152,6 @@ def _coerce_script_steps(value: object) -> list[dict[str, Any]]:
             )
         normalized.append(dict(step))
     return normalized
-
-
-def _mobile_runtime(container: Any) -> tuple[Any, Any]:
-    facade = getattr(container, "mobile_facade", None)
-    serializer = getattr(container, "mobile_result_serializer", None)
-    if facade is None or serializer is None:
-        raise RuntimeError("Mobile tool runtime is not available.")
-    return facade, serializer
 
 
 def _tool_result(
@@ -573,11 +578,12 @@ def _build_mobile_script_request(
     )
 
 
-def mobile_devices(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_devices(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -629,11 +635,12 @@ def mobile_devices(container: Any):
     return _handler
 
 
-def mobile_snapshot(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_snapshot(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -664,11 +671,12 @@ def mobile_snapshot(container: Any):
     return _handler
 
 
-def mobile_tap(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_tap(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -694,11 +702,12 @@ def mobile_tap(container: Any):
     return _handler
 
 
-def mobile_type(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_type(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -733,11 +742,12 @@ def mobile_type(container: Any):
     return _handler
 
 
-def mobile_swipe(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_swipe(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -771,11 +781,12 @@ def mobile_swipe(container: Any):
     return _handler
 
 
-def mobile_press(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_press(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -806,11 +817,12 @@ def mobile_press(container: Any):
     return _handler
 
 
-def mobile_wait(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_wait(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -843,11 +855,12 @@ def mobile_wait(container: Any):
     return _handler
 
 
-def mobile_screenshot(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_screenshot(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],
@@ -875,11 +888,12 @@ def mobile_screenshot(container: Any):
     return _handler
 
 
-def mobile_script(container: Any):
-    try:
-        facade, serializer = _mobile_runtime(container)
-    except RuntimeError:
+def mobile_script(deps: MobileToolDeps | Any):
+    resolved_deps = _coerce_mobile_deps(deps)
+    if resolved_deps is None:
         return None
+    facade = resolved_deps.mobile_facade
+    serializer = resolved_deps.mobile_result_serializer
 
     async def _handler(
         arguments: dict[str, Any],

@@ -34,6 +34,8 @@ DEFAULT_DAEMON_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "daemon"
 DEFAULT_EVENTS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "events"
 DEFAULT_OPERATIONS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "operations"
 DEFAULT_CHANNELS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "channels"
+DEFAULT_ACCESS_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "access"
+DEFAULT_MEMORY_STATE_DIR = PROJECT_ROOT / ".crxzipple" / "memory"
 DEFAULT_ARTIFACT_STORE_DIR = PROJECT_ROOT / ".crxzipple" / "artifacts"
 DEFAULT_OCR_BACKEND = "local"
 DEFAULT_OCR_PROVIDER = "host"
@@ -43,15 +45,8 @@ DEFAULT_BROWSER_DEFAULT_PROFILE_NAME = "crxzipple"
 DEFAULT_BROWSER_USER_PROFILE_NAME = "user"
 DEFAULT_BROWSER_USER_CDP_URL = "http://127.0.0.1:9222"
 DEFAULT_BROWSER_PROFILE_COLOR = "#2563EB"
-_ALLOWED_BROWSER_PROFILE_RUNTIME_MODES = {
-    "host",
-    "attached",
-    "proxy",
-    "sandbox",
-    "remote-cdp",
-}
-_ALLOWED_BROWSER_PROFILE_TRANSPORTS = {"cdp", "proxy"}
 _ALLOWED_BROWSER_PROFILE_DRIVERS = {"managed", "existing-session"}
+_ALLOWED_BROWSER_PROXY_CREDENTIAL_KINDS = {"basic", "bearer_token"}
 _ALLOWED_MOBILE_PLATFORMS = {"android"}
 _ALLOWED_EVENTS_BACKENDS = {"file", "redis"}
 DEFAULT_EVENTS_BACKEND = "redis"
@@ -183,22 +178,6 @@ def _normalize_browser_profile_name(value: str, *, label: str) -> str:
     return normalized
 
 
-def _normalize_browser_profile_runtime_mode(value: str, *, label: str) -> str:
-    normalized = value.strip().lower()
-    if normalized in _ALLOWED_BROWSER_PROFILE_RUNTIME_MODES:
-        return normalized
-    raise ValueError(
-        f"{label} must be one of: host, attached, proxy, sandbox, remote-cdp.",
-    )
-
-
-def _normalize_browser_profile_transport(value: str, *, label: str) -> str:
-    normalized = value.strip().lower()
-    if normalized in _ALLOWED_BROWSER_PROFILE_TRANSPORTS:
-        return normalized
-    raise ValueError(f"{label} must be one of: cdp, proxy.")
-
-
 def _normalize_browser_profile_driver(value: str, *, label: str) -> str:
     normalized = value.strip().lower()
     if normalized in _ALLOWED_BROWSER_PROFILE_DRIVERS:
@@ -218,6 +197,14 @@ def _normalize_browser_profile_color(value: str | None) -> str:
     except ValueError:
         return DEFAULT_BROWSER_PROFILE_COLOR
     return candidate.upper()
+
+
+def _proxy_server_has_credentials(value: str | None) -> bool:
+    normalized = (value or "").strip()
+    if not normalized:
+        return False
+    parsed = urlsplit(normalized)
+    return bool(parsed.username or parsed.password)
 
 
 def _load_browser_proxy_base_urls() -> tuple[tuple[str, str], ...]:
@@ -316,38 +303,13 @@ def _load_mobile_device_settings() -> tuple[MobileDeviceSettings, ...]:
     return tuple(resolved)
 
 
-def _derive_browser_profile_runtime_mode(
-    *,
-    driver: str,
-    cdp_url: str | None,
-    runtime_mode: str | None,
-) -> str:
-    if runtime_mode is not None:
-        return _normalize_browser_profile_runtime_mode(
-            runtime_mode,
-            label="Browser profile runtime_mode",
-        )
-    if driver == "existing-session":
-        return "attached"
-    if isinstance(cdp_url, str) and cdp_url.strip():
-        parsed = urlsplit(cdp_url.strip())
-        host = (parsed.hostname or "").strip().lower()
-        if host and host not in {"127.0.0.1", "localhost", "::1"}:
-            return "remote-cdp"
-    return "host"
-
-
-def _load_browser_profile_settings() -> tuple[
-    tuple[BrowserProfileSettings, ...],
-    tuple[BrowserProfileRuntimeSettings, ...],
-]:
+def _load_browser_profile_settings() -> tuple[BrowserProfileSettings, ...]:
     raw = os.getenv("APP_BROWSER_PROFILE_SPECS", "").strip()
     if not raw:
         return _ensure_default_user_browser_profile_settings(
             (
                 BrowserProfileSettings(name=DEFAULT_BROWSER_DEFAULT_PROFILE_NAME),
             ),
-            (),
         )
     payload = json.loads(raw)
     if not isinstance(payload, list):
@@ -355,7 +317,6 @@ def _load_browser_profile_settings() -> tuple[
             "APP_BROWSER_PROFILE_SPECS must decode to a JSON array of objects.",
         )
     resolved_profiles: list[BrowserProfileSettings] = []
-    resolved_runtime_settings: list[BrowserProfileRuntimeSettings] = []
     seen: set[str] = set()
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
@@ -388,35 +349,24 @@ def _load_browser_profile_settings() -> tuple[
                 raw_driver,
                 label=f"APP_BROWSER_PROFILE_SPECS[{index}].driver",
             )
+        raw_enabled = item.get("enabled")
+        if raw_enabled is not None and not isinstance(raw_enabled, bool):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].enabled must be a boolean when provided.",
+            )
         raw_cdp_url = item.get("cdp_url")
         if raw_cdp_url is not None and not isinstance(raw_cdp_url, str):
             raise ValueError(
                 f"APP_BROWSER_PROFILE_SPECS[{index}].cdp_url must be a string when provided.",
             )
         normalized_cdp_url = raw_cdp_url.strip() if isinstance(raw_cdp_url, str) else None
-        raw_runtime_mode = item.get("runtime_mode")
-        if raw_runtime_mode is not None and not isinstance(raw_runtime_mode, str):
+        if "runtime_mode" in item:
             raise ValueError(
-                f"APP_BROWSER_PROFILE_SPECS[{index}].runtime_mode must be a string.",
+                f"APP_BROWSER_PROFILE_SPECS[{index}].runtime_mode has been removed; use driver, cdp_url, attach_only, autostart, and proxy_* fields.",
             )
-        runtime_mode = _derive_browser_profile_runtime_mode(
-            driver=driver,
-            cdp_url=normalized_cdp_url,
-            runtime_mode=raw_runtime_mode,
-        )
-        if runtime_mode == "attached" and driver == "managed":
-            driver = "existing-session"
-        raw_transport = item.get("transport")
-        if raw_transport is None:
-            transport = "proxy" if runtime_mode == "proxy" else "cdp"
-        else:
-            if not isinstance(raw_transport, str):
-                raise ValueError(
-                    f"APP_BROWSER_PROFILE_SPECS[{index}].transport must be a string.",
-                )
-            transport = _normalize_browser_profile_transport(
-                raw_transport,
-                label=f"APP_BROWSER_PROFILE_SPECS[{index}].transport",
+        if "transport" in item:
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].transport has been removed; use driver, cdp_url, attach_only, autostart, and proxy_* fields.",
             )
         raw_cdp_port = item.get("cdp_port")
         if raw_cdp_port is not None and (
@@ -430,20 +380,66 @@ def _load_browser_profile_settings() -> tuple[
             raise ValueError(
                 f"APP_BROWSER_PROFILE_SPECS[{index}].user_data_dir must be a string when provided.",
             )
-        raw_executable_path = item.get("executable_path")
-        if raw_executable_path is not None and not isinstance(raw_executable_path, str):
+        raw_profile_directory = item.get("profile_directory")
+        if raw_profile_directory is not None and not isinstance(raw_profile_directory, str):
             raise ValueError(
-                f"APP_BROWSER_PROFILE_SPECS[{index}].executable_path must be a string when provided.",
+                f"APP_BROWSER_PROFILE_SPECS[{index}].profile_directory must be a string when provided.",
             )
-        raw_headless = item.get("headless")
-        if raw_headless is not None and not isinstance(raw_headless, bool):
+        if "executable_path" in item:
             raise ValueError(
-                f"APP_BROWSER_PROFILE_SPECS[{index}].headless must be a boolean when provided.",
+                f"APP_BROWSER_PROFILE_SPECS[{index}].executable_path has been removed; use APP_BROWSER_EXECUTABLE_PATH for the Browser system executable.",
+            )
+        if "headless" in item:
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].headless has been removed; use APP_BROWSER_HEADLESS for the Browser system headless mode.",
             )
         raw_attach_only = item.get("attach_only")
         if raw_attach_only is not None and not isinstance(raw_attach_only, bool):
             raise ValueError(
                 f"APP_BROWSER_PROFILE_SPECS[{index}].attach_only must be a boolean when provided.",
+            )
+        raw_autostart = item.get("autostart")
+        if raw_autostart is not None and not isinstance(raw_autostart, bool):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].autostart must be a boolean when provided.",
+            )
+        raw_proxy_mode = item.get("proxy_mode")
+        if raw_proxy_mode is not None and not isinstance(raw_proxy_mode, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].proxy_mode must be a string when provided.",
+            )
+        raw_proxy_server = item.get("proxy_server")
+        if raw_proxy_server is not None and not isinstance(raw_proxy_server, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].proxy_server must be a string when provided.",
+            )
+        raw_proxy_bypass_list = item.get("proxy_bypass_list")
+        if raw_proxy_bypass_list is not None and not (
+            isinstance(raw_proxy_bypass_list, list)
+            and all(isinstance(entry, str) for entry in raw_proxy_bypass_list)
+        ):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].proxy_bypass_list must be a string array when provided.",
+            )
+        raw_proxy_binding_id = item.get("proxy_binding_id")
+        if raw_proxy_binding_id is not None and not isinstance(raw_proxy_binding_id, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].proxy_binding_id must be a string when provided.",
+            )
+        raw_proxy_credential_kind = item.get("proxy_credential_kind")
+        if raw_proxy_credential_kind is not None and not isinstance(raw_proxy_credential_kind, str):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].proxy_credential_kind must be a string when provided.",
+            )
+        raw_close_targets_on_release = item.get("close_targets_on_release")
+        if raw_close_targets_on_release is not None and not isinstance(raw_close_targets_on_release, bool):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].close_targets_on_release must be a boolean when provided.",
+            )
+        raw_close_targets_on_expire = item.get("close_targets_on_expire")
+        if raw_close_targets_on_expire is not None and not isinstance(raw_close_targets_on_expire, bool):
+            raise ValueError(
+                f"APP_BROWSER_PROFILE_SPECS[{index}].close_targets_on_expire must be a boolean when provided.",
             )
         raw_color = item.get("color")
         if raw_color is not None and not isinstance(raw_color, str):
@@ -456,25 +452,33 @@ def _load_browser_profile_settings() -> tuple[
                 cdp_url=normalized_cdp_url,
                 cdp_port=raw_cdp_port,
                 user_data_dir=raw_user_data_dir,
+                profile_directory=raw_profile_directory,
                 driver=driver,
+                enabled=bool(raw_enabled) if raw_enabled is not None else True,
                 attach_only=bool(raw_attach_only) if raw_attach_only is not None else False,
+                autostart=bool(raw_autostart) if raw_autostart is not None else True,
+                proxy_mode=raw_proxy_mode or "none",
+                proxy_server=raw_proxy_server,
+                proxy_bypass_list=tuple(raw_proxy_bypass_list or ()),
+                proxy_binding_id=raw_proxy_binding_id,
+                proxy_credential_kind=raw_proxy_credential_kind or "basic",
+                close_targets_on_release=(
+                    bool(raw_close_targets_on_release)
+                    if raw_close_targets_on_release is not None
+                    else True
+                ),
+                close_targets_on_expire=(
+                    bool(raw_close_targets_on_expire)
+                    if raw_close_targets_on_expire is not None
+                    else True
+                ),
                 color=raw_color,
-            ),
-        )
-        resolved_runtime_settings.append(
-            BrowserProfileRuntimeSettings(
-                profile=name,
-                runtime_mode=runtime_mode,
-                transport=transport,
-                executable_path=raw_executable_path,
-                headless=raw_headless,
             ),
         )
     if not resolved_profiles:
         raise ValueError("APP_BROWSER_PROFILE_SPECS must contain at least one profile.")
     return _ensure_default_user_browser_profile_settings(
         tuple(resolved_profiles),
-        tuple(resolved_runtime_settings),
     )
 
 
@@ -498,9 +502,9 @@ def _load_tool_local_paths() -> tuple[str, ...]:
 @dataclass(frozen=True, slots=True)
 class OpenApiCredentialBinding:
     scheme_name: str
-    source: str | None = None
-    username_source: str | None = None
-    password_source: str | None = None
+    credential_binding_id: str | None = None
+    username_binding_id: str | None = None
+    password_binding_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,11 +516,21 @@ class BrowserProxyEndpointSettings:
 @dataclass(frozen=True, slots=True)
 class BrowserProfileSettings:
     name: str
+    enabled: bool = True
     cdp_url: str | None = None
     cdp_port: int | None = None
     user_data_dir: str | None = None
+    profile_directory: str | None = None
     driver: str = "managed"
     attach_only: bool = False
+    autostart: bool = True
+    proxy_mode: str = "none"
+    proxy_server: str | None = None
+    proxy_bypass_list: tuple[str, ...] = ()
+    proxy_binding_id: str | None = None
+    proxy_credential_kind: str = "basic"
+    close_targets_on_release: bool = True
+    close_targets_on_expire: bool = True
     color: str | None = None
 
     def __post_init__(self) -> None:
@@ -528,6 +542,7 @@ class BrowserProfileSettings:
                 label="Browser profile name",
             ),
         )
+        object.__setattr__(self, "enabled", bool(self.enabled))
         driver = _normalize_browser_profile_driver(
             self.driver,
             label=f"Browser profile '{self.name}' driver",
@@ -537,6 +552,42 @@ class BrowserProfileSettings:
             self.user_data_dir.strip()
             if isinstance(self.user_data_dir, str)
             else ""
+        )
+        normalized_profile_directory = (
+            self.profile_directory.strip()
+            if isinstance(self.profile_directory, str)
+            else ""
+        )
+        if "/" in normalized_profile_directory or "\\" in normalized_profile_directory:
+            raise ValueError(
+                f"Browser profile '{self.name}' profile_directory must be a browser profile name.",
+            )
+        proxy_mode = self.proxy_mode.strip().lower()
+        if proxy_mode not in {"none", "static", "access_binding"}:
+            raise ValueError(
+                f"Browser profile '{self.name}' proxy_mode must be one of: access_binding, none, static.",
+            )
+        normalized_proxy_server = (
+            self.proxy_server.strip()
+            if isinstance(self.proxy_server, str)
+            else ""
+        )
+        normalized_proxy_binding_id = (
+            self.proxy_binding_id.strip()
+            if isinstance(self.proxy_binding_id, str)
+            else ""
+        )
+        proxy_credential_kind = self.proxy_credential_kind.strip().lower()
+        if proxy_credential_kind == "bearer":
+            proxy_credential_kind = "bearer_token"
+        if proxy_credential_kind not in _ALLOWED_BROWSER_PROXY_CREDENTIAL_KINDS:
+            raise ValueError(
+                f"Browser profile '{self.name}' proxy_credential_kind must be one of: basic, bearer_token.",
+            )
+        normalized_proxy_bypass_list = tuple(
+            item.strip()
+            for item in self.proxy_bypass_list
+            if isinstance(item, str) and item.strip()
         )
         cdp_port = self.cdp_port
         if cdp_port is not None and cdp_port < 0:
@@ -553,58 +604,53 @@ class BrowserProfileSettings:
         object.__setattr__(self, "user_data_dir", normalized_user_data_dir or None)
         object.__setattr__(
             self,
+            "profile_directory",
+            normalized_profile_directory or None,
+        )
+        object.__setattr__(self, "proxy_mode", proxy_mode)
+        object.__setattr__(self, "proxy_server", normalized_proxy_server or None)
+        object.__setattr__(
+            self,
+            "proxy_bypass_list",
+            normalized_proxy_bypass_list,
+        )
+        object.__setattr__(
+            self,
+            "proxy_binding_id",
+            normalized_proxy_binding_id or None,
+        )
+        object.__setattr__(self, "proxy_credential_kind", proxy_credential_kind)
+        object.__setattr__(
+            self,
+            "close_targets_on_release",
+            bool(self.close_targets_on_release),
+        )
+        object.__setattr__(
+            self,
+            "close_targets_on_expire",
+            bool(self.close_targets_on_expire),
+        )
+        object.__setattr__(
+            self,
             "color",
             _normalize_browser_profile_color(self.color),
         )
         if driver == "existing-session" and not self.attach_only:
             object.__setattr__(self, "attach_only", True)
-
-
-@dataclass(frozen=True, slots=True)
-class BrowserProfileRuntimeSettings:
-    profile: str
-    runtime_mode: str = "host"
-    transport: str = "cdp"
-    executable_path: str | None = None
-    headless: bool | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "profile",
-            _normalize_browser_profile_name(
-                self.profile,
-                label="Browser profile runtime binding profile",
-            ),
-        )
-        runtime_mode = _normalize_browser_profile_runtime_mode(
-            self.runtime_mode,
-            label=f"Browser profile '{self.profile}' runtime_mode",
-        )
-        transport = _normalize_browser_profile_transport(
-            self.transport,
-            label=f"Browser profile '{self.profile}' transport",
-        )
-        if runtime_mode == "proxy" and transport != "proxy":
+        if self.attach_only or driver == "existing-session":
+            object.__setattr__(self, "autostart", False)
+        if proxy_mode == "static" and not normalized_proxy_server:
             raise ValueError(
-                f"Browser profile '{self.profile}' must use transport 'proxy' when runtime_mode is 'proxy'.",
+                f"Browser profile '{self.name}' proxy_server is required when proxy_mode is static.",
             )
-        if runtime_mode != "proxy" and transport == "proxy":
+        if proxy_mode == "static" and _proxy_server_has_credentials(normalized_proxy_server):
             raise ValueError(
-                f"Browser profile '{self.profile}' can only use transport 'proxy' when runtime_mode is 'proxy'.",
+                f"Browser profile '{self.name}' proxy_server must not contain credentials; use proxy_mode access_binding.",
             )
-        if runtime_mode == "remote-cdp" and transport != "cdp":
+        if proxy_mode == "access_binding" and not normalized_proxy_binding_id:
             raise ValueError(
-                f"Browser profile '{self.profile}' must use transport 'cdp' when runtime_mode is 'remote-cdp'.",
+                f"Browser profile '{self.name}' proxy_binding_id is required when proxy_mode is access_binding.",
             )
-        normalized_executable_path = (
-            self.executable_path.strip()
-            if isinstance(self.executable_path, str)
-            else ""
-        )
-        object.__setattr__(self, "runtime_mode", runtime_mode)
-        object.__setattr__(self, "transport", transport)
-        object.__setattr__(self, "executable_path", normalized_executable_path or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,10 +698,8 @@ class MobileDeviceSettings:
 
 def _ensure_default_user_browser_profile_settings(
     profiles: tuple[BrowserProfileSettings, ...],
-    runtime_settings: tuple[BrowserProfileRuntimeSettings, ...],
-) -> tuple[tuple[BrowserProfileSettings, ...], tuple[BrowserProfileRuntimeSettings, ...]]:
+) -> tuple[BrowserProfileSettings, ...]:
     resolved_profiles = profiles
-    resolved_runtime_settings = runtime_settings
     if not any(profile.name == DEFAULT_BROWSER_USER_PROFILE_NAME for profile in resolved_profiles):
         resolved_profiles = resolved_profiles + (
             BrowserProfileSettings(
@@ -665,18 +709,7 @@ def _ensure_default_user_browser_profile_settings(
                 attach_only=True,
             ),
         )
-    if not any(
-        runtime.profile == DEFAULT_BROWSER_USER_PROFILE_NAME
-        for runtime in resolved_runtime_settings
-    ):
-        resolved_runtime_settings = resolved_runtime_settings + (
-            BrowserProfileRuntimeSettings(
-                profile=DEFAULT_BROWSER_USER_PROFILE_NAME,
-                runtime_mode="attached",
-                transport="cdp",
-            ),
-        )
-    return resolved_profiles, resolved_runtime_settings
+    return resolved_profiles
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,16 +722,60 @@ class OpenApiProviderSettings:
     max_concurrency: int | None = None
     credential_bindings: tuple[OpenApiCredentialBinding, ...] = ()
     default_effect_ids: tuple[str, ...] = ()
+    runtime_requirements: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "runtime_requirements",
+            tuple(
+                dict.fromkeys(
+                    str(requirement).strip()
+                    for requirement in self.runtime_requirements
+                    if str(requirement).strip()
+                ),
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class McpProviderSettings:
     name: str
-    command: tuple[str, ...]
+    command: tuple[str, ...] = ()
+    transport: str = "stdio"
+    endpoint_url: str | None = None
     description: str = ""
     timeout_seconds: int = 30
     max_concurrency: int | None = None
     default_effect_ids: tuple[str, ...] = ()
+    runtime_requirements: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        transport = self.transport.strip().lower()
+        if transport not in {"stdio", "http"}:
+            raise ValueError(
+                f"MCP provider '{self.name}' transport must be one of: http, stdio.",
+            )
+        command = tuple(part.strip() for part in self.command if part.strip())
+        endpoint_url = self.endpoint_url.strip() if isinstance(self.endpoint_url, str) else ""
+        if transport == "stdio" and not command:
+            raise ValueError(f"MCP provider '{self.name}' command cannot be empty.")
+        if transport == "http" and not endpoint_url:
+            raise ValueError(f"MCP provider '{self.name}' endpoint_url cannot be empty.")
+        object.__setattr__(self, "transport", transport)
+        object.__setattr__(self, "command", command)
+        object.__setattr__(self, "endpoint_url", endpoint_url or None)
+        object.__setattr__(
+            self,
+            "runtime_requirements",
+            tuple(
+                dict.fromkeys(
+                    str(requirement).strip()
+                    for requirement in self.runtime_requirements
+                    if str(requirement).strip()
+                ),
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,7 +789,7 @@ class LlmProfileSettings:
     capabilities: tuple[str, ...] = ()
     default_params: dict[str, Any] = field(default_factory=dict)
     base_url: str | None = None
-    credential_binding: str | None = None
+    credential_binding_id: str | None = None
     timeout_seconds: int = 60
     max_concurrency: int | None = None
     concurrency_key: str | None = None
@@ -722,26 +799,26 @@ class LlmProfileSettings:
 
 @dataclass(frozen=True, slots=True)
 class AgentProfileDefaultsSettings:
-    description: str = ""
     enabled: bool = True
     identity: dict[str, Any] = field(default_factory=dict)
     instruction_policy: dict[str, Any] = field(default_factory=dict)
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
+    memory: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class AgentProfileSettings:
     id: str
     name: str
-    description: str = ""
     enabled: bool = True
     identity: dict[str, Any] = field(default_factory=dict)
     instruction_policy: dict[str, Any] = field(default_factory=dict)
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
+    memory: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_openapi_provider_settings() -> tuple[OpenApiProviderSettings, ...]:
@@ -892,6 +969,11 @@ def _build_openapi_provider_settings(
             for item in raw.get("default_effect_ids", []) or []
             if str(item).strip()
         ),
+        runtime_requirements=tuple(
+            str(item).strip()
+            for item in raw.get("runtime_requirements", []) or []
+            if str(item).strip()
+        ),
     )
 
 
@@ -931,15 +1013,21 @@ def _load_openapi_credential_bindings(
             )
 
         if isinstance(value, str):
-            source = value.strip()
-            if not source:
+            credential_binding_id = value.strip()
+            if not credential_binding_id:
                 raise ValueError(
                     f"OpenAPI provider '{provider_name}' credential binding '{normalized_scheme_name}' cannot be empty.",
                 )
+            _reject_direct_openapi_credential_source(
+                credential_binding_id,
+                provider_name=provider_name,
+                scheme_name=normalized_scheme_name,
+                field_name="credential_binding_id",
+            )
             bindings.append(
                 OpenApiCredentialBinding(
                     scheme_name=normalized_scheme_name,
-                    source=source,
+                    credential_binding_id=credential_binding_id,
                 ),
             )
             continue
@@ -949,35 +1037,109 @@ def _load_openapi_credential_bindings(
                 f"OpenAPI provider '{provider_name}' credential binding '{normalized_scheme_name}' must be a string or object.",
             )
 
-        source = (
-            str(value["source"]).strip()
-            if value.get("source") is not None
-            else None
+        _reject_legacy_openapi_credential_fields(
+            value,
+            provider_name=provider_name,
+            scheme_name=normalized_scheme_name,
         )
-        username_source = (
-            str(value.get("username_source") or value.get("username") or "").strip()
-            or None
+        credential_binding_id = _optional_mapping_text(
+            value,
+            "credential_binding_id",
         )
-        password_source = (
-            str(value.get("password_source") or value.get("password") or "").strip()
-            or None
+        username_binding_id = _optional_mapping_text(
+            value,
+            "username_binding_id",
+        )
+        password_binding_id = _optional_mapping_text(
+            value,
+            "password_binding_id",
         )
 
-        if source is None and (username_source is None or password_source is None):
+        if credential_binding_id is None and (
+            username_binding_id is None or password_binding_id is None
+        ):
             raise ValueError(
-                f"OpenAPI provider '{provider_name}' credential binding '{normalized_scheme_name}' must define source or username/password sources.",
+                f"OpenAPI provider '{provider_name}' credential binding '{normalized_scheme_name}' must define credential_binding_id or username/password binding ids.",
             )
 
         bindings.append(
             OpenApiCredentialBinding(
                 scheme_name=normalized_scheme_name,
-                source=source,
-                username_source=username_source,
-                password_source=password_source,
+                credential_binding_id=credential_binding_id,
+                username_binding_id=username_binding_id,
+                password_binding_id=password_binding_id,
             ),
         )
 
     return tuple(bindings)
+
+
+def _optional_mapping_text(value: dict[str, object], *keys: str) -> str | None:
+    for key in keys:
+        raw = value.get(key)
+        if raw is None:
+            continue
+        normalized = str(raw).strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _reject_legacy_openapi_credential_fields(
+    value: dict[str, object],
+    *,
+    provider_name: str,
+    scheme_name: str,
+) -> None:
+    legacy_fields = (
+        "source",
+        "username_source",
+        "password_source",
+        "username",
+        "password",
+        "credential_binding",
+        "credential_binding_ref",
+        "binding_id",
+        "username_binding",
+        "password_binding",
+    )
+    for field_name in legacy_fields:
+        if value.get(field_name) is not None:
+            raise ValueError(
+                f"OpenAPI provider '{provider_name}' credential binding "
+                f"'{scheme_name}' must use Access credential binding ids; "
+                f"field '{field_name}' is no longer accepted.",
+            )
+    for field_name in (
+        "credential_binding_id",
+        "username_binding_id",
+        "password_binding_id",
+    ):
+        candidate = value.get(field_name)
+        if candidate is None:
+            continue
+        _reject_direct_openapi_credential_source(
+            str(candidate),
+            provider_name=provider_name,
+            scheme_name=scheme_name,
+            field_name=field_name,
+        )
+
+
+def _reject_direct_openapi_credential_source(
+    value: str,
+    *,
+    provider_name: str,
+    scheme_name: str,
+    field_name: str,
+) -> None:
+    normalized = value.strip()
+    if normalized.startswith(("env:", "file:", "codex_auth_json", "codex-cli")):
+        raise ValueError(
+            f"OpenAPI provider '{provider_name}' credential binding '{scheme_name}' "
+            f"field '{field_name}' must reference an Access credential binding id, "
+            "not a direct credential source.",
+        )
 
 
 def _load_mcp_provider_settings() -> tuple[McpProviderSettings, ...]:
@@ -1000,6 +1162,12 @@ def _load_mcp_provider_settings() -> tuple[McpProviderSettings, ...]:
         if not name:
             raise ValueError("MCP provider name cannot be empty.")
 
+        transport = str(item.get("transport") or "stdio").strip().lower()
+        endpoint_url = item.get("endpoint_url")
+        if endpoint_url is not None and not isinstance(endpoint_url, str):
+            raise ValueError(
+                f"MCP provider '{name}' endpoint_url must be a string when provided.",
+            )
         command = item.get("command")
         args = item.get("args", [])
         command_parts: tuple[str, ...]
@@ -1014,18 +1182,22 @@ def _load_mcp_provider_settings() -> tuple[McpProviderSettings, ...]:
                 command.strip(),
                 *(str(part).strip() for part in args if str(part).strip()),
             )
+        elif transport == "http":
+            command_parts = ()
         else:
             raise ValueError(
                 f"MCP provider '{name}' must define command as a string or list.",
             )
 
-        if not command_parts:
+        if transport == "stdio" and not command_parts:
             raise ValueError(f"MCP provider '{name}' command cannot be empty.")
 
         providers.append(
             McpProviderSettings(
                 name=name,
                 command=command_parts,
+                transport=transport,
+                endpoint_url=endpoint_url,
                 description=str(item.get("description", "")).strip(),
                 timeout_seconds=max(int(item.get("timeout_seconds", 30)), 1),
                 max_concurrency=_optional_positive_int(
@@ -1035,6 +1207,11 @@ def _load_mcp_provider_settings() -> tuple[McpProviderSettings, ...]:
                 default_effect_ids=tuple(
                     str(part).strip()
                     for part in item.get("default_effect_ids", []) or []
+                    if str(part).strip()
+                ),
+                runtime_requirements=tuple(
+                    str(part).strip()
+                    for part in item.get("runtime_requirements", []) or []
                     if str(part).strip()
                 ),
             ),
@@ -1260,16 +1437,15 @@ def _build_channel_account_profile_settings(
         raise ValueError(
             f"{source_description} channel profile '{channel_type}' accounts[{index}] metadata must decode to an object.",
         )
-    return ChannelAccountProfile(
-        account_id=account_id,
-        enabled=bool(raw.get("enabled", True)),
-        transport_mode=str(raw.get("transport_mode") or "push"),
-        auth_ref=(
-            str(raw.get("auth_ref")).strip()
-            if raw.get("auth_ref") is not None and str(raw.get("auth_ref")).strip()
-            else None
-        ),
-        metadata=metadata,
+    return ChannelAccountProfile.from_payload(
+        {
+            **raw,
+            "account_id": account_id,
+            "enabled": bool(raw.get("enabled", True)),
+            "transport_mode": str(raw.get("transport_mode") or "push"),
+            "metadata": metadata,
+        },
+        channel_type=channel_type,
     )
 
 
@@ -1362,6 +1538,10 @@ def _build_llm_profile_settings(
         raise ValueError(
             f"LLM profile '{profile_id}' must define model_name.",
         )
+    if raw.get("credential_binding") is not None:
+        raise ValueError(
+            f"LLM profile '{profile_id}' must use credential_binding_id, not credential_binding.",
+        )
 
     capabilities_raw = raw.get("capabilities", [])
     if capabilities_raw is None:
@@ -1404,9 +1584,9 @@ def _build_llm_profile_settings(
         base_url=(
             str(raw["base_url"]).strip() if raw.get("base_url") is not None else None
         ),
-        credential_binding=(
-            str(raw["credential_binding"]).strip()
-            if raw.get("credential_binding") is not None
+        credential_binding_id=(
+            str(raw["credential_binding_id"]).strip()
+            if raw.get("credential_binding_id") is not None
             else None
         ),
         timeout_seconds=max(int(raw.get("timeout_seconds", 60)), 1),
@@ -1598,16 +1778,20 @@ def _build_agent_profile_settings(
             f"Agent profile '{profile_id}' runtime_preferences"
         ),
     )
+    memory = _coerce_object_payload(
+        raw.get("memory", {}),
+        source_description=f"Agent profile '{profile_id}' memory",
+    )
     return AgentProfileSettings(
         id=profile_id,
         name=name,
-        description=str(raw.get("description", "")).strip(),
         enabled=bool(raw.get("enabled", True)),
         identity=identity,
         instruction_policy=instruction_policy,
         llm_routing_policy=llm_routing_policy,
         execution_policy=execution_policy,
         runtime_preferences=runtime_preferences,
+        memory=memory,
     )
 
 
@@ -1706,10 +1890,11 @@ class Settings:
     authorization_policy_paths: tuple[str, ...] = ()
     authorization_runtime_policy_path: str = str(DEFAULT_AUTHORIZATION_RUNTIME_POLICY_PATH)
     memory_retrieval_backend: str = "keyword"
+    memory_storage_root: str = str(DEFAULT_MEMORY_STATE_DIR)
     memory_vector_provider: str = "local"
     memory_vector_model: str | None = None
     memory_vector_base_url: str | None = None
-    memory_vector_credential_binding: str | None = None
+    memory_vector_credential_binding_id: str | None = None
     memory_vector_timeout_seconds: int = 30
     memory_watch_interval_seconds: float = 300.0
     browser_enabled: bool = True
@@ -1718,7 +1903,6 @@ class Settings:
             BrowserProfileSettings(name=DEFAULT_BROWSER_DEFAULT_PROFILE_NAME),
         ),
     )
-    browser_profile_runtime_settings: tuple[BrowserProfileRuntimeSettings, ...] = ()
     browser_proxy_base_urls: tuple[BrowserProxyEndpointSettings, ...] = ()
     browser_state_dir: str = str(DEFAULT_BROWSER_STATE_DIR)
     mobile_enabled: bool = True
@@ -1743,6 +1927,7 @@ class Settings:
     events_redis_block_ms: int = 1000
     events_redis_dedupe_ttl_seconds: int = 3600
     channels_state_dir: str = str(DEFAULT_CHANNELS_STATE_DIR)
+    access_state_dir: str = str(DEFAULT_ACCESS_STATE_DIR)
     mobile_adb_binary: str = "adb"
     artifact_store_dir: str = str(DEFAULT_ARTIFACT_STORE_DIR)
     artifact_image_preview_max_dimension: int = 1024
@@ -1755,6 +1940,7 @@ class Settings:
     browser_executable_path: str | None = None
     browser_sandbox_executable_path: str | None = None
     browser_proxy_base_url: str | None = None
+    browser_proxy_egress_check_url: str | None = None
     browser_cdp_host: str = "127.0.0.1"
     browser_cdp_port: int = 18800
     browser_headless: bool = False
@@ -1779,19 +1965,13 @@ class Settings:
     tool_worker_shared_state_run_concurrency: int = 1
 
     def __post_init__(self) -> None:
-        profiles, runtime_settings = _ensure_default_user_browser_profile_settings(
+        profiles = _ensure_default_user_browser_profile_settings(
             self.browser_profiles,
-            self.browser_profile_runtime_settings,
         )
         object.__setattr__(
             self,
             "browser_profiles",
             profiles,
-        )
-        object.__setattr__(
-            self,
-            "browser_profile_runtime_settings",
-            runtime_settings,
         )
 
     @property
@@ -1800,7 +1980,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    browser_profiles, browser_profile_runtime_settings = _load_browser_profile_settings()
+    browser_profiles = _load_browser_profile_settings()
     ocr_backend = _load_ocr_backend()
     ocr_provider = _load_ocr_provider()
     ocr_host = os.getenv("APP_OCR_HOST", DEFAULT_OCR_HOST).strip() or DEFAULT_OCR_HOST
@@ -1852,6 +2032,10 @@ def load_settings() -> Settings:
         ),
         authorization_runtime_policy_path=str(_authorization_runtime_policy_path()),
         memory_retrieval_backend=_load_memory_retrieval_backend(),
+        memory_storage_root=os.getenv(
+            "APP_MEMORY_STORAGE_ROOT",
+            str(DEFAULT_MEMORY_STATE_DIR),
+        ),
         memory_vector_provider=_load_memory_vector_provider(),
         memory_vector_model=(
             os.getenv("APP_MEMORY_VECTOR_MODEL", "").strip() or None
@@ -1859,14 +2043,13 @@ def load_settings() -> Settings:
         memory_vector_base_url=(
             os.getenv("APP_MEMORY_VECTOR_BASE_URL", "").strip() or None
         ),
-        memory_vector_credential_binding=(
-            os.getenv("APP_MEMORY_VECTOR_CREDENTIAL_BINDING", "").strip() or None
+        memory_vector_credential_binding_id=(
+            os.getenv("APP_MEMORY_VECTOR_CREDENTIAL_BINDING_ID", "").strip() or None
         ),
         memory_vector_timeout_seconds=_load_memory_vector_timeout_seconds(),
         memory_watch_interval_seconds=_load_memory_watch_interval_seconds(),
         browser_enabled=_env_flag("APP_BROWSER_ENABLED", default=True),
         browser_profiles=browser_profiles,
-        browser_profile_runtime_settings=browser_profile_runtime_settings,
         browser_proxy_base_urls=tuple(
             BrowserProxyEndpointSettings(profile=profile, base_url=base_url)
             for profile, base_url in _load_browser_proxy_base_urls()
@@ -1937,6 +2120,10 @@ def load_settings() -> Settings:
             "APP_CHANNELS_STATE_DIR",
             str(DEFAULT_CHANNELS_STATE_DIR),
         ),
+        access_state_dir=os.getenv(
+            "APP_ACCESS_STATE_DIR",
+            str(DEFAULT_ACCESS_STATE_DIR),
+        ),
         mobile_adb_binary=os.getenv("APP_MOBILE_ADB_BINARY", "adb").strip() or "adb",
         artifact_store_dir=os.getenv(
             "APP_ARTIFACT_STORE_DIR",
@@ -1978,6 +2165,9 @@ def load_settings() -> Settings:
         ),
         browser_proxy_base_url=(
             os.getenv("APP_BROWSER_PROXY_BASE_URL", "").strip() or None
+        ),
+        browser_proxy_egress_check_url=(
+            os.getenv("APP_BROWSER_PROXY_EGRESS_CHECK_URL", "").strip() or None
         ),
         browser_cdp_host=os.getenv("APP_BROWSER_CDP_HOST", "127.0.0.1").strip()
         or "127.0.0.1",

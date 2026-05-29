@@ -23,7 +23,9 @@ It does not own the internals of the modules it coordinates:
 - `agent` owns profile data and agent policy.
 - `llm` owns provider profiles, provider adapters, and invocation details.
 - `tool` owns tool catalog, tool run records, tool workers, and tool execution details.
-- `access` and `authorization` own credential readiness and policy decisions.
+- `skills` owns skill catalog, source governance, read access, and run prompt readiness.
+- `access` owns external credential readiness; `authorization` owns internal
+  ABAC policy and grant decisions.
 - `channels` own transport-facing runtime state and delivery.
 - `events` owns topic publish/read/wait/cursor primitives.
 
@@ -53,7 +55,7 @@ src/crxzipple/modules/orchestration/
     prompt_assembler.py
     llm_resolver.py
     tool_resolver.py
-    resolve_skill.py
+    # skill prompt readiness is delegated to modules/skills.application.prompt_resolver
     maintenance.py
     approval.py
     cancellation.py
@@ -99,6 +101,9 @@ Important cleanup state:
 - There is no old `application/services.py` facade.
 - There is no old `application/router.py` route center.
 - There is no old `application/session_resolver.py`; session resolution is provided by the session module and used through orchestration workflows.
+- Skill prompt readiness is not computed in orchestration. `PromptAssembler` passes run
+  context and resolved tool ids into `SkillCatalogPort.resolve_prompt_catalog(...)`;
+  Skills resolves tool/access/authorization/surface readiness and returns the catalog.
 - Public API/CLI/channel turn submission helpers live in `application/turn_submission.py`, not in a top-level interface helper.
 
 ## Core Runtime Roles
@@ -242,7 +247,8 @@ Background tools are submitted to the tool module. The orchestration run records
 Approval is orchestration-facing but authorization-owned:
 
 - orchestration detects a run is waiting for approval
-- authorization/access decide and persist grants according to their own rules
+- authorization decides and persists internal approval grants; access only
+  participates when the action also needs external credential readiness
 - `ApprovalControlService` is a narrow approval resolution surface, not a general control facade
 - resolving approval resumes orchestration through wait/recovery coordinators
 

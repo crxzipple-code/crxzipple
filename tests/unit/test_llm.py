@@ -30,6 +30,7 @@ from crxzipple.modules.llm.domain import (
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
 from crxzipple.modules.llm.interfaces.dto import LlmInvocationDTO, LlmProfileDTO
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
 
@@ -156,11 +157,12 @@ class LlmServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = SqliteTestHarness()
         self.harness.initialize_schema()
-        self.container = self.harness.build_container()
+        self.container = self.harness.build_runtime_container()
+        self.uow_factory = self.container.require(AppKey.UNIT_OF_WORK_FACTORY)
         self.registry = LlmAdapterRegistry()
         self.adapter = _FakeLlmAdapter()
         self.registry.register(LlmApiFamily.OPENAI_RESPONSES, self.adapter)
-        self.service = LlmApplicationService(self.container.uow_factory, self.registry)
+        self.service = LlmApplicationService(self.uow_factory, self.registry)
 
     def tearDown(self) -> None:
         self.harness.close()
@@ -186,18 +188,18 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(dto.started_at, "2026-04-18T07:00:01+00:00")
         self.assertEqual(dto.completed_at, "2026-04-18T07:00:02+00:00")
 
-    def test_llm_profile_dto_does_not_echo_inline_credential_values(self) -> None:
+    def test_llm_profile_dto_exposes_access_credential_binding_id(self) -> None:
         profile = LlmProfile(
             id="inline-credential-profile",
             provider=LlmProviderKind.OPENAI,
             api_family=LlmApiFamily.OPENAI_RESPONSES,
             model_name="gpt-5",
-            credential_binding="sk-inline-secret",
+            credential_binding_id="openai-api-key",
         )
 
         dto = LlmProfileDTO.from_entity(profile)
 
-        self.assertEqual(dto.credential_binding, "credential binding")
+        self.assertEqual(dto.credential_binding_id, "openai-api-key")
 
     def test_register_profile_and_invoke_persists_new_llm_shapes(self) -> None:
         profile = self.service.register_profile(
@@ -219,7 +221,7 @@ class LlmServiceTestCase(unittest.TestCase):
                         "chat_template_kwargs": {"enable_thinking": False},
                     },
                 ),
-                credential_binding="env:OPENAI_API_KEY",
+                credential_binding_id="openai-api-key",
                 max_concurrency=2,
                 concurrency_key="provider:openai",
             ),
@@ -308,7 +310,7 @@ class LlmServiceTestCase(unittest.TestCase):
     def test_invoke_resolves_credential_through_injected_access_provider(self) -> None:
         credential_provider = _FakeCredentialProvider("llm-access-token")
         service = LlmApplicationService(
-            self.container.uow_factory,
+            self.uow_factory,
             self.registry,
             credential_provider=credential_provider,
         )
@@ -318,7 +320,7 @@ class LlmServiceTestCase(unittest.TestCase):
                 provider=LlmProviderKind.OPENAI,
                 api_family=LlmApiFamily.OPENAI_RESPONSES,
                 model_name="gpt-5",
-                credential_binding="env:LLM_ACCESS_TOKEN",
+                credential_binding_id="llm-access-token",
             ),
         )
 
@@ -335,8 +337,8 @@ class LlmServiceTestCase(unittest.TestCase):
         )
 
         binding, consumer, trace_context = credential_provider.calls[0]
-        self.assertEqual(binding.source_ref, "env:LLM_ACCESS_TOKEN")
-        self.assertEqual(binding.source_type, "env")
+        self.assertEqual(binding.source_ref, "llm-access-token")
+        self.assertEqual(binding.source_type, "access_credential_binding")
         self.assertEqual(consumer.module, "llm")
         self.assertEqual(consumer.consumer_id, "llm.profile:access-backed-writer")
         self.assertIsNone(trace_context)
@@ -344,8 +346,40 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(invocation.status.value, "succeeded")
 
         fetched_profile = service.get_profile(profile.id)
-        self.assertEqual(fetched_profile.credential_binding, "env:LLM_ACCESS_TOKEN")
-        self.assertNotEqual(fetched_profile.credential_binding, "llm-access-token")
+        self.assertEqual(fetched_profile.credential_binding_id, "llm-access-token")
+        self.assertNotEqual(fetched_profile.credential_binding_id, "llm-access-token-secret")
+
+    def test_profile_probe_invokes_without_persisting_profile_or_invocation(self) -> None:
+        credential_provider = _FakeCredentialProvider("probe-token")
+        service = LlmApplicationService(
+            self.uow_factory,
+            self.registry,
+            credential_provider=credential_provider,
+        )
+
+        invocation = service.test_profile(
+            RegisterLlmProfileInput(
+                id="probe-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+                credential_binding_id="openai-api-key",
+            ),
+            InvokeLlmInput(
+                llm_id="probe-writer",
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="Probe this unsaved profile.",
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(invocation.status.value, "succeeded")
+        self.assertEqual(self.adapter.last_request.resolved_credential, "probe-token")
+        self.assertNotIn("probe-writer", [profile.id for profile in service.list_profiles()])
+        self.assertEqual(service.list_invocations(llm_id="probe-writer"), [])
 
     def test_sync_profiles_updates_imported_profiles_and_preserves_manual_profiles(self) -> None:
         manual_profile = self.service.register_profile(
@@ -367,7 +401,7 @@ class LlmServiceTestCase(unittest.TestCase):
                     model_name="gpt-5.4",
                     model_family=LlmModelFamily.REASONING,
                     source_kind=LlmSourceKind.IMPORTED,
-                    credential_binding="env:OPENAI_API_KEY",
+                    credential_binding_id="openai-api-key",
                 ),
                 RegisterLlmProfileInput(
                     id="manual-writer",
@@ -387,7 +421,7 @@ class LlmServiceTestCase(unittest.TestCase):
                     model_name="gpt-5.4-mini",
                     model_family=LlmModelFamily.REASONING,
                     source_kind=LlmSourceKind.IMPORTED,
-                    credential_binding="env:OPENAI_API_KEY",
+                    credential_binding_id="openai-api-key",
                 ),
             ),
         )
@@ -407,7 +441,7 @@ class LlmServiceTestCase(unittest.TestCase):
         registry = LlmAdapterRegistry()
         adapter = _FakeStreamingLlmAdapter()
         registry.register(LlmApiFamily.OPENAI_CODEX_RESPONSES, adapter)
-        service = LlmApplicationService(self.container.uow_factory, registry)
+        service = LlmApplicationService(self.uow_factory, registry)
 
         profile = service.register_profile(
             RegisterLlmProfileInput(
@@ -450,7 +484,7 @@ class LlmServiceTestCase(unittest.TestCase):
         registry = LlmAdapterRegistry()
         adapter = _FakeAsyncLlmAdapter()
         registry.register(LlmApiFamily.OPENAI_RESPONSES, adapter)
-        service = LlmApplicationService(self.container.uow_factory, registry)
+        service = LlmApplicationService(self.uow_factory, registry)
         profile = service.register_profile(
             RegisterLlmProfileInput(
                 id="async-writer",
@@ -483,7 +517,7 @@ class LlmServiceTestCase(unittest.TestCase):
         registry = LlmAdapterRegistry()
         adapter = _ConcurrentAsyncLlmAdapter()
         registry.register(LlmApiFamily.OPENAI_RESPONSES, adapter)
-        service = LlmApplicationService(self.container.uow_factory, registry)
+        service = LlmApplicationService(self.uow_factory, registry)
         profile = service.register_profile(
             RegisterLlmProfileInput(
                 id="limited-async-writer",
@@ -534,7 +568,7 @@ class LlmServiceTestCase(unittest.TestCase):
         registry = LlmAdapterRegistry()
         adapter = _FakeAsyncStreamingLlmAdapter()
         registry.register(LlmApiFamily.OPENAI_CODEX_RESPONSES, adapter)
-        service = LlmApplicationService(self.container.uow_factory, registry)
+        service = LlmApplicationService(self.uow_factory, registry)
         profile = service.register_profile(
             RegisterLlmProfileInput(
                 id="async-codex",

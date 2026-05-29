@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import json
+import os
 from pathlib import Path
+import tempfile
 
 from crxzipple.modules.browser.domain import (
     BrowserProfileConfig,
     BrowserSystemConfig,
-    DEFAULT_BROWSER_MCP_COMMAND,
 )
 
 
@@ -16,6 +19,8 @@ class BrowserStateRoot:
     root_dir: Path
     config_dir: Path
     profiles_dir: Path
+    pools_dir: Path
+    allocations_dir: Path
     runtime_dir: Path
     refs_dir: Path
 
@@ -26,10 +31,20 @@ def ensure_browser_state_root(
     root_path = Path(root_dir).expanduser().resolve()
     config_dir = root_path / "config"
     profiles_dir = root_path / "profiles"
+    pools_dir = root_path / "pools"
+    allocations_dir = root_path / "allocations"
     runtime_dir = root_path / "runtime"
     refs_dir = root_path / "refs"
 
-    for directory in (root_path, config_dir, profiles_dir, runtime_dir, refs_dir):
+    for directory in (
+        root_path,
+        config_dir,
+        profiles_dir,
+        pools_dir,
+        allocations_dir,
+        runtime_dir,
+        refs_dir,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
 
     _write_json(
@@ -44,6 +59,8 @@ def ensure_browser_state_root(
         root_dir=root_path,
         config_dir=config_dir,
         profiles_dir=profiles_dir,
+        pools_dir=pools_dir,
+        allocations_dir=allocations_dir,
         runtime_dir=runtime_dir,
         refs_dir=refs_dir,
     )
@@ -90,8 +107,6 @@ def persist_browser_system_config(
             "cdp_host": system_config.cdp_host,
             "cdp_port_range_start": system_config.cdp_port_range_start,
             "cdp_port_range_end": system_config.cdp_port_range_end,
-            "mcp_command": list(system_config.mcp_command),
-            "mcp_timeout_seconds": system_config.mcp_timeout_seconds,
             "profiles": [_profile_payload(profile) for profile in system_config.profiles],
         },
     )
@@ -159,8 +174,6 @@ def load_browser_system_config(
         cdp_host=str(payload.get("cdp_host") or "127.0.0.1"),
         cdp_port_range_start=int(payload.get("cdp_port_range_start", 9222)),
         cdp_port_range_end=int(payload.get("cdp_port_range_end", 9322)),
-        mcp_command=tuple(payload.get("mcp_command") or DEFAULT_BROWSER_MCP_COMMAND),
-        mcp_timeout_seconds=int(payload.get("mcp_timeout_seconds", 30)),
     )
 
 
@@ -213,10 +226,20 @@ def _profile_payload(profile: BrowserProfileConfig) -> dict[str, object]:
     return {
         "name": profile.name,
         "driver": profile.driver,
+        "enabled": profile.enabled,
         "cdp_url": profile.cdp_url,
         "cdp_port": profile.cdp_port,
         "user_data_dir": profile.user_data_dir,
+        "profile_directory": profile.profile_directory,
         "attach_only": profile.attach_only,
+        "autostart": profile.autostart,
+        "proxy_mode": profile.proxy_mode,
+        "proxy_server": profile.proxy_server,
+        "proxy_bypass_list": list(profile.proxy_bypass_list),
+        "proxy_binding_id": profile.proxy_binding_id,
+        "proxy_credential_kind": profile.proxy_credential_kind,
+        "close_targets_on_release": profile.close_targets_on_release,
+        "close_targets_on_expire": profile.close_targets_on_expire,
     }
 
 
@@ -229,10 +252,20 @@ def _profile_from_payload(payload: dict[str, object]) -> BrowserProfileConfig:
     return BrowserProfileConfig(
         name=raw_name,
         driver=str(payload.get("driver") or "managed"),  # type: ignore[arg-type]
+        enabled=bool(payload.get("enabled", True)),
         cdp_url=_optional_text(payload.get("cdp_url")),
         cdp_port=cdp_port,
         user_data_dir=_optional_text(payload.get("user_data_dir")),
+        profile_directory=_optional_text(payload.get("profile_directory")),
         attach_only=bool(payload.get("attach_only", False)),
+        autostart=bool(payload.get("autostart", True)),
+        proxy_mode=str(payload.get("proxy_mode") or "none"),  # type: ignore[arg-type]
+        proxy_server=_optional_text(payload.get("proxy_server")),
+        proxy_bypass_list=_text_tuple(payload.get("proxy_bypass_list")),
+        proxy_binding_id=_optional_text(payload.get("proxy_binding_id")),
+        proxy_credential_kind=str(payload.get("proxy_credential_kind") or "basic"),  # type: ignore[arg-type]
+        close_targets_on_release=bool(payload.get("close_targets_on_release", True)),
+        close_targets_on_expire=bool(payload.get("close_targets_on_expire", True)),
     )
 
 
@@ -243,8 +276,53 @@ def _optional_text(value: object) -> str | None:
     return normalized or None
 
 
+def _text_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, list):
+        return ()
+    resolved: list[str] = []
+    for item in value:
+        text = _optional_text(item)
+        if text is not None:
+            resolved.append(text)
+    return tuple(resolved)
+
+
+@contextmanager
+def _file_lock(path: Path, *, shared: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
+    lock_path = path.with_name(f"{path.name}.lock")
+    with _file_lock(lock_path, shared=False):
+        _write_json_atomically(path, payload)
+
+
+def _write_json_atomically(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_path_raw = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
     )
+    temp_path = Path(temp_path_raw)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()

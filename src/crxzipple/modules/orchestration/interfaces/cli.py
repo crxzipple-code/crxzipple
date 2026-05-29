@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationInspectionPort,
     OrchestrationRunQueryPort,
-    OrchestrationSchedulerSubmitPort,
+    OrchestrationSubmissionPort,
 )
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
@@ -47,15 +47,15 @@ def _exit_not_found(exc: OrchestrationRunNotFoundError) -> None:
 
 
 def _inspection_port(container) -> OrchestrationInspectionPort:  # noqa: ANN001
-    return container.orchestration_inspection_service
+    return container.require(AppKey.ORCHESTRATION_INSPECTION_SERVICE)
 
 
 def _run_query_port(container) -> OrchestrationRunQueryPort:  # noqa: ANN001
-    return container.orchestration_run_query_service
+    return container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE)
 
 
-def _scheduler_port(container) -> OrchestrationSchedulerSubmitPort:  # noqa: ANN001
-    return container.orchestration_scheduler_service
+def _scheduler_port(container) -> OrchestrationSubmissionPort:  # noqa: ANN001
+    return container.require(AppKey.ORCHESTRATION_SUBMISSION_SERVICE)
 
 
 def build_cli() -> typer.Typer:

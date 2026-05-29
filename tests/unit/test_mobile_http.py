@@ -31,7 +31,7 @@ class MobileHttpTestCase(HttpModuleTestCase):
             )
 
         with patch.object(
-            type(container.mobile_facade),
+            type(container.require(AppKey.MOBILE_FACADE)),
             "execute",
             autospec=True,
             side_effect=lambda _self, request: _execute(request),
@@ -88,7 +88,7 @@ class MobileHttpTestCase(HttpModuleTestCase):
             )
 
         with patch.object(
-            type(container.mobile_facade),
+            type(container.require(AppKey.MOBILE_FACADE)),
             "execute",
             autospec=True,
             side_effect=lambda _self, request: _execute(request),

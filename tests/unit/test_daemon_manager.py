@@ -9,13 +9,14 @@ from crxzipple.modules.daemon import (
     DaemonApplicationService,
     DaemonInstance,
     DaemonManager,
+    DaemonServiceSetSpec,
     DaemonServiceSpec,
     FileBackedDaemonInstanceStore,
     FileBackedDaemonLeaseStore,
     FileBackedDaemonServiceSpecStore,
     bootstrap_daemon_state_root,
 )
-from crxzipple.modules.process.domain import ProcessSession, ProcessStatus
+from crxzipple.modules.process.domain import ProcessNotFoundError, ProcessSession, ProcessStatus
 
 
 class _FakeProcessService:
@@ -48,7 +49,10 @@ class _FakeProcessService:
         return session
 
     def get_session(self, *, process_id: str) -> ProcessSession:
-        return self.sessions[process_id]
+        try:
+            return self.sessions[process_id]
+        except KeyError as exc:
+            raise ProcessNotFoundError(f"Process session '{process_id}' was not found.") from exc
 
     def list_sessions(self) -> tuple[ProcessSession, ...]:
         return tuple(self.sessions.values())
@@ -410,6 +414,36 @@ class DaemonManagerTestCase(unittest.TestCase):
             self.assertIn("browser host run --profile crxzipple", process_service.started_commands[0])
             self.assertNotIn("--worker-id", process_service.started_commands[0])
 
+    def test_refresh_service_adopts_existing_process_session_without_starting_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            daemon_service = self._build_host_service(Path(temp_dir))
+            process_service = _FakeProcessService()
+            process_service.sessions["existing-host"] = ProcessSession(
+                id="existing-host",
+                command="/usr/bin/python -m crxzipple.main browser host run --profile crxzipple",
+                shell="/bin/sh",
+                working_directory=temp_dir,
+                session_key="daemon:host:browser:crxzipple",
+                metadata={},
+                pid=4242,
+                status=ProcessStatus.RUNNING,
+            )
+            manager = DaemonManager(
+                daemon_service=daemon_service,
+                process_service=process_service,
+                working_directory=temp_dir,
+                shell_resolver=lambda: "/bin/sh",
+                python_executable="/usr/bin/python3",
+            )
+
+            instances = manager.refresh_service("host:browser:crxzipple")
+
+            self.assertEqual(len(instances), 1)
+            self.assertEqual(instances[0].status, "ready")
+            self.assertEqual(instances[0].pid, 4242)
+            self.assertEqual(instances[0].metadata["process_id"], "existing-host")
+            self.assertEqual(process_service.started_commands, [])
+
     def test_ensure_channel_service_uses_channel_runtime_command_without_worker_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             daemon_service = self._build_channel_service(Path(temp_dir))
@@ -555,11 +589,11 @@ class DaemonManagerTestCase(unittest.TestCase):
             )
             self.assertIn("LARK_APP_ID=cli-test", process_service.started_commands[0])
             self.assertIn("LARK_APP_SECRET=secret-test", process_service.started_commands[0])
-            self.assertIn(
+            self.assertNotIn(
                 "APP_TOOL_WORKER_MAX_IN_FLIGHT=8",
                 process_service.started_commands[0],
             )
-            self.assertIn(
+            self.assertNotIn(
                 "APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY=4",
                 process_service.started_commands[0],
             )
@@ -570,16 +604,19 @@ class DaemonManagerTestCase(unittest.TestCase):
                 "APP_OPERATIONS_STATE_DIR",
                 "APP_EVENTS_BACKEND",
                 "APP_EVENTS_REDIS_URL",
+                "LARK_APP_ID",
+                "LARK_APP_SECRET",
+            ):
+                self.assertIn(key, env_keys)
+            for key in (
                 "APP_ORCHESTRATION_RUN_LEASE_SECONDS",
                 "APP_TOOL_RUN_LEASE_SECONDS",
                 "APP_TOOL_WORKER_MAX_IN_FLIGHT",
                 "APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY",
                 "APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY",
                 "APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY",
-                "LARK_APP_ID",
-                "LARK_APP_SECRET",
             ):
-                self.assertIn(key, env_keys)
+                self.assertNotIn(key, env_keys)
             self.assertEqual(env_keys[-2:], ["LARK_APP_ID", "LARK_APP_SECRET"])
 
             original_process_id = instances[0].metadata["process_id"]
@@ -659,6 +696,80 @@ class DaemonManagerTestCase(unittest.TestCase):
             self.assertEqual(refreshed[0].status, "ready")
             self.assertEqual(refreshed[0].endpoint, "http://127.0.0.1:9222")
 
+    def test_missing_browser_host_runner_session_marks_manifest_stale_without_endpoint_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
+            daemon_service = DaemonApplicationService(
+                service_spec_store=FileBackedDaemonServiceSpecStore(
+                    state_root.config_dir,
+                    bootstrap_specs=(
+                        DaemonServiceSpec(
+                            key="host:browser:crxzipple",
+                            role="host",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="ensure",
+                            restart_policy="on-failure",
+                            healthcheck_policy="cdp-version",
+                            match_policy="cdp-port",
+                            metadata={
+                                "cli_args": ["browser", "host", "run", "--profile", "crxzipple"],
+                                "server_url": "http://127.0.0.1:9222",
+                            },
+                        ),
+                    ),
+                ),
+                instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+            )
+            daemon_service.save_instance(
+                DaemonInstance(
+                    id="daemon-host-browser-crxzipple",
+                    service_key="host:browser:crxzipple",
+                    status="ready",
+                    pid=1234,
+                    endpoint="http://127.0.0.1:9222",
+                    metadata={
+                        "process_id": "missing-proc",
+                        "browser_pid": 9876,
+                        "launch_fingerprint": "sha256:old",
+                    },
+                )
+            )
+            process_service = _FakeProcessService()
+
+            def _unexpected_probe(**_: object) -> None:
+                raise AssertionError("stale process manifest should not run endpoint probe")
+
+            manager = DaemonManager(
+                daemon_service=daemon_service,
+                process_service=process_service,
+                working_directory=temp_dir,
+                shell_resolver=lambda: "/bin/sh",
+                python_executable="/usr/bin/python3",
+                endpoint_probe=_unexpected_probe,
+            )
+
+            refreshed = manager.healthcheck_service("host:browser:crxzipple")
+
+            self.assertEqual(len(refreshed), 1)
+            self.assertEqual(refreshed[0].status, "failed")
+            self.assertEqual(refreshed[0].endpoint, "http://127.0.0.1:9222")
+            self.assertIsNone(refreshed[0].pid)
+            self.assertNotIn("process_id", refreshed[0].metadata)
+            self.assertEqual(refreshed[0].metadata["browser_pid"], 9876)
+            self.assertEqual(refreshed[0].metadata["manifest_status"], "stale")
+
+            ensured = manager.ensure_service("host:browser:crxzipple")
+
+            ready_instances = [instance for instance in ensured if instance.status == "ready"]
+            self.assertEqual(len(ready_instances), 1)
+            self.assertEqual(ready_instances[0].metadata["process_id"], "proc-1")
+            self.assertIn(
+                "/usr/bin/python3 -m crxzipple.main browser host run --profile crxzipple",
+                process_service.started_commands[-1],
+            )
+
     def test_ensure_process_backed_capability_can_use_raw_command_argv(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
@@ -667,7 +778,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                     state_root.config_dir,
                     bootstrap_specs=(
                         DaemonServiceSpec(
-                            key="capability:chrome-mcp:user",
+                            key="capability:browser-tools:user",
                             role="capability",
                             service_group="browser",
                             managed_by="internal",
@@ -676,7 +787,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                             restart_policy="on-failure",
                             metadata={
                                 "command_argv": [
-                                    "google-chrome-mcp",
+                                    "browser-tools",
                                     "--port",
                                     "8787",
                                 ]
@@ -696,15 +807,15 @@ class DaemonManagerTestCase(unittest.TestCase):
                 python_executable="/usr/bin/python3",
             )
 
-            instances = manager.ensure_service("capability:chrome-mcp:user")
+            instances = manager.ensure_service("capability:browser-tools:user")
 
             self.assertEqual(len(instances), 1)
             self.assertEqual(
                 process_service.started_commands[0],
-                "google-chrome-mcp --port 8787",
+                "browser-tools --port 8787",
             )
 
-    def test_healthcheck_service_attaches_existing_browser_capability_endpoint(self) -> None:
+    def test_ensure_service_starts_required_service_first(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
             daemon_service = DaemonApplicationService(
@@ -712,8 +823,63 @@ class DaemonManagerTestCase(unittest.TestCase):
                     state_root.config_dir,
                     bootstrap_specs=(
                         DaemonServiceSpec(
-                            key="capability:chrome-mcp:user",
+                            key="host:browser:work",
+                            role="host",
+                            service_group="browser",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="ensure",
+                            restart_policy="on-failure",
+                            metadata={"command_argv": ["browser-host", "--profile", "work"]},
+                        ),
+                        DaemonServiceSpec(
+                            key="capability:browser-tools:work",
                             role="capability",
+                            service_group="browser",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="lazy",
+                            restart_policy="on-failure",
+                            metadata={
+                                "requires_service_key": "host:browser:work",
+                                "command_argv": ["browser-tools", "--profile", "work"],
+                            },
+                        ),
+                    ),
+                ),
+                instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+            )
+            process_service = _FakeProcessService()
+            manager = DaemonManager(
+                daemon_service=daemon_service,
+                process_service=process_service,
+                working_directory=temp_dir,
+                shell_resolver=lambda: "/bin/sh",
+                python_executable="/usr/bin/python3",
+            )
+
+            instances = manager.ensure_service("capability:browser-tools:work")
+
+            self.assertEqual(len(instances), 1)
+            self.assertEqual(
+                process_service.started_commands,
+                [
+                    "browser-host --profile work",
+                    "browser-tools --profile work",
+                ],
+            )
+
+    def test_healthcheck_service_attaches_existing_browser_host_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
+            daemon_service = DaemonApplicationService(
+                service_spec_store=FileBackedDaemonServiceSpecStore(
+                    state_root.config_dir,
+                    bootstrap_specs=(
+                        DaemonServiceSpec(
+                            key="host:browser:user",
+                            role="host",
                             service_group="browser",
                             managed_by="external",
                             transport="endpoint",
@@ -737,7 +903,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                 endpoint_probe=lambda **_: None,
             )
 
-            refreshed = manager.healthcheck_service("capability:chrome-mcp:user")
+            refreshed = manager.healthcheck_service("host:browser:user")
 
             self.assertEqual(len(refreshed), 1)
             self.assertEqual(refreshed[0].status, "ready")
@@ -751,7 +917,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                     state_root.config_dir,
                     bootstrap_specs=(
                         DaemonServiceSpec(
-                            key="capability:chrome-mcp:user",
+                            key="capability:browser-tools:user",
                             role="capability",
                             service_group="browser",
                             managed_by="internal",
@@ -761,7 +927,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                             healthcheck_policy="cdp-version",
                             metadata={
                                 "command_argv": [
-                                    "google-chrome-mcp",
+                                    "browser-tools",
                                     "--port",
                                     "8787",
                                 ],
@@ -786,13 +952,13 @@ class DaemonManagerTestCase(unittest.TestCase):
                 python_executable="/usr/bin/python3",
                 endpoint_probe=_unexpected_probe,
             )
-            instances = manager.ensure_service("capability:chrome-mcp:user")
+            instances = manager.ensure_service("capability:browser-tools:user")
             original_instance_id = instances[0].id
             original_session = process_service.sessions["proc-1"]
             original_session.mark_termination_requested()
             original_session.mark_exited(exit_code=0)
 
-            reconciled = manager.reconcile_service("capability:chrome-mcp:user")
+            reconciled = manager.reconcile_service("capability:browser-tools:user")
 
             ready_instances = [instance for instance in reconciled if instance.status == "ready"]
             stopped_instances = [instance for instance in reconciled if instance.status == "stopped"]
@@ -801,7 +967,7 @@ class DaemonManagerTestCase(unittest.TestCase):
             self.assertEqual(stopped_instances[0].id, original_instance_id)
             self.assertIsNone(stopped_instances[0].pid)
             self.assertNotIn("process_id", stopped_instances[0].metadata)
-            self.assertEqual(process_service.started_commands[-1], "google-chrome-mcp --port 8787")
+            self.assertEqual(process_service.started_commands[-1], "browser-tools --port 8787")
 
     def test_reconcile_process_backed_browser_capability_ignores_legacy_endpoint_only_ready_instance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -811,7 +977,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                     state_root.config_dir,
                     bootstrap_specs=(
                         DaemonServiceSpec(
-                            key="capability:chrome-mcp:user",
+                            key="capability:browser-tools:user",
                             role="capability",
                             service_group="browser",
                             managed_by="internal",
@@ -821,7 +987,7 @@ class DaemonManagerTestCase(unittest.TestCase):
                             healthcheck_policy="cdp-version",
                             metadata={
                                 "command_argv": [
-                                    "google-chrome-mcp",
+                                    "browser-tools",
                                     "--port",
                                     "8787",
                                 ],
@@ -834,8 +1000,8 @@ class DaemonManagerTestCase(unittest.TestCase):
                 lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
             )
             legacy = DaemonInstance(
-                id="daemon-capability-chrome-mcp-user",
-                service_key="capability:chrome-mcp:user",
+                id="daemon-capability-browser-tools-user",
+                service_key="capability:browser-tools:user",
                 status="ready",
                 endpoint="http://127.0.0.1:8787",
                 metadata={"server_url": "http://127.0.0.1:8787"},
@@ -852,14 +1018,17 @@ class DaemonManagerTestCase(unittest.TestCase):
                 endpoint_probe=lambda **_: None,
             )
 
-            reconciled = manager.reconcile_service("capability:chrome-mcp:user")
+            reconciled = manager.reconcile_service("capability:browser-tools:user")
 
             ready_instances = [instance for instance in reconciled if instance.status == "ready"]
             stopped_instances = [instance for instance in reconciled if instance.status == "stopped"]
             self.assertEqual(len(ready_instances), 1)
             self.assertEqual(len(stopped_instances), 1)
-            self.assertEqual(stopped_instances[0].id, "daemon-capability-chrome-mcp-user")
-            self.assertEqual(process_service.started_commands[-1], "google-chrome-mcp --port 8787")
+            self.assertEqual(
+                stopped_instances[0].id,
+                "daemon-capability-browser-tools-user",
+            )
+            self.assertEqual(process_service.started_commands[-1], "browser-tools --port 8787")
 
     def test_resolve_reconcile_service_keys_supports_roles_and_groups(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -923,6 +1092,74 @@ class DaemonManagerTestCase(unittest.TestCase):
 
             self.assertEqual(keys, ("host:browser:crxzipple",))
 
+    def test_resolve_reconcile_service_keys_skips_lazy_group_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
+            daemon_service = DaemonApplicationService(
+                service_spec_store=FileBackedDaemonServiceSpecStore(
+                    state_root.config_dir,
+                    bootstrap_specs=(
+                        DaemonServiceSpec(
+                            key="host:browser:crxzipple",
+                            role="host",
+                            service_group="browser",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="ensure",
+                            restart_policy="on-failure",
+                            metadata={"cli_args": ["browser", "host", "run", "--profile", "crxzipple"]},
+                        ),
+                        DaemonServiceSpec(
+                            key="capability:browser-tools:user",
+                            role="capability",
+                            service_group="browser",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="lazy",
+                            restart_policy="on-failure",
+                            metadata={"cli_args": ["browser-tools", "run", "--profile", "user"]},
+                        ),
+                    ),
+                ),
+                instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
+                lease_store=FileBackedDaemonLeaseStore(state_root.leases_dir),
+                service_sets=(
+                    DaemonServiceSetSpec(
+                        key="browser-stack",
+                        service_groups=("browser",),
+                    ),
+                ),
+            )
+            manager = DaemonManager(
+                daemon_service=daemon_service,
+                process_service=_FakeProcessService(),
+                working_directory=temp_dir,
+                shell_resolver=lambda: "/bin/sh",
+                python_executable="/usr/bin/python3",
+            )
+
+            self.assertEqual(
+                manager.resolve_reconcile_service_keys(
+                    service_set_keys=("browser-stack",),
+                    include_eager=False,
+                ),
+                ("host:browser:crxzipple",),
+            )
+            self.assertEqual(
+                manager.resolve_reconcile_service_keys(
+                    service_groups=("browser",),
+                    include_eager=False,
+                ),
+                ("host:browser:crxzipple",),
+            )
+            self.assertEqual(
+                manager.resolve_reconcile_service_keys(
+                    service_keys=("capability:browser-tools:user",),
+                    include_eager=False,
+                ),
+                ("capability:browser-tools:user",),
+            )
+
     def test_resolve_reconcile_service_keys_supports_service_sets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_root = bootstrap_daemon_state_root(str(Path(temp_dir)))
@@ -966,6 +1203,15 @@ class DaemonManagerTestCase(unittest.TestCase):
                             restart_policy="on-failure",
                             metadata={"cli_args": ["tool-worker", "run"]},
                         ),
+                        DaemonServiceSpec(
+                            key="worker:test",
+                            role="worker",
+                            service_group="workers",
+                            managed_by="internal",
+                            transport="process",
+                            start_policy="lazy",
+                            restart_policy="manual",
+                        ),
                     ),
                 ),
                 instance_store=FileBackedDaemonInstanceStore(state_root.instances_dir),
@@ -989,6 +1235,9 @@ class DaemonManagerTestCase(unittest.TestCase):
                 (
                     "worker:orchestration-scheduler",
                     "worker:orchestration",
+                    "worker:event-relay",
+                    "worker:operations-observer",
+                    "worker:tool-scheduler",
                     "worker:tool",
                 ),
             )

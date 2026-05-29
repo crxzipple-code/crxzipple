@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from crxzipple.core.config import load_settings
 from crxzipple.interfaces.http.app import create_app
 from crxzipple.modules.channels import ChannelAccountProfile, ChannelProfile
-from crxzipple.modules.tool.application import RegisterToolInput
-from tests.unit.http_test_support import HttpModuleTestCase
+from tests.unit.http_test_support import AppKey, HttpModuleTestCase
+from tests.unit.tool_catalog_seed import seed_catalog_tool
 
 
 class AccessHttpTestCase(HttpModuleTestCase):
@@ -69,18 +69,91 @@ class AccessHttpTestCase(HttpModuleTestCase):
         self.assertNotIn("trace-secret", response.text)
 
         container = self.client.app.state.container
-        resolution = container.settings_query_service.get_effective(
+        settings_query_service = container.require(AppKey.SETTINGS_QUERY_SERVICE)
+        resolution = settings_query_service.get_effective(
             "cred_openai_env",
         )
         binding = resolution.effective_value["credential_bindings"][0]
         self.assertEqual(binding["source_kind"], "env")
         self.assertEqual(binding["source_ref"], "OPENAI_API_KEY")
         persisted_payload = repr(binding) + repr(
-            container.settings_query_service.list_audits(),
+            settings_query_service.list_audits(),
         )
         self.assertNotIn("sk-should-not-persist", persisted_payload)
         self.assertNotIn("trace-secret", persisted_payload)
-        self.assertEqual(container.access_action_audit_repository.list_recent(), ())
+        self.assertEqual(
+            container.require(AppKey.ACCESS_ACTION_AUDIT_REPOSITORY).list_recent(),
+            (),
+        )
+
+    def test_access_action_updates_binding_through_settings_actions(self) -> None:
+        register_response = self.client.post(
+            "/access/actions",
+            json={
+                "action_id": "act_register_openai",
+                "resource_kind": "credential_binding",
+                "target_id": "cred_openai_env",
+                "intent": "register_env_binding",
+                "changes": {
+                    "source_ref": "OPENAI_API_KEY",
+                    "binding_kind": "api_key",
+                    "asset_id": "asset_openai",
+                },
+                "reason": "register OpenAI credential source",
+                "actor": "unit-test",
+            },
+        )
+        self.assertEqual(register_response.status_code, 200)
+
+        response = self.client.post(
+            "/access/actions",
+            json={
+                "action_id": "act_update_openai",
+                "resource_kind": "credential_binding",
+                "target_id": "cred_openai_env",
+                "intent": "update_credential_binding",
+                "changes": {
+                    "source_kind": "file",
+                    "source_ref": "file:/tmp/openai-token.txt",
+                    "binding_kind": "api_key",
+                    "masked_preview": "file:***",
+                    "status": "disabled",
+                },
+                "reason": "move OpenAI credential source",
+                "confirmation": "cred_openai_env",
+                "risk_acknowledged": True,
+                "actor": "unit-test",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertEqual(payload["asset"]["binding_id"], "cred_openai_env")
+        self.assertEqual(payload["asset"]["asset_id"], "asset_openai")
+        self.assertEqual(payload["asset"]["source_ref"], "file:/tmp/openai-token.txt")
+        self.assertEqual(
+            payload["validation"]["before_redacted"]["source_ref"],
+            "env:OPENAI_API_KEY",
+        )
+        self.assertEqual(
+            payload["validation"]["after_redacted"]["source_ref"],
+            "file:/tmp/openai-token.txt",
+        )
+
+        container = self.client.app.state.container
+        resolution = container.require(AppKey.SETTINGS_QUERY_SERVICE).get_effective(
+            "cred_openai_env",
+        )
+        binding = resolution.effective_value["credential_bindings"][0]
+        self.assertEqual(binding["source_kind"], "file")
+        self.assertEqual(binding["source_ref"], "/tmp/openai-token.txt")
+        self.assertEqual(binding["asset_id"], "asset_openai")
+        self.assertEqual(binding["status"], "disabled")
+        self.assertEqual(
+            container.require(AppKey.ACCESS_ACTION_AUDIT_REPOSITORY).list_recent(),
+            (),
+        )
 
     def test_access_action_rejects_raw_secret_inputs(self) -> None:
         response = self.client.post(
@@ -135,7 +208,7 @@ class AccessHttpTestCase(HttpModuleTestCase):
         finally:
             client.close()
 
-    def test_access_setup_returns_codex_login_action(self) -> None:
+    def test_access_setup_no_longer_returns_codex_cli_login_action(self) -> None:
         settings = replace(
             load_settings(),
             database_url=self.harness.database_url,
@@ -149,10 +222,9 @@ class AccessHttpTestCase(HttpModuleTestCase):
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["kind"], "command")
-            self.assertEqual(payload["command"], ["codex", "login"])
-            self.assertIn("auth.json", payload["path"])
-            self.assertEqual(payload["actions"][0]["kind"], "run_command")
+            self.assertEqual(payload["kind"], "unsupported")
+            self.assertEqual(payload["command"], [])
+            self.assertEqual(payload["actions"], [])
         finally:
             client.close()
 
@@ -174,7 +246,6 @@ class AccessHttpTestCase(HttpModuleTestCase):
                     "api_family": "openai_chat_compatible",
                     "model_name": "llama3.2",
                     "base_url": "http://127.0.0.1:1/v1",
-                    "credential_binding": "env:MISSING_MODEL_TOKEN",
                 },
             )
             self.assertEqual(llm_response.status_code, 201)
@@ -186,71 +257,31 @@ class AccessHttpTestCase(HttpModuleTestCase):
                     "api_family": "openai_chat_compatible",
                     "model_name": "llama3.2-alt",
                     "base_url": "http://127.0.0.1:1/v1",
-                    "credential_binding": "env:MISSING_MODEL_TOKEN",
                 },
             )
             self.assertEqual(second_llm_response.status_code, 201)
-            codex_llm_response = client.post(
-                "/llms",
-                json={
-                    "id": "missing-codex-model",
-                    "provider": "openai_codex",
-                    "api_family": "openai_codex_responses",
-                    "model_name": "gpt-5-codex",
-                    "model_family": "codex",
-                    "credential_binding": "codex_auth_json",
-                },
+            seed_catalog_tool(
+                client.app.state.container,
+                tool_id="missing-access-model-tool",
+                name="Missing Access Model Tool",
+                description="Needs the same OpenAI API token.",
+                access_requirements=("openai:api_key(env:MISSING_MODEL_TOKEN)",),
             )
-            self.assertEqual(codex_llm_response.status_code, 201)
-            codex_alias_llm_response = client.post(
-                "/llms",
-                json={
-                    "id": "missing-codex-model-alt",
-                    "provider": "openai_codex",
-                    "api_family": "openai_codex_responses",
-                    "model_name": "gpt-5-codex-alt",
-                    "model_family": "codex",
-                    "credential_binding": "codex-cli",
-                },
+            seed_catalog_tool(
+                client.app.state.container,
+                tool_id="missing-access-tool",
+                name="Missing Access Tool",
+                description="Needs a token.",
+                access_requirements=("env:MISSING_TOOL_TOKEN",),
             )
-            self.assertEqual(codex_alias_llm_response.status_code, 201)
-            inline_llm_response = client.post(
-                "/llms",
-                json={
-                    "id": "inline-secret-model",
-                    "provider": "openai_compatible",
-                    "api_family": "openai_chat_compatible",
-                    "model_name": "inline-secret-model",
-                    "base_url": "http://127.0.0.1:1/v1",
-                    "credential_binding": "inline-secret-token",
-                },
+            seed_catalog_tool(
+                client.app.state.container,
+                tool_id="missing-access-tool-alt",
+                name="Missing Access Tool Alt",
+                description="Needs the same token.",
+                access_requirements=("env:MISSING_TOOL_TOKEN",),
             )
-            self.assertEqual(inline_llm_response.status_code, 201)
-            client.app.state.container.tool_service.register(
-                RegisterToolInput(
-                    id="missing-access-model-tool",
-                    name="Missing Access Model Tool",
-                    description="Needs the same OpenAI API token.",
-                    access_requirements=("openai:api_key(env:MISSING_MODEL_TOKEN)",),
-                ),
-            )
-            client.app.state.container.tool_service.register(
-                RegisterToolInput(
-                    id="missing-access-tool",
-                    name="Missing Access Tool",
-                    description="Needs a token.",
-                    access_requirements=("env:MISSING_TOOL_TOKEN",),
-                ),
-            )
-            client.app.state.container.tool_service.register(
-                RegisterToolInput(
-                    id="missing-access-tool-alt",
-                    name="Missing Access Tool Alt",
-                    description="Needs the same token.",
-                    access_requirements=("env:MISSING_TOOL_TOKEN",),
-                ),
-            )
-            client.app.state.container.channel_profile_service.upsert_profile(
+            client.app.state.container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
                 ChannelProfile(
                     channel_type="webhook",
                     accounts=(
@@ -281,19 +312,15 @@ class AccessHttpTestCase(HttpModuleTestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(include_ready_response.status_code, 200)
-            self.assertNotIn("inline-secret-token", include_ready_response.text)
             payload = response.json()
             include_ready_payload = include_ready_response.json()
-            self.assertTrue(payload["ready"])
-            self.assertEqual(payload["counts"], {"total": 0, "ready": 0, "blocked": 0})
+            self.assertGreaterEqual(payload["counts"]["total"], 1)
             self.assertNotIn("MISSING_MODEL_TOKEN", response.text)
-            self.assertNotIn("codex_auth_json", response.text)
+            self.assertNotIn("missing-access-model", include_ready_response.text)
+            self.assertNotIn("missing-access-model-tool", include_ready_response.text)
             self.assertNotIn("MISSING_TOOL_TOKEN", include_ready_response.text)
             self.assertNotIn("MISSING_WEBHOOK_TOKEN", include_ready_response.text)
-            self.assertEqual(
-                include_ready_payload["counts"],
-                {"total": 0, "ready": 0, "blocked": 0},
-            )
+            self.assertGreaterEqual(include_ready_payload["counts"]["total"], 1)
         finally:
             client.close()
 

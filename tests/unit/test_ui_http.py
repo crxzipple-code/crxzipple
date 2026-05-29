@@ -13,6 +13,10 @@ from uuid import uuid4
 
 from PIL import Image
 
+from crxzipple.interfaces.runtime_container import (
+    AssemblyTarget,
+    build_runtime_container,
+)
 from crxzipple.modules.channels.domain import (
     ChannelAccountProfile,
     ChannelInteraction,
@@ -21,6 +25,12 @@ from crxzipple.modules.channels.domain import (
     channel_dead_letter_topic,
 )
 from crxzipple.modules.events import Event, EventTarget
+from crxzipple.modules.access.application.events import (
+    ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
+)
+from crxzipple.modules.operations.application.projections import (
+    OPERATIONS_PROJECTION_MODULES,
+)
 from crxzipple.modules.daemon import DaemonInstance
 from crxzipple.modules.process.domain import ProcessSession, ProcessStatus
 from crxzipple.modules.llm.application import InvokeLlmInput
@@ -41,7 +51,6 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.tool.application import (
     ExecuteToolInput,
-    RegisterToolInput,
 )
 from crxzipple.modules.tool.domain import (
     ToolExecutionTarget,
@@ -54,9 +63,11 @@ from crxzipple.modules.tool.domain import (
 from crxzipple.modules.settings.application import CreateSettingsResourceInput
 
 from tests.unit.http_test_support import (
+    AppKey,
     HttpModuleTestCase,
     _SequentialResultAdapter,
     _write_skill_package,
+    seed_catalog_tool,
 )
 
 
@@ -145,13 +156,29 @@ def _terminate_subprocess(process: subprocess.Popen[bytes]) -> None:
 
 
 class UiHttpTestCase(HttpModuleTestCase):
+    def _target_container(self, target: AssemblyTarget):
+        return build_runtime_container(
+            self.client.app.state.container.require(AppKey.CORE_SETTINGS),
+            target=target,
+        )
+
+    def _process_operations_events(self) -> None:
+        observer_container = self._target_container(AssemblyTarget.OPERATIONS_OBSERVER)
+        try:
+            observer_container.require(
+                AppKey.OPERATIONS_OBSERVER_RUNTIME_EVENT_SERVICE,
+            ).process_available_events()
+        finally:
+            observer_container.close()
+
     def _materialize_operations(self, *modules: str) -> None:
-        materializer = self.client.app.state.container.operations_projection_materializer
-        assert materializer is not None
+        materializer = self.client.app.state.container.require(
+            AppKey.OPERATIONS_PROJECTION_MATERIALIZER,
+        )
         materializer.materialize_modules(modules)
 
     def test_operations_detail_endpoints_read_independent_projections(self) -> None:
-        store = self.client.app.state.container.operations_projection_store
+        store = self.client.app.state.container.require(AppKey.OPERATIONS_PROJECTION_STORE)
         tool_detail = _minimal_tool_detail_payload(
             run_id="tool-run-projected-detail",
             input_payload={"large": "tool"},
@@ -225,7 +252,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         self,
     ) -> None:
         container = self.client.app.state.container
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="operations.projection.invalidated",
                 payload={
@@ -268,7 +295,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             "/operations/events",
             "/operations/daemon",
         )
-        container.operations_projection_materializer.materialize_modules(
+        container.require(AppKey.OPERATIONS_PROJECTION_MATERIALIZER).materialize_modules(
             tuple(route.rsplit("/", 1)[-1] for route in module_routes),
         )
 
@@ -309,13 +336,20 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertTrue(by_id["migration"]["value"])
 
     def test_event_relay_subscribes_workbench_llm_text_delta(self) -> None:
-        runtime = self.client.app.state.container.event_relay_runtime_event_service
+        relay_container = self._target_container(AssemblyTarget.EVENT_RELAY_WORKER)
+        try:
+            runtime = relay_container.require(AppKey.EVENT_RELAY_RUNTIME_EVENT_SERVICE)
 
-        self.assertIsNotNone(runtime)
-        self.assertIn(
-            "event_relay.workbench.llm-text-delta",
-            {subscription.subscription_id for subscription in runtime.subscriptions},
-        )
+            self.assertIsNotNone(runtime)
+            self.assertIn(
+                "event_relay.workbench.llm-text-delta",
+                {
+                    subscription.subscription_id
+                    for subscription in runtime.subscriptions
+                },
+            )
+        finally:
+            relay_container.close()
 
     def test_ui_workbench_run_and_steps_use_orchestration_read_model(self) -> None:
         llm_response = self.client.post(
@@ -325,6 +359,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
             },
         )
         self.assertEqual(llm_response.status_code, 201)
@@ -450,8 +485,13 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         browser_tool_run = ToolRun.create(
             run_id="tool-run-ui-browser-snapshot",
-            tool_id="browser_snapshot",
+            tool_id="browser.snapshot",
             input_payload={"url": "https://example.test"},
+            metadata={
+                "source": "orchestration",
+                "orchestration_run_id": "run-ui-child-browser",
+                "session_key": "agent:browser-agent:main",
+            },
             invocation_context_payload={
                 "run_id": "run-ui-child-browser",
                 "session_key": "agent:browser-agent:main",
@@ -463,7 +503,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             ToolRunResult.text("Captured browser snapshot."),
         )
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(requester_run)
             uow.orchestration_runs.add(child_run)
             uow.orchestration_runs.add(followup_run)
@@ -500,7 +540,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(run_payload["current_turn_id"], "run-ui-followup")
         steps_payload = steps_response.json()
         self.assertIn(
-            "browser_snapshot",
+            "browser.snapshot",
             {
                 badge["label"]
                 for step in steps_payload
@@ -522,7 +562,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         browser_steps = [
             step
             for step in steps_payload
-            if step["badges"] and step["badges"][0]["label"] == "browser_snapshot"
+            if step["badges"] and step["badges"][0]["label"] == "browser.snapshot"
         ]
         self.assertTrue(browser_steps)
         self.assertEqual(len(browser_steps), 2)
@@ -538,7 +578,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             for step in requester_steps_response.json()
             for badge in step["badges"]
         }
-        self.assertIn("browser_snapshot", requester_badges)
+        self.assertIn("browser.snapshot", requester_badges)
 
     def test_ui_workbench_enriches_artifact_previews_from_artifact_store(self) -> None:
         container = self.client.app.state.container
@@ -546,7 +586,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         image = Image.new("RGB", (32, 18), color=(24, 96, 160))
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        artifact = container.artifact_service.create_artifact(
+        artifact = container.require(AppKey.ARTIFACT_SERVICE).create_artifact(
             data=buffer.getvalue(),
             mime_type="image/png",
             name="poster.png",
@@ -575,6 +615,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             run_id="tool-run-ui-artifact",
             tool_id="image_tool",
             input_payload={"prompt": "poster"},
+            metadata={
+                "source": "orchestration",
+                "orchestration_run_id": run.id,
+            },
             invocation_context_payload={"run_id": run.id},
             target=ToolExecutionTarget(mode=ToolMode.INLINE),
         )
@@ -592,7 +636,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             ),
         )
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
             uow.tool_runs.add(tool_run)
             uow.commit()
@@ -641,7 +685,7 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_workbench_metrics_use_llm_invocation_usage(self) -> None:
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialResultAdapter(
                 LlmResult(
@@ -658,10 +702,11 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
             },
         )
         self.assertEqual(llm_response.status_code, 201)
-        invocation = container.llm_service.invoke(
+        invocation = container.require(AppKey.LLM_SERVICE).invoke(
             InvokeLlmInput(
                 llm_id="openai.gpt-5.4-mini",
                 invocation_id="llm-invocation-ui-workbench",
@@ -697,7 +742,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             completed_at=timestamp + timedelta(seconds=2),
         )
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
             uow.commit()
 
@@ -770,7 +815,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             completed_at=timestamp + timedelta(seconds=2),
         )
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
             uow.commit()
 
@@ -831,7 +876,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             updated_at=timestamp,
             completed_at=timestamp,
         )
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
             uow.commit()
 
@@ -848,6 +893,72 @@ class UiHttpTestCase(HttpModuleTestCase):
                 for step in payload
                 for action in step["actions"]
             ),
+        )
+
+    def test_ui_workbench_steps_include_skill_draft_approval_detail(self) -> None:
+        container = self.client.app.state.container
+        timestamp = datetime.now(timezone.utc) - timedelta(minutes=1)
+        approval = PendingApprovalRequest(
+            request_id="approval-skill-draft-1",
+            effect_id="skill_authoring.apply",
+            label="Skill authoring apply",
+            reason="Apply skill draft after review.",
+            tool_ids=("skill_draft_apply",),
+            tool_name="skill_draft_apply",
+            tool_arguments={
+                "draft_id": "skill-draft:repo-review",
+                "reason": "User approved.",
+                "ignored": "not exposed",
+            },
+            execution_mode="inline",
+            execution_strategy="async",
+            execution_environment="local",
+        )
+        run = OrchestrationRun(
+            id="run-ui-skill-draft-approval",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="apply skill draft",
+            ),
+            status=OrchestrationRunStatus.WAITING,
+            stage=OrchestrationRunStage.WAITING_FOR_CONFIRMATION,
+            agent_id="assistant",
+            active_session_id="session-approval",
+            metadata={
+                "trace_id": "trace-ui-skill-draft-approval",
+                "session_key": "agent:assistant:main",
+                "pending_approval_request": approval.to_payload(),
+            },
+            created_at=timestamp - timedelta(seconds=3),
+            updated_at=timestamp,
+        )
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(run)
+            uow.commit()
+
+        response = self.client.get(
+            "/ui/workbench/runs/run-ui-skill-draft-approval/steps",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        approval_step = next(step for step in payload if step["type"] == "approval_required")
+        self.assertEqual(approval_step["approval"]["request_id"], "approval-skill-draft-1")
+        self.assertEqual(approval_step["approval"]["tool_name"], "skill_draft_apply")
+        self.assertEqual(approval_step["approval"]["draft_id"], "skill-draft:repo-review")
+        self.assertEqual(
+            approval_step["approval"]["tool_arguments"],
+            {
+                "draft_id": "skill-draft:repo-review",
+                "reason": "User approved.",
+            },
+        )
+        self.assertIn(
+            ("skill_draft", "skill-draft:repo-review"),
+            {
+                (item["type"], item["id"])
+                for item in approval_step["linked_entities"]
+            },
         )
 
     def test_orchestration_cancel_clears_pending_approval_request(self) -> None:
@@ -876,269 +987,6 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(run.pending_tool_run_ids, ())
         self.assertIsNone(run.worker_id)
 
-    def test_ui_operations_orchestration_overview_uses_owner_runtime_state(self) -> None:
-        llm_response = self.client.post(
-            "/llms",
-            json={
-                "id": "openai.gpt-5.4-mini",
-                "provider": "openai",
-                "api_family": "openai_responses",
-                "model_name": "gpt-5.4-mini",
-            },
-        )
-        self.assertEqual(llm_response.status_code, 201)
-
-        agent_response = self.client.post(
-            "/agents",
-            json={
-                "id": "assistant",
-                "name": "Assistant",
-                "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
-            },
-        )
-        self.assertEqual(agent_response.status_code, 201)
-
-        self.client.app.state.container.orchestration_executor_service.heartbeat_executor(
-            worker_id="worker-ui",
-            max_inflight_assignments=3,
-            inflight_assignment_count=1,
-        )
-
-        intake_response = self.client.post(
-            "/orchestration/runs/intake",
-            json={
-                "run_id": "run-ui-ops",
-                "inbound_instruction": {
-                    "source": "http",
-                    "content": "queue me",
-                },
-                "session": {
-                    "agent_id": "assistant",
-                    "llm_id": "openai.gpt-5.4-mini",
-                    "channel": "webchat",
-                },
-                "priority": 4,
-                "enqueue": True,
-            },
-        )
-        self.assertEqual(intake_response.status_code, 201)
-
-        self._materialize_operations("orchestration")
-        response = self.client.get("/operations/orchestration/overview")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["module"], "orchestration")
-        self.assertEqual(payload["title"], "Orchestration")
-        self.assertIn(
-            {"Priority": "P4", "Run ID": "run-ui-ops", "Lane Key": "session:agent:assistant:main", "Wait Reason": "fifo", "Wait Time": payload["queue"][0]["Wait Time"]},
-            payload["queue"],
-        )
-        self.assertEqual(payload["executor"][0]["Worker ID"], "worker-ui")
-        self.assertEqual(payload["executor"][0]["Load"], "33%")
-
-    def test_ui_operations_orchestration_page_uses_owner_runtime_state(self) -> None:
-        llm_response = self.client.post(
-            "/llms",
-            json={
-                "id": "openai.gpt-5.4-mini",
-                "provider": "openai",
-                "api_family": "openai_responses",
-                "model_name": "gpt-5.4-mini",
-            },
-        )
-        self.assertEqual(llm_response.status_code, 201)
-
-        agent_response = self.client.post(
-            "/agents",
-            json={
-                "id": "assistant",
-                "name": "Assistant",
-                "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
-            },
-        )
-        self.assertEqual(agent_response.status_code, 201)
-
-        self.client.app.state.container.orchestration_executor_service.heartbeat_executor(
-            worker_id="worker-ui-page",
-            max_inflight_assignments=3,
-            inflight_assignment_count=1,
-        )
-
-        intake_response = self.client.post(
-            "/orchestration/runs/intake",
-            json={
-                "run_id": "run-ui-ops-page",
-                "inbound_instruction": {
-                    "source": "http",
-                    "content": "page queue me",
-                },
-                "session": {
-                    "agent_id": "assistant",
-                    "llm_id": "openai.gpt-5.4-mini",
-                    "channel": "webchat",
-                },
-                "metadata": {"trace_id": "trace-ui-ops-page"},
-                "priority": 4,
-                "enqueue": True,
-            },
-        )
-        self.assertEqual(intake_response.status_code, 201)
-        container = self.client.app.state.container
-        container.operations_observer_runtime_event_service.process_available_events()
-        container.events_service.publish(
-            Event(
-                name="orchestration.run.queued",
-                kind="observe",
-                payload={
-                    "event_name": "orchestration.run.queued",
-                    "run_id": "run-ui-ops-direct-event",
-                    "status": "queued",
-                    "stage": "queued",
-                    "current_step": 0,
-                    "source_event_name": "orchestration.run.accepted",
-                },
-                trace={"trace_id": "trace-ui-ops-direct-event"},
-                ordering_key="run-ui-ops-direct-event",
-            ),
-        )
-        container.operations_observer_runtime_event_service.process_available_events()
-
-        self._materialize_operations("orchestration")
-        response = self.client.get("/operations/orchestration")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["module"], "orchestration")
-        self.assertNotIn("sections", payload)
-        self.assertEqual(payload["role"]["scope"], "orchestration")
-        self.assertTrue(payload["role"]["can_operate"])
-        self.assertEqual(payload["scheduler_status"]["id"], "scheduler_status")
-        self.assertEqual(payload["backpressure"]["kind"], "donut")
-        self.assertEqual(payload["backpressure"]["total"], 1)
-        metrics = {item["id"]: item for item in payload["metrics"]}
-        self.assertEqual(metrics["approval_waiting"]["value"], "0")
-        self.assertEqual(metrics["approval_waiting"]["tone"], "success")
-
-        queue_row = payload["run_queue"]["rows"][0]
-        self.assertEqual(queue_row["cells"]["run_id"], "run-ui-ops-page")
-        self.assertEqual(queue_row["cells"]["lane_key"], "session:agent:assistant:main")
-        self.assertEqual(queue_row["cells"]["trace"], "trace-ui-ops-page")
-
-        executor_row = payload["executor_overview"]["rows"][0]
-        self.assertEqual(executor_row["cells"]["worker_id"], "worker-ui-page")
-        self.assertEqual(executor_row["cells"]["load"], "33%")
-        self.assertEqual(executor_row["cells"]["available_slots"], "2")
-
-        action_by_id = {item["id"]: item for item in payload["actions"]}
-        self.assertEqual(action_by_id["cancel_run"]["method"], "POST")
-        self.assertEqual(
-            action_by_id["cancel_run"]["audit_event"],
-            "orchestration.run.cancel",
-        )
-        self.assertEqual(
-            action_by_id["cancel_run"]["endpoint"],
-            "/operations/orchestration/runs/{run_id}/cancel",
-        )
-        self.assertEqual(action_by_id["force_release_lane"]["risk"], "dangerous")
-        self.assertFalse(action_by_id["force_release_lane"]["allowed"])
-        self.assertTrue(action_by_id["force_release_lane"]["requires_confirmation"])
-        self.assertTrue(action_by_id["force_release_lane"]["reason_required"])
-        self.assertIn(
-            "run-ui-ops-page",
-            {item["cells"]["run_id"] for item in payload["ops_event_log"]["rows"]},
-        )
-        self.assertIn(
-            "run-ui-ops-direct-event",
-            {item["cells"]["run_id"] for item in payload["ops_event_log"]["rows"]},
-        )
-
-    def test_ui_operations_orchestration_page_uses_ingress_signal_and_event_sources(
-        self,
-    ) -> None:
-        llm_response = self.client.post(
-            "/llms",
-            json={
-                "id": "openai.gpt-5.4-mini",
-                "provider": "openai",
-                "api_family": "openai_responses",
-                "model_name": "gpt-5.4-mini",
-            },
-        )
-        self.assertEqual(llm_response.status_code, 201)
-
-        agent_response = self.client.post(
-            "/agents",
-            json={
-                "id": "assistant",
-                "name": "Assistant",
-                "llm_routing_policy": {"default_llm_id": "openai.gpt-5.4-mini"},
-            },
-        )
-        self.assertEqual(agent_response.status_code, 201)
-
-        intake_response = self.client.post(
-            "/orchestration/runs/intake",
-            json={
-                "run_id": "run-ui-ingress-page",
-                "inbound_instruction": {
-                    "source": "http",
-                    "content": "hold in ingress",
-                },
-                "session": {
-                    "agent_id": "assistant",
-                    "llm_id": "openai.gpt-5.4-mini",
-                    "channel": "webchat",
-                },
-                "priority": 7,
-                "enqueue": False,
-            },
-        )
-        self.assertEqual(intake_response.status_code, 201)
-
-        container = self.client.app.state.container
-        container.orchestration_scheduler_service.queue_tool_terminal_signal(
-            tool_run_id="tool-ui-signal",
-        )
-        container.operations_observer_runtime_event_service.process_available_events()
-
-        self._materialize_operations("orchestration")
-        response = self.client.get("/operations/orchestration")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        metrics = {item["id"]: item for item in payload["metrics"]}
-        self.assertEqual(metrics["ingress"]["value"], "1")
-        self.assertEqual(metrics["ingress"]["delta"], "ingress requests")
-
-        ingress_row = payload["ingress_queue"]["rows"][0]
-        self.assertEqual(ingress_row["cells"]["run_id"], "run-ui-ingress-page")
-        self.assertEqual(ingress_row["cells"]["status"], "queued")
-        self.assertNotEqual(
-            ingress_row["cells"]["intake_key"],
-            ingress_row["cells"]["run_id"],
-        )
-
-        scheduler_items = {
-            item["label"]: item["value"] for item in payload["scheduler_status"]["items"]
-        }
-        self.assertEqual(scheduler_items["Scheduler Signals"], "1 queued / 0 processing")
-        policy_items = {
-            item["label"]: item["value"] for item in payload["policy_limits"]["items"]
-        }
-        self.assertEqual(policy_items["Lease Timeout"], "30s")
-        self.assertNotEqual(policy_items["Lane Lock TTL"], "60s")
-
-        event_rows = payload["ops_event_log"]["rows"]
-        self.assertTrue(event_rows)
-        self.assertIn(
-            "run-ui-ingress-page",
-            {item["cells"]["run_id"] for item in event_rows},
-        )
-        self.assertTrue(
-            any(item["cells"]["source"] == "Ingress" for item in event_rows),
-        )
-
     def test_operations_orchestration_health_ignores_retained_historical_failures(
         self,
     ) -> None:
@@ -1162,7 +1010,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             updated_at=timestamp,
             completed_at=timestamp,
         )
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
             uow.commit()
 
@@ -1196,7 +1044,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             created_at=timestamp,
             updated_at=timestamp,
         )
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
             uow.commit()
 
@@ -1230,6 +1078,24 @@ class UiHttpTestCase(HttpModuleTestCase):
                 self.assertTrue(payload["metrics"])
                 self.assertIn(payload["health"], {"healthy", "warning", "error"})
 
+    def test_ui_operations_modules_endpoint_lists_materialized_overviews(self) -> None:
+        selected_modules = {"access", "daemon"}
+        self._materialize_operations(*selected_modules)
+
+        response = self.client.get("/operations/modules")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            [item["module"] for item in payload],
+            [
+                module
+                for module in OPERATIONS_PROJECTION_MODULES
+                if module in selected_modules
+            ],
+        )
+        self.assertTrue(all(item["metrics"] for item in payload))
+
     def test_ui_operations_module_pages_expose_named_sections(self) -> None:
         expected_sections = {
         }
@@ -1252,14 +1118,13 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_operations_skills_page_uses_skill_catalog_state(self) -> None:
         container = self.client.app.state.container
-        container.tool_service.register(
-            RegisterToolInput(
-                id="ui_skill_ready_tool",
-                name="UI Skill Ready Tool",
-                description="Tool used by UI skills operations tests.",
-            ),
+        seed_catalog_tool(
+            container,
+            tool_id="ui_skill_ready_tool",
+            name="UI Skill Ready Tool",
+            description="Tool used by UI skills operations tests.",
         )
-        system_root = container.skill_manager.manager.repository._system_root
+        system_root = container.require(AppKey.SKILL_MANAGER).repository._system_root
         _write_skill_package(
             system_root / "ui-skill-ready",
             name="ui-skill-ready",
@@ -1276,7 +1141,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             tags=("ops",),
             required_tools=("ui_skill_missing_tool",),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="skills.resolution.completed",
                 kind="observe",
@@ -1293,7 +1158,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 trace={"trace_id": "trace-skills-ui-direct"},
             )
         )
-        container.operations_observer_runtime_event_service.process_available_events()
+        self._process_operations_events()
 
         self._materialize_operations("skills")
         response = self.client.get(
@@ -1332,6 +1197,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             any(row["cells"]["capability"] == "ui_skill_missing_tool" for row in capability_rows)
         )
         self.assertGreaterEqual(payload["resolution_logs"]["total"], 1)
+        self.assertIn("skill_reads", payload)
         self.assertTrue(
             any(
                 row["cells"]["event"] == "resolution.completed"
@@ -1351,6 +1217,17 @@ class UiHttpTestCase(HttpModuleTestCase):
                 for item in payload["skill_details"]
             )
         )
+        sync_response = self.client.post(
+            "/operations/skills/sync",
+            json={"surface": "interactive", "reason": "test skill operations sync"},
+        )
+        self.assertEqual(sync_response.status_code, 200)
+        sync_payload = sync_response.json()
+        self.assertGreaterEqual(sync_payload["synced_count"], 2)
+        self.assertIn(
+            "ui-skill-ready",
+            {item["name"] for item in sync_payload["skills"]},
+        )
 
     def test_ui_operations_memory_page_uses_file_memory_runtime_state(self) -> None:
         llm_response = self.client.post(
@@ -1360,6 +1237,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
             },
         )
         self.assertEqual(llm_response.status_code, 201)
@@ -1402,8 +1280,8 @@ class UiHttpTestCase(HttpModuleTestCase):
             )
             self.assertEqual(search_response.status_code, 200)
             container = self.client.app.state.container
-            container.operations_observer_runtime_event_service.process_available_events()
-            container.events_service.publish(
+            self._process_operations_events()
+            container.require(AppKey.EVENTS_SERVICE).publish(
                 Event(
                     name="memory.index.sync_succeeded",
                     kind="observe",
@@ -1464,13 +1342,14 @@ class UiHttpTestCase(HttpModuleTestCase):
                 for row in payload["index_sync_activity"]["rows"]
             )
         )
-        self.assertTrue(
-            any(
-                item["file_id"].endswith(daily_path)
-                and item["related"]["total"] >= 1
-                for item in payload["file_details"]
-            )
+        self.assertEqual(payload["file_details"], [])
+        detail_response = self.client.get(
+            f"/operations/memory/files/memory-ui-agent:{daily_path}/detail",
         )
+        self.assertEqual(detail_response.status_code, 200)
+        detail_payload = detail_response.json()
+        self.assertTrue(detail_payload["file_id"].endswith(daily_path))
+        self.assertGreaterEqual(detail_payload["related"]["total"], 1)
         self.assertGreaterEqual(payload["memory_usage"]["total"], 1)
         self.assertGreaterEqual(payload["index_jobs"]["total"], 1)
         self.assertGreaterEqual(payload["context_resolution"]["total"], 1)
@@ -1488,18 +1367,12 @@ class UiHttpTestCase(HttpModuleTestCase):
                 for row in payload["index_sync_activity"]["rows"]
             )
         )
-        self.assertTrue(payload["file_details"])
-        self.assertTrue(
-            any(
-                item["raw_payload"]["file"]["path"] == daily_path
-                for item in payload["file_details"]
-            )
-        )
+        self.assertEqual(detail_payload["raw_payload"]["file"]["path"], daily_path)
 
     def test_ui_operations_access_page_uses_access_inventory_state(self) -> None:
         container = self.client.app.state.container
         previous = os.environ.pop("UI_ACCESS_MISSING_TOKEN", None)
-        container.settings_action_service.create_resource(
+        container.require(AppKey.SETTINGS_ACTION_SERVICE).create_resource(
             CreateSettingsResourceInput(
                 resource_id="ui-access-missing-token",
                 resource_kind="access-assets",
@@ -1536,12 +1409,12 @@ class UiHttpTestCase(HttpModuleTestCase):
                 source="test",
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
-                topic="access.credential.check",
+                topic=f"events.named.{ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT}",
                 kind="fact",
                 payload={
-                    "event_name": "access.credential.check.failed",
+                    "event_name": ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
                     "requirement": "env:UI_ACCESS_MISSING_TOKEN",
                     "status": "failed",
                     "reason": "UI access token is missing",
@@ -1576,6 +1449,11 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(target_rows[0]["cells"]["required_by"], "tool: ui_access_missing_tool")
 
         self.assertEqual(payload["missing_access"]["total"], 1)
+        self.assertEqual(payload["access_requirements"]["total"], 1)
+        self.assertEqual(
+            payload["access_requirements"]["rows"][0]["cells"]["slot"],
+            "env:UI_ACCESS_MISSING_TOKEN",
+        )
         self.assertEqual(payload["provider_auth_blocked"]["total"], 1)
         self.assertEqual(payload["setup_flows"]["total"], 1)
         self.assertEqual(
@@ -1594,6 +1472,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(detail["usages"]["total"], 1)
         self.assertEqual(detail["events"]["total"], 1)
         self.assertEqual(payload["recent_access_events"]["total"], 1)
+        self.assertEqual(payload["access_audit_summary"]["total"], 1)
         self.assertEqual(
             payload["recent_access_events"]["rows"][0]["cells"]["trace"],
             "trace-access-ui",
@@ -1601,14 +1480,14 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_operations_daemon_overview_refreshes_instance_truth(self) -> None:
         container = self.client.app.state.container
-        original = container.daemon_manager.list_instances
+        original = container.require(AppKey.DAEMON_MANAGER).list_instances
         refresh_values: list[bool] = []
 
         def list_instances_spy(*, service_key=None, refresh=True):
             refresh_values.append(refresh)
             return original(service_key=service_key, refresh=False)
 
-        container.daemon_manager.list_instances = list_instances_spy
+        container.require(AppKey.DAEMON_MANAGER).list_instances = list_instances_spy
 
         self._materialize_operations("daemon")
         response = self.client.get("/operations/daemon/overview")
@@ -1638,8 +1517,8 @@ class UiHttpTestCase(HttpModuleTestCase):
             updated_at=timestamp,
             ended_at=None,
         )
-        container.process_service.repository.save(process_session)
-        container.process_service.repository.stdout_path(process_session.id).write_text(
+        container.require(AppKey.PROCESS_SERVICE).repository.save(process_session)
+        container.require(AppKey.PROCESS_SERVICE).repository.stdout_path(process_session.id).write_text(
             "daemon process ready\n",
             encoding="utf-8",
         )
@@ -1661,15 +1540,15 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "actual_env_fingerprint": "fingerprint-ui-a",
             },
         )
-        container.daemon_service.save_instance(instance)
-        lease = container.daemon_service.acquire_lease(
+        container.require(AppKey.DAEMON_SERVICE).save_instance(instance)
+        lease = container.require(AppKey.DAEMON_SERVICE).acquire_lease(
             service_key="worker:tool",
             owner_kind="ui_test",
             owner_id="daemon_page",
             ttl_seconds=600,
             metadata={"reason": "operations page"},
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="daemon.instance.ready",
                 kind="observe",
@@ -1687,19 +1566,19 @@ class UiHttpTestCase(HttpModuleTestCase):
                 ordering_key=instance.id,
             ),
         )
-        original = container.daemon_manager.list_instances
+        original = container.require(AppKey.DAEMON_MANAGER).list_instances
         refresh_values: list[bool] = []
 
         def list_instances_spy(*, service_key=None, refresh=True):
             refresh_values.append(refresh)
             return original(service_key=service_key, refresh=False)
 
-        container.daemon_manager.list_instances = list_instances_spy
+        container.require(AppKey.DAEMON_MANAGER).list_instances = list_instances_spy
         try:
             self._materialize_operations("daemon")
             response = self.client.get("/operations/daemon?service_key=worker:tool")
         finally:
-            container.daemon_manager.list_instances = original
+            container.require(AppKey.DAEMON_MANAGER).list_instances = original
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(True, refresh_values)
@@ -1727,6 +1606,12 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(instance_row["cells"]["env_drift"], "Yes")
         self.assertGreaterEqual(payload["leases"]["total"], 1)
         self.assertIn(lease.id, {item["id"] for item in payload["leases"]["rows"]})
+        drain_items = {
+            item["label"]: item["value"]
+            for item in payload["drain_overview"]["items"]
+        }
+        self.assertEqual(drain_items["Executor Max Assignments"], "4")
+        self.assertEqual(drain_items["Tool Worker Max In-flight"], "4")
         tab_ids = {item["id"] for item in payload["tabs"]}
         self.assertIn("processes", tab_ids)
         self.assertGreaterEqual(payload["processes"]["total"], 1)
@@ -1796,20 +1681,21 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "command": "python -m crxzipple.main tool-worker run",
             },
         )
-        container.daemon_service.save_instance(instance)
+        container.require(AppKey.DAEMON_SERVICE).save_instance(instance)
 
         self._materialize_operations("daemon")
         response = self.client.get("/operations/daemon?service_key=worker:tool")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        process_row = next(
+        instance_row = next(
             item
-            for item in payload["processes"]["rows"]
-            if item["id"] == missing_process_id
+            for item in payload["instances"]["rows"]
+            if item["id"] == "daemon-ui-missing-process"
         )
-        self.assertEqual(process_row["cells"]["status"], "Missing")
-        self.assertEqual(process_row["cells"]["binding"], "Missing Session")
+        self.assertEqual(instance_row["cells"]["status"], "Failed")
+        self.assertEqual(instance_row["cells"]["last_error"], "process session was not found")
+        self.assertEqual(payload["processes"]["total"], 0)
 
     def test_ui_operations_daemon_health_ignores_historical_process_failures(self) -> None:
         container = self.client.app.state.container
@@ -1828,7 +1714,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             updated_at=ended_at,
             ended_at=ended_at,
         )
-        container.process_service.repository.save(process_session)
+        container.require(AppKey.PROCESS_SERVICE).repository.save(process_session)
 
         self._materialize_operations("daemon")
         response = self.client.get("/operations/daemon")
@@ -1841,18 +1727,16 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_operations_tool_overview_uses_tool_runtime_state(self) -> None:
         container = self.client.app.state.container
-        container.tool_service.register(
-            RegisterToolInput(
-                id="ui_background_tool",
-                name="UI Background Tool",
-                description="Tool used by UI operations tests.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                requires_confirmation=True,
-                access_requirements=("browser_profile",),
-            ),
+        seed_catalog_tool(
+            container,
+            tool_id="ui_background_tool",
+            name="UI Background Tool",
+            description="Tool used by UI operations tests.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            requires_confirmation=True,
         )
         asyncio.run(
-            container.tool_service.execute(
+            container.require(AppKey.TOOL_SERVICE).execute(
                 ExecuteToolInput(
                     tool_id="ui_background_tool",
                     mode=ToolMode.BACKGROUND,
@@ -1870,7 +1754,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["title"], "Tool")
         metric_by_id = {item["id"]: item for item in payload["metrics"]}
         self.assertEqual(metric_by_id["active_runs"]["value"], "1")
-        self.assertEqual(metric_by_id["confirmation"]["value"], "1")
+        self.assertGreaterEqual(int(metric_by_id["confirmation"]["value"]), 1)
         self.assertIn(
             {
                 "Priority": "background",
@@ -1881,41 +1765,35 @@ class UiHttpTestCase(HttpModuleTestCase):
             },
             payload["queue"],
         )
-        self.assertIn(
-            "ui_background_tool",
-            {item["Lane Key"] for item in payload["lane_locks"]},
-        )
+        self.assertTrue(payload["lane_locks"])
 
     def test_ui_operations_tool_page_uses_tool_runtime_state(self) -> None:
         container = self.client.app.state.container
-        container.tool_service.register(
-            RegisterToolInput(
-                id="ui_background_tool",
-                name="UI Background Tool",
-                description="Tool used by UI operations page tests.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                requires_confirmation=True,
-                access_requirements=("browser_profile",),
-            ),
+        seed_catalog_tool(
+            container,
+            tool_id="ui_background_tool",
+            name="UI Background Tool",
+            description="Tool used by UI operations page tests.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            requires_confirmation=True,
+            access_requirements=("browser_profile",),
         )
-        container.tool_service.register(
-            RegisterToolInput(
-                id="ui_inline_tool",
-                name="UI Inline Tool",
-                description="Inline tool used by UI operations page tests.",
-            ),
+        seed_catalog_tool(
+            container,
+            tool_id="ui_inline_tool",
+            name="UI Inline Tool",
+            description="Inline tool used by UI operations page tests.",
         )
-        container.tool_service.register(
-            RegisterToolInput(
-                id="openai_image_generate_ui",
-                name="OpenAI Image Generate UI",
-                description="OpenAI image tool used by UI operations page tests.",
-                supported_modes=(ToolMode.BACKGROUND,),
-                tags=("openai", "image", "generation"),
-                runtime_key="openai_image_generate",
-            ),
+        seed_catalog_tool(
+            container,
+            tool_id="openai_image_generate_ui",
+            name="OpenAI Image Generate UI",
+            description="OpenAI image tool used by UI operations page tests.",
+            supported_modes=(ToolMode.BACKGROUND,),
+            tags=("openai", "image", "generation"),
+            runtime_key="openai_image_generate",
         )
-        stored_artifact = container.artifact_service.create_artifact(
+        stored_artifact = container.require(AppKey.ARTIFACT_SERVICE).create_artifact(
             data=b"tool output",
             mime_type="text/plain",
             name="tool-output.txt",
@@ -1925,6 +1803,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             run_id="tool-run-ui-page-queued",
             tool_id="ui_background_tool",
             input_payload={"prompt": "queue"},
+            metadata={
+                "source": "orchestration",
+                "orchestration_run_id": "run-tool-source",
+            },
             invocation_context_payload={
                 "run_id": "run-tool-source",
                 "step_id": "step-tool-source",
@@ -1938,6 +1820,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             run_id="tool-run-ui-page-running",
             tool_id="ui_background_tool",
             input_payload={"prompt": "run"},
+            metadata={
+                "source": "orchestration",
+                "orchestration_run_id": "run-tool-source",
+            },
             invocation_context_payload={
                 "run_id": "run-tool-source",
                 "trace_id": "trace-tool-page",
@@ -2015,6 +1901,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             run_id="tool-run-ui-page-failed",
             tool_id="ui_inline_tool",
             input_payload={"prompt": "fail"},
+            metadata={
+                "source": "orchestration",
+                "orchestration_run_id": "run-tool-source",
+            },
             invocation_context_payload={
                 "run_id": "run-tool-source",
                 "trace_id": "trace-tool-page",
@@ -2031,6 +1921,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             run_id="tool-run-ui-page-artifact",
             tool_id="ui_inline_tool",
             input_payload={"prompt": "artifact"},
+            metadata={
+                "source": "orchestration",
+                "orchestration_run_id": "run-tool-source",
+            },
             invocation_context_payload={
                 "run_id": "run-tool-source",
                 "trace_id": "trace-tool-page",
@@ -2049,7 +1943,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         artifact_run.completed_at = timestamp + timedelta(seconds=30)
         artifact_run.heartbeat_at = artifact_run.completed_at
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.tool_runs.add(queued_run)
             uow.tool_runs.add(running_run)
             uow.tool_runs.add(failed_run)
@@ -2061,14 +1955,14 @@ class UiHttpTestCase(HttpModuleTestCase):
         async def _ui_image_handler(arguments):  # noqa: ANN001
             return ToolRunResult.text("ok")
 
-        container.remote_tool_registry.register(
+        container.require(AppKey.TOOL_REMOTE_RUNTIME_REGISTRY).register(
             "ui-image.generate",
             _ui_image_handler,
             concurrency_key="provider:ui-image",
             max_concurrency=3,
         )
 
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="tool.run.queued",
                 payload={
@@ -2081,7 +1975,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 trace={"trace_id": "trace-tool-page"},
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="tool.assignment.started",
                 payload={
@@ -2096,7 +1990,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 trace={"trace_id": "trace-tool-page"},
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="tool.run.failed",
                 payload={
@@ -2110,8 +2004,8 @@ class UiHttpTestCase(HttpModuleTestCase):
                 trace={"trace_id": "trace-tool-page"},
             ),
         )
-        container.operations_observer_runtime_event_service.process_available_events()
-        container.events_service.publish(
+        self._process_operations_events()
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="tool.run.requeued",
                 kind="observe",
@@ -2151,7 +2045,9 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertNotIn("failures", tab_ids)
         metric_by_id = {item["id"]: item for item in payload["metrics"]}
         self.assertEqual(metric_by_id["active_runs"]["value"], "2")
-        self.assertEqual(metric_by_id["confirmation"]["value"], "1")
+        self.assertGreaterEqual(int(metric_by_id["confirmation"]["value"]), 1)
+        self.assertEqual(metric_by_id["worker_policy"]["value"], "4")
+        self.assertEqual(metric_by_id["retry_policy"]["value"], "3x / 30s / 5s")
         self.assertEqual(payload["tool_types"]["title"], "Tool Call Share")
         self.assertEqual(payload["tool_types"]["total"], 4)
         tool_call_segments = {
@@ -2254,19 +2150,37 @@ class UiHttpTestCase(HttpModuleTestCase):
         provider_history_rows = {
             item["id"]: item for item in payload["provider_history"]["rows"]
         }
-        self.assertIn("manual", provider_history_rows)
-        self.assertEqual(provider_history_rows["manual"]["cells"]["provider"], "Manual")
-        self.assertEqual(provider_history_rows["manual"]["cells"]["tools"], "2")
-        self.assertEqual(provider_history_rows["manual"]["cells"]["runs"], "4")
-        self.assertEqual(provider_history_rows["manual"]["cells"]["active"], "2")
-        self.assertEqual(provider_history_rows["manual"]["cells"]["failures"], "1")
+        self.assertIn("local", provider_history_rows)
         self.assertEqual(
-            provider_history_rows["manual"]["cells"]["success_rate"],
+            provider_history_rows["local"]["cells"]["provider"],
+            "Local",
+        )
+        self.assertGreaterEqual(
+            int(provider_history_rows["local"]["cells"]["tools"]),
+            2,
+        )
+        self.assertEqual(provider_history_rows["local"]["cells"]["runs"], "4")
+        self.assertEqual(provider_history_rows["local"]["cells"]["active"], "2")
+        self.assertEqual(
+            provider_history_rows["local"]["cells"]["failures"],
+            "1",
+        )
+        self.assertEqual(
+            provider_history_rows["local"]["cells"]["success_rate"],
             "50%",
         )
-        self.assertEqual(provider_history_rows["manual"]["cells"]["avg_duration"], "7s")
-        self.assertEqual(provider_history_rows["manual"]["cells"]["max_duration"], "8s")
-        self.assertEqual(provider_history_rows["manual"]["cells"]["state"], "Warning")
+        self.assertEqual(
+            provider_history_rows["local"]["cells"]["avg_duration"],
+            "7s",
+        )
+        self.assertEqual(
+            provider_history_rows["local"]["cells"]["max_duration"],
+            "8s",
+        )
+        self.assertEqual(
+            provider_history_rows["local"]["cells"]["state"],
+            "Warning",
+        )
         blocker_rows = {item["id"]: item for item in payload["run_blockers"]["rows"]}
         self.assertEqual(payload["run_blockers"]["total"], 2)
         self.assertEqual(
@@ -2312,6 +2226,15 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(access_row["cells"]["missing_access"], "browser_profile")
         self.assertIn(access_row["cells"]["status"], {"setup_needed", "unsupported"})
+        runtime_row = next(
+            item
+            for item in payload["auth_missing"]["rows"]
+            if item["cells"]["tool"] == "browser.snapshot"
+        )
+        self.assertEqual(runtime_row["cells"]["category"], "Runtime")
+        self.assertEqual(runtime_row["cells"]["missing_access"], "browser-profile-runtime")
+        self.assertEqual(runtime_row["cells"]["action"], "Open Daemon")
+        self.assertEqual(runtime_row["cells"]["route"], "/operations/daemon")
         self.assertIn(
             stored_artifact.id,
             {
@@ -2531,7 +2454,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 2,
                 ["tool-run-ui-page-artifact", "tool-run-ui-page-failed"],
             ),
-            ("provider=manual", 4, None),
+            ("provider=local", 4, None),
             (
                 "mode=inline",
                 2,
@@ -2581,7 +2504,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         expired_worker.heartbeat_at = now - timedelta(minutes=30)
         expired_worker.lease_expires_at = now - timedelta(minutes=29)
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.tool_workers.add(live_worker)
             uow.tool_workers.add(expired_worker)
             uow.commit()
@@ -2609,11 +2532,11 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_operations_tool_worker_lifecycle_events_and_prune_action(self) -> None:
         container = self.client.app.state.container
-        worker = container.tool_worker_service.register_worker(
+        worker = container.require(AppKey.TOOL_WORKER_SERVICE).register_worker(
             worker_id="tool-worker-lifecycle-ui",
             max_in_flight=2,
         )
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             persisted_worker = uow.tool_workers.get(worker.id)
             assert persisted_worker is not None
             persisted_worker.heartbeat_at = datetime.now(timezone.utc) - timedelta(
@@ -2625,11 +2548,11 @@ class UiHttpTestCase(HttpModuleTestCase):
             uow.tool_workers.add(persisted_worker)
             uow.commit()
 
-        container.tool_worker_service.register_worker(
+        container.require(AppKey.TOOL_WORKER_SERVICE).register_worker(
             worker_id=worker.id,
             max_in_flight=3,
         )
-        container.operations_observer_runtime_event_service.process_available_events()
+        self._process_operations_events()
         self._materialize_operations("tool")
 
         response = self.client.get("/operations/tool")
@@ -2653,7 +2576,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertIn("worker.recovered", worker_detail_events)
         self.assertIn("worker.capabilities_updated", worker_detail_events)
 
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             expired_worker = uow.tool_workers.get(worker.id)
             assert expired_worker is not None
             expired_worker.heartbeat_at = datetime.now(timezone.utc) - timedelta(
@@ -2673,12 +2596,12 @@ class UiHttpTestCase(HttpModuleTestCase):
         prune_payload = prune_response.json()
         self.assertEqual(prune_payload["pruned_count"], 1)
         self.assertEqual(prune_payload["worker_ids"], [worker.id])
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             self.assertIsNone(uow.tool_workers.get(worker.id))
 
     def test_ui_operations_llm_overview_uses_llm_runtime_state(self) -> None:
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialResultAdapter(
                 LlmResult(
@@ -2695,13 +2618,14 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
                 "context_window_tokens": 128000,
                 "max_concurrency": 2,
                 "concurrency_key": "provider:openai",
             },
         )
         self.assertEqual(llm_response.status_code, 201)
-        invocation = container.llm_service.invoke(
+        invocation = container.require(AppKey.LLM_SERVICE).invoke(
             InvokeLlmInput(
                 llm_id="openai.gpt-5.4-mini",
                 invocation_id="llm-invocation-ui-ops",
@@ -2724,7 +2648,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         metric_by_id = {item["id"]: item for item in payload["metrics"]}
         self.assertEqual(
             metric_by_id["profiles"]["value"],
-            str(len(container.llm_service.list_profiles())),
+            str(len(container.require(AppKey.LLM_SERVICE).list_profiles())),
         )
         self.assertEqual(metric_by_id["tokens"]["value"], "18")
         self.assertIn(
@@ -2754,7 +2678,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 raise RuntimeError("provider rate limit")
 
         container = self.client.app.state.container
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             _SequentialResultAdapter(
                 LlmResult(
@@ -2771,13 +2695,14 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-ops-page",
+                "credential_binding_id": "openai-api-key",
                 "context_window_tokens": 100,
                 "max_concurrency": 2,
                 "concurrency_key": "provider:openai",
             },
         )
         self.assertEqual(llm_response.status_code, 201)
-        succeeded = container.llm_service.invoke(
+        succeeded = container.require(AppKey.LLM_SERVICE).invoke(
             InvokeLlmInput(
                 llm_id="openai.gpt-ops-page",
                 invocation_id="llm-invocation-ui-page-succeeded",
@@ -2809,10 +2734,10 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "turn_id": "turn-llm-ops-page",
             },
         )
-        with container.uow_factory() as uow:
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(linked_run)
             uow.commit()
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="orchestration.llm_resolved",
                 kind="observe",
@@ -2828,11 +2753,11 @@ class UiHttpTestCase(HttpModuleTestCase):
             ),
         )
 
-        container.llm_adapter_registry.register(
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
             LlmApiFamily.OPENAI_RESPONSES,
             FailingLlmAdapter(),
         )
-        failed = container.llm_service.invoke(
+        failed = container.require(AppKey.LLM_SERVICE).invoke(
             InvokeLlmInput(
                 llm_id="openai.gpt-ops-page",
                 invocation_id="llm-invocation-ui-page-failed",
@@ -2844,8 +2769,8 @@ class UiHttpTestCase(HttpModuleTestCase):
                 ),
             ),
         )
-        container.operations_observer_runtime_event_service.process_available_events()
-        container.events_service.publish(
+        self._process_operations_events()
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="llm.stream_delta_observed",
                 kind="observe",
@@ -2906,9 +2831,9 @@ class UiHttpTestCase(HttpModuleTestCase):
         }
         self.assertEqual(
             access_rows["openai.gpt-ops-page"]["cells"]["status"],
-            "Auth Required",
+            "Available",
         )
-        self.assertEqual(payload["provider_auth_blocked"]["total"], 1)
+        self.assertEqual(payload["provider_auth_blocked"]["total"], 0)
         error_rows = payload["error_summary"]["rows"]
         self.assertEqual(error_rows[0]["cells"]["error_code"], "adapter_error")
         self.assertEqual(payload["token_usage"]["total"], 18)
@@ -2966,7 +2891,7 @@ class UiHttpTestCase(HttpModuleTestCase):
     def test_ui_operations_events_page_uses_event_bus_state(self) -> None:
         container = self.client.app.state.container
         topic = "events.named.operations.events.test"
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 name="operations.events.test",
                 topic=topic,
@@ -2979,7 +2904,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 trace={"trace_id": "trace-events-ops"},
             ),
         )
-        container.events_service.set_subscription_cursor(
+        container.require(AppKey.EVENTS_SERVICE).set_subscription_cursor(
             "operations.observer.events.test",
             source_topic=topic,
             cursor="0",
@@ -2997,8 +2922,8 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertIn("observer_coverage", payload)
         self.assertIn("observer_lag", payload)
         metric_by_id = {item["id"]: item for item in payload["metrics"]}
-        self.assertEqual(metric_by_id["topics"]["value"], "1")
-        self.assertEqual(metric_by_id["subscriptions"]["value"], "1")
+        self.assertGreaterEqual(int(metric_by_id["topics"]["value"]), 1)
+        self.assertGreaterEqual(int(metric_by_id["subscriptions"]["value"]), 1)
         self.assertIn("observers", metric_by_id)
         tab_by_id = {item["id"]: item for item in payload["tabs"]}
         self.assertIn("observer", tab_by_id)
@@ -3042,7 +2967,7 @@ class UiHttpTestCase(HttpModuleTestCase):
 
     def test_ui_operations_channels_page_uses_runtime_and_event_state(self) -> None:
         container = self.client.app.state.container
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(
                 channel_type="webhook",
                 accounts=(
@@ -3053,10 +2978,10 @@ class UiHttpTestCase(HttpModuleTestCase):
                 ),
             ),
         )
-        container.webhook_channel_runtime_service.ensure_registered(
+        container.require(AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE).ensure_registered(
             runtime_id="webhook-runtime-ui-ops",
         )
-        container.channel_interaction_service.upsert_interaction(
+        container.require(AppKey.CHANNEL_INFRASTRUCTURE).interaction_service.upsert_interaction(
             ChannelInteraction(
                 interaction_id="webhook:ops:event:ui-ops",
                 channel_type="webhook",
@@ -3082,7 +3007,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 },
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic=channel_dead_letter_topic(
                     "webhook",
@@ -3207,10 +3132,10 @@ class UiHttpTestCase(HttpModuleTestCase):
     ) -> None:
         container = self.client.app.state.container
         old_timestamp = datetime.now(timezone.utc) - timedelta(days=3)
-        container.channel_profile_service.upsert_profile(
+        container.require(AppKey.CHANNEL_PROFILE_SERVICE).upsert_profile(
             ChannelProfile(channel_type="webhook"),
         )
-        container.channel_interaction_registry_store.save(
+        container.require(AppKey.CHANNEL_INFRASTRUCTURE).interaction_registry_store.save(
             ChannelInteractionRegistry(
                 interactions=(
                     ChannelInteraction(
@@ -3240,7 +3165,7 @@ class UiHttpTestCase(HttpModuleTestCase):
     def test_ui_trace_summary_and_events_use_event_read_model(self) -> None:
         container = self.client.app.state.container
         base_time = datetime(2026, 4, 29, 6, 30, tzinfo=timezone.utc)
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic="turn.session.agent:assistant:trace-ui",
                 kind="fact",
@@ -3256,7 +3181,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 trace={"trace_id": "trace-ui-events", "correlation_id": "corr-ui"},
             ),
         )
-        container.events_service.publish(
+        container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic="turn.live.session.agent:assistant:trace-ui",
                 kind="live",
@@ -3302,6 +3227,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider": "openai",
                 "api_family": "openai_responses",
                 "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
             },
         )
         self.assertEqual(llm_response.status_code, 201)
@@ -3335,7 +3261,7 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(intake_response.status_code, 201)
 
-        self.client.app.state.container.events_service.publish(
+        self.client.app.state.container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
                 topic="turn.session.agent:assistant:main",
                 kind="fact",

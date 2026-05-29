@@ -2,18 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from crxzipple.modules.artifacts.application.services import ArtifactApplicationService
 from crxzipple.modules.artifacts.domain.entities import ArtifactKind, ArtifactVariant
 from crxzipple.modules.artifacts.domain.exceptions import ArtifactNotFoundError
 from crxzipple.modules.ocr.domain import OcrExecutionError, OcrResult, OcrValidationError
 
-from .ports import OcrEngine
+from .ports import OcrArtifactReadPort, OcrEngine
 
 
 @dataclass(slots=True)
 class OcrApplicationService:
     engine: OcrEngine
-    artifact_service: ArtifactApplicationService
+    artifact_service: OcrArtifactReadPort
     default_language: str = "ch"
 
     def health(self) -> dict[str, object]:

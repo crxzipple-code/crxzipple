@@ -9,7 +9,7 @@ class OcrHttpTestCase(HttpModuleTestCase):
     def test_ocr_health_endpoint_returns_service_health(self) -> None:
         container = self.client.app.state.container
         with patch.object(
-            type(container.ocr_service),
+            type(container.require(AppKey.OCR_SERVICE)),
             "health",
             autospec=True,
             return_value={"status": "ok", "backend": "fake-ocr"},
@@ -47,7 +47,7 @@ class OcrHttpTestCase(HttpModuleTestCase):
             )
 
         with patch.object(
-            type(container.ocr_service),
+            type(container.require(AppKey.OCR_SERVICE)),
             "analyze_artifact",
             autospec=True,
             side_effect=lambda _self, **kwargs: _analyze(**kwargs),

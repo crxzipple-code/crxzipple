@@ -10,6 +10,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "AgentIdentity",
     "AgentInstructionPolicy",
     "AgentLlmRoutingPolicy",
+    "AgentMemoryBinding",
     "AgentNotFoundError",
     "AgentProfile",
     "AgentRuntimePreferences",

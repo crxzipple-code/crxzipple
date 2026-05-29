@@ -11,7 +11,7 @@ capabilities:
   - reasoning
 default_params:
   reasoning_effort: medium
-credential_binding: env:OPENAI_API_KEY
+credential_binding_id: openai-api-key
 timeout_seconds: 120
 source_kind: imported
 enabled: true

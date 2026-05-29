@@ -24,7 +24,7 @@ class LlmProfileModel(Base):
         default=dict,
     )
     base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    credential_binding: Mapped[str | None] = mapped_column(
+    credential_binding_id: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
     )

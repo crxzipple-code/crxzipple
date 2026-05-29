@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.events import (
     EventSubscriptionCursor,
@@ -91,8 +91,8 @@ class EventConsoleStreamFilters:
 def list_event_contracts(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> dict[str, Any]:
-    payload = container.event_contract_registry.to_payload()
-    payload.update(container.event_definition_registry.to_payload())
+    payload = container.require(AppKey.EVENT_CONTRACT_REGISTRY).to_payload()
+    payload.update(container.require(AppKey.EVENT_DEFINITION_REGISTRY).to_payload())
     return payload
 
 
@@ -112,7 +112,7 @@ def stream_event_console(
     payload_key: str | None = Query(default=None),
     payload_value: str | None = Query(default=None),
 ) -> StreamingResponse:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     if events_service is None:
         raise HTTPException(status_code=503, detail="Event service is not available.")
 
@@ -128,7 +128,7 @@ def stream_event_console(
         payload_key=payload_key,
         payload_value=payload_value,
     )
-    definition_registry = container.event_definition_registry
+    definition_registry = container.require(AppKey.EVENT_DEFINITION_REGISTRY)
 
     def event_stream():
         topic_cursors = _snapshot_console_topics(
@@ -249,7 +249,7 @@ def list_event_records(
     payload_key: str | None = Query(default=None),
     payload_value: str | None = Query(default=None),
 ) -> dict[str, Any]:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     if events_service is None:
         raise HTTPException(status_code=503, detail="Event service is not available.")
 
@@ -273,7 +273,7 @@ def list_event_records(
         events_service=events_service,
         topic_cursors=topic_cursors,
         limit=limit,
-        definition_registry=container.event_definition_registry,
+        definition_registry=container.require(AppKey.EVENT_DEFINITION_REGISTRY),
         filters=filters,
     )
     return {
@@ -289,14 +289,14 @@ def get_event_topic_diagnostics(
     container: Annotated[AppContainer, Depends(get_container)],
     record_limit: Annotated[int, Query(ge=0, le=25)] = 5,
 ) -> dict[str, Any]:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     if events_service is None:
         raise HTTPException(status_code=503, detail="Event service is not available.")
     normalized_topic = topic.strip()
     if not normalized_topic:
         raise HTTPException(status_code=400, detail="topic is required.")
 
-    registry = container.event_contract_registry
+    registry = container.require(AppKey.EVENT_CONTRACT_REGISTRY)
     latest_cursor = events_service.snapshot_event_topic(normalized_topic)
     subscription_cursors = events_service.list_subscription_cursors(
         source_topic=normalized_topic,
@@ -351,7 +351,7 @@ def list_event_subscription_diagnostics(
     status: str | None = Query(default=None),
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict[str, Any]:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     if events_service is None:
         raise HTTPException(status_code=503, detail="Event service is not available.")
 
@@ -359,7 +359,7 @@ def list_event_subscription_diagnostics(
     normalized_subscription_prefix = _normalize_optional_text(subscription_prefix)
     normalized_status = _normalize_subscription_status(status)
 
-    registry = container.event_contract_registry
+    registry = container.require(AppKey.EVENT_CONTRACT_REGISTRY)
     all_states = events_service.list_subscription_cursors()
     filtered_states = tuple(
         state

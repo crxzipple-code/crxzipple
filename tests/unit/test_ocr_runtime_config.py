@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from crxzipple.bootstrap.container import _bootstrap_daemon_specs
+from crxzipple.app.assembly.daemon import build_runtime_daemon_specs
+from crxzipple.app.assembly.runtime_defaults import RuntimeSettingsBootstrapConfig
 from crxzipple.core.config import Settings
 from crxzipple.modules.browser.domain import BrowserSystemConfig
-from crxzipple.modules.orchestration.application import RuntimeSettingsBootstrapConfig
 
 
 class OcrRuntimeConfigTestCase(unittest.TestCase):
@@ -26,7 +26,7 @@ class OcrRuntimeConfigTestCase(unittest.TestCase):
             ocr_base_url="http://127.0.0.1:18900",
         )
 
-        specs = _bootstrap_daemon_specs(
+        specs = build_runtime_daemon_specs(
             settings=settings,
             browser_system_config=BrowserSystemConfig(
                 default_profile="crxzipple",
@@ -56,7 +56,7 @@ class OcrRuntimeConfigTestCase(unittest.TestCase):
             ocr_base_url="https://ocr.example.com",
         )
 
-        specs = _bootstrap_daemon_specs(
+        specs = build_runtime_daemon_specs(
             settings=settings,
             browser_system_config=BrowserSystemConfig(
                 default_profile="crxzipple",
@@ -86,7 +86,7 @@ class OcrRuntimeConfigTestCase(unittest.TestCase):
             ocr_base_url="https://ocr.example.com",
         )
 
-        specs = _bootstrap_daemon_specs(
+        specs = build_runtime_daemon_specs(
             settings=settings,
             browser_system_config=BrowserSystemConfig(
                 default_profile="crxzipple",

@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from crxzipple.modules.orchestration.application.ports import AuthorizationPort
+from crxzipple.modules.orchestration.application.ports import (
+    AuthorizationPort,
+    SessionMessageAppendPort,
+)
 from crxzipple.modules.orchestration.application.commands import (
     ResolveApprovalRequestInput,
 )
@@ -17,10 +20,7 @@ from crxzipple.modules.orchestration.domain.value_objects import (
     ApprovalDecision,
     PendingApprovalRequest,
 )
-from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
-    SessionApplicationService,
-)
+from crxzipple.modules.session.application import AppendSessionMessageInput
 from crxzipple.modules.session.domain import SessionMessageKind
 
 
@@ -45,7 +45,7 @@ class ApprovalResolutionService:
     """Authorization and transcript side effects for approval decisions."""
 
     authorization_port: AuthorizationPort | None
-    session_service: SessionApplicationService | None
+    session_service: SessionMessageAppendPort | None
     get_run: Callable[[str], OrchestrationRun]
 
     def grant_run_tool_authorization(

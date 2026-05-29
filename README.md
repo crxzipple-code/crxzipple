@@ -98,7 +98,7 @@ npm run dev
 
 ```text
 src/crxzipple/
-  bootstrap/        composition root and dependency wiring
+  app/              composition root: assembly factories, targets, AppKey registry
   core/             settings, database, logging, process config
   interfaces/       HTTP and CLI entrypoints
   modules/          bounded contexts
@@ -121,8 +121,28 @@ Each bounded context follows the same internal layering:
   adapters.
 - `interfaces`: HTTP/CLI DTOs, routers, serializers. Keep this layer thin.
 
-`src/crxzipple/bootstrap/container.py` is the composition root. Add wiring
-there, not business behavior.
+`src/crxzipple/app/assembly/*` is the composition root. Add module-local
+factories, integration factories and activation tasks there. `app/container.py`
+is only a thin runtime lookup facade over an assembled registry; production
+entrypoints should use explicit `AppKey` lookups and must not add broad
+attribute-style service locator access.
+
+Runtime targets are explicit and intentionally load different capability sets:
+
+- `api`: HTTP surface and UI read endpoints; does not host worker loops.
+- `daemon-supervisor`: daemon spec/instance/lease/process supervision.
+- `orchestration-scheduler`: ingress, queue, lane and assignment scheduling.
+- `orchestration-executor`: run lease/claim/heartbeat and engine advancement.
+- `tool-scheduler`: tool run dispatch and worker assignment.
+- `tool-worker`: executable tool capabilities and assignment execution.
+- `operations-observer`: event observation and Operations projection materialization.
+- `event-relay-worker`: event relay subscriptions.
+- `channel-runtime`: channel transport runtimes and inbound submission.
+- `cli-admin`: administrative CLI surface.
+- `test`: full test target with explicit fakes/overrides.
+
+Use `build_runtime_container(settings, target=AssemblyTarget.<target>)` from
+entrypoints. Do not restore the retired `bootstrap.build_container()` path.
 
 ## Modules
 

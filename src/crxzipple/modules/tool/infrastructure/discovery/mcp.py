@@ -5,7 +5,7 @@ from typing import Any
 
 from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.core.config import McpProviderSettings
-from crxzipple.modules.tool.domain import ToolSourceKind
+from crxzipple.modules.tool.domain import ToolDefinitionOrigin
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.domain.value_objects import (
     ToolEnvironment,
@@ -16,7 +16,7 @@ from crxzipple.modules.tool.domain.value_objects import (
     ToolMode,
     ToolParameter,
 )
-from crxzipple.modules.tool.infrastructure.mcp_client import McpStdioClient
+from crxzipple.modules.tool.infrastructure.mcp_client import McpClient, build_mcp_client
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,20 +53,20 @@ class McpToolDefinition:
                 supported_strategies=(ToolExecutionStrategy.ASYNC,),
                 supported_environments=(ToolEnvironment.REMOTE,),
             ),
-            source_kind=ToolSourceKind.REMOTE_REGISTRY,
+            definition_origin=ToolDefinitionOrigin.REMOTE_DISCOVERY,
             runtime_key=self.runtime_key,
             enabled=True,
         )
 
 
 class McpDiscoveryProvider:
-    source_kind = ToolSourceKind.REMOTE_REGISTRY
+    definition_origin = ToolDefinitionOrigin.REMOTE_DISCOVERY
 
     def __init__(
         self,
         config: McpProviderSettings,
         *,
-        client: McpStdioClient | None = None,
+        client: McpClient | None = None,
     ) -> None:
         self.config = config
         self.name = config.name
@@ -74,7 +74,7 @@ class McpDiscoveryProvider:
             config.description
             or f"Discovers MCP tools exposed by provider '{config.name}'."
         )
-        self.client = client or McpStdioClient(config)
+        self.client = client or build_mcp_client(config)
         self._definitions_cache: tuple[McpToolDefinition, ...] | None = None
 
     def discover_specs(self) -> list[ToolSpec]:

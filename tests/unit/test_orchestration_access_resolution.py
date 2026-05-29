@@ -21,7 +21,8 @@ class _FakeToolCatalog:
     def ensure_local_system_tools_registered(self) -> tuple[Tool, ...]:
         return ()
 
-    def list_enabled_tools(self) -> list[Tool]:
+    def list_enabled_tools(self, *, runtime_context=None) -> list[Tool]:
+        del runtime_context
         return [tool for tool in self._tools if tool.enabled]
 
 

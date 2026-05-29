@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import Tool, ToolRun
 
 
 class ToolCatalogPort(Protocol):
-    def ensure_local_system_tools_registered(self) -> tuple[Tool, ...]:
-        ...
-
-    def list_enabled_tools(self) -> list[Tool]:
+    def list_enabled_tools(
+        self,
+        *,
+        runtime_context: Mapping[str, Any] | None = None,
+    ) -> list[Tool]:
         ...
 
 

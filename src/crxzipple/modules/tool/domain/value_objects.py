@@ -44,10 +44,58 @@ class ToolEnvironment(StrEnum):
     REMOTE = "remote"
 
 
-class ToolSourceKind(StrEnum):
-    MANUAL = "manual"
+class ToolDefinitionOrigin(StrEnum):
     LOCAL_DISCOVERY = "local_discovery"
-    REMOTE_REGISTRY = "remote_registry"
+    REMOTE_DISCOVERY = "remote_discovery"
+
+
+class ToolCatalogSourceKind(StrEnum):
+    LOCAL_PACKAGE = "local_package"
+    MCP = "mcp"
+    OPENAPI = "openapi"
+    CLI = "cli"
+    PROVIDER_BACKEND = "provider_backend"
+
+
+class ToolSourceStatus(StrEnum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    ERROR = "error"
+    DELETED = "deleted"
+
+
+class ToolFunctionRuntimeKind(StrEnum):
+    LOCAL = "local"
+    REMOTE = "remote"
+    SANDBOX = "sandbox"
+    MCP = "mcp"
+    OPENAPI = "openapi"
+    CLI = "cli"
+    PROVIDER_BACKEND = "provider_backend"
+
+
+class ToolFunctionStatus(StrEnum):
+    ACTIVE = "active"
+    STALE = "stale"
+    DEPRECATED = "deprecated"
+    DISABLED = "disabled"
+    DELETED = "deleted"
+
+
+class ToolProviderCapability(StrEnum):
+    IMAGE_GENERATION = "image_generation"
+    WEB_SEARCH = "web_search"
+    SPEECH = "speech"
+    MEDIA = "media"
+    BROWSER = "browser"
+    CUSTOM = "custom"
+
+
+class ToolProviderBackendStatus(StrEnum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    ERROR = "error"
+    DELETED = "deleted"
 
 
 class ToolRunStatus(StrEnum):

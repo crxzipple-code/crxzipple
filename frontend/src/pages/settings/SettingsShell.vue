@@ -8,6 +8,7 @@ import {
   Home,
   KeyRound,
   Layers,
+  Monitor,
   Package,
   Shield,
   SlidersHorizontal,
@@ -23,6 +24,7 @@ import AgentProfilesSettingsPage from "./modules/AgentProfilesSettingsPage.vue";
 import AuditLogsSettingsPage from "./modules/AuditLogsSettingsPage.vue";
 import AuthorizationPoliciesSettingsPage from "./modules/AuthorizationPoliciesSettingsPage.vue";
 import BackupRestoreSettingsPage from "./modules/BackupRestoreSettingsPage.vue";
+import BrowserProfilesSettingsPage from "./modules/BrowserProfilesSettingsPage.vue";
 import ChannelProfilesSettingsPage from "./modules/ChannelProfilesSettingsPage.vue";
 import EnvironmentSettingsPage from "./modules/EnvironmentSettingsPage.vue";
 import EventRegistrySettingsPage from "./modules/EventRegistrySettingsPage.vue";
@@ -43,6 +45,7 @@ type SettingsResourceId =
   | "access-assets"
   | "authorization-policies"
   | "channel-profiles"
+  | "browser-profiles"
   | "event-registry"
   | "runtime-defaults"
   | "environment"
@@ -71,6 +74,7 @@ const settingsNav: SettingsNavItem[] = [
   { groupKey: "settings.group.accessAuth", id: "access-assets", path: "/settings/access-assets", labelKey: "settings.resource.accessAssets", icon: Shield },
   { groupKey: "settings.group.accessAuth", id: "authorization-policies", path: "/settings/authorization-policies", labelKey: "settings.resource.authorizationPolicies", icon: KeyRound },
   { groupKey: "settings.group.channelsEvents", id: "channel-profiles", path: "/settings/channel-profiles", labelKey: "settings.resource.channelProfiles", icon: GitBranch },
+  { groupKey: "settings.group.runtime", id: "browser-profiles", path: "/settings/browser-profiles", labelKey: "settings.resource.browserProfiles", icon: Monitor },
   { groupKey: "settings.group.runtime", id: "runtime-defaults", path: "/settings/runtime-defaults", labelKey: "settings.resource.runtimeDefaults", icon: SlidersHorizontal },
   { groupKey: "settings.group.administration", id: "environment", path: "/settings/environment", labelKey: "settings.resource.environment", icon: Box },
   { groupKey: "settings.group.administration", id: "audit-logs", path: "/settings/audit-logs", labelKey: "settings.resource.auditLogs", icon: FileClock },
@@ -86,6 +90,7 @@ const settingsComponents = {
   "access-assets": AccessAssetsSettingsPage,
   "authorization-policies": AuthorizationPoliciesSettingsPage,
   "channel-profiles": ChannelProfilesSettingsPage,
+  "browser-profiles": BrowserProfilesSettingsPage,
   "event-registry": EventRegistrySettingsPage,
   "runtime-defaults": RuntimeDefaultsSettingsPage,
   environment: EnvironmentSettingsPage,
@@ -107,6 +112,7 @@ function normalizeResource(value: unknown): SettingsResourceId {
   if (raw === "access") return "access-assets";
   if (raw === "authorization" || raw === "auth" || raw === "authorization-policies") return "authorization-policies";
   if (raw === "channel" || raw === "channels") return "channel-profiles";
+  if (raw === "browser" || raw === "browsers" || raw === "browser-profile" || raw === "browser-profiles") return "browser-profiles";
   if (raw === "runtime") return "runtime-defaults";
   if (raw === "audit") return "audit-logs";
   if (raw === "backup") return "backup-restore";

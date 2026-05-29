@@ -12,7 +12,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="read",
                         arguments={"path": "notes.txt", "offset": 2, "limit": 2},
@@ -37,7 +37,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             Path(outside_dir, "escape.txt").write_text("outside\n", encoding="utf-8")
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="read",
                         arguments={"path": "../escape.txt"},
@@ -63,7 +63,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 "from forged context\n",
                 encoding="utf-8",
             )
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -72,7 +72,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="read",
                         arguments={"path": "notes.txt"},
@@ -97,7 +97,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             Path(workspace_dir, "docs", "guide.md").write_text("guide\n", encoding="utf-8")
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="workspace_list",
                         arguments={"path": ".", "limit": 10},
@@ -118,7 +118,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_list_tool_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="workspace_list",
                         arguments={"path": "../escape"},
@@ -138,7 +138,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
         with tempfile.TemporaryDirectory() as bound_workspace, tempfile.TemporaryDirectory() as fake_workspace:
             Path(bound_workspace, "bound.txt").write_text("bound\n", encoding="utf-8")
             Path(fake_workspace, "fake.txt").write_text("fake\n", encoding="utf-8")
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -147,7 +147,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="workspace_list",
                         arguments={},
@@ -168,7 +168,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_executes_workspace_write_tool_with_bound_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="write",
                         arguments={"path": "notes.txt", "content": "alpha\nbeta\n"},
@@ -190,7 +190,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_write_tool_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="write",
                         arguments={"path": "../escape.txt", "content": "outside\n"},
@@ -206,10 +206,37 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
         assert tool_run.error is not None
         self.assertIn("cannot traverse upward", tool_run.error.message)
 
+    def test_workspace_write_tool_rejects_memory_managed_path(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            memory_path = Path(workspace_dir, "MEMORY.md")
+            memory_path.write_text("# Memory\n", encoding="utf-8")
+
+            tool_run = asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="write",
+                        arguments={
+                            "path": "MEMORY.md",
+                            "content": "bypassed memory service\n",
+                        },
+                        execution_context=ToolExecutionContext(
+                            attrs={"workspace_dir": workspace_dir},
+                        ),
+                    ),
+                ),
+            )
+            memory_text = memory_path.read_text(encoding="utf-8")
+
+        self.assertEqual(tool_run.status, ToolRunStatus.FAILED)
+        self.assertEqual(memory_text, "# Memory\n")
+        self.assertIsNotNone(tool_run.error)
+        assert tool_run.error is not None
+        self.assertIn("memory-managed paths", tool_run.error.message)
+
     def test_workspace_write_tool_creates_missing_parent_directories(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="write",
                         arguments={
@@ -232,7 +259,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
 
     def test_workspace_write_tool_prefers_session_bound_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as bound_workspace, tempfile.TemporaryDirectory() as fake_workspace:
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -241,7 +268,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="write",
                         arguments={"path": "notes.txt", "content": "from session binding\n"},
@@ -272,7 +299,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 encoding="utf-8",
             )
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="workspace_search",
                         arguments={"query": "session_workspace_lookup", "limit": 2},
@@ -292,7 +319,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_search_tool_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="workspace_search",
                         arguments={"query": "alpha", "path": "../escape"},
@@ -318,7 +345,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 "from forged context\n",
                 encoding="utf-8",
             )
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -327,7 +354,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="workspace_search",
                         arguments={"query": "session binding"},
@@ -353,7 +380,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 encoding="utf-8",
             )
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="edit",
                         arguments={
@@ -384,7 +411,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 encoding="utf-8",
             )
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="edit",
                         arguments={
@@ -404,6 +431,35 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
         assert tool_run.error is not None
         self.assertIn("exactly one match", tool_run.error.message)
 
+    def test_workspace_edit_tool_rejects_memory_managed_path(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            daily_path = Path(workspace_dir, "memory", "2026-05-22.md")
+            daily_path.parent.mkdir()
+            daily_path.write_text("alpha\n", encoding="utf-8")
+
+            tool_run = asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="edit",
+                        arguments={
+                            "path": "memory/2026-05-22.md",
+                            "oldText": "alpha",
+                            "newText": "beta",
+                        },
+                        execution_context=ToolExecutionContext(
+                            attrs={"workspace_dir": workspace_dir},
+                        ),
+                    ),
+                ),
+            )
+            memory_text = daily_path.read_text(encoding="utf-8")
+
+        self.assertEqual(tool_run.status, ToolRunStatus.FAILED)
+        self.assertEqual(memory_text, "alpha\n")
+        self.assertIsNotNone(tool_run.error)
+        assert tool_run.error is not None
+        self.assertIn("memory-managed paths", tool_run.error.message)
+
     def test_workspace_edit_tool_prefers_session_bound_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as bound_workspace, tempfile.TemporaryDirectory() as fake_workspace:
             Path(bound_workspace, "notes.txt").write_text(
@@ -414,7 +470,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 "from forged context\n",
                 encoding="utf-8",
             )
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -423,7 +479,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="edit",
                         arguments={
@@ -456,7 +512,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             Path(workspace_dir, "nested").mkdir()
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="exec",
                         arguments={"command": "pwd", "cwd": "nested"},
@@ -479,7 +535,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_exec_tool_rejects_cwd_escape(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="exec",
                         arguments={"command": "pwd", "cwd": "../escape"},
@@ -505,7 +561,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 "from forged context\n",
                 encoding="utf-8",
             )
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -514,7 +570,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
 
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="exec",
                         arguments={"command": "cat marker.txt"},
@@ -535,7 +591,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_exec_tool_returns_nonzero_exit_without_failing(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="exec",
                         arguments={"command": "printf 'problem\\n' >&2; exit 7"},
@@ -553,11 +609,11 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_exec_can_start_background_process_and_manage_it(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             started = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="exec",
                         arguments={
-                            "command": "printf 'start\\n'; sleep 0.2; printf 'done\\n'",
+                            "command": "printf 'start\\n'; sleep 0.05; printf 'done\\n'",
                             "background": True,
                         },
                         execution_context=ToolExecutionContext(
@@ -569,7 +625,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             process_id = str(started.result.metadata["process_id"])
 
             listed = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="process",
                         arguments={"action": "list"},
@@ -579,20 +635,26 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                     ),
                 ),
             )
-            time.sleep(0.4)
-            polled = asyncio.run(
-                self.container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="process",
-                        arguments={"action": "poll", "process_id": process_id},
-                        execution_context=ToolExecutionContext(
-                            attrs={"workspace_dir": workspace_dir},
+            deadline = time.monotonic() + 0.5
+            while True:
+                polled = asyncio.run(
+                    self.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="process",
+                            arguments={"action": "poll", "process_id": process_id},
+                            execution_context=ToolExecutionContext(
+                                attrs={"workspace_dir": workspace_dir},
+                            ),
                         ),
                     ),
-                ),
-            )
+                )
+                if "done" in str(polled.result.metadata.get("stdout", "")):
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
             removed = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="process",
                         arguments={"action": "remove", "process_id": process_id},
@@ -618,7 +680,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
     def test_workspace_process_tool_can_kill_background_process(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             started = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="exec",
                         arguments={
@@ -633,7 +695,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             )
             process_id = str(started.result.metadata["process_id"])
             killed = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="process",
                         arguments={"action": "kill", "process_id": process_id},
@@ -643,18 +705,24 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                     ),
                 ),
             )
-            time.sleep(0.2)
-            polled = asyncio.run(
-                self.container.tool_service.execute(
-                    ExecuteToolInput(
-                        tool_id="process",
-                        arguments={"action": "poll", "process_id": process_id},
-                        execution_context=ToolExecutionContext(
-                            attrs={"workspace_dir": workspace_dir},
+            deadline = time.monotonic() + 0.5
+            while True:
+                polled = asyncio.run(
+                    self.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="process",
+                            arguments={"action": "poll", "process_id": process_id},
+                            execution_context=ToolExecutionContext(
+                                attrs={"workspace_dir": workspace_dir},
+                            ),
                         ),
                     ),
-                ),
-            )
+                )
+                if polled.result.metadata.get("status") == "killed":
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
 
         self.assertEqual(killed.status, ToolRunStatus.SUCCEEDED)
         self.assertEqual(polled.status, ToolRunStatus.SUCCEEDED)
@@ -682,7 +750,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 ],
             )
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="apply_patch",
                         arguments={"input": patch_input},
@@ -702,6 +770,40 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
         self.assertEqual(tool_run.result.metadata["added_files"], [])
         self.assertEqual(tool_run.result.metadata["deleted_files"], [])
 
+    def test_workspace_apply_patch_tool_rejects_memory_managed_path(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            memory_path = Path(workspace_dir, "MEMORY.md")
+            memory_path.write_text("# Memory\n", encoding="utf-8")
+            patch_input = "\n".join(
+                [
+                    "*** Begin Patch",
+                    "*** Update File: MEMORY.md",
+                    "@@",
+                    "-# Memory",
+                    "+# Edited",
+                    "*** End Patch",
+                ],
+            )
+
+            tool_run = asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="apply_patch",
+                        arguments={"input": patch_input},
+                        execution_context=ToolExecutionContext(
+                            attrs={"workspace_dir": workspace_dir},
+                        ),
+                    ),
+                ),
+            )
+            memory_text = memory_path.read_text(encoding="utf-8")
+
+        self.assertEqual(tool_run.status, ToolRunStatus.FAILED)
+        self.assertEqual(memory_text, "# Memory\n")
+        self.assertIsNotNone(tool_run.error)
+        assert tool_run.error is not None
+        self.assertIn("memory-managed paths", tool_run.error.message)
+
     def test_workspace_apply_patch_tool_rejects_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
             patch_input = "\n".join(
@@ -713,7 +815,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 ],
             )
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="apply_patch",
                         arguments={"input": patch_input},
@@ -739,7 +841,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 "from forged context\n",
                 encoding="utf-8",
             )
-            self.container.session_service.ensure_session(
+            self.session_service.ensure_session(
                 EnsureSessionInput(
                     key="agent:assistant:main",
                     agent_id="assistant",
@@ -758,7 +860,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                 ],
             )
             tool_run = asyncio.run(
-                self.container.tool_service.execute(
+                self.tool_service.execute(
                     ExecuteToolInput(
                         tool_id="apply_patch",
                         arguments={"input": patch_input},
@@ -781,4 +883,3 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
             Path(str(tool_run.result.metadata["workspace_dir"])).resolve(),
             Path(bound_workspace).resolve(),
         )
-

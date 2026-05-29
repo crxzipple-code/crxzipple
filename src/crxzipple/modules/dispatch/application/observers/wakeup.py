@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.shared.domain.events import Event
+
+from ..ports import DispatchEventPublishPort
 
 logger = get_logger(__name__)
 
@@ -18,7 +19,7 @@ def dispatch_wakeup_topic(owner_kind: str) -> str:
 
 @dataclass(slots=True)
 class DispatchWakeupObserver:
-    events_service: EventsApplicationService
+    events_service: DispatchEventPublishPort
 
     def observe_task_queued(self, event: Event) -> None:
         self._observe_wakeup(event)

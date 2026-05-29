@@ -18,7 +18,7 @@ export interface LlmProfileApiPayload {
   capabilities: string[];
   default_params: LlmDefaultsApiPayload;
   base_url: string | null;
-  credential_binding: string | null;
+  credential_binding_id: string | null;
   timeout_seconds: number;
   max_concurrency: number | null;
   concurrency_key: string | null;
@@ -65,8 +65,19 @@ export type LlmProfileWritePayload = Omit<LlmProfileApiPayload, "source_kind"> &
   reason?: string | null;
 };
 
+export type LlmProfileTestPayload = LlmInvokeRequestPayload & {
+  profile: LlmProfileWritePayload;
+};
+
 export function listLlmProfiles(): Promise<LlmProfileApiPayload[]> {
   return requestJson<LlmProfileApiPayload[]>("/llms");
+}
+
+export function createLlmProfile(payload: LlmProfileWritePayload): Promise<LlmProfileApiPayload> {
+  return requestJson<LlmProfileApiPayload>("/llms", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getLlmProfile(profileId: string): Promise<LlmProfileApiPayload> {
@@ -98,6 +109,13 @@ export function invokeLlmProfile(
   payload: LlmInvokeRequestPayload,
 ): Promise<LlmInvocationApiPayload> {
   return requestJson<LlmInvocationApiPayload>(`/llms/${encodeURIComponent(profileId)}/invoke`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function testLlmProfile(payload: LlmProfileTestPayload): Promise<LlmInvocationApiPayload> {
+  return requestJson<LlmInvocationApiPayload>("/llms/test", {
     method: "POST",
     body: JSON.stringify(payload),
   });

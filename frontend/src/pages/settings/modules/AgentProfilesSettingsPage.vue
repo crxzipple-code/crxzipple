@@ -1,20 +1,29 @@
 <script setup lang="ts">
 import {
   Box,
+  CheckCircle2,
+  Clock3,
+  Database,
+  Download,
+  FileText,
+  Folder,
   Import,
+  Link2,
+  Maximize2,
   MoreVertical,
   Plus,
   Power,
   RefreshCcw,
   Save,
   Search,
-  SlidersHorizontal,
+  Settings2,
+  ShieldCheck,
   Trash2,
+  UserCog,
   X,
 } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 
-import UiButton from "@/shared/ui/UiButton.vue";
 import {
   createAgentProfile,
   deleteAgentProfile,
@@ -24,70 +33,58 @@ import {
   getAgentProfile,
   getAgentProfileResolution,
   getAgentHome,
+  grantAgentAuthorization,
   listAgentProfiles,
-  listAgentProfileEvents,
+  revokeAgentAuthorization,
   syncAgentHome,
   updateAgentProfile,
   updateAgentHomeFiles,
-  type AgentOwnerJsonRecord,
-  type AgentAuthorizationGrantApiPayload,
+  type AgentAuthorizationGrantKind,
   type AgentProfileApiPayload,
   type AgentProfileResolutionApiPayload,
   type AgentHomeSnapshotApiPayload,
-  type EventRecordApiPayload,
 } from "../ownerApis/agentProfiles";
+import {
+  listBrowserProfiles,
+  type BrowserProfileApiPayload,
+} from "../ownerApis/browserProfiles";
 import {
   listLlmProfiles,
   type LlmProfileApiPayload,
 } from "../ownerApis/llmProfiles";
-import {
-  listSkills,
-  type SkillApiPayload,
-} from "../ownerApis/skillCatalog";
 import {
   listTools,
   type ToolApiPayload,
 } from "../ownerApis/toolCatalog";
 
 type JsonRecord = Record<string, unknown>;
-type AgentTab = "general" | "llm" | "runtime" | "memory" | "tools" | "resolution" | "history" | "advanced";
 
 const profiles = ref<AgentProfileApiPayload[]>([]);
 const llmProfiles = ref<LlmProfileApiPayload[]>([]);
 const toolCatalog = ref<ToolApiPayload[]>([]);
-const skillCatalog = ref<SkillApiPayload[]>([]);
+const browserProfiles = ref<BrowserProfileApiPayload[]>([]);
+const browserDefaultProfile = ref("");
 const homeSnapshot = ref<AgentHomeSnapshotApiPayload | null>(null);
 const profileResolution = ref<AgentProfileResolutionApiPayload | null>(null);
-const historyRecords = ref<EventRecordApiPayload[]>([]);
 const selectedProfileId = ref<string | null>(null);
 const isLoading = ref(false);
 const homeLoading = ref(false);
 const resolutionLoading = ref(false);
-const historyLoading = ref(false);
 const loadError = ref<string | null>(null);
 const catalogLoadError = ref<string | null>(null);
 const homeError = ref<string | null>(null);
 const resolutionError = ref<string | null>(null);
-const historyError = ref<string | null>(null);
 const detailError = ref<string | null>(null);
 const ownerActionError = ref<string | null>(null);
 const ownerActionMessage = ref<string | null>(null);
 const ownerActionLoading = ref(false);
+const authorizationActionKey = ref<string | null>(null);
 const importInput = ref<HTMLInputElement | null>(null);
-const openRowMenuId = ref<string | null>(null);
-const searchTerm = ref("");
-const statusFilter = ref("all");
-const runtimeFilter = ref("all");
-const strategyFilter = ref("all");
-const tagFilter = ref("all");
-const currentPage = ref(1);
-const pageSize = ref(10);
+const toolSearchTerm = ref("");
 const editMode = ref<"create" | "update">("update");
-const activeTab = ref<AgentTab>("general");
 
 const editProfileId = ref("");
 const editName = ref("");
-const editDescription = ref("");
 const editTags = ref("");
 const editEnabled = ref(true);
 const editDefaultLlmId = ref("");
@@ -98,114 +95,104 @@ const editWorkdir = ref("");
 const editWorkspace = ref("");
 const editHomeDir = ref("");
 const editSandboxMode = ref("sandbox");
-const editMemoryBackend = ref("");
+const editDefaultBrowserProfile = ref("");
+const editMemorySpace = ref("");
 const editSystemPrompt = ref("");
 const editStreamByDefault = ref(false);
 const editTimeoutSeconds = ref(120);
 const editMaxTurns = ref(99);
-const editToolIds = ref<string[]>([]);
-const editSkillIds = ref<string[]>([]);
 const selectedHomeFileName = ref("");
 const editHomeFileContent = ref("");
-
-const llmById = computed(() => {
-  const values = new Map<string, LlmProfileApiPayload>();
-  for (const item of llmProfiles.value) values.set(item.id, item);
-  return values;
-});
 
 const selectedProfile = computed(() =>
   profiles.value.find((profile) => profile.id === selectedProfileId.value) ?? null,
 );
 
-const filteredProfiles = computed(() => {
-  const query = searchTerm.value.trim().toLowerCase();
-  return profiles.value.filter((profile) => {
-    if (query) {
-      const haystack = [
-        profile.id,
-        profile.name,
-        profile.description,
-        profile.llm_routing_policy.default_llm_id,
-        ...fallbackLlmIds(profile),
-        ...tagsForProfile(profile),
-      ].join(" ").toLowerCase();
-      if (!haystack.includes(query)) return false;
-    }
-    if (statusFilter.value !== "all" && profileStatus(profile) !== statusFilter.value) return false;
-    if (runtimeFilter.value !== "all" && runtimeMode(profile) !== runtimeFilter.value) return false;
-    if (strategyFilter.value !== "all" && routingStrategy(profile) !== strategyFilter.value) return false;
-    if (tagFilter.value !== "all" && !tagsForProfile(profile).includes(tagFilter.value)) return false;
-    return true;
-  });
-});
-
-const totalPages = computed(() =>
-  Math.max(1, Math.ceil(filteredProfiles.value.length / pageSize.value)),
-);
-
-const pagedProfiles = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value;
-  return filteredProfiles.value.slice(start, start + pageSize.value);
-});
-
-const visibleRangeLabel = computed(() => {
-  if (!filteredProfiles.value.length) return "0-0 / 0";
-  const start = (currentPage.value - 1) * pageSize.value + 1;
-  const end = Math.min(filteredProfiles.value.length, start + pageSize.value - 1);
-  return `${start}-${end} / ${filteredProfiles.value.length}`;
-});
-
-const statusOptions = computed(() => [
-  { value: "all", label: "All", count: profiles.value.length },
-  { value: "enabled", label: "Enabled", count: profiles.value.filter((profile) => profile.enabled).length },
-  { value: "disabled", label: "Disabled", count: profiles.value.filter((profile) => !profile.enabled).length },
-  { value: "draft", label: "Draft", count: profiles.value.filter((profile) => profileStatus(profile) === "draft").length },
-]);
-
-const runtimeOptions = computed(() => optionCounts(profiles.value.map(runtimeMode), [
-  "sandbox",
-  "container",
-  "hybrid",
-  "workspace",
-]));
-
-const strategyOptions = computed(() => optionCounts(profiles.value.map(routingStrategy), [
-  "fixed",
-  "auto-routing",
-  "fallback",
-  "image/document",
-]));
-
-const tagOptions = computed(() => {
-  const counts = new Map<string, number>();
-  for (const profile of profiles.value) {
-    for (const tag of tagsForProfile(profile)) counts.set(tag, (counts.get(tag) ?? 0) + 1);
-  }
-  return Array.from(counts.entries())
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 8)
-    .map(([label, count]) => ({ value: label, label, count }));
-});
-
 const selectedTags = computed(() =>
   editTags.value.split(",").map((tag) => tag.trim()).filter(Boolean),
 );
 
-const selectedToolIds = computed(() => {
-  return editToolIds.value;
+const filteredToolCatalog = computed(() => {
+  const query = toolSearchTerm.value.trim().toLowerCase();
+  if (!query) return toolCatalog.value;
+  return toolCatalog.value.filter((tool) =>
+    [
+      tool.id,
+      tool.name,
+      tool.kind,
+      toolAuthorizationTargetLabel(tool),
+    ].filter(Boolean).join(" ").toLowerCase().includes(query),
+  );
 });
 
-const selectedSkillIds = computed(() => {
-  return editSkillIds.value;
-});
+const visibleToolCatalog = computed(() => filteredToolCatalog.value);
 
 const selectedHomeFile = computed(() =>
   homeSnapshot.value?.files.find((file) => file.name === selectedHomeFileName.value) ?? null,
 );
 
+const homeEditorLineNumbers = computed(() => {
+  const lineCount = Math.max(1, editHomeFileContent.value.split(/\r\n|\r|\n/).length);
+  return Array.from({ length: Math.min(lineCount, 999) }, (_, index) => index + 1).join("\n");
+});
+
 const effectiveAuthorizationGrants = computed(() =>
   profileResolution.value?.authorization_grants ?? [],
+);
+
+const enabledAllowAuthorizationGrants = computed(() =>
+  effectiveAuthorizationGrants.value.filter(
+    (grant) => grant.effect === "allow" && grant.status === "enabled",
+  ),
+);
+
+const preauthorizedEffectIds = computed(() => {
+  const values = new Set<string>();
+  for (const grant of enabledAllowAuthorizationGrants.value) {
+    for (const effectId of grant.effect_ids) values.add(effectId);
+  }
+  return values;
+});
+
+const preauthorizedToolIds = computed(() => {
+  const values = new Set<string>();
+  for (const grant of enabledAllowAuthorizationGrants.value) {
+    for (const toolId of grant.tool_ids) values.add(toolId);
+  }
+  return values;
+});
+
+const preauthorizedToolCount = computed(() =>
+  toolCatalog.value.filter((tool) => isToolPreauthorized(tool)).length,
+);
+
+const resolutionIssueCount = computed(() =>
+  profileResolution.value?.summary.issues ?? profileResolution.value?.validation.length ?? 0,
+);
+
+const blockedAccessGrantCount = computed(() =>
+  profileResolution.value?.access_grants.filter((grant) => !grant.ready).length ?? 0,
+);
+
+const readyAccessGrantCount = computed(() =>
+  profileResolution.value?.access_grants.filter((grant) => grant.ready).length ?? 0,
+);
+
+const homePathLabel = computed(() =>
+  editHomeDir.value.trim()
+    || editWorkdir.value.trim()
+    || editWorkspace.value.trim()
+    || selectedProfile.value?.runtime_preferences.home_dir
+    || selectedProfile.value?.runtime_preferences.workdir
+    || selectedProfile.value?.runtime_preferences.workspace
+    || "-",
+);
+
+const browserProfileOptions = computed(() =>
+  browserProfiles.value.map((profile) => ({
+    value: profile.name,
+    label: `${profile.name}${profile.name === browserDefaultProfile.value ? " · system default" : ""}`,
+  })),
 );
 
 const canSubmitOwnerForm = computed(() =>
@@ -224,28 +211,8 @@ watch(selectedProfile, (profile) => {
   resetEditFormFromProfile(profile);
 });
 
-watch([activeTab, selectedProfileId], () => {
-  if (activeTab.value === "advanced" && selectedProfileId.value && editMode.value === "update") {
-    void loadAgentHome();
-  }
-  if (
-    (activeTab.value === "tools" || activeTab.value === "resolution")
-    && selectedProfileId.value
-    && editMode.value === "update"
-  ) {
-    void loadAgentResolution();
-  }
-  if (activeTab.value === "history" && selectedProfileId.value && editMode.value === "update") {
-    void loadAgentHistory();
-  }
-});
-
-watch([searchTerm, statusFilter, runtimeFilter, strategyFilter, tagFilter, pageSize], () => {
-  currentPage.value = 1;
-});
-
-watch(filteredProfiles, () => {
-  if (currentPage.value > totalPages.value) currentPage.value = totalPages.value;
+watch([selectedProfileId, editMode], () => {
+  void refreshSelectedProfileReadModels();
 });
 
 async function loadAgentProfiles(): Promise<void> {
@@ -280,10 +247,8 @@ async function loadAgentProfiles(): Promise<void> {
 }
 
 async function selectProfile(profileId: string): Promise<void> {
-  openRowMenuId.value = null;
   homeSnapshot.value = null;
   profileResolution.value = null;
-  historyRecords.value = [];
   selectedHomeFileName.value = "";
   editHomeFileContent.value = "";
   selectedProfileId.value = profileId;
@@ -303,12 +268,10 @@ async function selectProfile(profileId: string): Promise<void> {
 function beginCreateProfile(): void {
   editMode.value = "create";
   selectedProfileId.value = null;
-  activeTab.value = "general";
   ownerActionError.value = null;
   ownerActionMessage.value = null;
   editProfileId.value = "";
   editName.value = "";
-  editDescription.value = "";
   editTags.value = "";
   editEnabled.value = true;
   editDefaultLlmId.value = llmProfiles.value[0]?.id ?? "";
@@ -319,53 +282,54 @@ function beginCreateProfile(): void {
   editWorkspace.value = "";
   editHomeDir.value = "";
   editSandboxMode.value = "sandbox";
-  editMemoryBackend.value = "";
+  editDefaultBrowserProfile.value = "";
+  editMemorySpace.value = "";
   editSystemPrompt.value = "";
   editStreamByDefault.value = false;
   editTimeoutSeconds.value = 120;
   editMaxTurns.value = 99;
-  editToolIds.value = [];
-  editSkillIds.value = [];
   homeSnapshot.value = null;
   profileResolution.value = null;
-  historyRecords.value = [];
   selectedHomeFileName.value = "";
   editHomeFileContent.value = "";
 }
 
 function resetEditFormFromProfile(profile: AgentProfileApiPayload): void {
+  const llmRouting = objectValue(profile.llm_routing_policy) ?? {};
+  const runtimePreferences = objectValue(profile.runtime_preferences) ?? {};
+  const instructionPolicy = objectValue(profile.instruction_policy) ?? {};
+  const executionPolicy = objectValue(profile.execution_policy) ?? {};
   editMode.value = "update";
   editProfileId.value = profile.id;
   editName.value = profile.name;
-  editDescription.value = profile.description ?? "";
   editTags.value = tagsForProfile(profile).join(", ");
   editEnabled.value = profile.enabled;
-  editDefaultLlmId.value = profile.llm_routing_policy.default_llm_id ?? "";
+  editDefaultLlmId.value = textValue(llmRouting.default_llm_id, "");
   editFallbackLlmIds.value = fallbackLlmIds(profile).join(", ");
-  editImageLlmId.value = profile.llm_routing_policy.image_llm_id ?? "";
-  editDocumentLlmId.value = profile.llm_routing_policy.document_llm_id ?? "";
-  editWorkdir.value = profile.runtime_preferences.workdir ?? "";
-  editWorkspace.value = profile.runtime_preferences.workspace ?? "";
-  editHomeDir.value = profile.runtime_preferences.home_dir ?? "";
-  editSandboxMode.value = profile.runtime_preferences.sandbox_mode ?? "sandbox";
-  editMemoryBackend.value = profile.runtime_preferences.memory_retrieval_backend ?? "";
-  editSystemPrompt.value = profile.instruction_policy.system_prompt ?? "";
-  editStreamByDefault.value = profile.instruction_policy.stream_by_default === true;
-  editTimeoutSeconds.value = numericOr(profile.execution_policy.timeout_seconds, 120);
-  editMaxTurns.value = numericOr(profile.execution_policy.max_turns, 99);
-  editToolIds.value = stringArrayFromAttrs(profile, "tool_ids", "tools");
-  editSkillIds.value = stringArrayFromAttrs(profile, "skill_ids", "skills");
+  editImageLlmId.value = textValue(llmRouting.image_llm_id, "");
+  editDocumentLlmId.value = textValue(llmRouting.document_llm_id, "");
+  editWorkdir.value = textValue(runtimePreferences.workdir, "");
+  editWorkspace.value = textValue(runtimePreferences.workspace, "");
+  editHomeDir.value = textValue(runtimePreferences.home_dir, "");
+  editSandboxMode.value = textValue(runtimePreferences.sandbox_mode, "sandbox");
+  editDefaultBrowserProfile.value = defaultBrowserProfileForProfile(profile);
+  editMemorySpace.value = memorySpaceForProfile(profile);
+  editSystemPrompt.value = textValue(instructionPolicy.system_prompt, "");
+  editStreamByDefault.value = instructionPolicy.stream_by_default === true;
+  editTimeoutSeconds.value = numericOr(executionPolicy.timeout_seconds, 120);
+  editMaxTurns.value = numericOr(executionPolicy.max_turns, 99);
 }
 
 async function loadCatalogs(): Promise<void> {
   catalogLoadError.value = null;
   try {
-    const [tools, skills] = await Promise.all([
+    const [tools, browserCatalog] = await Promise.all([
       listTools().catch(() => [] as ToolApiPayload[]),
-      listSkills().catch(() => [] as SkillApiPayload[]),
+      listBrowserProfiles().catch(() => null),
     ]);
     toolCatalog.value = tools;
-    skillCatalog.value = skills;
+    browserProfiles.value = browserCatalog?.profiles ?? [];
+    browserDefaultProfile.value = browserCatalog?.default_profile ?? "";
   } catch (error) {
     catalogLoadError.value = error instanceof Error ? error.message : String(error);
   }
@@ -410,19 +374,54 @@ async function loadAgentResolution(): Promise<void> {
   }
 }
 
-async function loadAgentHistory(): Promise<void> {
+async function refreshSelectedProfileReadModels(): Promise<void> {
+  if (!selectedProfileId.value || editMode.value !== "update") return;
+  await Promise.all([
+    loadAgentResolution(),
+    loadAgentHome(),
+  ]);
+}
+
+async function toggleToolPreauthorization(tool: ToolApiPayload, event: Event): Promise<void> {
   const profileId = selectedProfileId.value;
-  if (!profileId || historyLoading.value) return;
-  historyLoading.value = true;
-  historyError.value = null;
+  if (!profileId || authorizationActionKey.value) return;
+  const checked = (event.target as HTMLInputElement | null)?.checked === true;
+  const targets = toolAuthorizationTargets(tool);
+  const actionKey = toolAuthorizationActionKey(tool);
+  authorizationActionKey.value = actionKey;
+  ownerActionError.value = null;
+  ownerActionMessage.value = null;
   try {
-    const payload = await listAgentProfileEvents(profileId, 25);
-    historyRecords.value = payload.records;
+    for (const target of targets) {
+      const payload = {
+        agent_id: profileId,
+        kind: target.kind,
+        id: target.id,
+        reason: checked
+          ? "settings_agent_profiles_grant_preauthorization"
+          : "settings_agent_profiles_revoke_preauthorization",
+      };
+      if (checked) {
+        await grantAgentAuthorization(payload);
+      } else {
+        await revokeAgentAuthorization(payload);
+      }
+    }
+    await loadAgentResolution();
+    ownerActionMessage.value = checked
+      ? "Agent preauthorization granted."
+      : "Agent preauthorization revoked.";
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    ownerActionError.value = error instanceof Error ? error.message : String(error);
+    await loadAgentResolution();
   } finally {
-    historyLoading.value = false;
+    authorizationActionKey.value = null;
   }
+}
+
+async function toggleToolPreauthorizationFromButton(tool: ToolApiPayload): Promise<void> {
+  const checked = !isToolPreauthorized(tool);
+  await toggleToolPreauthorization(tool, { target: { checked } } as unknown as Event);
 }
 
 function selectHomeFile(fileName: string): void {
@@ -513,7 +512,7 @@ async function submitOwnerForm(): Promise<void> {
     editMode.value = "update";
     resetEditFormFromProfile(profile);
     profileResolution.value = null;
-    if (activeTab.value === "tools" || activeTab.value === "resolution") await loadAgentResolution();
+    await refreshSelectedProfileReadModels();
     ownerActionMessage.value = "Agent profile saved.";
   } catch (error) {
     ownerActionError.value = error instanceof Error ? error.message : String(error);
@@ -547,6 +546,9 @@ async function importAgentProfileFile(event: Event): Promise<void> {
     selectedProfileId.value = profile.id;
     editMode.value = "update";
     resetEditFormFromProfile(profile);
+    profileResolution.value = null;
+    homeSnapshot.value = null;
+    await refreshSelectedProfileReadModels();
     ownerActionMessage.value = exists ? "Agent profile imported and updated." : "Agent profile imported.";
   } catch (error) {
     ownerActionError.value = error instanceof Error ? error.message : String(error);
@@ -566,7 +568,6 @@ async function toggleProfile(profile: AgentProfileApiPayload): Promise<void> {
   ownerActionError.value = null;
   ownerActionMessage.value = null;
   ownerActionLoading.value = true;
-  openRowMenuId.value = null;
   try {
     const updated = profile.enabled
       ? await disableAgentProfile(profile.id, { reason: "settings_agent_profiles_owner_view" })
@@ -575,7 +576,7 @@ async function toggleProfile(profile: AgentProfileApiPayload): Promise<void> {
     selectedProfileId.value = updated.id;
     resetEditFormFromProfile(updated);
     profileResolution.value = null;
-    if (activeTab.value === "tools" || activeTab.value === "resolution") await loadAgentResolution();
+    await refreshSelectedProfileReadModels();
     ownerActionMessage.value = updated.enabled ? "Agent profile enabled." : "Agent profile disabled.";
   } catch (error) {
     ownerActionError.value = error instanceof Error ? error.message : String(error);
@@ -596,7 +597,6 @@ async function deleteProfile(profile: AgentProfileApiPayload): Promise<void> {
   ownerActionError.value = null;
   ownerActionMessage.value = null;
   ownerActionLoading.value = true;
-  openRowMenuId.value = null;
   try {
     await deleteAgentProfile(profile.id, { reason: "settings_agent_profiles_owner_view" });
     profiles.value = profiles.value.filter((item) => item.id !== profile.id);
@@ -617,31 +617,10 @@ async function deleteProfile(profile: AgentProfileApiPayload): Promise<void> {
   }
 }
 
-function duplicateProfile(profile: AgentProfileApiPayload): void {
-  openRowMenuId.value = null;
-  selectedProfileId.value = null;
-  resetEditFormFromProfile(profile);
-  editMode.value = "create";
-  activeTab.value = "general";
-  editProfileId.value = `${profile.id}-copy`;
-  editName.value = `${profile.name} Copy`;
-  editEnabled.value = false;
-  homeSnapshot.value = null;
-  profileResolution.value = null;
-  historyRecords.value = [];
-  selectedHomeFileName.value = "";
-  editHomeFileContent.value = "";
-  ownerActionError.value = null;
-  ownerActionMessage.value = "Review the duplicated profile, then save it as a new Agent.";
-}
-
-function toggleRowMenu(profileId: string): void {
-  openRowMenuId.value = openRowMenuId.value === profileId ? null : profileId;
-}
-
-function setActiveTab(tab: AgentTab): void {
-  activeTab.value = tab;
-  openRowMenuId.value = null;
+function handleAgentSelectorChange(event: Event): void {
+  const profileId = (event.target as HTMLSelectElement | null)?.value ?? "";
+  if (!profileId || profileId === selectedProfileId.value) return;
+  void selectProfile(profileId);
 }
 
 function closeCreateMode(): void {
@@ -652,18 +631,6 @@ function closeCreateMode(): void {
     return;
   }
   beginCreateProfile();
-}
-
-function clearFilters(): void {
-  searchTerm.value = "";
-  statusFilter.value = "all";
-  runtimeFilter.value = "all";
-  strategyFilter.value = "all";
-  tagFilter.value = "all";
-}
-
-function goToPage(page: number): void {
-  currentPage.value = Math.min(Math.max(1, page), totalPages.value);
 }
 
 function replaceProfile(profile: AgentProfileApiPayload): void {
@@ -681,14 +648,22 @@ function buildOwnerWritePayload() {
   const attrs: JsonRecord = {
     ...(runtime?.attrs ?? {}),
     tags: selectedTags.value,
-    tool_ids: editToolIds.value,
-    skill_ids: editSkillIds.value,
   };
+  const memorySpace = editMemorySpace.value.trim();
+  delete attrs.memory_space;
+  delete attrs.memory_space_id;
   delete attrs.tools;
+  delete attrs.tool_ids;
+  delete attrs.skill_ids;
   delete attrs.skills;
+  const defaultBrowserProfile = editDefaultBrowserProfile.value.trim();
+  if (defaultBrowserProfile) {
+    attrs.default_browser_profile = defaultBrowserProfile;
+  } else {
+    delete attrs.default_browser_profile;
+  }
   return {
     name: editName.value.trim(),
-    description: editDescription.value.trim(),
     enabled: editEnabled.value,
     identity: {
       ...(current?.identity ?? {}),
@@ -717,42 +692,16 @@ function buildOwnerWritePayload() {
       workdir: editWorkdir.value.trim() || null,
       workspace: editWorkspace.value.trim() || null,
       sandbox_mode: editSandboxMode.value.trim() || null,
-      memory_retrieval_backend: editMemoryBackend.value.trim() || null,
       attrs,
+    },
+    memory: {
+      ...(current?.memory ?? {}),
+      enabled: current?.memory?.enabled ?? true,
+      scope_ref: memorySpace || null,
+      access: current?.memory?.access ?? "read_write",
     },
     reason: "settings_agent_profiles_owner_view",
   };
-}
-
-function profileStatus(profile: AgentProfileApiPayload): string {
-  const attrs = runtimeAttrs(profile);
-  const lifecycle = textValue(attrs.status ?? attrs.lifecycle_status, "");
-  if (lifecycle === "draft") return "draft";
-  return profile.enabled ? "enabled" : "disabled";
-}
-
-function runtimeMode(profile: AgentProfileApiPayload): string {
-  const raw = textValue(profile.runtime_preferences.sandbox_mode, "");
-  if (raw.includes("container")) return "container";
-  if (raw.includes("hybrid")) return "hybrid";
-  if (raw.includes("workspace")) return "workspace";
-  return raw || "sandbox";
-}
-
-function runtimeLocation(profile: AgentProfileApiPayload): string {
-  return profile.runtime_preferences.workdir
-    ?? profile.runtime_preferences.workspace
-    ?? profile.runtime_preferences.home_dir
-    ?? "-";
-}
-
-function routingStrategy(profile: AgentProfileApiPayload): string {
-  if (profile.llm_routing_policy.image_llm_id || profile.llm_routing_policy.document_llm_id) return "image/document";
-  if (fallbackLlmIds(profile).length) return "fallback";
-  const attrs = runtimeAttrs(profile);
-  const strategy = textValue(attrs.llm_strategy ?? attrs.routing_strategy, "");
-  if (strategy) return strategy;
-  return "fixed";
 }
 
 function tagsForProfile(profile: AgentProfileApiPayload): string[] {
@@ -766,53 +715,49 @@ function tagsForProfile(profile: AgentProfileApiPayload): string[] {
 }
 
 function fallbackLlmIds(profile: AgentProfileApiPayload): string[] {
-  return Array.isArray(profile.llm_routing_policy.fallback_llm_ids)
-    ? profile.llm_routing_policy.fallback_llm_ids
+  const llmRouting = objectValue(profile.llm_routing_policy) ?? {};
+  return Array.isArray(llmRouting.fallback_llm_ids)
+    ? llmRouting.fallback_llm_ids.map((item) => textValue(item)).filter(Boolean)
     : [];
 }
 
-function memoryState(profile: AgentProfileApiPayload): string {
-  const attrs = runtimeAttrs(profile);
-  if (attrs.memory_enabled === false) return "off";
-  if (profile.runtime_preferences.memory_retrieval_backend) return "on";
-  return attrs.memory_enabled === true ? "on" : "off";
+function memorySpaceForProfile(profile: AgentProfileApiPayload | null): string {
+  return textValue(objectValue(profile?.memory)?.scope_ref, "");
 }
 
-function toolCount(profile: AgentProfileApiPayload): number {
-  const attrs = runtimeAttrs(profile);
-  const raw = attrs.tool_ids ?? attrs.tools;
-  return Array.isArray(raw) ? raw.length : 0;
+function defaultBrowserProfileForProfile(profile: AgentProfileApiPayload | null): string {
+  return textValue(runtimeAttrs(profile).default_browser_profile, "");
 }
 
 function runtimeAttrs(profile: AgentProfileApiPayload | null): JsonRecord {
-  return objectValue(profile?.runtime_preferences.attrs) ?? {};
+  return objectValue(objectValue(profile?.runtime_preferences)?.attrs) ?? {};
 }
 
-function stringArrayFromAttrs(
-  profile: AgentProfileApiPayload | null,
-  primaryKey: string,
-  fallbackKey: string,
-): string[] {
-  const attrs = runtimeAttrs(profile);
-  const values = attrs[primaryKey] ?? attrs[fallbackKey] ?? [];
-  if (!Array.isArray(values)) return [];
-  return values.map((item) => textValue(item)).filter(Boolean);
+function toolAuthorizationTargets(tool: ToolApiPayload): Array<{ kind: AgentAuthorizationGrantKind; id: string }> {
+  const effectIds = tool.required_effect_ids.map((effectId) => effectId.trim()).filter(Boolean);
+  if (effectIds.length) {
+    return effectIds.map((id) => ({ kind: "effect", id }));
+  }
+  return [{ kind: "tool", id: tool.id }];
 }
 
-function authorizationGrantKey(grant: AgentAuthorizationGrantApiPayload): string {
-  return [
-    grant.policy_id,
-    grant.action,
-    grant.effect_ids.join(","),
-    grant.tool_ids.join(","),
-  ].join(":");
+function toolAuthorizationTargetLabel(tool: ToolApiPayload): string {
+  const targets = toolAuthorizationTargets(tool);
+  const effects = targets.filter((target) => target.kind === "effect").map((target) => target.id);
+  if (effects.length) return `Effects: ${effects.join(", ")}`;
+  return "Exact tool grant";
 }
 
-function authorizationGrantTarget(grant: AgentAuthorizationGrantApiPayload): string {
-  const groups: string[] = [];
-  if (grant.effect_ids.length) groups.push(`Effects: ${grant.effect_ids.join(", ")}`);
-  if (grant.tool_ids.length) groups.push(`Tools: ${grant.tool_ids.join(", ")}`);
-  return groups.join(" · ") || grant.action;
+function toolAuthorizationActionKey(tool: ToolApiPayload): string {
+  return toolAuthorizationTargets(tool)
+    .map((target) => `${target.kind}:${target.id}`)
+    .join("|");
+}
+
+function isToolPreauthorized(tool: ToolApiPayload): boolean {
+  if (preauthorizedToolIds.value.has(tool.id)) return true;
+  const effectIds = tool.required_effect_ids.map((effectId) => effectId.trim()).filter(Boolean);
+  return effectIds.length > 0 && effectIds.every((effectId) => preauthorizedEffectIds.value.has(effectId));
 }
 
 function normalizeImportedProfile(value: unknown) {
@@ -828,7 +773,6 @@ function normalizeImportedProfile(value: unknown) {
   return {
     id,
     name,
-    description: textValue(source.description, ""),
     enabled: source.enabled !== false,
     identity: objectValue(source.identity) ?? {},
     instruction_policy: objectValue(source.instruction_policy) ?? {},
@@ -837,42 +781,6 @@ function normalizeImportedProfile(value: unknown) {
     runtime_preferences: objectValue(source.runtime_preferences) ?? {},
     reason: "settings_agent_profiles_import",
   };
-}
-
-function llmLabel(llmId: string | null | undefined): string {
-  const id = textValue(llmId, "");
-  if (!id) return "Disabled";
-  const profile = llmById.value.get(id);
-  return profile?.model_name ?? id;
-}
-
-function llmProvider(llmId: string | null | undefined): string {
-  const id = textValue(llmId, "");
-  if (!id) return "-";
-  return llmById.value.get(id)?.provider ?? providerFromId(id);
-}
-
-function providerFromId(value: string): string {
-  const [provider] = value.split(".");
-  return provider || "-";
-}
-
-function optionCounts(values: string[], preferred: string[]) {
-  const counts = new Map<string, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  const known = preferred.map((value) => ({
-    value,
-    label: titleize(value),
-    count: counts.get(value) ?? 0,
-  }));
-  const extra = Array.from(counts.entries())
-    .filter(([value]) => !preferred.includes(value))
-    .map(([value, count]) => ({ value, label: titleize(value), count }));
-  return [
-    { value: "all", label: "All", count: profiles.value.length },
-    ...known,
-    ...extra,
-  ];
 }
 
 function objectValue(value: unknown): JsonRecord | null {
@@ -906,29 +814,6 @@ function initials(profile: AgentProfileApiPayload | null): string {
   return textValue(name, "A").slice(0, 1).toUpperCase();
 }
 
-function shortPath(value: string): string {
-  if (!value || value === "-") return "-";
-  if (value.length <= 30) return value;
-  return `...${value.slice(-27)}`;
-}
-
-function eventPayload(record: EventRecordApiPayload): AgentOwnerJsonRecord {
-  return objectValue(record.source_payload) ?? {};
-}
-
-function eventActionLabel(record: EventRecordApiPayload): string {
-  const name = textValue(record.source_event_name || record.event_name, "agent.profile.event");
-  return titleize(name.replace(/^agent\.profile\./, ""));
-}
-
-function eventReason(record: EventRecordApiPayload): string {
-  return textValue(eventPayload(record).reason, "-");
-}
-
-function eventActor(record: EventRecordApiPayload): string {
-  return textValue(eventPayload(record).actor, "system");
-}
-
 function formatRelativeTimestamp(value: string | null | undefined): string {
   if (!value) return "-";
   const timestamp = Date.parse(value);
@@ -957,1643 +842,1383 @@ function formatRelativeTimestamp(value: string | null | undefined): string {
 
 <template>
   <main class="settings-module agent-profiles-page">
-    <header class="agent-page-header">
-      <div>
-        <h1>Agent Profiles</h1>
-        <p>Manage runtime agent identities, routing and execution behavior.</p>
-      </div>
-      <div class="agent-page-actions">
-        <UiButton size="sm" variant="primary" :disabled="ownerActionLoading" @click="beginCreateProfile">
-          <Plus :size="15" /> New Agent
-        </UiButton>
-        <UiButton size="sm" variant="secondary" :disabled="ownerActionLoading" @click="triggerImportProfile">
-          <Import :size="14" /> Import
-        </UiButton>
-        <input
-          ref="importInput"
-          accept="application/json,.json"
-          class="agent-import-input"
-          type="file"
-          @change="importAgentProfileFile"
-        />
-        <UiButton size="sm" variant="secondary" :disabled="isLoading" @click="loadAgentProfiles">
-          <RefreshCcw :size="14" /> Refresh
-        </UiButton>
-        <button class="icon-button" type="button" aria-label="More actions"><MoreVertical :size="16" /></button>
-      </div>
-    </header>
-
-    <p v-if="loadError" class="agent-page-error">{{ loadError }}</p>
-
-    <section class="agent-workbench">
-      <section class="agent-list-panel">
-        <div class="agent-table-toolbar">
-          <div class="agent-list-count">{{ filteredProfiles.length }} agents</div>
-          <label class="agent-search">
-            <Search :size="15" />
-            <input v-model="searchTerm" placeholder="Search agents..." />
-            <kbd>⌘K</kbd>
-          </label>
-          <select v-model="statusFilter">
-            <option v-for="option in statusOptions" :key="option.value" :value="option.value">
-              {{ option.label }} · {{ option.count }}
-            </option>
-          </select>
-          <select v-model="runtimeFilter">
-            <option v-for="option in runtimeOptions" :key="option.value" :value="option.value">
-              {{ option.label }} · {{ option.count }}
-            </option>
-          </select>
-          <select v-model="strategyFilter">
-            <option v-for="option in strategyOptions" :key="option.value" :value="option.value">
-              {{ option.label }} · {{ option.count }}
-            </option>
-          </select>
-          <select v-model="tagFilter" :disabled="!tagOptions.length">
-            <option value="all">All tags</option>
-            <option v-for="option in tagOptions" :key="option.value" :value="option.value">
-              {{ option.label }} · {{ option.count }}
-            </option>
-          </select>
-          <button class="clear-filters" type="button" @click="clearFilters">
-            <X :size="14" /> Clear
-          </button>
-        </div>
-        <div class="agent-table">
-          <div class="agent-table-head">
-            <span>Agent</span>
-            <span>Default LLM</span>
-            <span>Fallback</span>
-            <span>Runtime</span>
-            <span>Preferences</span>
-            <span>Status</span>
-            <span>Updated</span>
-            <span><SlidersHorizontal :size="14" /></span>
-          </div>
-
-          <div
-            v-for="profile in pagedProfiles"
-            :key="profile.id"
-            class="agent-row"
-            :class="{ active: profile.id === selectedProfileId }"
-            role="button"
-            tabindex="0"
-            @click="selectProfile(profile.id)"
-            @keydown.enter.prevent="selectProfile(profile.id)"
-            @keydown.space.prevent="selectProfile(profile.id)"
-          >
-            <span class="agent-cell agent-identity-cell">
-              <span class="agent-avatar">{{ initials(profile) }}</span>
-              <strong>
-                <span class="truncate">{{ profile.name }}</span>
-                <small>{{ profile.id }}</small>
-                <span v-if="tagsForProfile(profile).length" class="row-tags">
-                  <em v-for="tag in tagsForProfile(profile).slice(0, 2)" :key="tag">{{ tag }}</em>
-                </span>
-              </strong>
-            </span>
-            <span class="agent-cell llm-cell">
-              <span class="llm-badge">{{ llmLabel(profile.llm_routing_policy.default_llm_id).slice(0, 2).toUpperCase() }}</span>
-              <strong><span class="truncate">{{ llmLabel(profile.llm_routing_policy.default_llm_id) }}</span><small>{{ llmProvider(profile.llm_routing_policy.default_llm_id) }}</small></strong>
-            </span>
-            <span class="agent-cell llm-cell muted">
-              <span v-if="fallbackLlmIds(profile).length" class="llm-badge secondary">AI</span>
-              <strong>
-                <span class="truncate">{{ fallbackLlmIds(profile).length ? llmLabel(fallbackLlmIds(profile)[0]) : "Disabled" }}</span>
-                <small>{{ fallbackLlmIds(profile).length ? llmProvider(fallbackLlmIds(profile)[0]) : "-" }}</small>
-              </strong>
-            </span>
-            <span class="agent-cell runtime-cell">
-              <Box :size="16" />
-              <strong><span class="truncate">{{ runtimeMode(profile) }}</span><small>{{ shortPath(runtimeLocation(profile)) }}</small></strong>
-            </span>
-            <span class="agent-cell preference-cell">
-              <small :class="{ on: profile.instruction_policy.stream_by_default }">streaming</small>
-              <small :class="{ on: memoryState(profile) === 'on', off: memoryState(profile) === 'off' }">memory: {{ memoryState(profile) }}</small>
-              <small>tools: {{ toolCount(profile) }}</small>
-            </span>
-            <span class="agent-cell status-cell">
-              <i :class="`status-dot status-dot--${profileStatus(profile)}`" />
-              {{ titleize(profileStatus(profile)) }}
-            </span>
-            <span class="agent-cell updated-cell" :title="profile.updated_at || profile.created_at || ''">
-              {{ formatRelativeTimestamp(profile.updated_at || profile.created_at) }}
-            </span>
-            <span class="agent-cell row-menu">
-              <button
-                class="row-menu-button"
-                type="button"
-                aria-label="Agent row actions"
-                @click.stop="toggleRowMenu(profile.id)"
-              >
-                <MoreVertical :size="15" />
-              </button>
-              <span v-if="openRowMenuId === profile.id" class="row-action-menu">
-                <button type="button" @click.stop="selectProfile(profile.id); activeTab = 'general'; openRowMenuId = null">Edit</button>
-                <button type="button" @click.stop="duplicateProfile(profile)">Duplicate</button>
-                <button type="button" @click.stop="toggleProfile(profile)">{{ profile.enabled ? "Disable" : "Enable" }}</button>
-                <button class="danger" type="button" @click.stop="deleteProfile(profile)">Delete</button>
-              </span>
-            </span>
-          </div>
-
-          <div v-if="!isLoading && !filteredProfiles.length" class="agent-empty">
-            No agents match the current filters.
-          </div>
-        </div>
-
-        <footer class="agent-pagination">
-          <span>{{ visibleRangeLabel }}</span>
-          <label>
-            Rows
-            <select v-model.number="pageSize">
-              <option :value="10">10</option>
-              <option :value="25">25</option>
-              <option :value="50">50</option>
-            </select>
-          </label>
-          <nav>
-            <button type="button" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">‹</button>
-            <button type="button" class="active">{{ currentPage }}</button>
-            <button type="button" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">›</button>
-          </nav>
-        </footer>
-      </section>
-
-      <aside class="agent-drawer">
-        <button class="drawer-close" type="button" aria-label="Close editor" @click="closeCreateMode">
-          <X :size="17" />
-        </button>
-
-        <header class="drawer-profile-header">
-          <span class="drawer-avatar">{{ initials(selectedProfile) }}</span>
+    <form class="agent-fullscreen-form" @submit.prevent="submitOwnerForm">
+      <header class="agent-command-bar">
+        <div class="agent-title-block">
+          <span class="agent-avatar">{{ initials(selectedProfile) }}</span>
           <div>
-            <h2>{{ editName || "New Agent" }}</h2>
-            <p>{{ editProfileId || "agent-id" }}</p>
+            <h1>Agent Profiles</h1>
+            <p>{{ editName || "New Agent" }} · {{ editProfileId || "agent-id" }}</p>
           </div>
-          <label class="switch" :class="{ on: editEnabled }">
-            <input v-model="editEnabled" type="checkbox" />
-            <span />
-          </label>
-          <em>{{ editEnabled ? "Enabled" : "Disabled" }}</em>
-        </header>
-
-        <nav class="drawer-tabs">
-          <button type="button" :class="{ active: activeTab === 'general' }" @click="setActiveTab('general')">General</button>
-          <button type="button" :class="{ active: activeTab === 'llm' }" @click="setActiveTab('llm')">LLM</button>
-          <button type="button" :class="{ active: activeTab === 'runtime' }" @click="setActiveTab('runtime')">Runtime</button>
-          <button type="button" :class="{ active: activeTab === 'memory' }" @click="setActiveTab('memory')">Memory</button>
-          <button type="button" :class="{ active: activeTab === 'tools' }" @click="setActiveTab('tools')">Tools</button>
-          <button type="button" :class="{ active: activeTab === 'resolution' }" @click="setActiveTab('resolution')">Resolve</button>
-          <button type="button" :class="{ active: activeTab === 'history' }" @click="setActiveTab('history')">History</button>
-          <button type="button" :class="{ active: activeTab === 'advanced' }" @click="setActiveTab('advanced')">Home</button>
-        </nav>
-
-        <form class="agent-drawer-form" @submit.prevent="submitOwnerForm">
-          <section v-if="activeTab === 'general'" class="drawer-section">
-            <h3>Basic Information</h3>
-            <label>
-              <span>Display Name</span>
-              <input v-model="editName" placeholder="Support Agent" />
-            </label>
-            <label>
-              <span>Profile ID</span>
-              <input v-model="editProfileId" :readonly="editMode === 'update'" placeholder="support-prod" />
-            </label>
-            <label>
-              <span>Description</span>
-              <textarea v-model="editDescription" rows="4" />
-            </label>
-            <label>
-              <span>Tags</span>
-              <input v-model="editTags" placeholder="support, internal" />
-            </label>
-            <h3>Runtime Identity</h3>
-            <label>
-              <span>Environment</span>
-              <select v-model="editSandboxMode">
-                <option value="sandbox">Sandbox</option>
-                <option value="workspace">Workspace</option>
-                <option value="container">Container</option>
-                <option value="hybrid">Hybrid</option>
-              </select>
-            </label>
-            <label>
-              <span>Workspace / Workdir</span>
-              <input v-model="editWorkdir" placeholder="/agents/support" />
-            </label>
-            <fieldset class="visibility-fieldset">
-              <legend>Visibility</legend>
-              <label><input checked type="radio" name="agent-visibility" /> Internal <small>Only visible to team members</small></label>
-              <label><input disabled type="radio" name="agent-visibility" /> Shared <small>Requires backend field</small></label>
-              <label><input disabled type="radio" name="agent-visibility" /> System Default <small>Requires backend field</small></label>
-            </fieldset>
-          </section>
-
-          <section v-else-if="activeTab === 'llm'" class="drawer-section">
-            <h3>Routing</h3>
-            <label>
-              <span>Default LLM</span>
-              <select v-model="editDefaultLlmId">
-                <option v-for="llm in llmProfiles" :key="llm.id" :value="llm.id">
-                  {{ llm.model_name }} · {{ llm.provider }}
-                </option>
-                <option v-if="!llmProfiles.length" :value="editDefaultLlmId">{{ editDefaultLlmId || "No LLM profiles loaded" }}</option>
-              </select>
-            </label>
-            <label>
-              <span>Fallback LLMs</span>
-              <input v-model="editFallbackLlmIds" placeholder="comma,separated,llm.ids" />
-            </label>
-            <label>
-              <span>Image LLM</span>
-              <input v-model="editImageLlmId" placeholder="optional" />
-            </label>
-            <label>
-              <span>Document LLM</span>
-              <input v-model="editDocumentLlmId" placeholder="optional" />
-            </label>
-          </section>
-
-          <section v-else-if="activeTab === 'runtime'" class="drawer-section">
-            <h3>Execution</h3>
-            <label>
-              <span>Timeout Seconds</span>
-              <input v-model.number="editTimeoutSeconds" min="1" type="number" />
-            </label>
-            <label>
-              <span>Max Turns</span>
-              <input v-model.number="editMaxTurns" min="1" type="number" />
-            </label>
-            <label>
-              <span>Home Directory</span>
-              <input v-model="editHomeDir" />
-            </label>
-            <label>
-              <span>Workspace</span>
-              <input v-model="editWorkspace" />
-            </label>
-          </section>
-
-          <section v-else-if="activeTab === 'memory'" class="drawer-section">
-            <h3>Memory</h3>
-            <label>
-              <span>Retrieval Backend</span>
-              <input v-model="editMemoryBackend" placeholder="keyword / vector / hybrid" />
-            </label>
-            <label class="checkbox-field">
-              <input v-model="editStreamByDefault" type="checkbox" />
-              <span>Stream by default</span>
-            </label>
-            <label>
-              <span>System Prompt</span>
-              <textarea v-model="editSystemPrompt" rows="7" />
-            </label>
-          </section>
-
-          <section v-else-if="activeTab === 'tools'" class="drawer-section">
-            <h3>Tool Authorization</h3>
-            <div class="grant-summary">
-              <span>{{ selectedToolIds.length }} tools</span>
-              <span>{{ selectedSkillIds.length }} skills</span>
-              <span>{{ effectiveAuthorizationGrants.length }} auth grants</span>
-            </div>
-            <div class="grant-picker">
-              <h4>Authorization Grants</h4>
-              <article
-                v-for="grant in effectiveAuthorizationGrants"
-                :key="authorizationGrantKey(grant)"
-                class="resolution-row"
+        </div>
+        <label class="agent-profile-selector">
+          <span>Agent</span>
+          <select :value="selectedProfileId ?? ''" :disabled="editMode === 'create'" @change="handleAgentSelectorChange">
+            <option v-if="editMode === 'create'" value="">New Agent</option>
+            <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
+              {{ profile.name }} · {{ profile.id }}
+            </option>
+          </select>
+        </label>
+        <div class="agent-header-actions" aria-label="Agent profile actions">
+          <div class="agent-icon-toolbar">
+            <button
+              class="agent-icon-action agent-icon-action--accent"
+              type="button"
+              title="New Agent"
+              aria-label="New Agent"
+              :disabled="ownerActionLoading"
+              @click="beginCreateProfile"
+            >
+              <Plus :size="16" />
+            </button>
+            <button
+              class="agent-icon-action"
+              type="button"
+              title="Import"
+              aria-label="Import"
+              :disabled="ownerActionLoading"
+              @click="triggerImportProfile"
+            >
+              <Import :size="15" />
+            </button>
+            <button
+              class="agent-icon-action"
+              type="button"
+              title="Refresh"
+              aria-label="Refresh"
+              :disabled="isLoading"
+              @click="loadAgentProfiles"
+            >
+              <RefreshCcw :size="15" />
+            </button>
+            <button class="agent-icon-action" type="button" title="More actions" aria-label="More actions">
+              <MoreVertical :size="15" />
+            </button>
+            <span class="agent-icon-divider" aria-hidden="true" />
+            <button class="agent-icon-action" type="button" title="Cancel" aria-label="Cancel" @click="closeCreateMode">
+              <X :size="16" />
+            </button>
+            <button
+              class="agent-icon-action agent-icon-action--save"
+              type="button"
+              title="Save Changes"
+              aria-label="Save Changes"
+              :disabled="!canSubmitOwnerForm"
+              @click="submitOwnerForm"
+            >
+              <Save :size="15" />
+            </button>
+            <template v-if="editMode === 'update'">
+              <span class="agent-icon-divider" aria-hidden="true" />
+              <button
+                class="agent-icon-action"
+                type="button"
+                :title="selectedProfile?.enabled ? 'Disable' : 'Enable'"
+                :aria-label="selectedProfile?.enabled ? 'Disable' : 'Enable'"
+                :disabled="ownerActionLoading"
+                @click="toggleSelectedProfile"
               >
-                <strong>{{ authorizationGrantTarget(grant) }}</strong>
-                <small>{{ grant.policy_id }}</small>
-                <em :class="{ ready: grant.status === 'enabled', blocked: grant.effect === 'deny' }">
-                  {{ titleize(grant.effect) }} · {{ titleize(grant.status) }}
-                </em>
-              </article>
-              <p v-if="resolutionLoading" class="grant-empty">Loading authorization grants...</p>
-              <p v-else-if="!effectiveAuthorizationGrants.length" class="grant-empty">No agent authorization policies matched.</p>
-            </div>
-            <div class="grant-picker">
-              <h4>Tools</h4>
-              <label v-for="tool in toolCatalog" :key="tool.id" class="grant-row">
-                <input v-model="editToolIds" :value="tool.id" type="checkbox" />
-                <strong>{{ tool.name || tool.id }}</strong>
-                <small>{{ tool.id }}</small>
-              </label>
-              <p v-if="!toolCatalog.length" class="grant-empty">No tools returned by the Tool catalog.</p>
-            </div>
-            <div class="grant-picker">
-              <h4>Skills</h4>
-              <label v-for="skill in skillCatalog" :key="skill.name" class="grant-row">
-                <input v-model="editSkillIds" :value="skill.name" type="checkbox" />
-                <strong>{{ skill.name }}</strong>
-                <small>{{ skill.source }}</small>
-              </label>
-              <p v-if="!skillCatalog.length" class="grant-empty">No skills returned by the Skill catalog.</p>
-            </div>
-          </section>
-
-          <section v-else-if="activeTab === 'resolution'" class="drawer-section">
-            <h3>Effective Resolution</h3>
-            <div class="history-actions">
-              <button type="button" :disabled="resolutionLoading" @click="loadAgentResolution">
-                Reload Resolution
+                <Power :size="15" />
               </button>
-              <span>{{ profileResolution ? formatRelativeTimestamp(profileResolution.profile_updated_at) : "not loaded" }}</span>
-            </div>
-            <div v-if="profileResolution" class="resolution-summary">
-              <span><strong>{{ titleize(profileResolution.summary.status) }}</strong><small>Status</small></span>
-              <span><strong>{{ profileResolution.summary.llm_routes }}</strong><small>LLM routes</small></span>
-              <span><strong>{{ profileResolution.summary.tools }}</strong><small>Tools</small></span>
-              <span><strong>{{ profileResolution.summary.skills }}</strong><small>Skills</small></span>
-              <span><strong>{{ profileResolution.summary.access_grants }}</strong><small>Access</small></span>
-              <span><strong>{{ profileResolution.summary.authorization_grants }}</strong><small>Authz</small></span>
-              <span><strong>{{ profileResolution.summary.issues }}</strong><small>Issues</small></span>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>LLM Routes</h4>
-              <article v-for="route in profileResolution.llm_routes" :key="`${route.slot}:${route.llm_id}`" class="resolution-row">
-                <strong>{{ titleize(route.slot) }} · {{ route.model_name || route.llm_id }}</strong>
-                <small>{{ route.provider || "-" }} · {{ route.resolved ? (route.enabled ? "enabled" : "disabled") : "missing" }}</small>
-                <em v-if="route.credential_binding">{{ route.credential_binding }}</em>
-              </article>
-              <p v-if="!profileResolution.llm_routes.length" class="grant-empty">No LLM routes resolved.</p>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>Tools</h4>
-              <article v-for="tool in profileResolution.tools" :key="tool.tool_id" class="resolution-row">
-                <strong>{{ tool.name || tool.tool_id }}</strong>
-                <small>{{ tool.kind || "-" }} · {{ tool.resolved ? (tool.enabled ? "enabled" : "disabled") : "missing" }}</small>
-                <em>{{ tool.access_requirements.length + tool.access_requirement_sets.flat().length }} access requirements</em>
-              </article>
-              <p v-if="!profileResolution.tools.length" class="grant-empty">No tools selected in this profile.</p>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>Skills</h4>
-              <article v-for="skill in profileResolution.skills" :key="skill.skill_id" class="resolution-row">
-                <strong>{{ skill.name || skill.skill_id }}</strong>
-                <small>{{ skill.source || "-" }} · {{ skill.resolved ? "resolved" : "missing" }}</small>
-                <em>{{ skill.required_tools.length }} required tools</em>
-              </article>
-              <p v-if="!profileResolution.skills.length" class="grant-empty">No skills selected in this profile.</p>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>Access Grants</h4>
-              <article v-for="grant in profileResolution.access_grants" :key="`${grant.source_type}:${grant.source_id}:${grant.requirement}`" class="resolution-row">
-                <strong>{{ grant.requirement }}</strong>
-                <small>{{ grant.source_type }} · {{ grant.source_id }}</small>
-                <em :class="{ ready: grant.ready, blocked: !grant.ready }">{{ titleize(grant.status) }}</em>
-              </article>
-              <p v-if="!profileResolution.access_grants.length" class="grant-empty">No declared access grants.</p>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>Authorization Grants</h4>
-              <article
-                v-for="grant in profileResolution.authorization_grants"
-                :key="authorizationGrantKey(grant)"
-                class="resolution-row"
+              <button
+                class="agent-icon-action agent-icon-action--danger"
+                type="button"
+                title="Delete"
+                aria-label="Delete"
+                :disabled="ownerActionLoading"
+                @click="deleteSelectedProfile"
               >
-                <strong>{{ authorizationGrantTarget(grant) }}</strong>
-                <small>{{ grant.policy_id }} · {{ grant.source_kind || "policy" }}</small>
-                <em :class="{ ready: grant.status === 'enabled', blocked: grant.effect === 'deny' }">
-                  {{ titleize(grant.effect) }} · {{ titleize(grant.status) }}
-                </em>
-              </article>
-              <p v-if="!profileResolution.authorization_grants.length" class="grant-empty">No agent authorization policies matched.</p>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>Validation</h4>
-              <article v-for="issue in profileResolution.validation" :key="`${issue.code}:${issue.ref}`" class="resolution-row">
-                <strong>{{ issue.code }}</strong>
-                <small>{{ issue.message }}</small>
-                <em :class="{ blocked: issue.severity === 'error' }">{{ titleize(issue.severity) }}</em>
-              </article>
-              <p v-if="!profileResolution.validation.length" class="grant-empty">No validation issues.</p>
-            </div>
-
-            <div v-if="profileResolution" class="resolution-block">
-              <h4>Trace</h4>
-              <article v-for="record in profileResolution.trace" :key="`${record.source}:${record.detail}`" class="resolution-row">
-                <strong>{{ record.source }}</strong>
-                <small>{{ record.detail }}</small>
-                <em>{{ titleize(record.status) }}</em>
-              </article>
-            </div>
-            <p v-else-if="!resolutionLoading" class="grant-empty">Resolution preview has not been loaded.</p>
-            <p v-if="resolutionError" class="settings-tone-danger">{{ resolutionError }}</p>
-          </section>
-
-          <section v-else-if="activeTab === 'history'" class="drawer-section">
-            <h3>Lifecycle History</h3>
-            <div class="history-actions">
-              <button type="button" :disabled="historyLoading" @click="loadAgentHistory">Reload History</button>
-              <span>{{ historyRecords.length }} events</span>
-            </div>
-            <div v-if="historyRecords.length" class="history-list">
-              <article v-for="record in historyRecords" :key="record.event_id" class="history-row">
-                <header>
-                  <strong>{{ eventActionLabel(record) }}</strong>
-                  <time :title="record.source_created_at || record.created_at">
-                    {{ formatRelativeTimestamp(record.source_created_at || record.created_at) }}
-                  </time>
-                </header>
-                <dl>
-                  <div><dt>Reason</dt><dd>{{ eventReason(record) }}</dd></div>
-                  <div><dt>Actor</dt><dd>{{ eventActor(record) }}</dd></div>
-                  <div><dt>Cursor</dt><dd>{{ record.cursor }}</dd></div>
-                </dl>
-              </article>
-            </div>
-            <p v-else-if="!historyLoading" class="grant-empty">No agent lifecycle events retained for this profile.</p>
-            <p v-if="historyError" class="settings-tone-danger">{{ historyError }}</p>
-          </section>
-
-          <section v-else class="drawer-section">
-            <h3>Agent Home</h3>
-            <div class="home-meta">
-              <span>{{ homeSnapshot?.home_dir || "No home snapshot loaded" }}</span>
-              <small>{{ homeSnapshot?.workdir || "workdir follows home" }}</small>
-            </div>
-            <div class="home-actions">
-              <button type="button" :disabled="homeLoading" @click="loadAgentHome">Reload</button>
-              <button type="button" :disabled="ownerActionLoading" @click="syncSelectedHome">Sync from Home</button>
-              <button type="button" :disabled="ownerActionLoading" @click="exportSelectedHome">Export to Home</button>
-            </div>
-            <div class="home-files-panel">
-              <nav class="home-file-list">
-                <button
-                  v-for="file in homeSnapshot?.files ?? []"
-                  :key="file.name"
-                  type="button"
-                  :class="{ active: selectedHomeFileName === file.name }"
-                  @click="selectHomeFile(file.name)"
-                >
-                  <strong>{{ file.name }}</strong>
-                  <small>{{ file.language }} · {{ file.exists ? "exists" : "missing" }}</small>
-                </button>
-                <p v-if="!homeLoading && !(homeSnapshot?.files.length)" class="grant-empty">No agent home files loaded.</p>
-              </nav>
-              <label class="home-editor">
-                <span>{{ selectedHomeFile?.path || selectedHomeFileName || "Select a home file" }}</span>
-                <textarea v-model="editHomeFileContent" :disabled="!selectedHomeFileName" rows="10" />
-              </label>
-              <button class="home-save-button" type="button" :disabled="!selectedHomeFileName || ownerActionLoading" @click="saveSelectedHomeFile">
-                Save Home File
+                <Trash2 :size="15" />
               </button>
-            </div>
-            <p v-if="homeError" class="settings-tone-danger">{{ homeError }}</p>
-            <details class="profile-json-details">
-              <summary>Profile JSON</summary>
-              <pre>{{ JSON.stringify(selectedProfile ?? buildOwnerWritePayload(), null, 2) }}</pre>
-            </details>
+            </template>
+            <input
+              ref="importInput"
+              accept="application/json,.json"
+              class="agent-import-input"
+              type="file"
+              @change="importAgentProfileFile"
+            />
+          </div>
+        </div>
+      </header>
+
+      <div class="agent-content-scroll">
+        <p v-if="loadError" class="agent-page-error">{{ loadError }}</p>
+        <section class="agent-workbench">
+          <div class="agent-metric-strip" aria-label="Agent profile summary">
+            <article class="agent-metric agent-metric--effective">
+              <span class="agent-metric-icon"><CheckCircle2 :size="24" /></span>
+              <div>
+                <span>Effective</span>
+                <strong>{{ titleize(profileResolution?.summary.status, resolutionLoading ? "Loading" : "Not loaded") }}</strong>
+                <small>{{ resolutionIssueCount }} issues</small>
+              </div>
+            </article>
+            <article class="agent-metric agent-metric--capabilities">
+              <span class="agent-metric-icon"><Box :size="24" /></span>
+              <div>
+                <span>Tools</span>
+                <strong>{{ preauthorizedToolCount }} trusted tools</strong>
+                <small>{{ toolCatalog.length }} catalog tools</small>
+              </div>
+            </article>
+            <article class="agent-metric agent-metric--access">
+              <span class="agent-metric-icon"><ShieldCheck :size="24" /></span>
+              <div>
+                <span>Access</span>
+                <strong>{{ readyAccessGrantCount }} ready · {{ blockedAccessGrantCount }} blocked</strong>
+                <small>{{ effectiveAuthorizationGrants.length }} grants resolved</small>
+              </div>
+            </article>
+            <article class="agent-metric agent-metric--memory">
+              <span class="agent-metric-icon"><Database :size="24" /></span>
+              <div>
+                <span>Memory</span>
+                <strong>{{ editMemorySpace || "Default memory" }}</strong>
+                <small>{{ selectedProfile?.memory?.enabled === false ? "disabled" : "managed by Memory" }}</small>
+              </div>
+            </article>
+            <article class="agent-metric agent-metric--updated">
+              <span class="agent-metric-icon"><Clock3 :size="24" /></span>
+              <div>
+                <span>Updated</span>
+                <strong>{{ formatRelativeTimestamp(selectedProfile?.updated_at || selectedProfile?.created_at) }}</strong>
+                <small>{{ selectedProfile?.updated_at || selectedProfile?.created_at ? "" : "-" }}</small>
+              </div>
+            </article>
+            <article class="agent-metric agent-metric--home">
+              <span class="agent-metric-icon"><Folder :size="24" /></span>
+              <div>
+                <span>Home Directory</span>
+                <strong>{{ homePathLabel }}</strong>
+                <small>{{ homeSnapshot?.home_dir || "not synced" }}</small>
+              </div>
+            </article>
+          </div>
+
+          <div class="agent-workbench-summary">
+            {{ preauthorizedToolCount }} trusted tools · {{ effectiveAuthorizationGrants.length }} grants · {{ homeSnapshot?.files.length ?? 0 }} home files
+          </div>
+
+          <section class="agent-config-grid" aria-label="Agent profile configuration">
+            <article class="agent-panel agent-panel--identity">
+              <header class="agent-panel-title">
+                <h3><UserCog :size="15" /> Identity & Routing</h3>
+                <span>{{ editMode === "create" ? "new profile" : editProfileId }}</span>
+              </header>
+              <div class="dense-field-grid dense-field-grid--identity">
+                <label class="dense-field">
+                  <span>Display Name</span>
+                  <input v-model="editName" placeholder="Support Agent" />
+                </label>
+                <label class="dense-field">
+                  <span>Profile ID</span>
+                  <input v-model="editProfileId" :readonly="editMode === 'update'" placeholder="support-prod" />
+                </label>
+                <div class="dense-status-field">
+                  <span>Status</span>
+                  <label class="profile-status-toggle" :class="{ on: editEnabled }">
+                    <i />
+                    <em>{{ editEnabled ? "Enabled" : "Disabled" }}</em>
+                    <span class="mini-switch">
+                      <input v-model="editEnabled" type="checkbox" />
+                      <b />
+                    </span>
+                  </label>
+                </div>
+                <label class="dense-field">
+                  <span>Tags</span>
+                  <input v-model="editTags" placeholder="support, internal" />
+                </label>
+                <label class="dense-field">
+                  <span>Default LLM</span>
+                  <select v-model="editDefaultLlmId">
+                    <option v-for="llm in llmProfiles" :key="llm.id" :value="llm.id">
+                      {{ llm.model_name }} · {{ llm.provider }}
+                    </option>
+                    <option v-if="!llmProfiles.length" :value="editDefaultLlmId">{{ editDefaultLlmId || "No LLM profiles loaded" }}</option>
+                  </select>
+                </label>
+                <label class="dense-field">
+                  <span>Fallback LLMs</span>
+                  <input v-model="editFallbackLlmIds" placeholder="comma,separated,llm.ids" />
+                </label>
+                <label class="dense-field">
+                  <span>Image LLM</span>
+                  <input v-model="editImageLlmId" placeholder="optional" />
+                </label>
+                <label class="dense-field">
+                  <span>Document LLM</span>
+                  <input v-model="editDocumentLlmId" placeholder="optional" />
+                </label>
+                <label class="dense-field dense-field--full dense-field--prompt">
+                  <span>System Prompt · {{ editSystemPrompt.length }} chars</span>
+                  <textarea v-model="editSystemPrompt" rows="7" />
+                </label>
+              </div>
+            </article>
+
+            <article class="agent-panel agent-panel--runtime">
+              <header class="agent-panel-title">
+                <h3><Settings2 :size="15" /> Runtime & Memory</h3>
+                <span>{{ editSandboxMode }}</span>
+              </header>
+              <div class="dense-field-grid dense-field-grid--runtime">
+                <label class="dense-field">
+                  <span>Environment</span>
+                  <select v-model="editSandboxMode">
+                    <option value="sandbox">Sandbox</option>
+                    <option value="workspace">Workspace</option>
+                    <option value="container">Container</option>
+                    <option value="hybrid">Hybrid</option>
+                  </select>
+                </label>
+                <label class="dense-field">
+                  <span>Browser Profile</span>
+                  <select v-model="editDefaultBrowserProfile">
+                    <option value="">System default{{ browserDefaultProfile ? ` · ${browserDefaultProfile}` : "" }}</option>
+                    <option v-for="profile in browserProfileOptions" :key="profile.value" :value="profile.value">
+                      {{ profile.label }}
+                    </option>
+                    <option
+                      v-if="editDefaultBrowserProfile && !browserProfiles.some((profile) => profile.name === editDefaultBrowserProfile)"
+                      :value="editDefaultBrowserProfile"
+                    >
+                      {{ editDefaultBrowserProfile }} · missing
+                    </option>
+                  </select>
+                </label>
+                <label class="dense-field">
+                  <span>Timeout</span>
+                  <input v-model.number="editTimeoutSeconds" min="1" type="number" />
+                </label>
+                <label class="dense-field">
+                  <span>Max Turns</span>
+                  <input v-model.number="editMaxTurns" min="1" type="number" />
+                </label>
+                <label class="dense-field">
+                  <span>Workdir</span>
+                  <input v-model="editWorkdir" placeholder="/agents/support" />
+                </label>
+                <label class="dense-field">
+                  <span>Home Directory</span>
+                  <input v-model="editHomeDir" />
+                </label>
+                <label class="dense-field">
+                  <span>Workspace</span>
+                  <input v-model="editWorkspace" />
+                </label>
+                <label class="dense-field">
+                  <span>Memory Space</span>
+                  <input v-model="editMemorySpace" :placeholder="editProfileId || 'agent-id'" />
+                </label>
+                <label class="dense-checkbox">
+                  <input v-model="editStreamByDefault" type="checkbox" />
+                  <span>Stream by default</span>
+                </label>
+              </div>
+            </article>
+
+            <article class="agent-panel agent-panel--tools">
+              <header class="agent-panel-title">
+                <h3><Link2 :size="15" /> Tool Access</h3>
+                <span>{{ preauthorizedToolCount }} trusted · {{ effectiveAuthorizationGrants.length }} grants</span>
+              </header>
+              <label class="tool-search">
+                <Search :size="14" />
+                <input v-model="toolSearchTerm" aria-label="Search tools" type="search" />
+              </label>
+              <div class="tool-access-table">
+                <div class="tool-access-row tool-access-row--head">
+                  <span>Tool</span>
+                  <span>Auth Target</span>
+                  <span>Trust</span>
+                </div>
+                <div class="tool-access-body">
+                  <article v-for="tool in visibleToolCatalog" :key="tool.id" class="tool-access-row">
+                    <div class="tool-main">
+                      <strong>{{ tool.name || tool.id }}</strong>
+                      <small>{{ tool.id }}</small>
+                    </div>
+                    <small class="tool-target">{{ toolAuthorizationTargetLabel(tool) }}</small>
+                    <button
+                      class="tool-trust-button"
+                      :class="{ active: isToolPreauthorized(tool) }"
+                      :disabled="resolutionLoading || authorizationActionKey === toolAuthorizationActionKey(tool)"
+                      type="button"
+                      @click="toggleToolPreauthorizationFromButton(tool)"
+                    >
+                      {{ authorizationActionKey === toolAuthorizationActionKey(tool) ? "Saving" : "Trust" }}
+                    </button>
+                  </article>
+                  <p v-if="!toolCatalog.length" class="grant-empty">No tools returned by the Tool catalog.</p>
+                  <p v-else-if="!filteredToolCatalog.length" class="grant-empty">No tools match this search.</p>
+                </div>
+              </div>
+            </article>
           </section>
 
-          <p v-if="detailError" class="settings-tone-danger">{{ detailError }}</p>
-          <p v-if="catalogLoadError" class="settings-tone-danger">{{ catalogLoadError }}</p>
-          <p v-if="ownerActionError" class="settings-tone-danger">{{ ownerActionError }}</p>
-          <p v-else-if="ownerActionMessage" class="settings-tone-success">{{ ownerActionMessage }}</p>
-        </form>
+          <section class="agent-work-grid" aria-label="Agent profile work surfaces">
+            <article class="agent-panel agent-panel--home-files">
+              <header class="agent-panel-title">
+                <h3><Folder :size="15" /> Agent Home</h3>
+                <span>{{ homeSnapshot?.files.length ?? 0 }} files</span>
+              </header>
+              <div class="home-toolbar">
+                <div class="home-path">
+                  <strong>{{ homeSnapshot?.home_dir || "No home snapshot loaded" }}</strong>
+                  <small>{{ homeSnapshot?.workdir || "workdir follows home" }}</small>
+                </div>
+                <div class="home-actions">
+                  <button type="button" :disabled="homeLoading" @click="loadAgentHome"><RefreshCcw :size="13" />Reload</button>
+                  <button type="button" :disabled="ownerActionLoading" @click="syncSelectedHome"><RefreshCcw :size="13" />Sync</button>
+                  <button type="button" :disabled="ownerActionLoading" @click="exportSelectedHome"><Download :size="13" />Export</button>
+                </div>
+              </div>
+              <div class="home-files-table">
+                <div class="home-files-head">
+                  <span>Name</span>
+                  <span>Type</span>
+                  <span>Status</span>
+                  <span>Updated</span>
+                </div>
+                <div class="home-files-body">
+                  <button
+                    v-for="file in homeSnapshot?.files ?? []"
+                    :key="file.name"
+                    type="button"
+                    class="home-file-row"
+                    :class="{ active: selectedHomeFileName === file.name }"
+                    @click="selectHomeFile(file.name)"
+                  >
+                    <span class="home-file-name"><FileText :size="14" />{{ file.name }}</span>
+                    <span>{{ file.language || "-" }}</span>
+                    <span :class="{ ready: file.exists, blocked: !file.exists }">{{ file.exists ? "exists" : "missing" }}</span>
+                    <span>{{ formatRelativeTimestamp(selectedProfile?.updated_at || selectedProfile?.created_at) }}</span>
+                  </button>
+                  <p v-if="!homeLoading && !(homeSnapshot?.files.length)" class="grant-empty">No agent home files loaded.</p>
+                </div>
+              </div>
+              <p v-if="homeError" class="settings-tone-danger">{{ homeError }}</p>
+            </article>
 
-        <footer class="drawer-footer">
-          <UiButton size="sm" variant="secondary" type="button" @click="closeCreateMode">Cancel</UiButton>
-          <UiButton size="sm" variant="primary" type="button" :disabled="!canSubmitOwnerForm" @click="submitOwnerForm">
-            <Save :size="14" /> Save Changes
-          </UiButton>
-          <UiButton
-            v-if="editMode === 'update'"
-            size="sm"
-            variant="secondary"
-            type="button"
-            :disabled="ownerActionLoading"
-            @click="toggleSelectedProfile"
-          >
-            <Power :size="14" /> {{ selectedProfile?.enabled ? "Disable" : "Enable" }}
-          </UiButton>
-          <UiButton
-            v-if="editMode === 'update'"
-            size="sm"
-            variant="danger"
-            type="button"
-            :disabled="ownerActionLoading"
-            @click="deleteSelectedProfile"
-          >
-            <Trash2 :size="14" /> Delete
-          </UiButton>
-        </footer>
-      </aside>
-    </section>
+            <article class="agent-panel agent-panel--home-editor">
+              <header class="agent-panel-title home-editor-title">
+                <div>
+                  <h3><FileText :size="15" /> {{ selectedHomeFileName || "Agent Home File" }}</h3>
+                  <small>{{ selectedHomeFile?.path || "Select a file from Agent Home" }}</small>
+                </div>
+                <div class="home-editor-actions">
+                  <button type="button" :disabled="!selectedHomeFileName || ownerActionLoading" @click="saveSelectedHomeFile">
+                    Save Home File
+                  </button>
+                  <button type="button" aria-label="Expand editor"><Maximize2 :size="14" /></button>
+                </div>
+              </header>
+              <div class="home-code-editor">
+                <pre class="home-line-numbers">{{ homeEditorLineNumbers }}</pre>
+                <textarea v-model="editHomeFileContent" :disabled="!selectedHomeFileName" />
+              </div>
+            </article>
+          </section>
+        </section>
+
+        <p v-if="detailError" class="settings-tone-danger">{{ detailError }}</p>
+        <p v-if="catalogLoadError" class="settings-tone-danger">{{ catalogLoadError }}</p>
+        <p v-if="resolutionError" class="settings-tone-danger">{{ resolutionError }}</p>
+        <p v-if="ownerActionError" class="settings-tone-danger">{{ ownerActionError }}</p>
+        <p v-else-if="ownerActionMessage" class="settings-tone-success">{{ ownerActionMessage }}</p>
+      </div>
+
+    </form>
   </main>
 </template>
 
 <style scoped>
 .agent-profiles-page {
   --agent-green: #118848;
-  --agent-orange: #f08a18;
+  --agent-accent: #5b8cff;
   --agent-gray: #98a2b3;
-  height: calc(100vh - 92px);
-  min-height: 680px;
+  --agent-line: color-mix(in srgb, var(--border-subtle) 54%, transparent);
+  --agent-line-strong: color-mix(in srgb, var(--border-subtle) 78%, transparent);
+  --agent-canvas: color-mix(in srgb, var(--surface-page) 92%, black 5%);
+  --agent-surface: color-mix(in srgb, var(--surface-panel) 82%, transparent);
+  --agent-surface-soft: color-mix(in srgb, var(--surface-panel) 58%, transparent);
+  --agent-input-bg: color-mix(in srgb, var(--surface-input) 62%, transparent);
+  height: calc(100vh - 50px);
+  min-height: 0;
   padding: 0;
   overflow: hidden;
+  background: var(--agent-canvas);
+}
+
+.agent-fullscreen-form {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.agent-command-bar {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.9fr) minmax(300px, 460px) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 52px;
+  padding: 4px 24px;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.agent-title-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agent-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-2);
+  border: 1px solid color-mix(in srgb, var(--agent-green) 38%, transparent);
   background:
-    radial-gradient(circle at 26% 6%, color-mix(in srgb, var(--color-success) 9%, transparent), transparent 28%),
-    var(--surface-page);
+    linear-gradient(135deg, color-mix(in srgb, var(--agent-green) 74%, white 5%), color-mix(in srgb, var(--agent-green) 68%, black 14%));
+  color: white;
+  font-size: 13px;
+  font-weight: 800;
 }
 
-.agent-page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  min-height: 82px;
-  padding: 18px 24px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-panel) 84%, transparent);
-}
-
-.agent-page-header h1 {
+.agent-title-block h1 {
   margin: 0;
-  font-size: 20px;
-  line-height: 1.2;
+  font-size: 16px;
+  font-weight: 760;
+  line-height: 1.1;
 }
 
-.agent-page-header p {
-  margin: 6px 0 0;
+.agent-title-block p {
+  margin: 3px 0 0;
+  overflow: hidden;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-page-actions {
+.agent-header-actions {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  justify-self: end;
+  min-width: max-content;
 }
 
 .agent-import-input {
   display: none;
 }
 
-.icon-button {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-raised);
-  color: var(--text-secondary);
-  cursor: pointer;
+.agent-icon-toolbar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: max-content;
 }
 
-.agent-page-error {
-  margin: 8px 24px 0;
+.agent-icon-action {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    color 0.16s ease,
+    opacity 0.16s ease;
+}
+
+.agent-icon-action:hover:not(:disabled) {
+  border-color: var(--agent-line-strong);
+  background: var(--agent-surface-soft);
+  color: var(--text-primary);
+}
+
+.agent-icon-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.agent-icon-action--accent {
+  border-color: color-mix(in srgb, var(--agent-accent) 54%, var(--agent-line));
+  color: color-mix(in srgb, var(--agent-accent) 86%, white 8%);
+}
+
+.agent-icon-action--accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--agent-accent) 12%, transparent);
+}
+
+.agent-icon-action--save {
+  border-color: color-mix(in srgb, var(--agent-accent) 76%, transparent);
+  background: color-mix(in srgb, var(--agent-accent) 82%, black 7%);
+  color: #ffffff;
+}
+
+.agent-icon-action--save:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--agent-accent) 72%, black 14%);
+  color: #ffffff;
+}
+
+.agent-icon-action--danger {
+  border-color: color-mix(in srgb, var(--color-danger) 46%, transparent);
   color: var(--color-danger);
+}
+
+.agent-icon-action--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  color: var(--color-danger);
+}
+
+.agent-icon-divider {
+  width: 1px;
+  height: 20px;
+  margin-inline: 4px;
+  background: var(--agent-line);
+}
+
+.agent-profile-selector {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  justify-self: stretch;
+  width: 100%;
+}
+
+.agent-profile-selector span {
+  color: var(--text-secondary);
+  font-size: 9.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.agent-profile-selector select {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--radius-2);
+  background: var(--agent-input-bg);
+  color: var(--text-primary);
   font-size: 12px;
+  font-weight: 800;
+}
+
+.agent-content-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.agent-page-error,
+.settings-tone-danger,
+.settings-tone-success {
+  margin: 10px 24px 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-page-error,
+.settings-tone-danger {
+  color: var(--color-danger);
+}
+
+.settings-tone-success {
+  color: var(--agent-green);
 }
 
 .agent-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  height: calc(100% - 82px);
+  grid-template-rows: 76px 20px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  box-sizing: border-box;
+  height: 100%;
   min-height: 0;
+  padding: 10px 24px 12px;
 }
 
-.agent-list-panel,
-.agent-drawer {
-  min-height: 0;
-  overflow: auto;
-}
-
-.agent-search {
+.agent-metric-strip {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: 0.78fr 0.88fr 0.88fr 0.86fr 0.72fr 1.28fr;
   gap: 8px;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-muted);
-}
-
-.agent-search input {
   min-width: 0;
+  min-height: 0;
+  overflow: visible;
   border: 0;
-  outline: 0;
+  border-radius: 0;
   background: transparent;
-  color: var(--text-primary);
-  font-size: 12px;
 }
 
-.agent-search kbd {
-  color: var(--text-muted);
-  font: 11px var(--font-mono);
-}
-
-.clear-filters {
-  display: inline-flex;
+.agent-metric {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border-subtle);
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--agent-line);
   border-radius: var(--radius-2);
-  background: var(--surface-raised);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
+  background: color-mix(in srgb, var(--surface-panel) 38%, transparent);
 }
 
-.dot,
-.status-dot {
-  width: 9px;
-  height: 9px;
+.agent-metric-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
   border-radius: 999px;
-  background: var(--agent-gray);
+  color: var(--agent-green);
+  background: color-mix(in srgb, var(--agent-green) 18%, transparent);
 }
 
-.dot--enabled,
-.status-dot--enabled {
-  background: var(--agent-green);
+.agent-metric--capabilities .agent-metric-icon {
+  color: #8b5cf6;
+  background: color-mix(in srgb, #8b5cf6 20%, transparent);
 }
 
-.dot--disabled,
-.status-dot--disabled {
-  background: var(--agent-orange);
+.agent-metric--memory .agent-metric-icon {
+  color: #3b82f6;
+  background: color-mix(in srgb, #3b82f6 18%, transparent);
 }
 
-.dot--draft,
-.status-dot--draft {
-  background: var(--agent-gray);
-}
-
-.dot--all {
-  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
-}
-
-.tag-chip,
-.row-tags em {
-  display: inline-grid;
-  place-items: center;
-  min-height: 20px;
-  padding: 0 7px;
-  border-radius: var(--radius-1);
-  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+.agent-metric--updated .agent-metric-icon {
   color: var(--text-secondary);
-  font-size: 11px;
-  font-style: normal;
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
 }
 
-.agent-list-panel {
+.agent-metric div {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  padding: 18px 12px 0;
-}
-
-.agent-table-toolbar {
-  display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) repeat(4, minmax(112px, 136px)) auto;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.agent-list-count {
-  color: var(--text-secondary);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.agent-table-toolbar select {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 0 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.agent-table {
-  min-height: 0;
-  overflow: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: color-mix(in srgb, var(--surface-panel) 92%, transparent);
-}
-
-.agent-table-head,
-.agent-row {
-  display: grid;
-  grid-template-columns: minmax(144px, 1.35fr) minmax(108px, 0.95fr) minmax(76px, 0.75fr) minmax(98px, 0.85fr) minmax(88px, 0.78fr) 74px 64px 22px;
-  align-items: center;
-  gap: 9px;
+  gap: 3px;
   min-width: 0;
 }
 
-.agent-table-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  min-height: 40px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-panel) 96%, transparent);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.agent-row {
-  width: 100%;
-  min-height: 102px;
-  padding: 10px;
-  border: 0;
-  border-bottom: 1px solid var(--border-subtle);
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-  text-align: left;
-}
-
-.agent-row:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-primary) 72%, transparent);
-  outline-offset: -2px;
-}
-
-.agent-row.active {
-  background: color-mix(in srgb, var(--color-success) 8%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-success) 58%, transparent);
-}
-
-.agent-cell {
-  min-width: 0;
-}
-
-.agent-identity-cell,
-.llm-cell,
-.runtime-cell,
-.status-cell {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.agent-avatar,
-.drawer-avatar,
-.llm-badge {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: var(--radius-2);
-  color: white;
-  font-weight: 800;
-}
-
-.agent-avatar {
-  width: 34px;
-  height: 34px;
-  background: linear-gradient(135deg, var(--agent-green), color-mix(in srgb, var(--agent-green) 48%, #0b5));
-}
-
-.agent-identity-cell strong,
-.llm-cell strong,
-.runtime-cell strong {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  font-size: 12px;
-}
-
-.truncate {
-  display: block;
-  overflow: hidden;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-identity-cell small,
-.llm-cell small,
-.runtime-cell small {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.row-tags {
-  display: flex;
-  gap: 5px;
-}
-
-.llm-badge {
-  width: 24px;
-  height: 24px;
-  background: color-mix(in srgb, var(--color-success) 72%, var(--surface-raised));
+.agent-metric span:not(.agent-metric-icon) {
+  color: var(--text-muted);
   font-size: 10px;
+  font-weight: 780;
+  text-transform: uppercase;
 }
 
-.llm-badge.secondary {
-  background: color-mix(in srgb, var(--color-warning) 62%, var(--surface-raised));
-}
-
-.runtime-cell svg {
-  color: var(--text-primary);
-}
-
-.preference-cell {
-  display: grid;
-  gap: 5px;
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
-.preference-cell small {
-  position: relative;
-  padding-left: 10px;
-}
-
-.preference-cell small::before {
-  content: "";
-  position: absolute;
-  top: 5px;
-  left: 0;
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--agent-gray);
-}
-
-.preference-cell .on::before {
-  background: var(--agent-green);
-}
-
-.preference-cell .off::before {
-  background: var(--color-danger);
-}
-
-.status-cell {
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.status-cell {
-  gap: 6px;
-}
-
-.updated-cell,
-.row-menu {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.updated-cell {
+.agent-metric strong,
+.agent-metric small {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.row-menu {
-  position: relative;
-  display: grid;
-  place-items: center;
+.agent-metric strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 760;
 }
 
-.row-menu-button {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: var(--radius-1);
-  background: transparent;
+.agent-metric small {
   color: var(--text-secondary);
-  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 620;
 }
 
-.row-menu-button:hover {
-  background: var(--surface-raised);
-  color: var(--text-primary);
+.agent-workbench-summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
 }
 
-.row-action-menu {
-  position: absolute;
-  top: 30px;
-  right: 0;
-  z-index: 5;
+.agent-config-grid,
+.agent-work-grid {
   display: grid;
-  width: 128px;
-  padding: 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-panel);
-  box-shadow: var(--shadow-popover);
-}
-
-.row-action-menu button {
-  height: 28px;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
   border: 0;
-  border-radius: var(--radius-1);
+  border-radius: 0;
   background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 12px;
-  text-align: left;
 }
 
-.row-action-menu button:hover {
-  background: var(--surface-raised);
+.agent-config-grid {
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr) minmax(0, 1.28fr);
 }
 
-.row-action-menu .danger {
-  color: var(--color-danger);
+.agent-work-grid {
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1fr);
 }
 
-.agent-empty {
+.agent-panel {
   display: grid;
-  place-items: center;
-  min-height: 220px;
-  color: var(--text-muted);
-  font-size: 12px;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--radius-2);
+  background: var(--agent-surface);
+  box-shadow: none;
+  overflow: hidden;
 }
 
-.agent-pagination {
+.agent-panel-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 48px;
-  padding: 0 12px;
-  color: var(--text-secondary);
-  font-size: 12px;
+  min-width: 0;
+  min-height: 20px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--agent-line);
 }
 
-.agent-pagination label {
+.agent-panel-title h3 {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-}
-
-.agent-pagination select {
-  height: 30px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-1);
-  background: var(--surface-raised);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.agent-pagination button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-width: 34px;
-  height: 30px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-1);
-  background: var(--surface-raised);
-  color: var(--text-primary);
-}
-
-.agent-pagination nav {
-  display: flex;
-  gap: 6px;
-}
-
-.agent-pagination .active {
-  border-color: var(--agent-green);
-  color: var(--agent-green);
-}
-
-.agent-drawer {
-  position: relative;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  border-left: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-panel) 96%, transparent);
-}
-
-.drawer-close {
-  position: absolute;
-  top: 26px;
-  right: 22px;
-  z-index: 2;
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-}
-
-.drawer-profile-header {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 108px;
-  padding: 26px 26px 18px;
-}
-
-.drawer-avatar {
-  width: 46px;
-  height: 46px;
-  background: var(--agent-green);
-  font-size: 20px;
-}
-
-.drawer-profile-header h2 {
+  gap: 7px;
   margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.agent-panel-title span {
   overflow: hidden;
-  font-size: 15px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 680;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.drawer-profile-header p,
-.drawer-profile-header em {
-  margin: 4px 0 0;
+.dense-field-grid {
+  display: grid;
+  gap: 8px 9px;
+  align-content: start;
+  min-height: 0;
+  overflow: auto;
+  padding-top: 8px;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
+}
+
+.dense-field-grid--runtime {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dense-field-grid--identity {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.92fr);
+  row-gap: 10px;
+}
+
+.agent-panel--identity .dense-field--prompt {
+  min-height: 164px;
+  margin-top: 6px;
+}
+
+.dense-field,
+.dense-checkbox {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.dense-status-field {
+  display: grid;
+  grid-template-rows: auto 28px;
+  gap: 3px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.dense-status-field > span {
+  overflow: hidden;
   color: var(--text-secondary);
-  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-status-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--agent-line) 88%, transparent);
+  border-radius: var(--radius-2);
+  background: var(--agent-input-bg);
+  cursor: pointer;
+}
+
+.profile-status-toggle i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--agent-gray);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent-gray) 12%, transparent);
+}
+
+.profile-status-toggle.on i {
+  background: var(--agent-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent-green) 16%, transparent);
+}
+
+.profile-status-toggle em {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11.5px;
   font-style: normal;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.switch {
+.mini-switch {
   position: relative;
-  width: 40px;
-  height: 22px;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
 }
 
-.switch input {
+.mini-switch input {
   position: absolute;
   inset: 0;
   opacity: 0;
 }
 
-.switch span {
-  position: absolute;
-  inset: 0;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
-  cursor: pointer;
-}
-
-.switch span::after {
-  content: "";
+.mini-switch b {
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
-  background: white;
+  background: #fff;
   transition: transform 0.16s ease;
 }
 
-.switch.on span {
+.profile-status-toggle.on .mini-switch {
   background: var(--agent-green);
 }
 
-.switch.on span::after {
-  transform: translateX(18px);
+.profile-status-toggle.on .mini-switch b {
+  transform: translateX(14px);
 }
 
-.drawer-tabs {
-  display: flex;
-  gap: 8px;
-  min-height: 42px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--border-subtle);
-  overflow-x: auto;
+.dense-field {
+  display: grid;
+  grid-template-rows: auto 28px;
+  gap: 4px;
 }
 
-.drawer-tabs button {
-  flex: 0 0 auto;
-  height: 42px;
-  padding: 0;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
+.dense-field--full {
+  grid-column: 1 / -1;
+}
+
+.dense-field--span-2 {
+  grid-column: span 2;
+}
+
+.dense-field span {
+  overflow: hidden;
   color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.drawer-tabs .active {
-  border-color: var(--agent-green);
-  color: var(--agent-green);
-}
-
-.agent-drawer-form {
-  min-height: 0;
-  overflow: auto;
-}
-
-.drawer-section {
-  display: grid;
-  gap: 16px;
-  padding: 24px 24px 92px;
-}
-
-.drawer-section h3 {
-  margin: 0;
-  font-size: 13px;
-}
-
-.drawer-section label {
-  display: grid;
-  gap: 7px;
-  color: var(--text-primary);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.drawer-section input,
-.drawer-section textarea,
-.drawer-section select {
+.dense-field input,
+.dense-field textarea,
+.dense-field select {
   width: 100%;
   min-width: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid color-mix(in srgb, var(--agent-line) 88%, transparent);
   border-radius: var(--radius-2);
-  background: var(--surface-input);
+  background: var(--agent-input-bg);
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 450;
 }
 
-.drawer-section input,
-.drawer-section select {
-  height: 34px;
-  padding: 0 10px;
+.dense-field input:focus,
+.dense-field textarea:focus,
+.dense-field select:focus,
+.home-code-editor textarea:focus {
+  border-color: color-mix(in srgb, var(--agent-accent) 62%, var(--agent-line));
+  outline: none;
 }
 
-.drawer-section textarea {
-  min-height: 72px;
-  padding: 10px;
-  resize: vertical;
+.dense-field input,
+.dense-field select {
+  height: 28px;
+  padding: 0 8px;
 }
 
-.drawer-section input[readonly] {
-  background: color-mix(in srgb, var(--surface-sidebar) 70%, transparent);
+.dense-field textarea {
+  height: 42px;
+  min-height: 42px;
+  padding: 6px 8px;
+  line-height: 1.35;
+  resize: none;
+}
+
+.dense-field--prompt {
+  grid-template-rows: auto minmax(146px, 1fr);
+}
+
+.dense-field--prompt textarea {
+  height: 100%;
+  min-height: 146px;
+}
+
+.dense-field input[readonly] {
+  background: color-mix(in srgb, var(--surface-sidebar) 52%, transparent);
   color: var(--text-muted);
 }
 
-.checkbox-field {
-  display: flex !important;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px !important;
+.dense-checkbox {
+  display: flex;
+  align-items: end;
+  gap: 7px;
+  height: 46px;
+  padding-bottom: 5px;
 }
 
-.checkbox-field input,
-.visibility-fieldset input {
+.dense-checkbox input {
   width: 14px;
   height: 14px;
 }
 
-.visibility-fieldset {
-  display: grid;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.visibility-fieldset legend {
-  margin-bottom: 8px;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.visibility-fieldset label {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  column-gap: 8px;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.visibility-fieldset small {
-  grid-column: 2;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.grant-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.grant-summary span {
-  display: grid;
-  place-items: center;
-  min-height: 34px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 800;
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.grant-picker {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-}
-
-.grant-picker h4 {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.grant-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 3px 8px;
-  align-items: center;
-  min-height: 34px;
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.grant-row input {
-  grid-row: span 2;
-}
-
-.grant-row strong,
-.grant-row small {
+.tool-main strong,
+.tool-main small,
+.tool-target,
+.home-path strong,
+.home-path small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.grant-row small,
+.tool-main strong {
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 680;
+}
+
+.tool-main small,
+.tool-target,
 .grant-empty {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 10.5px;
+  font-weight: 560;
 }
 
-.resolution-summary {
+.tool-main strong {
+  font-size: 11.5px;
+  font-weight: 680;
+}
+
+.tool-access-table {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.resolution-summary span {
-  display: grid;
-  gap: 3px;
-  min-height: 48px;
-  padding: 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-}
-
-.resolution-summary strong {
-  color: var(--text-primary);
-  font-size: 14px;
-}
-
-.resolution-summary small {
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-
-.resolution-block {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: color-mix(in srgb, var(--surface-input) 84%, transparent);
-}
-
-.resolution-block h4 {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.resolution-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 10px;
-  align-items: center;
-  min-height: 32px;
-}
-
-.resolution-row strong,
-.resolution-row small {
-  overflow: hidden;
+  grid-template-rows: 22px minmax(0, 1fr);
   min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-height: 0;
 }
 
-.resolution-row strong {
+.agent-panel--tools {
+  grid-template-rows: auto 26px minmax(0, 1fr);
+}
+
+.tool-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 6px 0 5px;
+  padding: 0 8px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--radius-2);
+  background: var(--agent-input-bg);
+  color: var(--text-muted);
+}
+
+.tool-search input {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  border: 0;
+  background: transparent;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 11.5px;
+  outline: none;
 }
 
-.resolution-row small {
-  grid-column: 1;
-  color: var(--text-secondary);
-  font-size: 11px;
+.tool-access-body {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
-.resolution-row em {
-  grid-column: 2;
-  grid-row: 1 / span 2;
+.tool-access-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.45fr) minmax(130px, 0.9fr) 58px;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 3px 0;
+  border-top: 1px solid color-mix(in srgb, var(--agent-line) 72%, transparent);
+}
+
+.tool-access-row--head {
+  min-height: 24px;
+  padding: 2px 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.tool-trust-button {
   justify-self: end;
-  max-width: 128px;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--agent-accent) 54%, var(--agent-line));
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: color-mix(in srgb, var(--agent-accent) 86%, white 8%);
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 700;
 }
 
-.resolution-row em.ready {
+.tool-trust-button.active {
+  border-color: color-mix(in srgb, var(--agent-green) 56%, transparent);
   color: var(--agent-green);
 }
 
-.resolution-row em.blocked {
-  color: var(--color-danger);
+.tool-trust-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
-.history-actions {
+.tool-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-panel--home-editor {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.agent-panel--home-files {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.home-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-}
-
-.history-actions button {
-  min-height: 32px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-raised);
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.history-actions span {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.history-list {
-  display: grid;
   gap: 10px;
-}
-
-.history-row {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-}
-
-.history-row header,
-.history-row dl div {
-  display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  min-height: 48px;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--agent-line) 72%, transparent);
 }
 
-.history-row header strong {
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.history-row time,
-.history-row dt {
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-
-.history-row dl {
+.home-path {
   display: grid;
-  gap: 6px;
-  margin: 0;
+  gap: 2px;
+  min-width: 0;
 }
 
-.history-row dd {
-  overflow: hidden;
-  max-width: 180px;
-  margin: 0;
+.home-path strong {
   color: var(--text-primary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 760;
 }
 
-.home-meta {
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-}
-
-.home-meta span,
-.home-meta small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.home-meta span {
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.home-meta small {
+.home-path small {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 10.5px;
+  font-weight: 600;
 }
 
 .home-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.home-actions button:last-child {
-  grid-column: span 2;
+  grid-template-columns: repeat(3, minmax(62px, auto));
+  gap: 6px;
 }
 
 .home-actions button,
-.home-save-button {
-  min-height: 32px;
-  border: 1px solid var(--border-subtle);
+.home-editor-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 1px solid var(--agent-line);
   border-radius: var(--radius-2);
-  background: var(--surface-raised);
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.home-actions button:hover,
+.home-editor-actions button:hover:not(:disabled) {
+  border-color: var(--agent-line-strong);
+  background: var(--agent-surface-soft);
 }
 
 .home-actions button:disabled,
-.home-save-button:disabled {
+.home-editor-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
 }
 
-.home-files-panel {
+.home-files-table {
   display: grid;
+  grid-template-rows: 28px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  padding-top: 4px;
+}
+
+.home-files-head,
+.home-file-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.25fr) minmax(80px, 0.46fr) minmax(80px, 0.46fr) minmax(110px, 0.6fr);
+  align-items: center;
   gap: 10px;
+  min-height: 0;
 }
 
-.home-file-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+.home-files-head {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
 }
 
-.home-file-list button {
+.home-files-body {
   display: grid;
-  gap: 3px;
-  min-height: 42px;
-  padding: 8px;
-  border: 1px solid var(--border-subtle);
+  align-content: start;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.home-file-row {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-top: 1px solid var(--agent-line);
   border-radius: var(--radius-2);
-  background: var(--surface-input);
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   text-align: left;
+  font-size: 11.5px;
 }
 
-.home-file-list button.active {
-  border-color: color-mix(in srgb, var(--agent-green) 64%, transparent);
-  background: color-mix(in srgb, var(--agent-green) 10%, var(--surface-input));
+.home-file-row.active {
+  background: color-mix(in srgb, #6d5dfc 18%, transparent);
 }
 
-.home-file-list strong,
-.home-file-list small {
+.home-file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.home-file-row span,
+.home-editor-title small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.home-file-list small {
-  color: var(--text-secondary);
-  font-size: 11px;
+.home-file-row .ready {
+  color: var(--agent-green);
 }
 
-.home-editor textarea {
-  min-height: 220px;
-  font-family: var(--font-mono);
-  line-height: 1.45;
+.home-file-row .blocked {
+  color: var(--color-danger);
 }
 
-.home-editor span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.home-editor-title {
+  align-items: start;
 }
 
-.profile-json-details summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.drawer-section pre {
-  max-height: 420px;
-  margin: 0;
-  padding: 12px;
-  overflow: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: var(--surface-input);
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.drawer-footer {
+.home-editor-title > div:first-child {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px;
-  padding: 16px 24px;
-  border-top: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-panel) 98%, transparent);
+  gap: 3px;
+  min-width: 0;
 }
 
-.drawer-footer .ui-button--secondary:nth-last-child(-n + 2),
-.drawer-footer .ui-button--danger {
-  grid-column: span 1;
+.home-editor-title small {
+  color: var(--text-secondary);
+  font-size: 10.5px;
 }
 
-@media (max-width: 1280px) {
+.home-editor-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-width: max-content;
+}
+
+.home-code-editor {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  margin-top: 8px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-input) 42%, transparent);
+  overflow: hidden;
+}
+
+.home-line-numbers {
+  min-height: 0;
+  margin: 0;
+  padding: 8px 0;
+  border-right: 1px solid var(--agent-line);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow: hidden;
+  text-align: center;
+  user-select: none;
+}
+
+.home-code-editor textarea {
+  height: 100%;
+  min-height: 0;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  resize: none;
+}
+
+.agent-panel .settings-tone-danger {
+  margin: 6px 0 0;
+}
+
+@media (max-width: 1180px) {
+  .agent-command-bar {
+    grid-template-columns: minmax(240px, 1fr) minmax(260px, 360px) auto;
+  }
+
+  .agent-header-actions {
+    justify-self: end;
+  }
+
   .agent-workbench {
-    grid-template-columns: minmax(0, 1fr) 360px;
+    height: auto;
+    grid-template-rows: auto auto auto auto;
   }
 
-  .agent-table-toolbar {
-    grid-template-columns: auto minmax(160px, 1fr) repeat(2, minmax(112px, 1fr)) auto;
+  .agent-metric-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .agent-table-toolbar select:nth-of-type(n + 3) {
-    display: none;
+  .agent-config-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .agent-work-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 760px) {
   .agent-profiles-page {
     height: auto;
     min-height: 0;
     overflow: visible;
   }
 
-  .agent-workbench {
-    display: block;
-    height: auto;
+  .agent-fullscreen-form {
+    min-height: 100vh;
   }
 
-  .agent-list-panel,
-  .agent-drawer {
-    overflow: visible;
+  .agent-command-bar {
+    grid-template-columns: minmax(0, 1fr);
   }
+
+  .agent-profile-selector,
+  .agent-header-actions {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .agent-header-actions {
+    justify-content: flex-start;
+  }
+
+  .agent-icon-toolbar {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .agent-workbench,
+  .agent-config-grid,
+  .agent-work-grid,
+  .agent-metric-strip,
+  .dense-field-grid--identity,
+  .dense-field-grid--runtime,
+  .home-files-head,
+  .home-file-row,
+  .home-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-workbench {
+    padding-inline: 14px;
+  }
+
+  .tool-access-row {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+
+  .tool-access-row > .tool-target,
+  .tool-access-row--head > span:nth-child(2) {
+    display: none;
+  }
+
 }
 </style>

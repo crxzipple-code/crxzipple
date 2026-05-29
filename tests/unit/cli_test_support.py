@@ -16,15 +16,14 @@ from typer.testing import CliRunner
 from crxzipple.interfaces.cli.main import _is_missing_database_schema_error
 from crxzipple.interfaces.cli.main import app
 from crxzipple.interfaces.cli import db as db_cli
+from crxzipple.interfaces.runtime_container import AssemblyTarget
 from crxzipple.modules.dispatch.application import (
     CreateDispatchTaskInput,
     EnqueueDispatchTaskInput,
 )
-from crxzipple.modules.tool.application import RegisterToolInput
 from tests.unit.skill_test_support import write_skill_package as _write_skill_package
 from tests.unit.support import (
     FakeCdpServer,
-    FakeChromeMcpClientPool,
     FakePlaywrightCdpSessionPool,
     SampleApiServer,
     SampleLlmApiServer,
@@ -34,12 +33,14 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0043_settings_governance"
+HEAD_REVISION = "0062_drop_retired_browser_local_package_manifest"
 
 
 class CliModuleTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
+        self._runner_invoke = self.runner.invoke
+        self.runner.invoke = self._invoke_with_default_container
         self._skills_tempdir = tempfile.TemporaryDirectory()
         skills_root = Path(self._skills_tempdir.name)
         self._global_skills_patcher = patch(
@@ -61,6 +62,7 @@ class CliModuleTestCase(unittest.TestCase):
         )
         self.harness = SqliteTestHarness()
         self.harness.initialize_schema()
+        self._cli_obj: dict[str, object] | None = None
         self.env = {
             "APP_DATABASE_URL": self.harness.database_url,
             "APP_TOOL_OPENAPI_PROVIDER_PATHS": os.pathsep,
@@ -86,6 +88,37 @@ class CliModuleTestCase(unittest.TestCase):
         env.pop("APP_ALLOW_SQLITE_RUNTIME_FALLBACK", None)
         return env
 
+    def cli_obj(self, *, env: dict[str, str] | None = None) -> dict[str, object]:
+        if self._cli_obj is None:
+            with patch.dict(os.environ, env if env is not None else self.env, clear=False):
+                self._cli_obj = {
+                    "container": self.harness.build_runtime_container(
+                        target=AssemblyTarget.CLI_ADMIN,
+                    ),
+                }
+        return self._cli_obj
+
+    def invoke_cli(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+    ):
+        resolved_env = env if env is not None else self.env
+        kwargs: dict[str, object] = {"env": resolved_env}
+        if resolved_env is self.env:
+            kwargs["obj"] = self.cli_obj(env=resolved_env)
+        return self.runner.invoke(
+            app,
+            args,
+            **kwargs,
+        )
+
+    def _invoke_with_default_container(self, cli, args=None, *extra_args, **kwargs):  # noqa: ANN001
+        if cli is app and kwargs.get("env") is self.env and "obj" not in kwargs:
+            kwargs["obj"] = self.cli_obj(env=self.env)
+        return self._runner_invoke(cli, args, *extra_args, **kwargs)
+
 
 __all__ = [
     "CliModuleTestCase",
@@ -93,14 +126,12 @@ __all__ = [
     "CreateDispatchTaskInput",
     "EnqueueDispatchTaskInput",
     "FakeCdpServer",
-    "FakeChromeMcpClientPool",
     "FakePlaywrightCdpSessionPool",
     "HEAD_REVISION",
     "Path",
     "SampleApiServer",
     "SampleLlmApiServer",
     "SqliteTestHarness",
-    "RegisterToolInput",
     "_is_missing_database_schema_error",
     "_write_skill_package",
     "app",

@@ -12,7 +12,6 @@ from crxzipple.modules.access.application.read_models import (
 )
 from crxzipple.modules.access.application.services import (
     canonical_credential_binding,
-    is_codex_auth_json_binding,
     is_credential_binding,
     parse_access_requirement,
 )
@@ -102,8 +101,6 @@ def credential_asset_kind(binding: str) -> str:
         return "env"
     if normalized.startswith("file:"):
         return "file"
-    if is_codex_auth_json_binding(normalized):
-        return "codex_auth_json"
     return "inline_credential"
 
 
@@ -435,9 +432,6 @@ def _credential_binding_label(binding: str) -> str:
         return f"env:{env_name}" if env_name else "env"
     if normalized.startswith("file:"):
         return "file credential"
-    if is_codex_auth_json_binding(normalized):
-        canonical = canonical_credential_binding(normalized)
-        return canonical if ":" in canonical else "codex_auth_json"
     return "inline credential"
 
 

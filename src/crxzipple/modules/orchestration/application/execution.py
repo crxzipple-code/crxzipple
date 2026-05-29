@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from crxzipple.modules.events import Event, EventsApplicationService
 from crxzipple.modules.orchestration.application.commands import (
     AdvanceAssignmentInput,
     CompleteAssignmentInput,
@@ -21,6 +20,7 @@ from crxzipple.modules.orchestration.application.engine import (
 from crxzipple.modules.orchestration.application.maintenance import (
     OrchestrationMaintenanceService,
 )
+from crxzipple.modules.orchestration.application.ports import EventPublishManyPort
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
     OrchestrationRunStage,
@@ -29,6 +29,7 @@ from crxzipple.modules.orchestration.domain import (
 from crxzipple.shared.orchestration_observation import (
     ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
 )
+from crxzipple.shared.domain.events import Event
 from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
     get_runtime_metrics_registry,
@@ -48,7 +49,7 @@ class RunExecutionService:
     complete_assignment: Callable[[CompleteAssignmentInput], OrchestrationRun]
     fail_assignment: Callable[[FailAssignmentInput], OrchestrationRun]
     clear_prompt_flow_hint: Callable[[str], None]
-    events_service: EventsApplicationService | None = None
+    events_service: EventPublishManyPort | None = None
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
     )

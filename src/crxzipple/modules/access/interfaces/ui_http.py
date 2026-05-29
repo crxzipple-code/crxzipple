@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.access.application.query import AccessControlPlaneQueryProvider
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsConfigProvider,
+)
+from crxzipple.modules.access.interfaces.external_consumers import (
+    external_access_consumer_bindings,
 )
 
 
@@ -47,29 +50,15 @@ def list_access_consumers(
     return _provider(container).consumers().to_payload()
 
 
-@router.get("/audits")
-def list_access_audits(
-    container: Annotated[AppContainer, Depends(get_container)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> dict[str, object]:
-    return _provider(container).audits(limit=limit, offset=offset).to_payload()
-
-
 def _provider(container: AppContainer) -> AccessControlPlaneQueryProvider:
-    governance_repository = container.access_governance_repository
+    governance_repository = container.require(AppKey.ACCESS_GOVERNANCE_REPOSITORY)
     settings_config_provider = AccessSettingsConfigProvider(
-        getattr(container, "settings_query_service", None),
-        environment=getattr(getattr(container, "settings", None), "environment", None),
+        container.require(AppKey.SETTINGS_QUERY_SERVICE),
+        environment=container.require(AppKey.CORE_SETTINGS).environment,
     )
-    if governance_repository is None:
-        return AccessControlPlaneQueryProvider(
-            governance_repository=None,
-            audit_repository=None,
-            settings_config_provider=settings_config_provider,
-        )
     return AccessControlPlaneQueryProvider(
         governance_repository=governance_repository,
-        audit_repository=container.access_action_audit_repository,
+        audit_repository=container.require(AppKey.ACCESS_ACTION_AUDIT_REPOSITORY),
         settings_config_provider=settings_config_provider,
+        external_consumer_binding_provider=lambda: external_access_consumer_bindings(container),
     )

@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from crxzipple.modules.tool.application import ToolDiscoveryProviderDescriptor
 from crxzipple.modules.tool.domain import ToolRunError, ToolRunResult
 from crxzipple.modules.tool.domain.entities import Tool, ToolRun
+from crxzipple.shared.access import (
+    AccessCredentialRequirementDeclaration,
+    AccessCredentialRequirementSet,
+)
 from crxzipple.shared.time import (
     format_datetime_utc,
     format_optional_datetime_utc,
@@ -35,26 +38,9 @@ class ToolExecutionSupportDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolDiscoveryProviderDTO:
-    name: str
-    description: str
-    source_kind: str
-
-    @classmethod
-    def from_descriptor(
-        cls,
-        descriptor: ToolDiscoveryProviderDescriptor,
-    ) -> "ToolDiscoveryProviderDTO":
-        return cls(
-            name=descriptor.name,
-            description=descriptor.description,
-            source_kind=descriptor.source_kind.value,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class ToolDTO:
     id: str
+    source_id: str | None
     name: str
     description: str
     kind: str
@@ -63,9 +49,13 @@ class ToolDTO:
     required_effect_ids: tuple[str, ...]
     access_requirements: tuple[str, ...]
     access_requirement_sets: tuple[tuple[str, ...], ...]
+    runtime_requirement_sets: tuple[tuple[str, ...], ...]
+    context_requirements: tuple[str, ...]
+    capability_ids: tuple[str, ...]
+    credential_requirements: tuple[dict[str, Any], ...]
     execution_policy: ToolExecutionPolicyDTO
     execution_support: ToolExecutionSupportDTO
-    source_kind: str
+    definition_origin: str
     runtime_key: str | None
     enabled: bool
 
@@ -73,6 +63,7 @@ class ToolDTO:
     def from_entity(cls, tool: Tool) -> "ToolDTO":
         return cls(
             id=tool.id,
+            source_id=tool.source_id,
             name=tool.name,
             description=tool.description,
             kind=tool.kind.value,
@@ -89,6 +80,13 @@ class ToolDTO:
             required_effect_ids=tool.required_effect_ids,
             access_requirements=tool.access_requirements,
             access_requirement_sets=tool.access_requirement_sets,
+            runtime_requirement_sets=tool.runtime_requirement_sets,
+            context_requirements=tool.context_requirements,
+            capability_ids=tool.capability_ids,
+            credential_requirements=tuple(
+                _credential_requirement_set_payload(requirement_set)
+                for requirement_set in tool.credential_requirements
+            ),
             execution_policy=ToolExecutionPolicyDTO(
                 timeout_seconds=tool.execution_policy.timeout_seconds,
                 requires_confirmation=tool.execution_policy.requires_confirmation,
@@ -107,10 +105,68 @@ class ToolDTO:
                     for environment in tool.execution_support.supported_environments
                 ),
             ),
-            source_kind=tool.source_kind.value,
+            definition_origin=tool.definition_origin.value,
             runtime_key=tool.runtime_key,
             enabled=tool.enabled,
         )
+
+
+def _credential_requirement_set_payload(
+    requirement_set: AccessCredentialRequirementSet,
+) -> dict[str, Any]:
+    return {
+        "requirement_set_id": requirement_set.requirement_set_id,
+        "consumer": {
+            "consumer_id": requirement_set.consumer.consumer_id,
+            "module": requirement_set.consumer.module,
+            "component": requirement_set.consumer.component,
+            "runtime_ref": requirement_set.consumer.runtime_ref,
+            "metadata": dict(requirement_set.consumer.metadata),
+        },
+        "requirements": [
+            _credential_requirement_payload(requirement)
+            for requirement in requirement_set.requirements
+        ],
+        "alternative": requirement_set.alternative,
+        "metadata": dict(requirement_set.metadata),
+    }
+
+
+def _credential_requirement_payload(
+    requirement: AccessCredentialRequirementDeclaration,
+) -> dict[str, Any]:
+    return {
+        "requirement_id": requirement.requirement_id,
+        "consumer": {
+            "consumer_id": requirement.consumer.consumer_id,
+            "module": requirement.consumer.module,
+            "component": requirement.consumer.component,
+            "runtime_ref": requirement.consumer.runtime_ref,
+            "metadata": dict(requirement.consumer.metadata),
+        },
+        "slot": {
+            "slot": requirement.slot.slot,
+            "expected_kind": requirement.slot.expected_kind.value,
+            "binding_id": requirement.slot.binding_id,
+            "required": requirement.slot.required,
+            "display_name": requirement.slot.display_name,
+            "scopes": list(requirement.slot.scopes),
+            "metadata": dict(requirement.slot.metadata),
+        },
+        "provider": requirement.provider,
+        "transport": requirement.transport.value,
+        "parameter_name": requirement.parameter_name,
+        "setup_flow_hint": {
+            "flow_kind": requirement.setup_flow_hint.flow_kind.value,
+            "provider": requirement.setup_flow_hint.provider,
+            "authorization_url": requirement.setup_flow_hint.authorization_url,
+            "token_url": requirement.setup_flow_hint.token_url,
+            "device_code_url": requirement.setup_flow_hint.device_code_url,
+            "callback_url": requirement.setup_flow_hint.callback_url,
+            "metadata": dict(requirement.setup_flow_hint.metadata),
+        },
+        "metadata": dict(requirement.metadata),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,9 +210,15 @@ class ToolRunErrorDTO:
 class ToolRunDTO:
     id: str
     tool_id: str
+    function_id: str | None
+    function_revision: int | None
+    source_id: str | None
+    source_revision: int | None
+    schema_hash: str | None
     target: ToolExecutionTargetDTO
     status: str
     input_payload: dict[str, Any]
+    metadata: dict[str, Any]
     result: ToolRunResultDTO | None
     error: ToolRunErrorDTO | None
     output_payload: Any | None
@@ -176,6 +238,11 @@ class ToolRunDTO:
         return cls(
             id=tool_run.id,
             tool_id=tool_run.tool_id,
+            function_id=tool_run.function_id,
+            function_revision=tool_run.function_revision,
+            source_id=tool_run.source_id,
+            source_revision=tool_run.source_revision,
+            schema_hash=tool_run.schema_hash,
             target=ToolExecutionTargetDTO(
                 mode=tool_run.target.mode.value,
                 strategy=tool_run.target.strategy.value,
@@ -183,6 +250,7 @@ class ToolRunDTO:
             ),
             status=tool_run.status.value,
             input_payload=dict(tool_run.input_payload),
+            metadata=dict(tool_run.metadata),
             result=(
                 ToolRunResultDTO.from_value_object(tool_run.result)
                 if tool_run.result is not None

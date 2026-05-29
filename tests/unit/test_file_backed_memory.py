@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -16,6 +15,16 @@ from crxzipple.modules.memory.infrastructure.indexing import (
 )
 from crxzipple.modules.memory.infrastructure.storage import FileMemoryStore
 from tests.unit.support import SampleEmbeddingApiServer
+
+
+class _FakeMemoryCredentialProvider:
+    def __init__(self, value: str) -> None:
+        self.value = value
+        self.calls: list[tuple[object, dict[str, object]]] = []
+
+    def resolve_credential(self, binding: object, **kwargs: object) -> str:
+        self.calls.append((binding, kwargs))
+        return self.value
 
 
 def _file_backed_memory_service(
@@ -286,8 +295,7 @@ class FileBackedMemoryTestCase(unittest.TestCase):
         self.assertGreater(vector_vec_count, 0)
 
     def test_openai_compatible_provider_populates_embedding_cache(self) -> None:
-        previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-        os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-embedding-token"
+        credential_provider = _FakeMemoryCredentialProvider("sample-embedding-token")
         server = SampleEmbeddingApiServer()
         server.start()
         try:
@@ -296,8 +304,8 @@ class FileBackedMemoryTestCase(unittest.TestCase):
                     embedding_provider=OpenAICompatibleMemoryEmbeddingProvider(
                         base_url=server.base_url + "/v1",
                         model_name="sample-embedding-model",
-                        credential_binding="env:OPENAI_COMPATIBLE_TOKEN",
-                        resolved_credential="sample-embedding-token",
+                        credential_binding_id="memory-openai-api-key",
+                        credential_provider=credential_provider,
                         timeout_seconds=5,
                     ),
                 ),
@@ -332,12 +340,12 @@ class FileBackedMemoryTestCase(unittest.TestCase):
             self.assertEqual(meta["vector_model"], "sample-embedding-model")
             self.assertGreater(cache_count, 0)
             self.assertEqual(len(hits), 1)
+            self.assertEqual(
+                getattr(credential_provider.calls[0][0], "binding_id"),
+                "memory-openai-api-key",
+            )
         finally:
             server.close()
-            if previous_token is None:
-                os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
-            else:
-                os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
 
     def test_write_marks_dirty_and_search_syncs_on_demand(self) -> None:
         self.service.write_long_term(

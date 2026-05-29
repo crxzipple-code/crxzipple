@@ -21,6 +21,7 @@ from crxzipple.modules.dispatch.application.observers import (
     DispatchWakeupObserver,
     dispatch_wakeup_topic,
 )
+from crxzipple.modules.dispatch.application.ports import DispatchEventPublishPort
 from crxzipple.modules.dispatch.application.worker import DispatchWorker
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "CompleteDispatchTaskInput",
     "CreateDispatchTaskInput",
     "DispatchApplicationService",
+    "DispatchEventPublishPort",
     "dispatch_event_definitions",
     "dispatch_event_observers",
     "dispatch_event_surfaces",

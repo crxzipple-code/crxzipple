@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from crxzipple.modules.process.domain import (
@@ -26,6 +27,7 @@ class ProcessApplicationService:
         working_directory: str,
         session_key: str | None = None,
         metadata: dict[str, object] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessSession:
         return self.supervisor.start(
             session_key=session_key,
@@ -33,6 +35,7 @@ class ProcessApplicationService:
             shell=shell,
             working_directory=working_directory,
             metadata=metadata,
+            env=env,
         )
 
     def list_sessions(self) -> tuple[ProcessSession, ...]:

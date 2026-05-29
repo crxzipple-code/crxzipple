@@ -11,6 +11,9 @@ from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
 )
+from crxzipple.modules.operations.application.read_models.event_buckets import (
+    recent_event_buckets,
+)
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
     OperationsChartSectionModel,
@@ -147,6 +150,7 @@ class ChannelsOperationsReadModelProvider:
     events_service: Any | None = None
     event_contract_registry: Any | None = None
     event_definition_registry: Any | None = None
+    operations_observation: Any | None = None
 
     def overview(self) -> OperationsModuleOverview:
         page = self.page(ChannelsOperationsQuery(limit=40))
@@ -195,16 +199,32 @@ class ChannelsOperationsReadModelProvider:
             interactions=interactions,
             events_service=self.events_service,
         )
-        dead_letter_events = _dead_letter_events(
-            self.events_service,
-            channel_types=channel_types,
-            runtimes=runtimes,
-            definition_registry=self.event_definition_registry,
-        )
-        recent_events = _recent_channel_events(
-            self.events_service,
+        observed_events = _recent_channel_events_from_observation(
+            self.operations_observation,
             connection_bindings=connection_bindings,
-            definition_registry=self.event_definition_registry,
+        )
+        if observed_events:
+            dead_letter_events = tuple(
+                event for event in observed_events if _is_dead_letter_event(event)
+            )
+            recent_events = observed_events
+        else:
+            dead_letter_events = _dead_letter_events(
+                self.events_service,
+                channel_types=channel_types,
+                runtimes=runtimes,
+                definition_registry=self.event_definition_registry,
+            )
+            recent_events = _recent_channel_events(
+                self.events_service,
+                connection_bindings=connection_bindings,
+                definition_registry=self.event_definition_registry,
+            )
+        event_buckets = recent_event_buckets(
+            self.operations_observation,
+            module="channels",
+            hours=24,
+            limit=1000,
         )
         channel_events = _dedupe_events((*dead_letter_events, *recent_events))
         runtime_records = _runtime_records(
@@ -300,6 +320,7 @@ class ChannelsOperationsReadModelProvider:
                 channel_events,
                 runtime_records,
                 interactions,
+                event_buckets=event_buckets,
             ),
             top_channels=_top_channels(channel_events, runtime_records, interactions),
             dead_letter_queue=dead_letter_queue,
@@ -452,6 +473,30 @@ def _recent_channel_events(
     )
 
 
+def _recent_channel_events_from_observation(
+    operations_observation: Any | None,
+    *,
+    connection_bindings: tuple[Any, ...],
+) -> tuple[_ChannelEventRecord, ...]:
+    get_module_observation = getattr(operations_observation, "get_module_observation", None)
+    if not callable(get_module_observation):
+        return ()
+    try:
+        observation = get_module_observation("channels")
+    except Exception:
+        return ()
+    binding_by_conversation = _connection_binding_by_conversation(connection_bindings)
+    events = tuple(
+        _with_connection_binding(
+            _channel_event_from_observed_event(observed),
+            binding_by_conversation=binding_by_conversation,
+        )
+        for observed in tuple(getattr(observation, "recent_events", ()) or ())
+        if isinstance(observed, OperationsObservedEvent)
+    )
+    return _dedupe_events(events)[:_MAX_RECENT_EVENTS]
+
+
 def _read_event_records(
     events_service: Any,
     topics: tuple[str, ...],
@@ -477,6 +522,44 @@ def _read_event_records(
             )
     records.sort(key=lambda item: item.occurred_at, reverse=True)
     return tuple(records[:_MAX_RECENT_EVENTS])
+
+
+def _channel_event_from_observed_event(
+    observed: OperationsObservedEvent,
+) -> _ChannelEventRecord:
+    payload = dict(observed.payload)
+    topic = _text(observed.topic, "") or _text(observed.cursor, "")
+    return _ChannelEventRecord(
+        id=observed.id,
+        cursor=observed.cursor,
+        topic=topic,
+        event_name=observed.event_name,
+        kind=observed.kind,
+        status=_event_status(observed, payload),
+        occurred_at=coerce_utc_datetime(observed.occurred_at),
+        channel_type=_first_text(
+            payload.get("channel_type"),
+            payload.get("channel"),
+            _channel_from_topic(topic),
+        ),
+        runtime_id=_first_text(payload.get("runtime_id"), _runtime_from_topic(topic)),
+        channel_account_id=_first_text(
+            payload.get("channel_account_id"),
+            payload.get("account_id"),
+        ),
+        connection_id=_first_text(
+            payload.get("connection_id"),
+            _connection_from_topic(topic),
+        ),
+        conversation_id=_first_text(
+            payload.get("conversation_id"),
+            payload.get("session_key"),
+        ),
+        run_id=observed.run_id,
+        trace_id=observed.trace_id,
+        payload=payload,
+        trace={},
+    )
 
 
 def _channel_event_from_record(
@@ -1292,8 +1375,16 @@ def _delivery_trend(
     events: tuple[_ChannelEventRecord, ...],
     runtime_records: tuple[dict[str, Any], ...],
     interactions: tuple[Any, ...],
+    *,
+    event_buckets: tuple[dict[str, Any], ...] = (),
 ) -> OperationsChartSectionModel:
-    if events:
+    if event_buckets:
+        counts = Counter()
+        for bucket in event_buckets:
+            counts[_status_label(_text(bucket.get("status"), "observed"))] += _int(
+                bucket.get("count"),
+            )
+    elif events:
         counts = Counter(_status_label(event.status) for event in events)
     elif interactions:
         counts = Counter(
@@ -1304,7 +1395,7 @@ def _delivery_trend(
         counts = Counter(_status_label(_text(row.get("status"))) for row in runtime_records)
     return _chart(
         "delivery_trend",
-        "Runtime / Delivery Status",
+        "Runtime / Delivery Status (24h)" if event_buckets else "Runtime / Delivery Status",
         "bar",
         counts,
     )
@@ -1761,6 +1852,12 @@ def _event_direction(event: _ChannelEventRecord) -> str:
     return "Other"
 
 
+def _is_dead_letter_event(event: _ChannelEventRecord) -> bool:
+    name = event.event_name.lower()
+    topic = event.topic.lower()
+    return "dead_letter" in name or "dead-letter" in name or "dead_letter" in topic
+
+
 def _event_status(
     observed: OperationsObservedEvent,
     payload: dict[str, Any],
@@ -2097,6 +2194,13 @@ def _text(value: Any, default: str = "-") -> str:
     if isinstance(value, dict):
         return _short_json(value)
     return str(value)
+
+
+def _int(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _first_text(*values: Any) -> str | None:

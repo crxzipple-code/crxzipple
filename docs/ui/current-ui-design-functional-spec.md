@@ -256,8 +256,9 @@ Operations 左侧是模块导航，每个模块有健康、告警、错误计数
 关键数据：
 
 - Access Assets、Missing Access、Expiring Soon、Auth Success Rate、Failed Auth。
-- tabs：Overview、Access Assets、Missing Access、Grants、API Keys、OAuth Apps、Auth Status、Setup Flows、Usage。
-- Missing Access 表：asset、kind、status、required by、last failed、affected、impact、actions。
+- tabs：Overview、Requirements、Access Assets、Missing Access、API Keys、OAuth Connections、Auth Status、Setup Flows、Usage。
+- Requirements 表：consumer、module、slot、expected kind、binding、readiness、setup、last checked、actions。
+- Missing Access 表：asset/requirement、kind、status、required by、slot、last failed、affected、impact、actions。
 - Credential Health。
 - Provider Auth / Access Blocked。
 - Credentials by Kind。
@@ -269,7 +270,7 @@ Operations 左侧是模块导航，每个模块有健康、告警、错误计数
 - Fallback / Resolver Problems。
 - Setup Flows。
 
-后台需要凭证元数据读模型，不能返回 secret。还需要 consumer linkage、认证验证状态、过期/轮换状态、setup flow registry、access audit 和重试/设置动作。
+后台需要凭证元数据读模型和 requirement catalog，不能返回 secret。还需要 consumer linkage、slot binding、认证验证状态、过期/轮换状态、setup flow registry、access audit 和重试/设置动作。
 
 ### Channels
 
@@ -423,30 +424,28 @@ Settings 页面共同模式：
 
 关键数据：
 
-- Agent profile 列表：name、description、default LLM、fallback LLM、status、scope、updated、access grants、default skills。
-- detail tabs：Basic Information、LLM Configuration、Runtime Preferences、Access Grants、Tool Policy、Skill Preferences、Memory & Context、Run Scope & Limits、Effective Configuration、Validation。
+- Agent profile 列表：name、default LLM、fallback LLM、status、scope、updated、access grants。
+- detail tabs：Basic Information、LLM Configuration、Runtime Preferences、Access Grants、Tool Policy、Memory & Context、Run Scope & Limits、Effective Configuration、Validation。
 - Profile Actions：clone、export YAML、compare、archive。
-- Summary：overview、access grants、default skills、metadata。
+- Summary：overview、access grants、metadata。
 - Run Scope、Access Grant Scope、Change Impact。
 - Profile Resolution Trace。
-- Skill Set Resolution。
 - Validation Summary。
 
-后台需要 profile CRUD、profile resolution、skill resolution、access grant summary、scope evaluation、change impact 和 validation。
+后台需要 profile CRUD、profile resolution、access grant summary、scope evaluation、change impact 和 validation。Skill package、manifest、enablement 与 applicability 留在 Skills/Skill Enablement 面。
 
 ### LLM Profiles
 
-页面定位：管理模型 provider 和模型配置。
+页面定位：管理 LLM owner module 持有的模型配置。Settings 页面只作为业务视图入口，真相、写入和运行探测都走 LLM 模块 API。
 
 关键数据：
 
-- LLM profile 列表：provider、access asset、adapter type、model/version、status、context window、rate limit、updated。
-- detail tabs：Basic Information、Model Configuration、Limits & Quotas、Connection & Auth、Safety & Filtering、Capabilities、Fallback Policy、Rate Limiter、Tags & Metadata。
-- Provider & Access、Profile Status、Description、Tags。
-- Effective Configuration Preview。
-- Summary、Health & Diagnostics、Capabilities。
+- LLM profile 列表：id、provider、api family、model、model family、context window、capabilities、Access credential binding id、concurrency limit、enabled status。
+- Profile detail：provider、api family、model、context、timeout、concurrency、Access credential binding id、capabilities、default params。
+- Owner actions：通过结构化表单新增、保存、enable、disable profile；普通用户不直接编辑 JSON；凭证字段必须从 Access 已登记的 credential binding 下拉选择，不能手填 `env:` / `file:`。
+- Probe：通过 `/llms/{id}/invoke` 运行最小探测，并展示 status、finish reason、usage、request id、文本或错误。
 
-后台需要 LLM profile CRUD、provider/model capability discovery、access asset link、connection test、usage/diagnostics、effective config preview。secret 仍由 Access Assets 管理。
+后台依赖 `/llms`、`POST /llms`、`/llms/{id}`、`PUT /llms/{id}`、`/llms/{id}/enable|disable`、`/llms/{id}/invoke`，以及 `/ui/access` 提供 Access credential binding 选项。LLM Profile 只保存 `credential_binding_id`，不得直接保存 `env:` / `file:` / `codex_auth_json` 等凭证来源；来源真相属于 Access credential binding。Provider health、usage diagnostics、版本、审计、resolution trace 如果需要展示，必须来自 LLM/Operations/Audit 的真实 API；不能在 Settings 前端合成。secret readiness 仍由 Access 管理。
 
 ### Tool Catalog
 
@@ -457,7 +456,7 @@ Settings 页面共同模式：
 - tabs：All Tools、Built-in Tools、Custom Tools、Imported Packages、Deprecated。
 - tool 列表：source、type、runtime strategy、exec mode、category、status、risk、version。
 - detail tabs：Basic Information、Input Schema、Output Schema、Runtime Strategy、Authentication & Access、Effects & Requirements、Capabilities Provided、Runtime Backend、Risk & Approval、Supported Surfaces、Artifact Output、Testing & Debug、Version History、Changelog。
-- Required Access Assets。
+- Credential Requirements / Required Access Assets：显示 slot、expected kind、provider、binding、readiness 和 setup 入口；普通用户不能粘贴 raw secret。
 - Used by Skills。
 - Capabilities Provided、Required Effects、Risk & Approval、Supported Surfaces、Artifact Output。
 - Effective Configuration Preview。
@@ -486,6 +485,30 @@ Settings 页面共同模式：
 
 后台需要 skill manifest、package source、contract metadata、resolver mapping、access/capability evaluation、resource list、compatibility 和测试结果。
 
+### Skill Draft Review
+
+页面定位：审阅由 agent 或人工创建的 governed skill draft。它不是直接编辑 skill package 文件的入口，而是 Skills owner module 的 draft lifecycle 控制面。
+
+关键数据：
+
+- Draft 队列：draft id、skill name、intent、status、target source/scope、actor、created by run/turn、updated、validation readiness。
+- Draft 详情：manifest 摘要、SKILL.md body preview、support files、requirements、target owner source、base fingerprint、reason。
+- Validation：errors、warnings、missing tools、missing access、missing authorization effects、unsupported surfaces/platforms、readiness status。
+- Diff：manifest diff、instructions unified diff、support file diffs、summary。
+- Lifecycle actions：Create Draft、Update Draft、Validate、Build Diff、Apply、Reject、Delete。
+- Apply 风险提示：owner truth write、readonly/system source、base fingerprint conflict、missing validation、missing diff。
+- Trace / Workbench links：created_by_run_id、created_by_turn_id、draft lifecycle events、approval request。
+
+交互约束：
+
+- 列表只承担选择和筛选，不展示大段 diff 或 instructions。
+- 详情区需要足够空间展示 validation 和 diff，不应嵌套多层卡片。
+- Apply 必须走 authorization approval，普通保存/validate/diff/reject 走 Skills application action 并记录 audit。
+- 删除 draft 只删除 draft truth，不删除已 apply 的 owner package。
+- 已 applied/rejected/expired 的 draft 应只读，除 delete 外不允许继续 update。
+
+后台需要 `/skills/drafts` CRUD、validate、diff、apply、reject、delete，以及 draft audit/readiness/projection。Settings 前端只调用 Skills application API，不直接写 skill package 文件，也不从 Operations projection 反推 draft truth。
+
 ### Memory Config
 
 页面定位：配置 memory stores、source、index、policy、retrieval strategy。
@@ -513,9 +536,11 @@ Settings 页面共同模式：
 - Test Connection、Rotate、Revoke。
 - Consumers、Usage、Validation & Health、Affected Runs / Blocked Consumers。
 - Policy Resolution Preview。
+- Credential Binding Registry：通过 Access action 登记 env/file/codex auth json 等 server-side source reference；不得在 UI 收集或提交 raw secret。其他模块（如 LLM Profile、Tool Provider、Channel Account）只选择 `credential_binding_id` 或 OAuth account 引用。
+- Credential Requirement Catalog：展示 Tool / Channel / LLM / Memory 等模块声明的 credential requirements，包括 consumer、slot、expected kind、provider、binding、readiness、setup flow 和最近审计。
 - Danger Zone：rotate secret now、revoke、disable、invalidate sessions、delete reference。
 
-后台需要 secret-safe metadata，不能返回 secret。还需要 validation、rotation、usage、consumer mapping、policy resolution、blocked consumers、危险动作权限和审计。
+后台需要 secret-safe metadata，不能返回 secret。还需要 validation、rotation、usage、consumer mapping、policy resolution、blocked consumers、危险动作权限和审计。配置类写入必须通过 Access action / Settings audit 边界落地，运行时 readiness 和 setup session 仍归 Access。
 
 ### Channel Profiles
 
@@ -527,7 +552,7 @@ Settings 页面共同模式：
 - tabs：General、Authentication、Configuration、Runtime Binding、Message Mapping、Delivery & Retry、Permissions、Monitoring。
 - Basic Information。
 - Surfaces：intake surface、delivery surface。
-- Required Access Assets。
+- Credential Requirements / Required Access Assets。
 - Routing Rules。
 - Run / Turn Binding Preview。
 - Allowed Actions Policy。
@@ -537,7 +562,7 @@ Settings 页面共同模式：
 - Mapping Contract Test。
 - Sample Payloads。
 
-后台需要 channel profile CRUD、routing/binding dry-run、mapping preview/test、delivery policy、access asset link、callback health 和 ABAC policy linkage。
+后台需要 channel profile CRUD、routing/binding dry-run、mapping preview/test、delivery policy、credential requirement slots、access asset link、callback health 和 authorization policy linkage。
 
 ### Event Contracts
 
@@ -556,28 +581,26 @@ Settings 页面共同模式：
 
 ### Runtime Defaults
 
-页面定位：系统/平台默认配置，最低优先级，可被 Environment、Agent Profile、Session、Turn/Run 覆盖。
+页面定位：Settings-owned runtime control defaults。它只管理系统运行控制面的全局默认值，
+例如 orchestration lease、heartbeat、executor 并发、auto compaction、tool worker retry、
+lease、heartbeat 和并发。Runtime Defaults 不是 Agent/LLM/Tool/Access/Memory/Skill/Channel
+的业务配置入口，也不是 Operations 运行观察页。
 
 关键数据：
 
-- tabs：General、Execution、Limits & Quotas、Guardrails、Observability、Security、Advanced。
-- Validation / Dry Run、Export Contract、Change History、Save Changes。
-- Configuration Scope。
-- Inherited By。
-- Precedence。
-- Validation Status。
-- Runtime Configuration Precedence。
-- Tool Execution Defaults。
-- LLM Defaults。
-- Observability Defaults。
-- Change Impact Preview。
-- Safety & Guardrail Defaults。
-- Effective Defaults Contract。
-- Environment Overrides。
-- Preview。
-- Audit Requirement。
+- Orchestration Safety：run lease、heartbeat、executor max concurrent assignments。
+- Tool Worker Control：run max attempts、worker lease、heartbeat、max in flight、
+  default/image/shared-state/remote concurrency。
+- Compaction：enabled、reserve tokens、soft threshold tokens。
+- Effective Preview：当前 effective value、source、resource version、environment override。
+- Impact / Apply Requirement：restart required、daemon restart required、future hot apply。
+- Validation / Save Reason / Audit：保存必须提供 reason，写入 Settings action audit。
+- Version / Change History：resource version、published at、actor、rollback。
 
-后台需要配置继承引擎、effective defaults、dry-run、impact report、export JSON/YAML、validation、change history、save reason 和审计。
+后台需要 Settings-owned `runtime-defaults/defaults` resource、typed schema validation、
+effective materializer、typed assembly config、impact report、change history、save reason
+和审计。env 只作为首次 seed 或显式 import/reseed 来源；已存在 resource 不得被启动 seed
+静默覆盖。前端不得展示 LLM Defaults、Security Defaults、Observability Defaults 等未接通假面板。
 
 ### Environment
 

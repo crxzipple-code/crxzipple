@@ -17,6 +17,7 @@ const props = defineProps<{
   sectionId?: string;
   pageSize?: number;
   clickableRows?: boolean;
+  selectedRowId?: string | null;
   allowRawKeys?: boolean;
 }>();
 
@@ -252,6 +253,13 @@ function handleRowClick(event: MouseEvent, row: DataRow) {
   emit("row-click", row);
 }
 
+function rowIdentifier(row: DataRow): string | null {
+  if (isTableRow(row)) return row.id;
+  const value = (row as Record<string, unknown>).__row_id;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return null;
+}
+
 function localizeText(value: string, columnKey?: string): string {
   const key = textKeys[value];
   if (key) return t(key);
@@ -290,6 +298,7 @@ const textKeys: Record<string, string> = {
   "Description": "table.description",
   "Name": "table.name",
   "Profile": "table.profile",
+  "Driver": "table.driver",
   "Kind": "table.kind",
   "Mode": "table.mode",
   "Strategy": "table.strategy",
@@ -299,6 +308,7 @@ const textKeys: Record<string, string> = {
   "Time": "table.time",
   "Change": "table.change",
   "Changed": "table.changed",
+  "Updated": "table.updated",
   "Reindexed": "table.reindexed",
   "Chunks": "table.chunks",
   "Owner": "table.owner",
@@ -421,6 +431,24 @@ const textKeys: Record<string, string> = {
   "Working Directory": "table.workingDirectory",
   "Ended At": "table.endedAt",
   "Endpoint": "table.endpoint",
+  "Runtime Dependency": "table.runtimeDependency",
+  "Tools/List": "table.toolsList",
+  "CDP Endpoint": "table.cdpEndpoint",
+  "Pages": "table.pages",
+  "Host Gen": "table.hostGeneration",
+  "Active Target": "table.activeTarget",
+  "Page Gen": "table.pageGeneration",
+  "Snapshot Gen": "table.snapshotGeneration",
+  "Ref Gen": "table.refGeneration",
+  "Last Action": "table.lastAction",
+  "Refs": "table.refs",
+  "Frames": "table.frames",
+  "Proxy": "table.proxy",
+  "Proxy Ready": "table.proxyReady",
+  "Egress": "table.egress",
+  "Runtime": "table.runtime",
+  "Manifest": "table.manifest",
+  "Requires": "table.requires",
   "Last Healthcheck At": "table.lastHealthcheckAt",
   "Env Drift": "table.envDrift",
   "Last Error": "table.lastError",
@@ -451,6 +479,10 @@ const textKeys: Record<string, string> = {
   "Target Lane": "table.targetLane",
   "Age": "table.age",
   "Error": "table.error",
+  "Draft": "table.draft",
+  "Intent": "table.intent",
+  "Actor": "table.actor",
+  "Validation": "table.validation",
   "Module": "table.module",
   "Trace": "table.trace",
   "Level": "table.level",
@@ -560,6 +592,9 @@ const textKeys: Record<string, string> = {
   "Released": "text.released",
   "Configured": "text.configured",
   "not configured": "text.notConfigured",
+  "not_configured": "text.notConfigured",
+  "not required": "text.notRequired",
+  "access_binding": "text.accessBinding",
   "Available": "text.available",
   "Installed": "text.installed",
   "Registered": "text.registered",
@@ -605,11 +640,24 @@ const textKeys: Record<string, string> = {
   "background": "text.background",
   "inline": "text.inline",
   "async": "text.async",
+  "managed": "text.managed",
+  "existing-session": "text.existingSession",
+  "local-managed": "text.localManaged",
+  "manual_only": "text.manualOnly",
+  "least_busy": "text.leastBusy",
+  "round_robin": "text.roundRobin",
+  "sticky_session": "text.stickySession",
+  "none": "text.none",
+  "static": "text.static",
   "local": "text.local",
   "remote": "text.remote",
   "provider": "table.provider",
   "credential binding": "text.credentialBinding",
   "ready": "common.ready",
+  "attached": "operations.browser.status.attached",
+  "fresh": "operations.browser.status.fresh",
+  "stale": "operations.browser.status.stale",
+  "cooling": "operations.browser.status.cooling",
   "setup_needed": "text.setupNeeded",
   "waiting_user": "text.waitingUser",
   "unsupported": "text.unsupported",
@@ -640,7 +688,6 @@ const textKeys: Record<string, string> = {
   "Info": "text.info",
   "Env": "text.env",
   "File Credential": "text.fileCredential",
-  "Codex Auth JSON": "text.codexAuthJson",
   "Inline Credential": "text.inlineCredential",
   "Credential Set": "text.credentialSet",
   "Authorization Requirement": "text.authorizationRequirement",
@@ -744,6 +791,7 @@ const textKeys: Record<string, string> = {
   "LLM Profiles": "text.llmProfiles",
   "LLM Profile": "text.llmProfile",
   "Tools": "text.tools",
+  "Browser profile context": "operations.tool.source.browserProfileContext",
   "Skills": "text.skills",
   "Channels": "text.channels",
   "Events": "text.events",
@@ -901,7 +949,10 @@ const rawKeyLikeColumns = new Set([
         <tr
           v-for="(row, index) in displayedRows"
           :key="`${currentPage}:${index}`"
-          :class="{ 'is-clickable': props.clickableRows }"
+          :class="{
+            'is-clickable': props.clickableRows,
+            'is-selected': props.selectedRowId && rowIdentifier(row) === props.selectedRowId,
+          }"
           @click="handleRowClick($event, row)"
         >
           <td
@@ -1062,6 +1113,15 @@ tbody tr.is-clickable {
 
 tbody tr.is-clickable:hover td {
   background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+tbody tr.is-selected td {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--text-primary);
+}
+
+tbody tr.is-selected td:first-child {
+  font-weight: 760;
 }
 
 th {

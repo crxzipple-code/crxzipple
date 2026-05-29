@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 import json
 from pathlib import Path
 import shutil
 from urllib.parse import quote
 
 from crxzipple.modules.browser.domain import (
-    BrowserStoredRef,
+    BrowserProfileAllocation,
+    BrowserProfilePool,
     BrowserProfileRuntimeState,
+    BrowserStoredRef,
     BrowserSystemConfig,
 )
 
 from ..application.ports import (
+    BrowserProfileAllocationStore,
+    BrowserProfilePoolStore,
     BrowserRefStore,
     BrowserRuntimeStateStore,
     BrowserSystemConfigStore,
@@ -84,6 +89,156 @@ class FileBackedBrowserSystemConfigStore(BrowserSystemConfigStore):
                     shutil.rmtree(ref_path, ignore_errors=True)
                 else:
                     ref_path.unlink(missing_ok=True)
+
+
+@dataclass(slots=True)
+class InMemoryBrowserProfilePoolStore(BrowserProfilePoolStore):
+    _pools: dict[str, BrowserProfilePool] = field(default_factory=dict)
+
+    def list_pools(self) -> tuple[BrowserProfilePool, ...]:
+        return tuple(deepcopy(self._pools[pool_id]) for pool_id in sorted(self._pools))
+
+    def get_pool(self, *, pool_id: str) -> BrowserProfilePool | None:
+        pool = self._pools.get(pool_id.strip().lower())
+        if pool is None:
+            return None
+        return deepcopy(pool)
+
+    def save_pool(self, pool: BrowserProfilePool) -> BrowserProfilePool:
+        self._pools[pool.pool_id] = deepcopy(pool)
+        return deepcopy(pool)
+
+    def delete_pool(self, *, pool_id: str) -> None:
+        self._pools.pop(pool_id.strip().lower(), None)
+
+
+@dataclass(slots=True)
+class FileBackedBrowserProfilePoolStore(BrowserProfilePoolStore):
+    root_dir: Path | str
+
+    def __post_init__(self) -> None:
+        root_dir = Path(self.root_dir).expanduser().resolve()
+        root_dir.mkdir(parents=True, exist_ok=True)
+        self.root_dir = root_dir
+
+    def list_pools(self) -> tuple[BrowserProfilePool, ...]:
+        pools: list[BrowserProfilePool] = []
+        for path in sorted(Path(self.root_dir).glob("*.json")):
+            pool = self._load_path(path)
+            if pool is not None:
+                pools.append(pool)
+        return tuple(pools)
+
+    def get_pool(self, *, pool_id: str) -> BrowserProfilePool | None:
+        return self._load_path(self._pool_path(pool_id))
+
+    def save_pool(self, pool: BrowserProfilePool) -> BrowserProfilePool:
+        self._pool_path(pool.pool_id).write_text(
+            json.dumps(_pool_payload(pool), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        loaded = self.get_pool(pool_id=pool.pool_id)
+        return loaded or pool
+
+    def delete_pool(self, *, pool_id: str) -> None:
+        self._pool_path(pool_id).unlink(missing_ok=True)
+
+    def _load_path(self, path: Path) -> BrowserProfilePool | None:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        return _pool_from_payload(payload)
+
+    def _pool_path(self, pool_id: str) -> Path:
+        return Path(self.root_dir) / f"{pool_id.strip().lower()}.json"
+
+
+@dataclass(slots=True)
+class InMemoryBrowserProfileAllocationStore(BrowserProfileAllocationStore):
+    _allocations: dict[str, BrowserProfileAllocation] = field(default_factory=dict)
+
+    def list_allocations(self) -> tuple[BrowserProfileAllocation, ...]:
+        return tuple(
+            deepcopy(self._allocations[allocation_id])
+            for allocation_id in sorted(self._allocations)
+        )
+
+    def get_allocation(
+        self,
+        *,
+        allocation_id: str,
+    ) -> BrowserProfileAllocation | None:
+        allocation = self._allocations.get(allocation_id.strip())
+        if allocation is None:
+            return None
+        return deepcopy(allocation)
+
+    def save_allocation(
+        self,
+        allocation: BrowserProfileAllocation,
+    ) -> BrowserProfileAllocation:
+        self._allocations[allocation.allocation_id] = deepcopy(allocation)
+        return deepcopy(allocation)
+
+    def delete_allocation(self, *, allocation_id: str) -> None:
+        self._allocations.pop(allocation_id.strip(), None)
+
+
+@dataclass(slots=True)
+class FileBackedBrowserProfileAllocationStore(BrowserProfileAllocationStore):
+    root_dir: Path | str
+
+    def __post_init__(self) -> None:
+        root_dir = Path(self.root_dir).expanduser().resolve()
+        root_dir.mkdir(parents=True, exist_ok=True)
+        self.root_dir = root_dir
+
+    def list_allocations(self) -> tuple[BrowserProfileAllocation, ...]:
+        allocations: list[BrowserProfileAllocation] = []
+        for path in sorted(Path(self.root_dir).glob("*.json")):
+            allocation = self._load_path(path)
+            if allocation is not None:
+                allocations.append(allocation)
+        return tuple(
+            sorted(
+                allocations,
+                key=lambda item: (item.acquired_at, item.allocation_id),
+            )
+        )
+
+    def get_allocation(
+        self,
+        *,
+        allocation_id: str,
+    ) -> BrowserProfileAllocation | None:
+        return self._load_path(self._allocation_path(allocation_id))
+
+    def save_allocation(
+        self,
+        allocation: BrowserProfileAllocation,
+    ) -> BrowserProfileAllocation:
+        self._allocation_path(allocation.allocation_id).write_text(
+            json.dumps(_allocation_payload(allocation), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        loaded = self.get_allocation(allocation_id=allocation.allocation_id)
+        return loaded or allocation
+
+    def delete_allocation(self, *, allocation_id: str) -> None:
+        self._allocation_path(allocation_id).unlink(missing_ok=True)
+
+    def _load_path(self, path: Path) -> BrowserProfileAllocation | None:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        return _allocation_from_payload(payload)
+
+    def _allocation_path(self, allocation_id: str) -> Path:
+        return Path(self.root_dir) / f"{quote(allocation_id.strip(), safe='')}.json"
 
 
 @dataclass(slots=True)
@@ -387,3 +542,148 @@ class FileBackedBrowserRefStore(BrowserRefStore):
         normalized_profile = profile_name.strip().lower()
         normalized_target = quote(target_id.strip(), safe="")
         return Path(self.root_dir) / normalized_profile / f"{normalized_target}.json"
+
+
+def _pool_payload(pool: BrowserProfilePool) -> dict[str, object]:
+    return {
+        "pool_id": pool.pool_id,
+        "display_name": pool.display_name,
+        "enabled": pool.enabled,
+        "profile_names": list(pool.profile_names),
+        "target_hosts": list(pool.target_hosts),
+        "selection_strategy": pool.selection_strategy,
+        "max_concurrency_per_profile": pool.max_concurrency_per_profile,
+        "max_concurrency_total": pool.max_concurrency_total,
+        "allocation_ttl_seconds": pool.allocation_ttl_seconds,
+        "cooldown_seconds": pool.cooldown_seconds,
+        "failure_cooldown_seconds": pool.failure_cooldown_seconds,
+        "allow_attach_only": pool.allow_attach_only,
+        "close_targets_on_release": pool.close_targets_on_release,
+        "close_targets_on_expire": pool.close_targets_on_expire,
+        "health_policy": dict(pool.health_policy),
+        "metadata": dict(pool.metadata),
+    }
+
+
+def _pool_from_payload(payload: dict[str, object]) -> BrowserProfilePool:
+    raw_pool_id = payload.get("pool_id")
+    if not isinstance(raw_pool_id, str):
+        raise ValueError("browser pool payload must include a string pool_id.")
+    return BrowserProfilePool(
+        pool_id=raw_pool_id,
+        display_name=_optional_text(payload.get("display_name")),
+        enabled=bool(payload.get("enabled", True)),
+        profile_names=_text_tuple(payload.get("profile_names")),
+        target_hosts=_text_tuple(payload.get("target_hosts")),
+        selection_strategy=str(payload.get("selection_strategy") or "least_busy"),  # type: ignore[arg-type]
+        max_concurrency_per_profile=int(payload.get("max_concurrency_per_profile") or 1),
+        max_concurrency_total=(
+            int(payload["max_concurrency_total"])
+            if payload.get("max_concurrency_total") is not None
+            else None
+        ),
+        allocation_ttl_seconds=int(payload.get("allocation_ttl_seconds") or 900),
+        cooldown_seconds=int(payload.get("cooldown_seconds") or 0),
+        failure_cooldown_seconds=int(payload.get("failure_cooldown_seconds") or 300),
+        allow_attach_only=bool(payload.get("allow_attach_only", False)),
+        close_targets_on_release=bool(payload.get("close_targets_on_release", True)),
+        close_targets_on_expire=bool(payload.get("close_targets_on_expire", True)),
+        health_policy=_mapping(payload.get("health_policy")),
+        metadata=_mapping(payload.get("metadata")),
+    )
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _text_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, list):
+        return ()
+    resolved: list[str] = []
+    for item in value:
+        text = _optional_text(item)
+        if text is not None:
+            resolved.append(text)
+    return tuple(resolved)
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _allocation_payload(allocation: BrowserProfileAllocation) -> dict[str, object]:
+    return {
+        "allocation_id": allocation.allocation_id,
+        "pool_id": allocation.pool_id,
+        "profile_name": allocation.profile_name,
+        "consumer_kind": allocation.consumer_kind,
+        "consumer_id": allocation.consumer_id,
+        "target_host": allocation.target_host,
+        "status": allocation.status,
+        "acquired_at": allocation.acquired_at.isoformat(),
+        "expires_at": allocation.expires_at.isoformat(),
+        "last_heartbeat_at": (
+            allocation.last_heartbeat_at.isoformat()
+            if allocation.last_heartbeat_at is not None
+            else None
+        ),
+        "released_at": (
+            allocation.released_at.isoformat()
+            if allocation.released_at is not None
+            else None
+        ),
+        "release_reason": allocation.release_reason,
+        "owned_target_ids": list(allocation.owned_target_ids),
+        "metadata": dict(allocation.metadata),
+    }
+
+
+def _allocation_from_payload(payload: dict[str, object]) -> BrowserProfileAllocation:
+    raw_allocation_id = payload.get("allocation_id")
+    if not isinstance(raw_allocation_id, str):
+        raise ValueError("browser allocation payload must include a string allocation_id.")
+    return BrowserProfileAllocation(
+        allocation_id=raw_allocation_id,
+        pool_id=str(payload.get("pool_id") or ""),
+        profile_name=str(payload.get("profile_name") or ""),
+        consumer_kind=str(payload.get("consumer_kind") or "manual"),  # type: ignore[arg-type]
+        consumer_id=str(payload.get("consumer_id") or ""),
+        target_host=_optional_text(payload.get("target_host")),
+        status=str(payload.get("status") or "active"),  # type: ignore[arg-type]
+        acquired_at=_datetime(payload.get("acquired_at")),
+        expires_at=_datetime(payload.get("expires_at")),
+        last_heartbeat_at=(
+            _datetime(payload.get("last_heartbeat_at"))
+            if payload.get("last_heartbeat_at") is not None
+            else None
+        ),
+        released_at=(
+            _datetime(payload.get("released_at"))
+            if payload.get("released_at") is not None
+            else None
+        ),
+        release_reason=_optional_text(payload.get("release_reason")),
+        owned_target_ids=tuple(
+            str(item)
+            for item in (
+                payload.get("owned_target_ids")
+                if isinstance(payload.get("owned_target_ids"), list | tuple)
+                else ()
+            )
+        ),
+        metadata=_mapping(payload.get("metadata")),
+    )
+
+
+def _datetime(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("browser allocation datetime must be an ISO timestamp.")
+    return datetime.fromisoformat(value)

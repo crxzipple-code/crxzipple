@@ -13,12 +13,13 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.authorization import authorize_tool_run
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.events import EventTopicRecord, EventTopicWatch
 from crxzipple.modules.operations.interfaces.http_models import (
     AccessOperationsResponse,
+    BrowserOperationsResponse,
     OperationsChannelRuntimePruneRequest,
     OperationsChannelRuntimePruneResponse,
     OperationsActionAuditResponse,
@@ -36,11 +37,13 @@ from crxzipple.modules.operations.interfaces.http_models import (
     EventsOperationsResponse,
     LlmOperationsResponse,
     MemoryOperationsResponse,
+    MemoryFileDetailResponse,
     OperationsModulePageResponse,
     OperationsModuleOverviewResponse,
     OperationsRuntimeStatusItemResponse,
     OperationsRuntimeStatusResponse,
     OperationsSkillInstallRequest,
+    OperationsSkillSyncRequest,
     OperationsSkillValidateRequest,
     LlmInvocationDetailResponse,
     OperationsToolRunActionResponse,
@@ -54,10 +57,16 @@ from crxzipple.modules.operations.interfaces.http_models import (
 from crxzipple.modules.operations.application.read_models.llm import (
     defer_llm_invocation_details_payload,
 )
+from crxzipple.modules.operations.application.read_models.memory import (
+    defer_memory_file_details_payload,
+)
 from crxzipple.modules.operations.application.read_models.tool import (
     defer_tool_run_details_payload,
 )
 from crxzipple.modules.operations.application.actions import OperationsActionService
+from crxzipple.modules.operations.application.projections import (
+    OPERATIONS_PROJECTION_MODULES,
+)
 from crxzipple.modules.access.interfaces.inventory import collect_access_inventory
 from crxzipple.modules.access.interfaces.presenters import (
     present_readiness,
@@ -79,19 +88,7 @@ from crxzipple.shared.time import format_datetime_utc, format_optional_datetime_
 
 router = APIRouter()
 
-_PROJECTED_MODULES = frozenset(
-    {
-        "orchestration",
-        "tool",
-        "llm",
-        "access",
-        "channels",
-        "memory",
-        "skills",
-        "events",
-        "daemon",
-    },
-)
+_PROJECTED_MODULES = frozenset(OPERATIONS_PROJECTION_MODULES)
 _TOOL_ACTIVE_STATUSES = frozenset(
     {"created", "queued", "dispatching", "running", "waiting", "cancel_requested"}
 )
@@ -103,21 +100,22 @@ _OPERATIONS_STREAM_DISCOVERY_INTERVAL_SECONDS = 0.25
 
 def _operations_action_service(container: AppContainer) -> OperationsActionService:
     return OperationsActionService(
-        events_service=container.events_service,
-        channel_runtime_manager=container.channel_runtime_manager,
-        daemon_manager=container.daemon_manager,
-        tool_service=container.tool_service,
-        skill_manager=container.skill_manager,
-        access_service=container.access_service,
+        events_service=container.require(AppKey.EVENTS_SERVICE),
+        channel_runtime_manager=container.require(AppKey.CHANNEL_RUNTIME_MANAGER),
+        daemon_manager=container.require(AppKey.DAEMON_MANAGER),
+        tool_service=container.require(AppKey.TOOL_RUN_CONTROL_SERVICE),
+        skill_manager=container.require(AppKey.SKILL_MANAGER),
+        access_service=container.require(AppKey.ACCESS_SERVICE),
         access_inventory_collector=lambda **kwargs: collect_access_inventory(
             container,
             **kwargs,
         ),
-        webhook_channel_runtime_service=container.webhook_channel_runtime_service,
-        memory_context_resolver=container.memory_context_resolver,
-        file_memory_service=container.file_memory_service,
-        orchestration_resume_service=container.orchestration_scheduler_service,
-        orchestration_cancellation_service=container.orchestration_cancellation_service,
+        webhook_channel_runtime_service=container.require(AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE),
+        memory_runtime_service=container.require(AppKey.MEMORY_RUNTIME_SERVICE),
+        orchestration_resume_service=container.require(
+            AppKey.ORCHESTRATION_SCHEDULER_MAINTENANCE_SERVICE,
+        ),
+        orchestration_cancellation_service=container.require(AppKey.ORCHESTRATION_CANCELLATION_SERVICE),
     )
 
 
@@ -134,7 +132,7 @@ def stream_operations_refresh_feed(
     snapshot_limit: Annotated[int, Query(ge=0, le=50)] = 0,
     timeout_seconds: Annotated[float, Query(gt=0.0, le=300.0)] = 120.0,
 ) -> StreamingResponse:
-    events_service = container.events_service
+    events_service = container.require(AppKey.EVENTS_SERVICE)
     if events_service is None:
         raise HTTPException(status_code=503, detail="Event service is not available.")
 
@@ -276,6 +274,40 @@ def get_tool_operations(
     )
 
 
+@router.get("/browser", response_model=BrowserOperationsResponse)
+def get_browser_operations(
+    container: Annotated[AppContainer, Depends(get_container)],
+    status: str = Query(default="all"),
+    profile: str = Query(default="all"),
+    search: str = Query(default=""),
+    limit: int = Query(default=80, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> BrowserOperationsResponse:
+    return _projection_response(
+        container,
+        module="browser",
+        response_cls=BrowserOperationsResponse,
+        table="profiles",
+        filters={
+            "status": status,
+            "profile": profile,
+            "search": search,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+
+
+@router.get(
+    "/browser/overview",
+    response_model=OperationsModuleOverviewResponse,
+)
+def get_browser_operations_overview(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> OperationsModuleOverviewResponse:
+    return _projection_overview_response(container, "browser")
+
+
 @router.get("/llm", response_model=LlmOperationsResponse)
 def get_llm_operations(
     container: Annotated[AppContainer, Depends(get_container)],
@@ -363,6 +395,24 @@ def get_memory_operations(
             "limit": limit,
             "offset": offset,
         },
+    )
+
+
+@router.get(
+    "/memory/files/{file_id:path}/detail",
+    response_model=MemoryFileDetailResponse,
+)
+def get_memory_file_operations_detail(
+    file_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> MemoryFileDetailResponse:
+    return MemoryFileDetailResponse(
+        **_detail_projection_payload(
+            container,
+            module="memory",
+            kind="memory_file_detail",
+            query_key=file_id,
+        ),
     )
 
 
@@ -634,7 +684,7 @@ async def retry_tool_run_from_operations(
         risk="controlled",
     )
     try:
-        original = container.tool_service.get_tool_run(run_id)
+        original = container.require(AppKey.TOOL_QUERY_SERVICE).get_tool_run(run_id)
         authorize_tool_run(
             container,
             tool_id=original.tool_id,
@@ -642,6 +692,7 @@ async def retry_tool_run_from_operations(
             strategy=original.target.strategy,
             environment=original.target.environment,
             interface_name="http",
+            arguments=original.input_payload,
         )
         run = await _operations_action_service(container).retry_tool_run(
             run_id=run_id,
@@ -831,6 +882,49 @@ def install_global_skill_from_operations(
     return payload
 
 
+@router.post("/skills/sync", response_model=dict[str, Any])
+def sync_skills_from_operations(
+    request: OperationsSkillSyncRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> dict[str, Any]:
+    target_id = request.source_id or request.workspace_dir or "all"
+    reason, audit_id = _begin_operations_action_audit(
+        container,
+        request,
+        action_type="skills.source.sync",
+        target_type="skill_source",
+        target_id=target_id,
+        target={
+            "workspace_dir": request.workspace_dir,
+            "source_id": request.source_id,
+            "surface": request.surface,
+        },
+        default_reason="Operations skill source sync",
+        risk="controlled",
+    )
+    try:
+        result = _operations_action_service(container).sync_skills(
+            workspace_dir=request.workspace_dir,
+            source_id=request.source_id,
+            surface=request.surface,
+            reason=reason,
+        )
+    except SkillError as exc:
+        http_exc = HTTPException(status_code=400, detail=str(exc))
+        _mark_operations_action_failed(container, audit_id, http_exc)
+        raise http_exc from exc
+    except Exception as exc:
+        _mark_operations_action_failed(container, audit_id, exc)
+        raise
+    payload = {
+        "source_id": result.source_id,
+        "synced_count": result.synced_count,
+        "skills": [_skill_package_payload(package) for package in result.packages],
+    }
+    _mark_operations_action_succeeded(container, audit_id, payload)
+    return payload
+
+
 @router.get("/access/inventory", response_model=dict[str, Any])
 def get_access_inventory_from_operations(
     container: Annotated[AppContainer, Depends(get_container)],
@@ -968,11 +1062,16 @@ def write_long_term_memory_from_operations(
     except Exception as exc:
         _mark_operations_action_failed(container, audit_id, exc)
         raise
+    write_result = getattr(result, "write_result", None)
+    if write_result is None:
+        http_exc = HTTPException(status_code=500, detail="Memory write did not return a result.")
+        _mark_operations_action_failed(container, audit_id, http_exc)
+        raise http_exc
     response = OperationsMemoryWriteResultResponse(
-        path=result.path,
-        line_start=result.line_start,
-        line_end=result.line_end,
-        kind=result.kind,
+        path=write_result.path,
+        line_start=write_result.line_start,
+        line_end=write_result.line_end,
+        kind=write_result.kind,
     )
     _mark_operations_action_succeeded(container, audit_id, response)
     return response
@@ -989,11 +1088,35 @@ def list_operations_action_audits(
 ) -> list[OperationsActionAuditResponse]:
     return [
         OperationsActionAuditResponse.from_value(audit)
-        for audit in container.operations_action_audit_store.list_recent(
+        for audit in container.require(AppKey.OPERATIONS_ACTION_AUDIT_STORE).list_recent(
             limit=limit,
             offset=offset,
         )
     ]
+
+
+@router.get("/modules", response_model=list[OperationsModuleOverviewResponse])
+def list_operations_module_overviews(
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> list[OperationsModuleOverviewResponse]:
+    store = container.require(AppKey.OPERATIONS_PROJECTION_STORE)
+    overviews: list[OperationsModuleOverviewResponse] = []
+    for module in OPERATIONS_PROJECTION_MODULES:
+        projection = store.get_projection(module=module, kind="overview")
+        if projection is None:
+            continue
+        overviews.append(
+            OperationsModuleOverviewResponse(**deepcopy(projection.payload)),
+        )
+    if not overviews:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Operations projections are not materialized yet. "
+                "Start or run the operations-observer worker."
+            ),
+        )
+    return overviews
 
 
 @router.get("/{module}", response_model=OperationsModulePageResponse)
@@ -1064,7 +1187,7 @@ def _replace_table_from_projection(
     module: str,
     table: str,
 ) -> None:
-    projection = container.operations_projection_store.get_projection(
+    projection = container.require(AppKey.OPERATIONS_PROJECTION_STORE).get_projection(
         module=module.strip().lower(),
         kind="table",
         query_key=table,
@@ -1088,7 +1211,7 @@ def _projection_payload(
             status_code=404,
             detail=f"Operations projection for module '{module}' is not available.",
         )
-    projection = container.operations_projection_store.get_projection(
+    projection = container.require(AppKey.OPERATIONS_PROJECTION_STORE).get_projection(
         module=normalized_module,
         kind=kind,
     )
@@ -1111,7 +1234,7 @@ def _detail_projection_payload(
     query_key: str,
 ) -> dict[str, Any]:
     normalized_module = module.strip().lower()
-    projection = container.operations_projection_store.get_projection(
+    projection = container.require(AppKey.OPERATIONS_PROJECTION_STORE).get_projection(
         module=normalized_module,
         kind=kind,
         query_key=query_key,
@@ -1137,6 +1260,8 @@ def _strip_deferred_detail_payloads(
         defer_tool_run_details_payload(payload)
     elif normalized_module == "llm":
         defer_llm_invocation_details_payload(payload)
+    elif normalized_module == "memory":
+        defer_memory_file_details_payload(payload)
 
 
 def _apply_table_projection_filters(
@@ -1483,7 +1608,7 @@ def prune_stale_channel_runtimes(
 def _database_runtime_status(
     container: AppContainer,
 ) -> tuple[OperationsRuntimeStatusItemResponse, OperationsRuntimeStatusItemResponse]:
-    settings = container.settings
+    settings = container.require(AppKey.CORE_SETTINGS)
     url = settings.database_url
     database_value = _database_label(url)
     database_details = _safe_url(url)
@@ -1491,7 +1616,7 @@ def _database_runtime_status(
     migration_status = "unknown"
     migration_tone = "warning"
     try:
-        with container.engine.connect() as connection:
+        with container.require(AppKey.DATABASE_ENGINE).connect() as connection:
             dialect = connection.dialect.name
             driver = connection.dialect.driver
             connection.execute(text("select 1"))
@@ -1551,7 +1676,7 @@ def _database_runtime_status(
 
 
 def _events_runtime_status(container: AppContainer) -> OperationsRuntimeStatusItemResponse:
-    settings = container.settings
+    settings = container.require(AppKey.CORE_SETTINGS)
     if settings.events_backend != "redis":
         return OperationsRuntimeStatusItemResponse(
             id="events",
@@ -1652,7 +1777,7 @@ def _begin_operations_action_audit(
         reason=reason,
         risk=normalized_risk,
     )
-    audit = container.operations_action_audit_store.record_attempt(
+    audit = container.require(AppKey.OPERATIONS_ACTION_AUDIT_STORE).record_attempt(
         action_type=action_type,
         target_type=target_type,
         target_id=target_id,
@@ -1674,7 +1799,7 @@ def _mark_operations_action_succeeded(
     audit_id: str,
     result: Any,
 ) -> None:
-    container.operations_action_audit_store.mark_succeeded(
+    container.require(AppKey.OPERATIONS_ACTION_AUDIT_STORE).mark_succeeded(
         audit_id,
         result=_operation_result_summary(result),
     )
@@ -1685,7 +1810,7 @@ def _mark_operations_action_failed(
     audit_id: str,
     exc: BaseException,
 ) -> None:
-    container.operations_action_audit_store.mark_failed(
+    container.require(AppKey.OPERATIONS_ACTION_AUDIT_STORE).mark_failed(
         audit_id,
         error=_operation_error_summary(exc),
     )

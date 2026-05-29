@@ -13,7 +13,10 @@ from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
     PromptPreview,
 )
-from crxzipple.modules.orchestration.application.ports import LlmPort
+from crxzipple.modules.orchestration.application.ports import (
+    LlmPort,
+    SessionMaintenancePort,
+)
 from crxzipple.modules.orchestration.application.prompting import (
     PromptMode,
     estimate_text_tokens,
@@ -31,7 +34,6 @@ from crxzipple.modules.session.application import (
     ArchiveSessionMessagesInput,
     ListSessionMessagesInput,
     MergeSessionMessageMetadataInput,
-    SessionApplicationService,
 )
 from crxzipple.shared.time import format_datetime_utc
 from crxzipple.modules.session.domain import SessionMessageNotFoundError
@@ -44,7 +46,7 @@ logger = get_logger(__name__)
 class OrchestrationMaintenanceService:
     uow_factory: Callable[[], OrchestrationUnitOfWork]
     engine: OrchestrationEngine | None
-    session_service: SessionApplicationService | None
+    session_service: SessionMaintenancePort | None
     llm_port: LlmPort | None
     request_coordinator: Any
     request_memory_flush: Callable[[RequestMemoryFlushInput], OrchestrationRun]

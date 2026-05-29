@@ -49,6 +49,7 @@ def build_skill_catalog_prompt(
         content="\n".join(lines).strip(),
         metadata={
             "count": len(available_skills),
+            "available_skill_names": [skill.name for skill in available_skills],
             "skills": [
                 {
                     "name": skill.name,

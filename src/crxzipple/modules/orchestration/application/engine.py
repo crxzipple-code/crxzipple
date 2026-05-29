@@ -10,9 +10,9 @@ from crxzipple.modules.llm.domain import (
     LlmMessage,
     ToolSchema,
 )
+from crxzipple.modules.memory.application import MemoryRuntimePort
 from crxzipple.modules.orchestration.application.ports import (
     LlmPort,
-    MemoryPort,
     ToolExecutionPort,
 )
 from crxzipple.modules.orchestration.application.prompting import PromptReport
@@ -107,7 +107,7 @@ class OrchestrationEngine:
     llm_port: LlmPort
     tool_resolver: ToolResolver
     tool_execution_port: ToolExecutionPort
-    memory_port: MemoryPort | None = None
+    memory_port: MemoryRuntimePort | None = None
     detailed_phase_metrics_enabled: bool = False
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
@@ -369,14 +369,11 @@ class OrchestrationEngine:
         catalog = prompt.skills_catalog
         if catalog is None:
             return {}
-        skills = catalog.metadata.get("skills")
-        if not isinstance(skills, list):
+        raw_names = catalog.metadata.get("available_skill_names")
+        if not isinstance(raw_names, list):
             return {"available_skill_names": []}
         names: list[str] = []
-        for item in skills:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
+        for name in raw_names:
             if not isinstance(name, str):
                 continue
             normalized = name.strip()

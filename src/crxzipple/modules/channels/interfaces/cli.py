@@ -5,17 +5,20 @@ import os
 import signal
 import socket
 from threading import Event
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import typer
 
-from crxzipple.bootstrap import build_container
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging
 from crxzipple.interfaces.cli.crxzipple import guard_runtime_database
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.channels.application.runtime import ChannelRuntimeBootstrapService
 from crxzipple.modules.channels.domain import ChannelProfile, ChannelValidationError
+
+if TYPE_CHECKING:
+    from crxzipple.interfaces.runtime_container import AppContainer
 
 
 def _resolve_runtime_id(channel: str, runtime_id: str | None) -> str:
@@ -58,6 +61,39 @@ def _profile_payload(profile: ChannelProfile) -> dict[str, object]:
     return profile.to_payload()
 
 
+def _channel_container(settings):  # noqa: ANN001
+    from crxzipple.interfaces.runtime_container import (
+        AssemblyTarget,
+        runtime_container,
+    )
+
+    return runtime_container(
+        settings,
+        target=AssemblyTarget.CHANNEL_RUNTIME,
+    )
+
+
+def _channel_infrastructure(container: AppContainer):  # noqa: ANN001
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    return container.require(AppKey.CHANNEL_INFRASTRUCTURE)
+
+
+def _profile_service(container: AppContainer):  # noqa: ANN001
+    return _channel_infrastructure(container).profile_service
+
+
+def _fallback_runtime(container: AppContainer) -> ChannelRuntimeBootstrapService:
+    from crxzipple.interfaces.runtime_container import AppKey
+
+    infrastructure = _channel_infrastructure(container)
+    return ChannelRuntimeBootstrapService(
+        profile_service=infrastructure.profile_service,
+        runtime_manager=infrastructure.runtime_manager,
+        access_service=container.require(AppKey.ACCESS_SERVICE),
+    )
+
+
 def build_cli() -> typer.Typer:
     app = typer.Typer(help="Run channel runtime processes.", no_args_is_help=True)
 
@@ -65,16 +101,13 @@ def build_cli() -> typer.Typer:
     def list_profiles() -> None:
         settings = load_settings()
         configure_logging(settings)
-        container = build_container(settings=settings)
-        try:
+        with _channel_container(settings) as container:
             echo_data(
                 [
                     _profile_payload(profile)
-                    for profile in container.channel_profile_service.list_profiles()
+                    for profile in _profile_service(container).list_profiles()
                 ],
             )
-        finally:
-            container.close()
 
     @app.command("get-profile")
     def get_profile(
@@ -82,9 +115,8 @@ def build_cli() -> typer.Typer:
     ) -> None:
         settings = load_settings()
         configure_logging(settings)
-        container = build_container(settings=settings)
-        try:
-            profile = container.channel_profile_service.get_profile(channel)
+        with _channel_container(settings) as container:
+            profile = _profile_service(container).get_profile(channel)
             if profile is None:
                 _exit_error(
                     ChannelValidationError(
@@ -94,8 +126,6 @@ def build_cli() -> typer.Typer:
                     ),
                 )
             echo_data(_profile_payload(profile))
-        finally:
-            container.close()
 
     @app.command("upsert-profile")
     def upsert_profile(
@@ -119,26 +149,24 @@ def build_cli() -> typer.Typer:
     ) -> None:
         settings = load_settings()
         configure_logging(settings)
-        container = build_container(settings=settings)
         try:
-            profile = ChannelProfile.from_payload(
-                {
-                    "channel_type": channel,
-                    "enabled": enabled,
-                    "capabilities": _load_json_object(
-                        capabilities_json,
-                        "--capabilities-json",
-                    ),
-                    "accounts": _load_account_payloads(account_json),
-                    "metadata": _load_json_object(metadata_json, "--metadata-json"),
-                },
-            )
-            saved = container.channel_profile_service.upsert_profile(profile)
-            echo_data(_profile_payload(saved))
+            with _channel_container(settings) as container:
+                profile = ChannelProfile.from_payload(
+                    {
+                        "channel_type": channel,
+                        "enabled": enabled,
+                        "capabilities": _load_json_object(
+                            capabilities_json,
+                            "--capabilities-json",
+                        ),
+                        "accounts": _load_account_payloads(account_json),
+                        "metadata": _load_json_object(metadata_json, "--metadata-json"),
+                    },
+                )
+                saved = _profile_service(container).upsert_profile(profile)
+                echo_data(_profile_payload(saved))
         except ChannelValidationError as exc:
             _exit_error(exc)
-        finally:
-            container.close()
 
     @app.command("enable-profile")
     def enable_profile(
@@ -146,15 +174,13 @@ def build_cli() -> typer.Typer:
     ) -> None:
         settings = load_settings()
         configure_logging(settings)
-        container = build_container(settings=settings)
         try:
-            echo_data(
-                _profile_payload(container.channel_profile_service.enable_profile(channel)),
-            )
+            with _channel_container(settings) as container:
+                echo_data(
+                    _profile_payload(_profile_service(container).enable_profile(channel)),
+                )
         except ChannelValidationError as exc:
             _exit_error(exc)
-        finally:
-            container.close()
 
     @app.command("disable-profile")
     def disable_profile(
@@ -162,15 +188,15 @@ def build_cli() -> typer.Typer:
     ) -> None:
         settings = load_settings()
         configure_logging(settings)
-        container = build_container(settings=settings)
         try:
-            echo_data(
-                _profile_payload(container.channel_profile_service.disable_profile(channel)),
-            )
+            with _channel_container(settings) as container:
+                echo_data(
+                    _profile_payload(
+                        _profile_service(container).disable_profile(channel),
+                    ),
+                )
         except ChannelValidationError as exc:
             _exit_error(exc)
-        finally:
-            container.close()
 
     @app.command("run")
     def run_runtime(
@@ -201,81 +227,84 @@ def build_cli() -> typer.Typer:
         settings = load_settings()
         guard_runtime_database(settings, runtime_name="channel runtime")
         configure_logging(settings)
-        container = build_container(settings=settings)
-        stop_event = Event()
-        resolved_channel = channel.strip().lower()
-        if resolved_channel == "inbox":
-            _exit_error(
-                ChannelValidationError(
-                    "channel 'inbox' has been retired; route inbound traffic directly into orchestration instead.",
+        with _channel_container(settings) as container:
+            stop_event = Event()
+            resolved_channel = channel.strip().lower()
+            if resolved_channel == "inbox":
+                _exit_error(
+                    ChannelValidationError(
+                        "channel 'inbox' has been retired; route inbound traffic "
+                        "directly into orchestration instead.",
+                    ),
                 )
-            )
-        resolved_runtime_id = _resolve_runtime_id(resolved_channel, runtime_id)
-        runtime: ChannelRuntimeBootstrapService
-        if resolved_channel == "lark":
-            runtime = container.lark_channel_runtime_service
-        elif resolved_channel == "web":
-            runtime = container.web_channel_runtime_service
-        elif resolved_channel == "webhook":
-            runtime = container.webhook_channel_runtime_service
-        else:
-            runtime = ChannelRuntimeBootstrapService(
-                profile_service=container.channel_profile_service,
-                runtime_manager=container.channel_runtime_manager,
-            )
-        previous_sigint = signal.getsignal(signal.SIGINT)
-        previous_sigterm = signal.getsignal(signal.SIGTERM)
-        registration = None
+            resolved_runtime_id = _resolve_runtime_id(resolved_channel, runtime_id)
+            runtime: ChannelRuntimeBootstrapService
+            if resolved_channel == "lark":
+                from crxzipple.interfaces.runtime_container import AppKey
 
-        def _request_stop(signum, frame) -> None:  # noqa: ANN001
-            stop_event.set()
+                runtime = container.require(AppKey.LARK_CHANNEL_RUNTIME_SERVICE)
+            elif resolved_channel == "web":
+                from crxzipple.interfaces.runtime_container import AppKey
 
-        signal.signal(signal.SIGINT, _request_stop)
-        signal.signal(signal.SIGTERM, _request_stop)
+                runtime = container.require(AppKey.WEB_CHANNEL_RUNTIME_SERVICE)
+            elif resolved_channel == "webhook":
+                from crxzipple.interfaces.runtime_container import AppKey
 
-        try:
-            resolved_service_key = (
-                service_key.strip()
-                if isinstance(service_key, str) and service_key.strip()
-                else f"channel:{resolved_channel}"
-            )
-            if resolved_channel in {"web", "webhook", "lark"}:
-                registration = runtime.ensure_registered(
-                    runtime_id=resolved_runtime_id,
-                    service_key=resolved_service_key,
-                    metadata={"runtime_mode": "channel-runtime-cli"},
-                )
+                runtime = container.require(AppKey.WEBHOOK_CHANNEL_RUNTIME_SERVICE)
             else:
-                registration = runtime.ensure_registered(
+                runtime = _fallback_runtime(container)
+            previous_sigint = signal.getsignal(signal.SIGINT)
+            previous_sigterm = signal.getsignal(signal.SIGTERM)
+            registration = None
+
+            def _request_stop(signum, frame) -> None:  # noqa: ANN001
+                stop_event.set()
+
+            signal.signal(signal.SIGINT, _request_stop)
+            signal.signal(signal.SIGTERM, _request_stop)
+
+            try:
+                resolved_service_key = (
+                    service_key.strip()
+                    if isinstance(service_key, str) and service_key.strip()
+                    else f"channel:{resolved_channel}"
+                )
+                if resolved_channel in {"web", "webhook", "lark"}:
+                    registration = runtime.ensure_registered(
+                        runtime_id=resolved_runtime_id,
+                        service_key=resolved_service_key,
+                        metadata={"runtime_mode": "channel-runtime-cli"},
+                    )
+                else:
+                    registration = runtime.ensure_registered(
+                        resolved_channel,
+                        runtime_id=resolved_runtime_id,
+                        service_key=resolved_service_key,
+                        metadata={"runtime_mode": "channel-runtime-cli"},
+                    )
+                echo_data(
+                    {
+                        "status": "running",
+                        "channel": resolved_channel,
+                        "runtime_id": registration.runtime_id,
+                        "service_key": registration.service_key,
+                    },
+                )
+                runtime.run_runtime_loop(
                     resolved_channel,
-                    runtime_id=resolved_runtime_id,
-                    service_key=resolved_service_key,
+                    runtime_id=registration.runtime_id,
+                    service_key=registration.service_key,
+                    poll_interval_seconds=poll_interval_seconds,
+                    max_cycles=max_cycles,
+                    stop_event=stop_event,
                     metadata={"runtime_mode": "channel-runtime-cli"},
                 )
-            echo_data(
-                {
-                    "status": "running",
-                    "channel": resolved_channel,
-                    "runtime_id": registration.runtime_id,
-                    "service_key": registration.service_key,
-                },
-            )
-            runtime.run_runtime_loop(
-                resolved_channel,
-                runtime_id=registration.runtime_id,
-                service_key=registration.service_key,
-                poll_interval_seconds=poll_interval_seconds,
-                max_cycles=max_cycles,
-                stop_event=stop_event,
-                metadata={"runtime_mode": "channel-runtime-cli"},
-            )
-        except ChannelValidationError as exc:
-            _exit_error(exc)
-        finally:
-            if registration is not None:
-                runtime.unregister_runtime(registration.runtime_id)
-            signal.signal(signal.SIGINT, previous_sigint)
-            signal.signal(signal.SIGTERM, previous_sigterm)
-            container.close()
+            except ChannelValidationError as exc:
+                _exit_error(exc)
+            finally:
+                if registration is not None:
+                    runtime.unregister_runtime(registration.runtime_id)
+                signal.signal(signal.SIGINT, previous_sigint)
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
     return app

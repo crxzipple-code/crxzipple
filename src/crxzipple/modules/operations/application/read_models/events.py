@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -8,6 +9,9 @@ from typing import Any
 from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
+)
+from crxzipple.modules.operations.application.read_models.event_buckets import (
+    recent_event_buckets,
 )
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
@@ -91,6 +95,7 @@ class EventsOperationsReadModelProvider:
     event_definition_registry: Any | None = None
     operations_observation: Any | None = None
     operations_observer_runtime: Any | None = None
+    operations_observer_runtime_provider: Callable[[], Any | None] | None = None
 
     def overview(self) -> OperationsModuleOverview:
         page = self.page(EventsOperationsQuery(limit=50))
@@ -130,9 +135,8 @@ class EventsOperationsReadModelProvider:
             self.event_definition_registry,
             "list_observers",
         )
-        observer_subscriptions = _safe_observer_subscriptions(
-            self.operations_observer_runtime,
-        )
+        observer_runtime = self._operations_observer_runtime()
+        observer_subscriptions = _safe_observer_subscriptions(observer_runtime)
 
         live_topics = _list_live_topics(
             self.events_service,
@@ -178,16 +182,28 @@ class EventsOperationsReadModelProvider:
         )
         observer_runtime_states = _observer_runtime_states(
             self.operations_observation,
-            runtime=self.operations_observer_runtime,
+            runtime=observer_runtime,
             now=now,
         )
-        all_recent_events = _recent_event_summaries(
-            self.events_service,
-            topics=recent_scan_topics,
+        event_buckets = recent_event_buckets(
+            self.operations_observation,
+            hours=24,
+            limit=2000,
+        )
+        all_recent_events = _recent_event_summaries_from_observation(
+            self.operations_observation,
             definition_registry=self.event_definition_registry,
             contract_registry=self.event_contract_registry,
             limit=max(query.limit + query.offset, query.limit),
         )
+        if not all_recent_events:
+            all_recent_events = _recent_event_summaries(
+                self.events_service,
+                topics=recent_scan_topics,
+                definition_registry=self.event_definition_registry,
+                contract_registry=self.event_contract_registry,
+                limit=max(query.limit + query.offset, query.limit),
+            )
         filtered_events = _filter_events(all_recent_events, query)
         visible_events = filtered_events[query.offset : query.offset + query.limit]
 
@@ -273,13 +289,18 @@ class EventsOperationsReadModelProvider:
             ),
             active_tab="recent",
             actions=_actions(),
-            events_over_time=_events_over_time(all_recent_events),
-            events_by_surface=_events_by_surface(all_recent_events),
+            events_over_time=_events_over_time_from_buckets(event_buckets)
+            if event_buckets
+            else _events_over_time(all_recent_events),
+            events_by_surface=_events_by_surface_from_buckets(event_buckets)
+            if event_buckets
+            else _events_by_surface(all_recent_events),
             owners_by_volume=_owners_by_volume(
                 all_recent_events,
                 definitions=definitions,
                 surfaces=surfaces,
                 subscriptions=subscription_states,
+                event_buckets=event_buckets,
             ),
             contract_compatibility=_contract_compatibility(
                 live_topics=live_topics,
@@ -321,6 +342,11 @@ class EventsOperationsReadModelProvider:
                 subscription_states=subscription_states,
             ),
         )
+
+    def _operations_observer_runtime(self) -> Any | None:
+        if self.operations_observer_runtime_provider is not None:
+            return self.operations_observer_runtime_provider()
+        return self.operations_observer_runtime
 
 
 def _normalize_query(query: EventsOperationsQuery | None) -> EventsOperationsQuery:
@@ -596,14 +622,73 @@ def _events_by_surface(
     )
 
 
+def _events_over_time_from_buckets(
+    buckets: tuple[dict[str, Any], ...],
+) -> OperationsChartSectionModel:
+    counts = Counter()
+    for bucket in buckets:
+        status = _display(bucket.get("status"), "observed")
+        counts[status] += _int(bucket.get("count"))
+    segments = tuple(
+        OperationsChartSegmentModel(
+            id=_slug(status),
+            label=_status_label(status),
+            value=count,
+            tone=_status_tone(status),
+        )
+        for status, count in counts.most_common()
+        if count > 0
+    )
+    return OperationsChartSectionModel(
+        id="events_over_time",
+        title="Events by Status (24h)",
+        kind="bar",
+        total=sum(item.value for item in segments),
+        segments=segments,
+    )
+
+
+def _events_by_surface_from_buckets(
+    buckets: tuple[dict[str, Any], ...],
+) -> OperationsChartSectionModel:
+    counts = Counter()
+    for bucket in buckets:
+        owner = _display(bucket.get("owner") or bucket.get("module"), "unknown")
+        counts[owner] += _int(bucket.get("count"))
+    segments = tuple(
+        OperationsChartSegmentModel(
+            id=_slug(label),
+            label=label,
+            value=count,
+            tone=_tone_for_index(index),
+        )
+        for index, (label, count) in enumerate(counts.most_common(8))
+        if count > 0
+    )
+    return OperationsChartSectionModel(
+        id="events_by_surface",
+        title="Events by Owner (24h)",
+        kind="donut",
+        total=sum(item.value for item in segments),
+        segments=segments,
+    )
+
+
 def _owners_by_volume(
     events: list[dict[str, Any]],
     *,
     definitions: tuple[Any, ...],
     surfaces: tuple[Any, ...],
     subscriptions: list[dict[str, Any]],
+    event_buckets: tuple[dict[str, Any], ...] = (),
 ) -> OperationsTableSectionModel:
     event_counts = Counter(_display(item.get("owner")) for item in events)
+    if event_buckets:
+        event_counts = Counter()
+        for bucket in event_buckets:
+            owner = _display(bucket.get("owner") or bucket.get("module"))
+            if owner != "-":
+                event_counts[owner] += _int(bucket.get("count"))
     definition_counts = Counter(_display(getattr(item, "owner", None)) for item in definitions)
     surface_counts = Counter(_display(getattr(item, "owner", None)) for item in surfaces)
     subscription_counts = Counter(
@@ -1412,6 +1497,39 @@ def _recent_event_summaries(
     return summaries[:limit]
 
 
+def _recent_event_summaries_from_observation(
+    operations_observation: Any | None,
+    *,
+    definition_registry: Any | None,
+    contract_registry: Any | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    snapshot = _safe_operations_observation_snapshot(operations_observation)
+    if snapshot is None or limit <= 0:
+        return []
+    summaries: list[dict[str, Any]] = []
+    for module in tuple(getattr(snapshot, "modules", ()) or ()):
+        for observed in tuple(getattr(module, "recent_events", ()) or ()):
+            if not isinstance(observed, OperationsObservedEvent):
+                continue
+            summary = _event_summary_from_observed_event(
+                observed,
+                definition_registry=definition_registry,
+                contract_registry=contract_registry,
+            )
+            if summary is not None:
+                summaries.append(summary)
+    summaries.sort(
+        key=lambda item: (
+            _display(item.get("created_at")),
+            _display(item.get("topic")),
+            _display(item.get("event_id")),
+        ),
+        reverse=True,
+    )
+    return summaries[:limit]
+
+
 def _event_summary(
     record: Any,
     *,
@@ -1429,17 +1547,39 @@ def _event_summary(
     if envelope is None:
         return None
     topic = _display(getattr(envelope, "topic", None))
+    payload = _jsonable(getattr(envelope, "payload", {}) or {})
+    trace = _jsonable(getattr(envelope, "trace", {}) or {})
+    if not isinstance(payload, dict):
+        payload = {}
+    if not isinstance(trace, dict):
+        trace = {}
+    return _event_summary_from_observed_event(
+        observed,
+        definition_registry=definition_registry,
+        contract_registry=contract_registry,
+        topic=topic,
+        payload=payload,
+        trace=trace,
+    )
+
+
+def _event_summary_from_observed_event(
+    observed: OperationsObservedEvent,
+    *,
+    definition_registry: Any | None,
+    contract_registry: Any | None,
+    topic: str | None = None,
+    payload: dict[str, Any] | None = None,
+    trace: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    topic = _display(topic or observed.topic)
     event_name = observed.event_name
     definition = (
         definition_registry.get_by_event_name(event_name)
         if definition_registry is not None
         else None
     )
-    surfaces = (
-        definition_registry.list_surfaces_for_event_name(event_name)
-        if definition_registry is not None
-        else ()
-    )
+    surfaces = _safe_surfaces_for_event_name(definition_registry, event_name)
     contract_matches = _match_topic_contracts(contract_registry, topic)
     route_matches = _match_route_contracts(contract_registry, topic)
     contract_status = _contract_status(
@@ -1447,15 +1587,15 @@ def _event_summary(
         definition=definition,
         contract_matches=contract_matches,
     )
-    payload = _jsonable(getattr(envelope, "payload", {}) or {})
-    trace = _jsonable(getattr(envelope, "trace", {}) or {})
+    payload = _jsonable(payload if payload is not None else observed.payload)
+    trace = _jsonable(trace if trace is not None else {})
     if not isinstance(payload, dict):
         payload = {}
     if not isinstance(trace, dict):
         trace = {}
     return {
         "event_id": observed.id,
-        "cursor": _display(getattr(record, "cursor", None)),
+        "cursor": _display(observed.cursor),
         "topic": topic,
         "event_name": event_name,
         "owner": observed.owner,
@@ -1480,6 +1620,19 @@ def _event_summary(
         "trace": trace,
         "observed": observed.to_payload(),
     }
+
+
+def _safe_surfaces_for_event_name(
+    definition_registry: Any | None,
+    event_name: str,
+) -> tuple[Any, ...]:
+    method = getattr(definition_registry, "list_surfaces_for_event_name", None)
+    if not callable(method):
+        return ()
+    try:
+        return tuple(method(event_name) or ())
+    except Exception:
+        return ()
 
 
 def _filter_events(
@@ -2177,6 +2330,22 @@ def _kind_tone(kind: str) -> str:
     }.get(kind.lower(), "neutral")
 
 
+def _status_label(status: str) -> str:
+    normalized = status.strip().replace("_", " ").replace("-", " ")
+    return normalized.title() if normalized else "Observed"
+
+
+def _status_tone(status: str) -> str:
+    normalized = status.strip().lower().replace("_", "-")
+    if normalized in {"failed", "error", "dead-letter", "timed-out"}:
+        return "danger"
+    if normalized in {"waiting", "pending", "blocked", "degraded", "stale"}:
+        return "warning"
+    if normalized in {"succeeded", "success", "completed", "ready", "delivered"}:
+        return "success"
+    return "neutral"
+
+
 def _tone_for_index(index: int) -> str:
     return ("info", "success", "warning", "neutral", "danger")[index % 5]
 
@@ -2267,6 +2436,13 @@ def _display(value: Any, fallback: str = "-") -> str:
     if isinstance(value, (tuple, list, set)):
         return _join(tuple(_display(item) for item in value))
     return str(value)
+
+
+def _int(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _join(values: tuple[Any, ...] | list[Any]) -> str:

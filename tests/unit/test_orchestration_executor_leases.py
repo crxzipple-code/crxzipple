@@ -26,21 +26,21 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         lane_key: str,
         priority: int = 10,
     ):
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id=run_id,
                 inbound_instruction=InboundInstruction(source="cli", content=run_id),
                 priority=priority,
             ),
         )
-        self.container.orchestration_intake_service.route(
+        self.orchestration_intake_service.route(
             RouteOrchestrationRunInput(
                 run_id=run.id,
                 agent_id="assistant",
                 lane_key=lane_key,
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         return run
@@ -53,13 +53,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         direct_scope: DirectSessionScope = DirectSessionScope.MAIN,
         peer_id: str | None = None,
     ):
-        run = self.container.orchestration_intake_service.accept(
+        run = self.orchestration_intake_service.accept(
             AcceptOrchestrationRunInput(
                 run_id=run_id,
                 inbound_instruction=InboundInstruction(source="cli", content=run_id),
             ),
         )
-        self.container.orchestration_intake_service.prepare_session_run(
+        self.orchestration_intake_service.prepare_session_run(
             PrepareSessionRunInput(
                 run_id=run.id,
                 context=SessionRouteContext(
@@ -70,13 +70,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
-        self.container.orchestration_intake_service.enqueue(
+        self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=run.id),
         )
         return run
 
     def test_executor_heartbeat_registers_and_updates_shared_lease(self) -> None:
-        lease = self.container.orchestration_executor_service.heartbeat_executor(
+        lease = self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-1",
             max_inflight_assignments=4,
             inflight_assignment_count=1,
@@ -90,7 +90,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertEqual(lease.metadata, {"pool": "io"})
         self.assertIsNotNone(lease.lease_expires_at)
 
-        updated = self.container.orchestration_executor_service.heartbeat_executor(
+        updated = self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-1",
             max_inflight_assignments=8,
             inflight_assignment_count=2,
@@ -105,18 +105,18 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertEqual(updated.metadata, {"pool": "io", "region": "local"})
         self.assertGreaterEqual(updated.updated_at, lease.updated_at)
 
-        draining = self.container.orchestration_executor_service.list_executor_leases(
+        draining = self.orchestration_executor_service.list_executor_leases(
             status=OrchestrationExecutorLeaseStatus.DRAINING,
         )
         self.assertEqual([item.worker_id for item in draining], ["executor-1"])
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             persisted = uow.orchestration_executor_leases.get("executor-1")
         self.assertIsNotNone(persisted)
         assert persisted is not None
         self.assertEqual(persisted.status, OrchestrationExecutorLeaseStatus.DRAINING)
 
-        heartbeat_records = self.container.events_service.read_recent_event_topic(
+        heartbeat_records = self.events_service.read_recent_event_topic(
             named_event_topic("orchestration.executor.lease.heartbeated"),
             limit=5,
         )
@@ -129,21 +129,21 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_executor_heartbeat_rejects_inflight_above_capacity(self) -> None:
         with self.assertRaises(OrchestrationValidationError):
-            self.container.orchestration_executor_service.heartbeat_executor(
+            self.orchestration_executor_service.heartbeat_executor(
                 worker_id="executor-invalid",
                 max_inflight_assignments=1,
                 inflight_assignment_count=2,
             )
 
     def test_executor_loop_reports_lease_even_when_idle(self) -> None:
-        processed = self.container.orchestration_executor_service.run_until_stopped(
+        processed = self.orchestration_executor_service.run_until_stopped(
             worker_id="executor-loop-1",
             poll_interval_seconds=0.01,
             max_idle_cycles=1,
         )
 
         self.assertEqual(processed, 0)
-        leases = self.container.orchestration_executor_service.list_executor_leases()
+        leases = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual([item.worker_id for item in leases], ["executor-loop-1"])
         self.assertEqual(leases[0].inflight_assignment_count, 0)
         self.assertEqual(
@@ -154,7 +154,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_executor_async_loop_reports_lease_even_when_idle(self) -> None:
         async def _run() -> int:
-            return await self.container.orchestration_executor_service.run_until_stopped_async(
+            return await self.orchestration_executor_service.run_until_stopped_async(
                 worker_id="executor-async-loop-1",
                 poll_interval_seconds=0.01,
                 max_idle_cycles=1,
@@ -163,7 +163,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         processed = asyncio.run(_run())
 
         self.assertEqual(processed, 0)
-        leases = self.container.orchestration_executor_service.list_executor_leases()
+        leases = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual([item.worker_id for item in leases], ["executor-async-loop-1"])
         self.assertEqual(
             leases[0].metadata["runtime_state"]["max_concurrent_assignments"],
@@ -201,7 +201,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
 
     def test_executor_async_loop_revives_draining_lease_to_online(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-async-revive-1",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
@@ -209,7 +209,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
 
         async def _run() -> int:
-            return await self.container.orchestration_executor_service.run_until_stopped_async(
+            return await self.orchestration_executor_service.run_until_stopped_async(
                 worker_id="executor-async-revive-1",
                 poll_interval_seconds=0.01,
                 max_idle_cycles=1,
@@ -219,14 +219,14 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         processed = asyncio.run(_run())
 
         self.assertEqual(processed, 0)
-        [lease] = self.container.orchestration_executor_service.list_executor_leases()
+        [lease] = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual(lease.worker_id, "executor-async-revive-1")
         self.assertEqual(lease.status, OrchestrationExecutorLeaseStatus.ONLINE)
         self.assertEqual(lease.max_inflight_assignments, 2)
 
     def test_executor_sync_loop_rejects_nested_asyncio_loop(self) -> None:
         async def _run_sync_from_async() -> None:
-            self.container.orchestration_executor_service.run_until_stopped(
+            self.orchestration_executor_service.run_until_stopped(
                 worker_id="executor-nested-loop",
                 poll_interval_seconds=0.01,
                 max_idle_cycles=1,
@@ -240,24 +240,24 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_executor_available_path_does_not_claim_unassigned_queue(self) -> None:
         self._queue_run(run_id="run-unassigned-loop-1", lane_key="session:unassigned-1")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-unassigned-1",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
         )
 
-        processed = self.container.orchestration_executor_service.process_next_available(
+        processed = self.orchestration_executor_service.process_next_available(
             worker_id="executor-unassigned-1",
         )
 
         self.assertIsNone(processed)
-        run = self.container.orchestration_run_query_service.get_run("run-unassigned-loop-1")
+        run = self.orchestration_run_query_service.get_run("run-unassigned-loop-1")
         self.assertEqual(run.status, OrchestrationRunStatus.QUEUED)
 
     def test_scheduler_assign_next_assignment_respects_executor_capacity(self) -> None:
         self._queue_run(run_id="run-capacity-1", lane_key="session:capacity-1")
         self._queue_run(run_id="run-capacity-2", lane_key="session:capacity-2")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-capacity-1",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
@@ -272,15 +272,15 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(first)
         self.assertIsNone(blocked)
-        leases = self.container.orchestration_executor_service.list_executor_leases()
+        leases = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual(leases[0].inflight_assignment_count, 1)
 
-        self.container.orchestration_executor_service.complete_assignment(
+        self.orchestration_executor_service.complete_assignment(
             run_id="run-capacity-1",
             worker_id="executor-capacity-1",
             result_payload={"output": "done"},
         )
-        released = self.container.orchestration_executor_service.list_executor_leases()[0]
+        released = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(released.inflight_assignment_count, 0)
 
         second = assign_next_orchestration_assignment(self.container,
@@ -291,13 +291,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertEqual(second.id, "run-capacity-2")
 
     def test_executor_capacity_claim_is_atomic_guard(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-atomic-capacity",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
         )
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             first = uow.orchestration_executor_leases.claim_assignment_capacity(
                 worker_id="executor-atomic-capacity",
                 lease_seconds=30,
@@ -307,24 +307,24 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(first)
             uow.commit()
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             second = uow.orchestration_executor_leases.claim_assignment_capacity(
                 worker_id="executor-atomic-capacity",
                 lease_seconds=30,
             )
 
         self.assertIsNone(second)
-        lease = self.container.orchestration_executor_service.list_executor_leases()[0]
+        lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(lease.inflight_assignment_count, 1)
         self.assertEqual(lease.max_inflight_assignments, 1)
 
     def test_executor_heartbeat_without_inflight_preserves_claimed_capacity(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-heartbeat-preserve",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             claimed = uow.orchestration_executor_leases.claim_assignment_capacity(
                 worker_id="executor-heartbeat-preserve",
                 lease_seconds=30,
@@ -333,7 +333,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(claimed)
             uow.commit()
 
-        heartbeated = self.container.orchestration_executor_service.heartbeat_executor(
+        heartbeated = self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-heartbeat-preserve",
             max_inflight_assignments=4,
             inflight_assignment_count=None,
@@ -343,12 +343,12 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertEqual(heartbeated.inflight_assignment_count, 1)
 
     def test_expired_online_executor_lease_reports_effective_offline(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-effective-expired",
             max_inflight_assignments=3,
             inflight_assignment_count=1,
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             lease = uow.orchestration_executor_leases.get("executor-effective-expired")
             assert lease is not None
             lease.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -356,7 +356,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(lease)
             uow.commit()
 
-        [expired] = self.container.orchestration_executor_service.list_executor_leases()
+        [expired] = self.orchestration_executor_service.list_executor_leases()
 
         self.assertEqual(expired.status, OrchestrationExecutorLeaseStatus.ONLINE)
         self.assertTrue(expired.is_expired())
@@ -369,12 +369,12 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertFalse(expired.can_accept_assignment)
 
     def test_recover_abandoned_runs_marks_expired_executor_offline(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-expired-offline",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             lease = uow.orchestration_executor_leases.get("executor-expired-offline")
             assert lease is not None
             lease.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -382,19 +382,19 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(lease)
             uow.commit()
 
-        recovered = self.container.orchestration_scheduler_service.recover_abandoned_runs()
+        recovered = self.orchestration_scheduler_service.recover_abandoned_runs()
 
         self.assertEqual(recovered, [])
-        [offline] = self.container.orchestration_executor_service.list_executor_leases()
+        [offline] = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual(offline.status, OrchestrationExecutorLeaseStatus.OFFLINE)
 
     def test_scheduler_expire_executor_leases_marks_expired_online_offline(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-expire-command",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             lease = uow.orchestration_executor_leases.get("executor-expire-command")
             assert lease is not None
             lease.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -402,19 +402,19 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(lease)
             uow.commit()
 
-        expired = self.container.orchestration_scheduler_service.expire_executor_leases()
+        expired = self.orchestration_scheduler_service.expire_executor_leases()
 
         self.assertEqual([item.worker_id for item in expired], ["executor-expire-command"])
-        [offline] = self.container.orchestration_executor_service.list_executor_leases()
+        [offline] = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual(offline.status, OrchestrationExecutorLeaseStatus.OFFLINE)
 
     def test_executor_heartbeat_revives_offline_executor(self) -> None:
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-offline-revive",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             lease = uow.orchestration_executor_leases.get("executor-offline-revive")
             assert lease is not None
             lease.mark_offline()
@@ -422,7 +422,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(lease)
             uow.commit()
 
-        revived = self.container.orchestration_executor_service.heartbeat_executor(
+        revived = self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-offline-revive",
             max_inflight_assignments=4,
             inflight_assignment_count=None,
@@ -434,7 +434,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_recovered_running_assignment_releases_executor_capacity(self) -> None:
         self._queue_run(run_id="run-recovered-capacity", lane_key="session:recover-capacity")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-recovered-capacity",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
@@ -443,12 +443,12 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             worker_id="executor-recovered-capacity",
         )
         self.assertIsNotNone(claimed)
-        lease = self.container.orchestration_executor_service.list_executor_leases()[0]
+        lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(lease.inflight_assignment_count, 1)
-        task = self.container.dispatch_service.get_task("run-recovered-capacity")
+        task = self.dispatch_service.get_task("run-recovered-capacity")
         assert task.lease_expires_at is not None
 
-        recovered = self.container.dispatch_service.recover_abandoned_tasks(
+        recovered = self.dispatch_service.recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
                 owner_kind="orchestration_run",
                 reason="Orchestration worker lease expired before completion.",
@@ -456,20 +456,20 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             ),
         )
         self.assertEqual([item.id for item in recovered], ["run-recovered-capacity"])
-        self.container.orchestration_scheduler_service.process_runtime_events(
+        self.orchestration_scheduler_service.process_runtime_events(
             limit_per_subscription=10,
         )
 
-        failed = self.container.orchestration_run_query_service.get_run(
+        failed = self.orchestration_run_query_service.get_run(
             "run-recovered-capacity",
         )
-        released = self.container.orchestration_executor_service.list_executor_leases()[0]
+        released = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(failed.status, OrchestrationRunStatus.FAILED)
         self.assertEqual(released.inflight_assignment_count, 0)
 
     def test_control_cancel_running_assignment_releases_executor_capacity(self) -> None:
         self._queue_run(run_id="run-cancel-capacity", lane_key="session:cancel-capacity")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-cancel-capacity",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
@@ -479,18 +479,18 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
         self.assertIsNotNone(claimed)
 
-        cancelled = self.container.orchestration_cancellation_service.cancel_run(
+        cancelled = self.orchestration_cancellation_service.cancel_run(
             "run-cancel-capacity",
             reason="test_cancel",
         )
 
-        released = self.container.orchestration_executor_service.list_executor_leases()[0]
+        released = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(cancelled.status, OrchestrationRunStatus.CANCELLED)
         self.assertEqual(released.inflight_assignment_count, 0)
 
     def test_fail_without_worker_id_releases_original_executor_capacity(self) -> None:
         self._queue_run(run_id="run-fail-capacity", lane_key="session:fail-capacity")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-fail-capacity",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
@@ -500,20 +500,20 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
         self.assertIsNotNone(claimed)
 
-        failed = self.container.orchestration_executor_service.fail_assignment(
+        failed = self.orchestration_executor_service.fail_assignment(
             run_id="run-fail-capacity",
             message="failed by controller",
             code="controller_failure",
             worker_id=None,
         )
 
-        released = self.container.orchestration_executor_service.list_executor_leases()[0]
+        released = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(failed.status, OrchestrationRunStatus.FAILED)
         self.assertEqual(released.inflight_assignment_count, 0)
 
     def test_draining_executor_does_not_claim_new_assignments(self) -> None:
         self._queue_run(run_id="run-draining-1", lane_key="session:draining-1")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-draining-1",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
@@ -525,7 +525,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
         self.assertIsNone(blocked)
 
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-draining-1",
             draining=False,
         )
@@ -538,33 +538,33 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_scheduler_assigns_next_assignment_to_available_executor(self) -> None:
         self._queue_run(run_id="run-scheduler-assign-1", lane_key="session:assign-1")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-1",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
 
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
 
         self.assertIsNotNone(assigned)
         assert assigned is not None
         self.assertEqual(assigned.id, "run-scheduler-assign-1")
         self.assertEqual(assigned.status, OrchestrationRunStatus.RUNNING)
         self.assertEqual(assigned.worker_id, "executor-scheduler-1")
-        lease = self.container.orchestration_executor_service.list_executor_leases()[0]
+        lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(lease.inflight_assignment_count, 1)
 
     def test_scheduler_async_runtime_assigns_available_work(self) -> None:
         self._queue_run(run_id="run-scheduler-async-1", lane_key="session:async-1")
         self._queue_run(run_id="run-scheduler-async-2", lane_key="session:async-2")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-async",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
 
         processed = asyncio.run(
-            self.container.orchestration_scheduler_service.run_until_stopped_async(
+            self.orchestration_scheduler_service.run_until_stopped_async(
                 worker_id="scheduler-async",
                 poll_interval_seconds=0.01,
                 max_runs=2,
@@ -572,13 +572,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-        first = self.container.orchestration_run_query_service.get_run(
+        first = self.orchestration_run_query_service.get_run(
             "run-scheduler-async-1",
         )
-        second = self.container.orchestration_run_query_service.get_run(
+        second = self.orchestration_run_query_service.get_run(
             "run-scheduler-async-2",
         )
-        lease = self.container.orchestration_executor_service.list_executor_leases()[0]
+        lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(processed, 2)
         self.assertEqual(first.status, OrchestrationRunStatus.RUNNING)
         self.assertEqual(second.status, OrchestrationRunStatus.RUNNING)
@@ -588,18 +588,18 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_scheduler_assignment_publishes_executor_wakeup(self) -> None:
         self._queue_run(run_id="run-scheduler-wakeup-1", lane_key="session:wakeup-1")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-wakeup",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
         )
         topic = orchestration_executor_assignment_requested_topic()
-        cursor = self.container.events_service.snapshot_event_topic(topic)
+        cursor = self.events_service.snapshot_event_topic(topic)
 
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
 
         self.assertIsNotNone(assigned)
-        records = self.container.events_service.read_event_topic(
+        records = self.events_service.read_event_topic(
             topic,
             after_cursor=cursor,
             limit=10,
@@ -613,19 +613,19 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_scheduler_skips_draining_executor_when_assigning(self) -> None:
         self._queue_run(run_id="run-scheduler-draining-1", lane_key="session:assign-2")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-draining",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
             draining=True,
         )
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-online",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
 
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
 
         self.assertIsNotNone(assigned)
         assert assigned is not None
@@ -633,17 +633,17 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
     def test_scheduler_skips_expired_executor_when_assigning(self) -> None:
         self._queue_run(run_id="run-scheduler-expired-1", lane_key="session:assign-3")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-expired",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-fresh",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             expired = uow.orchestration_executor_leases.get("executor-scheduler-expired")
             assert expired is not None
             expired.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -651,7 +651,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(expired)
             uow.commit()
 
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
 
         self.assertIsNotNone(assigned)
         assert assigned is not None
@@ -663,17 +663,17 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             lane_key="session:scheduler-lane",
             priority=10,
         )
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-scheduler-lane",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        active = self.container.orchestration_scheduler_service.assign_next_assignment()
+        active = self.orchestration_scheduler_service.assign_next_assignment()
         self.assertIsNotNone(active)
         assert active is not None
         self.assertEqual(active.id, "run-scheduler-lane-active")
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             task = uow.dispatch_tasks.get(active.id)
             assert task is not None
             task.complete(now=datetime.now(timezone.utc))
@@ -692,7 +692,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             priority=50,
         )
 
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
 
         self.assertIsNotNone(assigned)
         assert assigned is not None
@@ -710,7 +710,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             priority=20,
         )
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             active = uow.orchestration_runs.claim_queued_for_assignment(
                 run_id="run-atomic-lane-active",
                 worker_id="executor-atomic-lane-1",
@@ -725,38 +725,38 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             uow.collect(active)
             uow.commit()
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             blocked = uow.orchestration_runs.claim_queued_for_assignment(
                 run_id="run-atomic-lane-blocked",
                 worker_id="executor-atomic-lane-2",
             )
 
         self.assertIsNone(blocked)
-        still_queued = self.container.orchestration_run_query_service.get_run(
+        still_queued = self.orchestration_run_query_service.get_run(
             "run-atomic-lane-blocked",
         )
         self.assertEqual(still_queued.status, OrchestrationRunStatus.QUEUED)
 
     def test_executor_processes_scheduler_assigned_assignment(self) -> None:
         adapter = _StaticTextAdapter(text="assigned execution complete")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
         self._queue_session_run(run_id="run-assigned-process-1")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-assigned-process",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
         )
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
         self.assertIsNotNone(assigned)
         assert assigned is not None
         self.assertEqual(assigned.worker_id, "executor-assigned-process")
 
         processed = (
-            self.container.orchestration_executor_service.process_next_assigned_assignment(
+            self.orchestration_executor_service.process_next_assigned_assignment(
                 worker_id="executor-assigned-process",
             )
         )
@@ -771,33 +771,33 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             processed.result_payload["output_text"],
             "assigned execution complete",
         )
-        lease = self.container.orchestration_executor_service.list_executor_leases()[0]
+        lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(lease.inflight_assignment_count, 0)
 
     def test_executor_loop_processes_scheduler_assigned_assignment(self) -> None:
         adapter = _StaticTextAdapter(text="assigned loop complete")
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
         self._register_agent_and_llm()
         self._queue_session_run(run_id="run-assigned-loop-1")
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-assigned-loop",
             max_inflight_assignments=1,
             inflight_assignment_count=0,
         )
-        assigned = self.container.orchestration_scheduler_service.assign_next_assignment()
+        assigned = self.orchestration_scheduler_service.assign_next_assignment()
         self.assertIsNotNone(assigned)
 
-        processed_count = self.container.orchestration_executor_service.run_until_stopped(
+        processed_count = self.orchestration_executor_service.run_until_stopped(
             worker_id="executor-assigned-loop",
             poll_interval_seconds=0.01,
             max_runs=1,
         )
 
         self.assertEqual(processed_count, 1)
-        run = self.container.orchestration_run_query_service.get_run("run-assigned-loop-1")
+        run = self.orchestration_run_query_service.get_run("run-assigned-loop-1")
         self.assertEqual(run.status, OrchestrationRunStatus.COMPLETED)
         assert run.result_payload is not None
         self.assertEqual(run.result_payload["output_text"], "assigned loop complete")
@@ -820,7 +820,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 return LlmAdapterResponse(result=LlmResult(text="concurrent complete"))
 
         adapter = _BarrierAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -837,17 +837,17 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             direct_scope=DirectSessionScope.PER_CHANNEL_PEER,
             peer_id="peer-concurrent-2",
         )
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-concurrent-loop",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        first = self.container.orchestration_scheduler_service.assign_next_assignment()
-        second = self.container.orchestration_scheduler_service.assign_next_assignment()
+        first = self.orchestration_scheduler_service.assign_next_assignment()
+        second = self.orchestration_scheduler_service.assign_next_assignment()
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
 
-        processed_count = self.container.orchestration_executor_service.run_until_stopped(
+        processed_count = self.orchestration_executor_service.run_until_stopped(
             worker_id="executor-concurrent-loop",
             poll_interval_seconds=0.01,
             max_runs=2,
@@ -855,15 +855,15 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
 
         self.assertEqual(processed_count, 2)
-        first_run = self.container.orchestration_run_query_service.get_run(
+        first_run = self.orchestration_run_query_service.get_run(
             "run-concurrent-assigned-1",
         )
-        second_run = self.container.orchestration_run_query_service.get_run(
+        second_run = self.orchestration_run_query_service.get_run(
             "run-concurrent-assigned-2",
         )
         self.assertEqual(first_run.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(second_run.status, OrchestrationRunStatus.COMPLETED)
-        leases = self.container.orchestration_executor_service.list_executor_leases()
+        leases = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual(leases[0].inflight_assignment_count, 0)
         runtime_state = leases[0].metadata["runtime_state"]
         self.assertEqual(runtime_state["active_assignment_count"], 0)
@@ -899,7 +899,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 )
 
         adapter = _AsyncBarrierAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -916,18 +916,18 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             direct_scope=DirectSessionScope.PER_CHANNEL_PEER,
             peer_id="peer-async-concurrent-2",
         )
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-async-concurrent-loop",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
         )
-        first = self.container.orchestration_scheduler_service.assign_next_assignment()
-        second = self.container.orchestration_scheduler_service.assign_next_assignment()
+        first = self.orchestration_scheduler_service.assign_next_assignment()
+        second = self.orchestration_scheduler_service.assign_next_assignment()
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
 
         processed_count = asyncio.run(
-            self.container.orchestration_executor_service.run_until_stopped_async(
+            self.orchestration_executor_service.run_until_stopped_async(
                 worker_id="executor-async-concurrent-loop",
                 poll_interval_seconds=0.01,
                 max_runs=2,
@@ -937,10 +937,10 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
         self.assertEqual(processed_count, 2)
         self.assertEqual(adapter.entered, 2)
-        first_run = self.container.orchestration_run_query_service.get_run(
+        first_run = self.orchestration_run_query_service.get_run(
             "run-async-concurrent-assigned-1",
         )
-        second_run = self.container.orchestration_run_query_service.get_run(
+        second_run = self.orchestration_run_query_service.get_run(
             "run-async-concurrent-assigned-2",
         )
         self.assertEqual(first_run.status, OrchestrationRunStatus.COMPLETED)
@@ -992,13 +992,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
 
         async def _run_linked_runtimes() -> tuple[int, int]:
             return await asyncio.gather(
-                self.container.orchestration_scheduler_service.run_until_stopped_async(
+                self.orchestration_scheduler_service.run_until_stopped_async(
                     worker_id="scheduler-linked-runtime",
                     poll_interval_seconds=0.01,
                     max_runs=4,
                     max_idle_cycles=20,
                 ),
-                self.container.orchestration_executor_service.run_until_stopped_async(
+                self.orchestration_executor_service.run_until_stopped_async(
                     worker_id="executor-linked-runtime",
                     poll_interval_seconds=0.01,
                     max_runs=4,
@@ -1008,7 +1008,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
             )
 
         adapter = _AsyncConcurrentAdapter()
-        self.container.llm_adapter_registry.register(
+        self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
         )
@@ -1020,7 +1020,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 direct_scope=DirectSessionScope.PER_CHANNEL_PEER,
                 peer_id=f"peer-linked-runtime-{index + 1}",
             )
-        self.container.orchestration_executor_service.heartbeat_executor(
+        self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-linked-runtime",
             max_inflight_assignments=2,
             inflight_assignment_count=0,
@@ -1033,7 +1033,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertEqual(adapter.entered, 4)
         self.assertEqual(adapter.max_active, 2)
         for index in range(4):
-            run = self.container.orchestration_run_query_service.get_run(
+            run = self.orchestration_run_query_service.get_run(
                 f"run-linked-runtime-{index + 1}",
             )
             self.assertEqual(run.status, OrchestrationRunStatus.COMPLETED)
@@ -1042,6 +1042,6 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 run.result_payload["output_text"],
                 "linked runtime complete",
             )
-        lease = self.container.orchestration_executor_service.list_executor_leases()[0]
+        lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(lease.inflight_assignment_count, 0)
         self.assertEqual(lease.metadata["runtime_state"]["active_assignment_count"], 0)

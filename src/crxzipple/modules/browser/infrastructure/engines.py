@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field
+import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import time
 from typing import Any
@@ -33,9 +32,9 @@ from .cdp_urls import (
     build_cdp_json_new_endpoint,
     candidate_cdp_http_bases,
     json_tab_endpoints,
+    normalize_cdp_http_base,
     normalize_cdp_ws_url,
 )
-from .chrome_mcp import ChromeMcpClientPool
 from .daemon_leases import (
     host_daemon_enabled,
     host_daemon_lease,
@@ -114,6 +113,21 @@ def _tabs_cache_is_fresh(runtime_state: BrowserProfileRuntimeState) -> bool:
     except (TypeError, ValueError):
         return False
     return (time.time() - refreshed_at) <= _TABS_CACHE_FRESHNESS_SECONDS
+
+
+def _host_generation(
+    *,
+    base_url: str,
+    browser_ref: str | None,
+    running_pid: int | None,
+) -> str:
+    payload = {
+        "base_url": str(base_url).strip(),
+        "browser_ref": str(browser_ref).strip() if browser_ref else None,
+        "running_pid": int(running_pid) if running_pid is not None else None,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _next_tab_id(runtime_state: BrowserProfileRuntimeState, *, prefix: str) -> str:
@@ -466,29 +480,17 @@ class InMemoryCdpControlEngine(BrowserControlEngine):
         runtime_state.mark_closed()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CdpControlEngine(BrowserControlEngine):
     daemon_service: DaemonApplicationService = field(repr=False)
+    daemon_manager: Any | None = field(default=None, repr=False)
     family: str = "cdp-control"
     request_timeout_s: float = 5.0
-    launch_timeout_s: float = 10.0
-    launch_poll_interval_s: float = 0.1
-    terminate_owned_processes_on_close: bool = False
     profiles_root: str | Path | None = None
     ws_connect: Any = field(default=websocket.create_connection, repr=False)
-    popen: Any = field(default=subprocess.Popen, repr=False)
     list_processes: Any = field(default=None, repr=False)
-    terminate_pid: Any = field(default=None, repr=False)
-    sleep: Any = field(default=time.sleep, repr=False)
-    monotonic: Any = field(default=time.monotonic, repr=False)
     _http: requests.Session = field(
         default_factory=requests.Session,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _launched_processes: dict[str, Any] = field(
-        default_factory=dict,
         init=False,
         repr=False,
         compare=False,
@@ -498,8 +500,6 @@ class CdpControlEngine(BrowserControlEngine):
         self._http.trust_env = False
         if self.list_processes is None:
             object.__setattr__(self, "list_processes", self._default_list_processes)
-        if self.terminate_pid is None:
-            object.__setattr__(self, "terminate_pid", self._default_terminate_pid)
 
     def ensure_attached(
         self,
@@ -519,11 +519,14 @@ class CdpControlEngine(BrowserControlEngine):
         except BrowserValidationError as exc:
             validation_error = exc
             if plan.launch_policy == "launch-if-missing":
-                payload, base_url = self._launch_and_wait_for_browser(
+                self._sync_host_daemon_failed(
                     plan=plan,
-                    runtime_state=runtime_state,
-                    original_error=validation_error,
+                    reason=str(validation_error),
                 )
+                raise BrowserValidationError(
+                    f"Managed browser host '{self._host_daemon_service_key(profile_name=plan.profile.name)}' "
+                    f"is not ready. Start or ensure the daemon service and retry. Original CDP error: {validation_error}",
+                ) from validation_error
             else:
                 self._sync_host_daemon_failed(
                     plan=plan,
@@ -535,39 +538,24 @@ class CdpControlEngine(BrowserControlEngine):
         if isinstance(payload, dict):
             raw_browser_ref = payload.get("webSocketDebuggerUrl")
             browser_ref = str(raw_browser_ref).strip() if raw_browser_ref else None
-        owned_process = self._launched_processes.get(plan.profile.name)
-        owned_running_pid = None
-        if owned_process is not None:
-            if getattr(owned_process, "poll", lambda: None)() is None:
-                owned_running_pid = getattr(owned_process, "pid", None)
-            else:
-                self._launched_processes.pop(plan.profile.name, None)
         managed_process = self._find_matching_managed_process(plan=plan)
         port_process = self._find_process_for_cdp_port(plan=plan)
         if (
             plan.launch_policy == "launch-if-missing"
-            and owned_running_pid is None
             and managed_process is not None
             and managed_process["headless"] != bool(plan.system.headless)
         ):
-            self._terminate_process_by_pid(int(managed_process["pid"]))
-            payload, base_url = self._launch_and_wait_for_browser(
-                plan=plan,
-                runtime_state=runtime_state,
-                original_error=BrowserValidationError(
-                    "Managed browser process did not match the configured headless mode.",
-                ),
+            raise BrowserValidationError(
+                "Managed browser host is running with a headless mode that does not match "
+                "the configured profile. Stop the daemon host service and retry.",
             )
-            managed_process = self._find_matching_managed_process(plan=plan)
-            port_process = self._find_process_for_cdp_port(plan=plan)
         if (
             plan.launch_policy == "launch-if-missing"
-            and owned_running_pid is None
+            and managed_process is None
             and port_process is not None
         ):
             expected_user_data_dir = self._try_resolve_user_data_dir(plan=plan)
             port_command = str(port_process.get("command", "")).strip()
-            port_pid = int(port_process["pid"])
             expected_headless = bool(plan.system.headless)
             actual_headless = "--headless" in port_command
             matches_remote_allow_origins = _has_expected_remote_allow_origins(
@@ -584,33 +572,32 @@ class CdpControlEngine(BrowserControlEngine):
                 or actual_headless != expected_headless
                 or not matches_remote_allow_origins
             ):
-                self._terminate_process_by_pid(port_pid)
-                payload, base_url = self._launch_and_wait_for_browser(
-                    plan=plan,
-                    runtime_state=runtime_state,
-                    original_error=BrowserValidationError(
-                        "Managed browser process did not match the configured profile.",
-                    ),
+                raise BrowserValidationError(
+                    "CDP port is occupied by a browser process that does not match the "
+                    "configured managed profile. Stop or reconcile the daemon host service.",
                 )
-                managed_process = self._find_matching_managed_process(plan=plan)
-                port_process = self._find_process_for_cdp_port(plan=plan)
 
         runtime_state.mark_attached(
             browser_ref=browser_ref or base_url,
-            running_pid=owned_running_pid
-            or (
+            running_pid=(
                 int(managed_process["pid"])
                 if managed_process is not None
-                else (
-                    int(port_process["pid"])
-                    if port_process is not None
-                    else None
-                )
+                else (int(port_process["pid"]) if port_process is not None else None)
             ),
         )
-        if owned_running_pid is None and managed_process is None and port_process is None:
+        if managed_process is None and port_process is None:
             runtime_state.running_pid = None
+        user_data_dir = self._try_resolve_user_data_dir(plan=plan)
+        if user_data_dir is not None:
+            runtime_state.metadata["user_data_dir"] = user_data_dir
         runtime_state.metadata[_METADATA_CDP_BASE_URL_KEY] = base_url
+        runtime_state.remember_host_generation(
+            _host_generation(
+                base_url=base_url,
+                browser_ref=runtime_state.browser_ref,
+                running_pid=runtime_state.running_pid,
+            ),
+        )
         self._sync_host_daemon_ready(
             plan=plan,
             pid=runtime_state.running_pid,
@@ -790,15 +777,12 @@ class CdpControlEngine(BrowserControlEngine):
         plan: BrowserExecutionPlan,
         runtime_state: BrowserProfileRuntimeState,
     ) -> None:
-        launched = self._launched_processes.pop(plan.profile.name, None)
-        if launched is not None:
-            self._terminate_process(launched)
         user_data_dir = self._resolve_user_data_dir(plan=plan)
+        self._stop_host_daemon_process(plan=plan)
         self._clear_user_data_dir(Path(user_data_dir))
         runtime_state.metadata.clear()
         runtime_state.remember_target(None)
         runtime_state.mark_closed()
-        self._sync_host_daemon_stopped(plan=plan)
 
     def stop_profile(
         self,
@@ -806,36 +790,12 @@ class CdpControlEngine(BrowserControlEngine):
         plan: BrowserExecutionPlan,
         runtime_state: BrowserProfileRuntimeState,
     ) -> None:
-        launched = self._launched_processes.pop(plan.profile.name, None)
-        if launched is not None:
-            self._terminate_process(launched)
-        elif plan.capabilities.can_launch and plan.profile.is_loopback:
-            managed_process = self._find_matching_managed_process(plan=plan)
-            if managed_process is not None:
-                self._terminate_process_by_pid(int(managed_process["pid"]))
-            else:
-                port_process = self._find_process_for_cdp_port(plan=plan)
-                if port_process is not None:
-                    expected_user_data_dir = self._try_resolve_user_data_dir(plan=plan)
-                    port_command = str(port_process.get("command", "")).strip()
-                    if (
-                        expected_user_data_dir is not None
-                        and f"--user-data-dir={expected_user_data_dir}" in port_command
-                    ):
-                        self._terminate_process_by_pid(int(port_process["pid"]))
         runtime_state.metadata.clear()
         runtime_state.remember_target(None)
         runtime_state.mark_closed()
-        self._sync_host_daemon_stopped(plan=plan)
+        self._stop_host_daemon_process(plan=plan)
 
     def close(self) -> None:
-        if self.terminate_owned_processes_on_close:
-            for profile_name, process in list(self._launched_processes.items()):
-                self._terminate_process(process)
-                self._launched_processes.pop(profile_name, None)
-                self._sync_host_daemon_stopped_by_profile(profile_name=profile_name)
-        else:
-            self._launched_processes.clear()
         self._http.close()
 
     def _list_tab_payloads(
@@ -886,66 +846,15 @@ class CdpControlEngine(BrowserControlEngine):
                 return payload
         raise BrowserValidationError(f"Browser tab '{target_id}' was not found.")
 
-    def _launch_and_wait_for_browser(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        original_error: BrowserValidationError,
-    ) -> tuple[Any, str]:
-        process = self._ensure_local_browser_process(
-            plan=plan,
-            runtime_state=runtime_state,
-        )
-        deadline = self.monotonic() + max(self.launch_timeout_s, self.launch_poll_interval_s)
-        while True:
-            try:
-                return self._request_cdp_json(
-                    plan=plan,
-                    runtime_state=runtime_state,
-                    path="/json/version",
-                )
-            except BrowserValidationError:
-                poll_result = getattr(process, "poll", lambda: None)()
-                if self.monotonic() >= deadline:
-                    self._terminate_process(process)
-                    self._launched_processes.pop(plan.profile.name, None)
-                    if (
-                        poll_result is not None
-                        and self._find_process_for_cdp_port(plan=plan) is None
-                    ):
-                        self._sync_host_daemon_failed(
-                            plan=plan,
-                            reason="Local managed browser exited before CDP became available.",
-                        )
-                        raise BrowserValidationError(
-                            "Local managed browser exited before CDP became available.",
-                        ) from original_error
-                    self._sync_host_daemon_failed(
-                        plan=plan,
-                        reason=f"{original_error} Local managed browser did not expose CDP before timeout.",
-                    )
-                    raise BrowserValidationError(
-                        f"{original_error} Local managed browser did not expose CDP before timeout.",
-                    ) from original_error
-                self.sleep(self.launch_poll_interval_s)
-
     def _current_cdp_base_url(
         self,
         *,
         plan: BrowserExecutionPlan,
         runtime_state: BrowserProfileRuntimeState | None,
     ) -> str:
-        cached = None
-        browser_ref = None
-        if runtime_state is not None:
-            raw_cached = runtime_state.metadata.get(_METADATA_CDP_BASE_URL_KEY)
-            cached = raw_cached if isinstance(raw_cached, str) else None
-            browser_ref = runtime_state.browser_ref
-        return candidate_cdp_http_bases(
-            plan.profile.cdp_url,
-            cached_base_url=cached,
-            browser_ref=browser_ref,
+        return self._candidate_cdp_base_urls(
+            plan=plan,
+            runtime_state=runtime_state,
         )[0]
 
     def _candidate_cdp_base_urls(
@@ -960,11 +869,47 @@ class CdpControlEngine(BrowserControlEngine):
             raw_cached = runtime_state.metadata.get(_METADATA_CDP_BASE_URL_KEY)
             cached = raw_cached if isinstance(raw_cached, str) else None
             browser_ref = runtime_state.browser_ref
-        return candidate_cdp_http_bases(
+        candidates: list[str] = []
+        for endpoint in self._host_daemon_cdp_base_urls(plan=plan):
+            _push_cdp_base(candidates, endpoint)
+        if (
+            plan.profile.driver == "existing-session"
+            and plan.profile.cdp_url is None
+            and plan.profile.cdp_port is None
+        ):
+            return tuple(candidates)
+        for endpoint in candidate_cdp_http_bases(
             plan.profile.cdp_url,
             cached_base_url=cached,
             browser_ref=browser_ref,
-        )
+        ):
+            _push_cdp_base(candidates, endpoint)
+        return tuple(candidates)
+
+    def _host_daemon_cdp_base_urls(
+        self,
+        *,
+        plan: BrowserExecutionPlan,
+    ) -> tuple[str, ...]:
+        if not self._host_daemon_enabled(plan=plan):
+            return ()
+        try:
+            instances = self.daemon_service.list_instances(
+                service_key=self._host_daemon_service_key(profile_name=plan.profile.name),
+            )
+        except Exception:  # noqa: BLE001
+            return ()
+        endpoints: list[str] = []
+        for instance in instances:
+            if getattr(instance, "status", "") not in {"ready", "degraded"}:
+                continue
+            _push_cdp_base(endpoints, getattr(instance, "endpoint", None))
+            metadata = getattr(instance, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            _push_cdp_base(endpoints, metadata.get("server_url"))
+            _push_cdp_base(endpoints, metadata.get("cdp_url"))
+        return tuple(endpoints)
 
     def _request_cdp_json(
         self,
@@ -975,10 +920,13 @@ class CdpControlEngine(BrowserControlEngine):
         methods: tuple[str, ...] = ("get",),
     ) -> tuple[Any, str]:
         last_error: BrowserValidationError | None = None
-        for base_url in self._candidate_cdp_base_urls(
+        candidates = self._candidate_cdp_base_urls(
             plan=plan,
             runtime_state=runtime_state,
-        ):
+        )
+        if not candidates:
+            raise BrowserValidationError(_missing_cdp_endpoint_message(plan=plan))
+        for base_url in candidates:
             request_url = append_cdp_path(base_url, path)
             for method in methods:
                 try:
@@ -1004,60 +952,6 @@ class CdpControlEngine(BrowserControlEngine):
         if last_error is not None:
             raise last_error
         raise BrowserValidationError(f"Browser CDP request for '{path}' failed.")
-
-    def _ensure_local_browser_process(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> Any:
-        existing = self._launched_processes.get(plan.profile.name)
-        if existing is not None and getattr(existing, "poll", lambda: None)() is None:
-            runtime_state.running_pid = getattr(existing, "pid", None)
-            return existing
-
-        executable_path = self._resolve_executable_path(plan=plan)
-        user_data_dir = self._resolve_user_data_dir(plan=plan)
-        cdp_port = plan.profile.cdp_port
-        if cdp_port is None:
-            raise BrowserValidationError(
-                "Local managed browser launch requires a resolved cdp_port.",
-            )
-
-        command = [
-            executable_path,
-            f"--remote-debugging-address={plan.system.cdp_host}",
-            f"--remote-debugging-port={cdp_port}",
-            f"--remote-allow-origins={_remote_allow_origins(host=plan.system.cdp_host, port=cdp_port)}",
-            f"--user-data-dir={user_data_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ]
-        if plan.system.headless:
-            command.append("--headless=new")
-        if plan.system.no_sandbox:
-            command.append("--no-sandbox")
-
-        try:
-            process = self.popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._sync_host_daemon_failed(
-                plan=plan,
-                reason=f"Local managed browser could not be launched: {exc}",
-            )
-            raise BrowserValidationError(
-                f"Local managed browser could not be launched: {exc}",
-            ) from exc
-
-        runtime_state.running_pid = getattr(process, "pid", None)
-        self._launched_processes[plan.profile.name] = process
-        return process
 
     def _resolve_executable_path(self, *, plan: BrowserExecutionPlan) -> str:
         configured = plan.system.executable_path
@@ -1188,21 +1082,6 @@ class CdpControlEngine(BrowserControlEngine):
             else:
                 child.unlink(missing_ok=True)
 
-    def _terminate_process(self, process: Any) -> None:
-        if getattr(process, "poll", lambda: None)() is not None:
-            return
-        try:
-            process.terminate()
-            process.wait(timeout=2)
-            return
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            process.kill()
-            process.wait(timeout=2)
-        except Exception:  # noqa: BLE001
-            pass
-
     @staticmethod
     def _default_list_processes() -> list[dict[str, Any]]:
         try:
@@ -1225,29 +1104,11 @@ class CdpControlEngine(BrowserControlEngine):
             resolved.append({"pid": pid, "command": command.strip()})
         return resolved
 
-    def _terminate_process_by_pid(self, pid: int) -> None:
-        self.terminate_pid(pid)
-        deadline = self.monotonic() + 2.0
-        while self.monotonic() < deadline:
-            process = self._find_process_by_pid(pid)
-            if process is None:
-                return
-            self.sleep(0.05)
-
     def _find_process_by_pid(self, pid: int) -> dict[str, Any] | None:
         for item in self.list_processes():
             if item.get("pid") == pid:
                 return item
         return None
-
-    @staticmethod
-    def _default_terminate_pid(pid: int) -> None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        except Exception:  # noqa: BLE001
-            return
 
     def _host_daemon_enabled(self, *, plan: BrowserExecutionPlan) -> bool:
         return host_daemon_enabled(plan=plan)
@@ -1272,6 +1133,14 @@ class CdpControlEngine(BrowserControlEngine):
             metadata["cdp_url"] = plan.profile.cdp_url
         if plan.profile.cdp_port is not None:
             metadata["cdp_port"] = plan.profile.cdp_port
+        if plan.profile.proxy_mode != "none":
+            metadata["proxy_mode"] = plan.profile.proxy_mode
+        if plan.profile.proxy_mode == "static" and plan.profile.proxy_server is not None:
+            metadata["proxy_server"] = plan.profile.proxy_server
+        if plan.profile.proxy_mode == "access_binding":
+            if plan.profile.proxy_binding_id is not None:
+                metadata["proxy_binding_id"] = plan.profile.proxy_binding_id
+            metadata["proxy_credential_kind"] = plan.profile.proxy_credential_kind
         if pid is not None:
             metadata["browser_pid"] = pid
         return metadata
@@ -1314,276 +1183,44 @@ class CdpControlEngine(BrowserControlEngine):
             clear_metadata_keys=("browser_pid",),
         )
 
-    def _sync_host_daemon_stopped_by_profile(self, *, profile_name: str) -> None:
-        self.daemon_service.report_service_stopped(
-            service_key=self._host_daemon_service_key(profile_name=profile_name),
-            clear_metadata_keys=("browser_pid",),
+    def _stop_host_daemon_process(self, *, plan: BrowserExecutionPlan) -> None:
+        if not self._host_daemon_enabled(plan=plan):
+            return
+        service_key = self._host_daemon_service_key(profile_name=plan.profile.name)
+        stop_service = getattr(self.daemon_manager, "stop_service", None)
+        if callable(stop_service):
+            try:
+                stop_service(service_key)
+            except Exception as exc:  # noqa: BLE001
+                raise BrowserValidationError(
+                    f"Failed to stop browser daemon service '{service_key}': {exc}",
+                ) from exc
+            return
+        self._sync_host_daemon_stopped(plan=plan)
+
+
+def _push_cdp_base(candidates: list[str], value: object) -> None:
+    try:
+        normalized = normalize_cdp_http_base(value if isinstance(value, str) else None)
+    except BrowserValidationError:
+        return
+    if normalized not in candidates:
+        candidates.append(normalized)
+
+
+def _missing_cdp_endpoint_message(*, plan: BrowserExecutionPlan) -> str:
+    if plan.profile.driver == "existing-session":
+        return (
+            f"Existing-session browser profile '{plan.profile.name}' requires a "
+            "configured CDP URL or port. Start the target browser with remote "
+            "debugging enabled and set cdp_url/cdp_port before using this profile."
         )
-
-
-@dataclass(slots=True)
-class McpControlEngine(BrowserControlEngine):
-    mcp_pool: ChromeMcpClientPool
-    family: str = "mcp-control"
-
-    def ensure_attached(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> BrowserProfileRuntimeState:
-        self.mcp_pool.ensure_available(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            user_data_dir=plan.profile.user_data_dir,
+    if plan.capabilities.is_remote:
+        return (
+            f"Remote browser profile '{plan.profile.name}' requires a configured "
+            "CDP URL or port."
         )
-        runtime_state.mark_attached(
-            browser_ref=f"mcp:{plan.profile.name}",
-            running_pid=self.mcp_pool.get_pid(
-                profile_name=plan.profile.name,
-                system=plan.system,
-                user_data_dir=plan.profile.user_data_dir,
-            ),
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        return runtime_state
-
-    def list_tabs(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> tuple[BrowserTab, ...]:
-        del runtime_state
-        return self.mcp_pool.list_tabs(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            user_data_dir=plan.profile.user_data_dir,
-        )
-
-    def open_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        url: str,
-    ) -> BrowserTab:
-        tab = self.mcp_pool.open_tab(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            url=url,
-            user_data_dir=plan.profile.user_data_dir,
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
-
-    def navigate_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        target_id: str,
-        url: str,
-    ) -> BrowserTab:
-        tab = self.mcp_pool.navigate_tab(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            target_id=target_id,
-            url=url,
-            user_data_dir=plan.profile.user_data_dir,
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
-
-    def focus_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        target_id: str,
-    ) -> BrowserTab:
-        self.mcp_pool.focus_tab(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            target_id=target_id,
-            user_data_dir=plan.profile.user_data_dir,
-        )
-        tab = _tab_by_id(
-            tabs=self.list_tabs(plan=plan, runtime_state=runtime_state),
-            target_id=target_id,
-        )
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
-
-    def close_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        target_id: str,
-    ) -> None:
-        self.mcp_pool.close_tab(
-            profile_name=plan.profile.name,
-            system=plan.system,
-            target_id=target_id,
-            user_data_dir=plan.profile.user_data_dir,
-        )
-        tabs = self.list_tabs(plan=plan, runtime_state=runtime_state)
-        _store_tabs(runtime_state, tabs)
-        active_target = runtime_state.metadata.get(_METADATA_ACTIVE_TARGET_KEY)
-        if active_target == target_id:
-            _set_active_target(runtime_state, tabs[0].target_id if tabs else None)
-
-    def reset_profile(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> None:
-        self.mcp_pool.close_profile(profile_name=plan.profile.name)
-        runtime_state.metadata.clear()
-        runtime_state.remember_target(None)
-        runtime_state.mark_closed()
-
-    def stop_profile(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> None:
-        self.mcp_pool.close_profile(profile_name=plan.profile.name)
-        runtime_state.metadata.clear()
-        runtime_state.remember_target(None)
-        runtime_state.mark_closed()
-
-
-@dataclass(frozen=True, slots=True)
-class InMemoryMcpControlEngine(BrowserControlEngine):
-    family: str = "mcp-control"
-
-    def ensure_attached(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> BrowserProfileRuntimeState:
-        runtime_state.mark_attached(
-            browser_ref=f"mcp:{plan.profile.name}",
-            running_pid=None,
-        )
-        runtime_state.metadata.setdefault(_METADATA_TABS_KEY, [])
-        runtime_state.metadata.setdefault(_METADATA_NEXT_TAB_ID_KEY, 1)
-        runtime_state.metadata.setdefault(_METADATA_ACTIVE_TARGET_KEY, None)
-        return runtime_state
-
-    def list_tabs(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> tuple[BrowserTab, ...]:
-        del plan
-        return _load_tabs(runtime_state)
-
-    def open_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        url: str,
-    ) -> BrowserTab:
-        target_id = _next_tab_id(runtime_state, prefix=f"mcp-{plan.profile.name}")
-        tab = BrowserTab(target_id=target_id, url=url, title=url, type="page")
-        tabs = _load_tabs(runtime_state) + (tab,)
-        _store_tabs(runtime_state, tabs)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
-
-    def navigate_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        target_id: str,
-        url: str,
-    ) -> BrowserTab:
-        del plan
-        tabs = []
-        updated: BrowserTab | None = None
-        for tab in _load_tabs(runtime_state):
-            if tab.target_id == target_id:
-                updated = BrowserTab(
-                    target_id=tab.target_id,
-                    url=url,
-                    title=url,
-                    type=tab.type,
-                    ws_url=tab.ws_url,
-                    json_endpoints=tab.json_endpoints,
-                )
-                tabs.append(updated)
-            else:
-                tabs.append(tab)
-        if updated is None:
-            raise BrowserValidationError(f"Browser tab '{target_id}' was not found.")
-        _store_tabs(runtime_state, tuple(tabs))
-        _set_active_target(runtime_state, updated.target_id)
-        return updated
-
-    def focus_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        target_id: str,
-    ) -> BrowserTab:
-        del plan
-        tab = _find_tab(runtime_state, target_id=target_id)
-        _set_active_target(runtime_state, tab.target_id)
-        return tab
-
-    def close_tab(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        target_id: str,
-    ) -> None:
-        del plan
-        current_tabs = _load_tabs(runtime_state)
-        tabs = tuple(tab for tab in current_tabs if tab.target_id != target_id)
-        if len(tabs) == len(current_tabs):
-            raise BrowserValidationError(f"Browser tab '{target_id}' was not found.")
-        _store_tabs(runtime_state, tabs)
-        active_target = runtime_state.metadata.get(_METADATA_ACTIVE_TARGET_KEY)
-        if active_target == target_id:
-            _set_active_target(runtime_state, tabs[0].target_id if tabs else None)
-
-    def reset_profile(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> None:
-        del plan
-        runtime_state.metadata.clear()
-        runtime_state.remember_target(None)
-        runtime_state.mark_closed()
-
-    def stop_profile(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-    ) -> None:
-        del plan
-        runtime_state.metadata.clear()
-        runtime_state.remember_target(None)
-        runtime_state.mark_closed()
+    return f"Browser profile '{plan.profile.name}' does not expose a CDP endpoint."
 
 
 @dataclass(frozen=True, slots=True)
@@ -1628,57 +1265,6 @@ class InMemoryCdpBackedPlaywrightActionEngine(BrowserActionEngine):
                 "payload": dict(command.payload),
             },
             message=f"Executed {command.kind} via cdp-backed-playwright.",
-        )
-
-    def clear_profile(
-        self,
-        *,
-        profile_name: str,
-    ) -> None:
-        del profile_name
-
-
-@dataclass(frozen=True, slots=True)
-class InMemoryMcpActionEngine(BrowserActionEngine):
-    family: BrowserActionFamily = "mcp-backed"
-
-    def supports(
-        self,
-        *,
-        command: BrowserPageActionCommand,
-    ) -> bool:
-        return command.kind != "batch"
-
-    def execute(
-        self,
-        *,
-        plan: BrowserExecutionPlan,
-        runtime_state: BrowserProfileRuntimeState,
-        tab: BrowserTab | None,
-        command: BrowserPageActionCommand,
-    ) -> BrowserActionResult:
-        del runtime_state
-        if tab is None:
-            raise BrowserValidationError("mcp-backed actions require a tab.")
-        return BrowserActionResult(
-            command=command,
-            ok=True,
-            target_id=tab.target_id,
-            value={
-                "engine": self.family,
-                "control_family": plan.control_family,
-                "profile": plan.profile.name,
-                "tab": {
-                    "target_id": tab.target_id,
-                    "url": tab.url,
-                    "title": tab.title,
-                    "type": tab.type,
-                },
-                "ref": command.target.ref,
-                "selector": command.target.selector,
-                "payload": dict(command.payload),
-            },
-            message=f"Executed {command.kind} via mcp-backed.",
         )
 
     def clear_profile(

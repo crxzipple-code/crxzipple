@@ -1,17 +1,16 @@
 from crxzipple.modules.tool.application import (
     ExecuteToolInput,
-    RegisterToolInput,
-    RegisterToolParameterInput,
-    SetToolAvailabilityInput,
     ToolApplicationService,
     ToolCatalogService,
-    ToolDiscoveryProviderDescriptor,
     ToolSchedulerRuntimePort,
     ToolRuntimeEventService,
+    ToolQueryPort,
+    ToolRunControlPort,
     ToolRunDispatchClaim,
     ToolRunDispatchPort,
     ToolSpec,
     ToolSubmissionService,
+    ToolWorkerRegistrationPort,
     ToolWorkerRuntimePort,
 )
 from crxzipple.modules.tool.domain import (
@@ -28,18 +27,14 @@ from crxzipple.modules.tool.domain import (
     ToolRunError,
     ToolRunResult,
     ToolRunStatus,
-    ToolSourceKind,
+    ToolDefinitionOrigin,
 )
 
 __all__ = [
     "ExecuteToolInput",
-    "RegisterToolInput",
-    "RegisterToolParameterInput",
-    "SetToolAvailabilityInput",
     "Tool",
     "ToolApplicationService",
     "ToolCatalogService",
-    "ToolDiscoveryProviderDescriptor",
     "ToolEnvironment",
     "ToolExecutionPolicy",
     "ToolExecutionStrategy",
@@ -50,6 +45,8 @@ __all__ = [
     "ToolParameter",
     "ToolSchedulerRuntimePort",
     "ToolRuntimeEventService",
+    "ToolQueryPort",
+    "ToolRunControlPort",
     "ToolRunDispatchClaim",
     "ToolRunDispatchPort",
     "ToolRun",
@@ -58,6 +55,7 @@ __all__ = [
     "ToolRunStatus",
     "ToolSubmissionService",
     "ToolSpec",
-    "ToolSourceKind",
+    "ToolDefinitionOrigin",
+    "ToolWorkerRegistrationPort",
     "ToolWorkerRuntimePort",
 ]

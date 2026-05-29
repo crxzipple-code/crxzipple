@@ -9,6 +9,7 @@ _INTERACTIVE_ROLES = frozenset(
         "button",
         "checkbox",
         "combobox",
+        "gridcell",
         "link",
         "listbox",
         "menuitem",

@@ -1,5 +1,15 @@
 kind: local_package
 namespace: memory
+capabilities:
+  - memory.context_lookup
+  - memory.search
+  - memory.read
+  - memory.write
+  - memory.flush_marker
+dependencies:
+  - id: memory_runtime_service
+    kind: service_dependency
+    description: Memory runtime service used for scoped recall and remember operations.
 local_tools:
   - id: memory_search
     name: Memory Search
@@ -28,6 +38,8 @@ local_tools:
       - async
     supported_environments:
       - local
+    context_requirements:
+      - agent_id
     runtime_key: memory_search
   - id: memory_read
     name: Memory Read
@@ -52,6 +64,8 @@ local_tools:
       - async
     supported_environments:
       - local
+    context_requirements:
+      - agent_id
     runtime_key: memory_read
   - id: memory_write_daily
     name: Memory Write Daily
@@ -77,6 +91,8 @@ local_tools:
       - async
     supported_environments:
       - local
+    context_requirements:
+      - agent_id
     runtime_key: memory_write_daily
   - id: memory_flush_skip
     name: Memory Flush Skip
@@ -97,4 +113,6 @@ local_tools:
       - async
     supported_environments:
       - local
+    context_requirements:
+      - agent_id
     runtime_key: memory_flush_skip

@@ -6,7 +6,17 @@ from typing import Any
 from crxzipple.modules.agent.domain.exceptions import AgentValidationError
 
 
-_VALID_MEMORY_RETRIEVAL_BACKENDS = frozenset({"keyword", "hybrid", "vector"})
+_REMOVED_RUNTIME_ATTR_KEYS = frozenset(
+    {
+        "skill_ids",
+        "skills",
+        "tool_ids",
+        "tools",
+        "memory_space",
+        "memory_space_id",
+    },
+)
+_VALID_MEMORY_ACCESS = frozenset({"read", "read_write"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,12 +169,54 @@ class AgentExecutionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentMemoryBinding:
+    enabled: bool = True
+    scope_ref: str | None = None
+    access: str = "read_write"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scope_ref", _normalize_optional_text(self.scope_ref))
+        normalized_access = _normalize_memory_access(self.access)
+        object.__setattr__(self, "access", normalized_access)
+
+    @property
+    def writable(self) -> bool:
+        return self.enabled and self.access == "read_write"
+
+    def effective_scope_ref(self, agent_id: str) -> str:
+        if self.scope_ref is None or self.scope_ref == "auto":
+            return agent_id
+        return self.scope_ref
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "enabled": self.enabled,
+            "access": self.access,
+        }
+        if self.scope_ref is not None:
+            payload["scope_ref"] = self.scope_ref
+        return payload
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "AgentMemoryBinding":
+        payload = payload or {}
+        scope_ref = payload.get("scope_ref")
+        return cls(
+            enabled=_bool_value(payload.get("enabled"), default=True),
+            scope_ref=str(scope_ref) if scope_ref is not None else None,
+            access=str(payload.get("access") or "read_write"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRuntimePreferences:
     home_dir: str | None = None
     workdir: str | None = None
     workspace: str | None = None
     sandbox_mode: str | None = None
-    memory_retrieval_backend: str | None = None
     attrs: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -178,10 +230,13 @@ class AgentRuntimePreferences:
         )
         object.__setattr__(
             self,
-            "memory_retrieval_backend",
-            _normalize_memory_retrieval_backend(self.memory_retrieval_backend),
+            "attrs",
+            {
+                key: value
+                for key, value in dict(self.attrs).items()
+                if key not in _REMOVED_RUNTIME_ATTR_KEYS
+            },
         )
-        object.__setattr__(self, "attrs", dict(self.attrs))
 
     @property
     def resolved_home_dir(self) -> str | None:
@@ -205,8 +260,6 @@ class AgentRuntimePreferences:
             payload["workspace"] = self.workspace
         if self.sandbox_mode is not None:
             payload["sandbox_mode"] = self.sandbox_mode
-        if self.memory_retrieval_backend is not None:
-            payload["memory_retrieval_backend"] = self.memory_retrieval_backend
         return payload
 
     @classmethod
@@ -236,11 +289,6 @@ class AgentRuntimePreferences:
                 if payload.get("sandbox_mode") is not None
                 else None
             ),
-            memory_retrieval_backend=(
-                str(payload["memory_retrieval_backend"])
-                if payload.get("memory_retrieval_backend") is not None
-                else None
-            ),
             attrs=dict(payload.get("attrs", {}))
             if isinstance(payload.get("attrs"), dict)
             else {},
@@ -253,12 +301,20 @@ def _normalize_optional_text(value: str | None) -> str | None:
     normalized = value.strip()
     return normalized or None
 
-def _normalize_memory_retrieval_backend(value: str | None) -> str | None:
+def _normalize_memory_access(value: str | None) -> str:
     normalized = _normalize_optional_text(value)
     if normalized is None:
-        return None
-    if normalized not in _VALID_MEMORY_RETRIEVAL_BACKENDS:
+        return "read_write"
+    if normalized not in _VALID_MEMORY_ACCESS:
         raise AgentValidationError(
-            f"Unsupported memory_retrieval_backend '{normalized}'.",
+            f"Unsupported agent memory access '{normalized}'.",
         )
     return normalized
+
+
+def _bool_value(value: object, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

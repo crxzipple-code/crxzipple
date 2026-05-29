@@ -3,8 +3,9 @@ from __future__ import annotations
 from threading import Event as ThreadEvent
 from typing import TYPE_CHECKING, Any, Protocol
 
+from crxzipple.modules.tool.application.ports.events import ToolEventWaitPort
+
 if TYPE_CHECKING:
-    from crxzipple.modules.events import EventsApplicationService
     from crxzipple.modules.tool.application.dispatch_events import ToolRuntimeEventService
     from crxzipple.modules.tool.domain import ToolRun
 
@@ -23,8 +24,19 @@ class ToolSchedulerRuntimePort(Protocol):
         max_runs: int | None = None,
         max_idle_cycles: int | None = None,
         stop_event: ThreadEvent | None = None,
-        events_service: "EventsApplicationService | None" = None,
+        events_service: ToolEventWaitPort | None = None,
     ) -> int:
+        ...
+
+
+class ToolWorkerRegistrationPort(Protocol):
+    def register_worker(
+        self,
+        *,
+        worker_id: str,
+        max_in_flight: int = 1,
+        capabilities_payload: dict[str, Any] | None = None,
+    ) -> object:
         ...
 
 
@@ -58,7 +70,7 @@ class ToolWorkerRuntimePort(Protocol):
         max_runs: int | None = None,
         max_idle_cycles: int | None = None,
         stop_event: ThreadEvent | None = None,
-        events_service: "EventsApplicationService | None" = None,
+        events_service: ToolEventWaitPort | None = None,
         runtime_event_service: "ToolRuntimeEventService | None" = None,
         max_in_flight: int = 1,
     ) -> int:

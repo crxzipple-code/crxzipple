@@ -20,12 +20,27 @@ _LEASE_DEPTH_METADATA_KEY = "_lease_depth"
 _ACTIVE_INSTANCE_STATUSES = frozenset({"starting", "ready", "degraded", "stopping"})
 
 
+def _spec_server_url(spec: DaemonServiceSpec) -> str | None:
+    raw = spec.metadata.get("server_url")
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip()
+    return normalized or None
+
+
 DEFAULT_DAEMON_SERVICE_SETS: tuple[DaemonServiceSetSpec, ...] = (
     DaemonServiceSetSpec(
         key="workers",
         display_name="Workers",
-        description="All internal worker daemons.",
-        service_roles=("worker",),
+        description="Core runtime worker daemons managed by the dev/runtime stack.",
+        service_keys=(
+            "worker:orchestration-scheduler",
+            "worker:orchestration",
+            "worker:event-relay",
+            "worker:operations-observer",
+            "worker:tool-scheduler",
+            "worker:tool",
+        ),
     ),
     DaemonServiceSetSpec(
         key="orchestration-runtime",
@@ -53,7 +68,7 @@ DEFAULT_DAEMON_SERVICE_SETS: tuple[DaemonServiceSetSpec, ...] = (
     DaemonServiceSetSpec(
         key="browser-stack",
         display_name="Browser Stack",
-        description="Managed browser hosts and Chrome MCP capabilities.",
+        description="Managed browser host processes; lazy browser capabilities remain explicit.",
         service_groups=("browser",),
     ),
     DaemonServiceSetSpec(
@@ -313,7 +328,42 @@ class DaemonApplicationService:
             return tuple(updated_specs)
 
         self._update_service_specs(_mutate)
+        self._reconcile_instances_for_registered_spec(spec)
         return spec
+
+    def _reconcile_instances_for_registered_spec(self, spec: DaemonServiceSpec) -> None:
+        if spec.transport != "endpoint":
+            return
+        desired_endpoint = _spec_server_url(spec)
+
+        def _mutate(instances: tuple[DaemonInstance, ...]) -> tuple[DaemonInstance, ...]:
+            updated_instances: list[DaemonInstance] = []
+            for instance in instances:
+                if instance.service_key != spec.key:
+                    updated_instances.append(instance)
+                    continue
+                updated = replace(instance)
+                metadata = dict(updated.metadata)
+                if desired_endpoint is None:
+                    updated.endpoint = None
+                    metadata.pop("server_url", None)
+                    metadata.pop("cdp_url", None)
+                    updated.metadata = metadata
+                    updated.pid = None
+                    updated.last_error = None
+                    updated.mark_stopped()
+                    updated_instances.append(updated)
+                    continue
+                if updated.endpoint != desired_endpoint or metadata.get("server_url") != desired_endpoint:
+                    updated.endpoint = desired_endpoint
+                    metadata["server_url"] = desired_endpoint
+                    updated.metadata = metadata
+                    updated.last_error = None
+                    updated.mark_stopped()
+                updated_instances.append(updated)
+            return tuple(updated_instances)
+
+        self._update_instances(_mutate)
 
     def remove_service_specs(
         self,

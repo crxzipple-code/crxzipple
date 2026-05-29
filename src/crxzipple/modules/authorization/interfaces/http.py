@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.authorization.domain import (
     AuthorizationContext,
@@ -110,6 +110,23 @@ class AuthorizationPolicyStateRequest(BaseModel):
     reason: str = ""
 
 
+class AuthorizationAgentGrantRequest(BaseModel):
+    agent_id: str
+    kind: Literal["effect", "tool"]
+    id: str
+    actor: AuthorizationActorRequest = Field(default_factory=AuthorizationActorRequest)
+    reason: str = ""
+
+
+class AuthorizationAgentGrantResponse(BaseModel):
+    agent_id: str
+    kind: Literal["effect", "tool"]
+    id: str
+    policy_id: str
+    status: Literal["enabled", "revoked", "not_found"]
+    policy: AuthorizationPolicyResponse | None = None
+
+
 class AuthorizationPolicyImportRequest(BaseModel):
     content: str
     source: str = "inline"
@@ -170,7 +187,7 @@ class AuthorizationAuditResponse(BaseModel):
 def list_policies(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> list[AuthorizationPolicyResponse]:
-    return [_to_policy_response(policy) for policy in container.authorization_service.list_policies()]
+    return [_to_policy_response(policy) for policy in container.require(AppKey.AUTHORIZATION_SERVICE).list_policies()]
 
 
 @router.post(
@@ -183,7 +200,7 @@ def create_policy(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationPolicyResponse:
     try:
-        policy = container.authorization_service.create_policy(
+        policy = container.require(AppKey.AUTHORIZATION_SERVICE).create_policy(
             _policy_from_request(payload),
             actor_type=payload.actor.type,
             actor_id=payload.actor.id,
@@ -192,6 +209,97 @@ def create_policy(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _to_policy_response(policy)
+
+
+@router.post(
+    "/agent-grants",
+    response_model=AuthorizationAgentGrantResponse,
+)
+def grant_agent_authorization(
+    payload: AuthorizationAgentGrantRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AuthorizationAgentGrantResponse:
+    agent_id = payload.agent_id.strip()
+    target_id = payload.id.strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id cannot be empty.")
+    if not target_id:
+        raise HTTPException(status_code=400, detail="id cannot be empty.")
+    try:
+        if payload.kind == "effect":
+            policy = container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_effect_authorization(
+                agent_id=agent_id,
+                effect_id=target_id,
+                actor_type=payload.actor.type,
+                actor_id=payload.actor.id,
+                reason=payload.reason,
+            )
+        else:
+            policy = container.require(AppKey.AUTHORIZATION_SERVICE).grant_agent_tool_authorization(
+                agent_id=agent_id,
+                tool_id=target_id,
+                actor_type=payload.actor.type,
+                actor_id=payload.actor.id,
+                reason=payload.reason,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AuthorizationAgentGrantResponse(
+        agent_id=agent_id,
+        kind=payload.kind,
+        id=target_id,
+        policy_id=policy.id,
+        status="enabled",
+        policy=_to_policy_response(policy),
+    )
+
+
+@router.post(
+    "/agent-grants/revoke",
+    response_model=AuthorizationAgentGrantResponse,
+)
+def revoke_agent_authorization(
+    payload: AuthorizationAgentGrantRequest,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> AuthorizationAgentGrantResponse:
+    agent_id = payload.agent_id.strip()
+    target_id = payload.id.strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id cannot be empty.")
+    if not target_id:
+        raise HTTPException(status_code=400, detail="id cannot be empty.")
+    try:
+        if payload.kind == "effect":
+            policy = container.require(AppKey.AUTHORIZATION_SERVICE).revoke_agent_effect_authorization(
+                agent_id=agent_id,
+                effect_id=target_id,
+                actor_type=payload.actor.type,
+                actor_id=payload.actor.id,
+                reason=payload.reason,
+            )
+        else:
+            policy = container.require(AppKey.AUTHORIZATION_SERVICE).revoke_agent_tool_authorization(
+                agent_id=agent_id,
+                tool_id=target_id,
+                actor_type=payload.actor.type,
+                actor_id=payload.actor.id,
+                reason=payload.reason,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    policy_id = (
+        policy.id
+        if policy is not None
+        else _agent_grant_policy_id(agent_id=agent_id, kind=payload.kind, target_id=target_id)
+    )
+    return AuthorizationAgentGrantResponse(
+        agent_id=agent_id,
+        kind=payload.kind,
+        id=target_id,
+        policy_id=policy_id,
+        status="revoked" if policy is not None else "not_found",
+        policy=_to_policy_response(policy) if policy is not None else None,
+    )
 
 
 @router.put(
@@ -209,7 +317,7 @@ def update_policy(
             detail="Policy id in path and payload must match.",
         )
     try:
-        policy = container.authorization_service.update_policy(
+        policy = container.require(AppKey.AUTHORIZATION_SERVICE).update_policy(
             _policy_from_request(payload),
             actor_type=payload.actor.type,
             actor_id=payload.actor.id,
@@ -265,7 +373,7 @@ def delete_policy(
 ) -> AuthorizationPolicyResponse:
     resolved_payload = payload or AuthorizationPolicyStateRequest()
     try:
-        policy = container.authorization_service.delete_policy(
+        policy = container.require(AppKey.AUTHORIZATION_SERVICE).delete_policy(
             policy_id,
             actor_type=resolved_payload.actor.type,
             actor_id=resolved_payload.actor.id,
@@ -291,7 +399,7 @@ def import_policies(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    imported = container.authorization_service.import_policies(
+    imported = container.require(AppKey.AUTHORIZATION_SERVICE).import_policies(
         policies,
         actor_type=payload.actor.type,
         actor_id=payload.actor.id,
@@ -309,7 +417,7 @@ def export_policies(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationPolicyExportResponse:
     return AuthorizationPolicyExportResponse(
-        **container.authorization_service.export_policy_bundle(),
+        **container.require(AppKey.AUTHORIZATION_SERVICE).export_policy_bundle(),
     )
 
 
@@ -318,7 +426,7 @@ def dry_run_authorization(
     payload: AuthorizationDryRunRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationDecisionResponse:
-    decision = container.authorization_service.dry_run(
+    decision = container.require(AppKey.AUTHORIZATION_SERVICE).dry_run(
         _authorization_request_from_payload(payload.request),
         actor_type=payload.actor.type,
         actor_id=payload.actor.id,
@@ -332,7 +440,7 @@ def preview_policy_impact(
     payload: AuthorizationImpactRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationImpactResponse:
-    preview = container.authorization_service.preview_policy_impact(
+    preview = container.require(AppKey.AUTHORIZATION_SERVICE).preview_policy_impact(
         _authorization_request_from_payload(payload.request),
         proposed_policies=tuple(
             _policy_from_request(policy_payload)
@@ -363,7 +471,7 @@ def list_audits(
 ) -> list[AuthorizationAuditResponse]:
     return [
         _to_audit_response(record)
-        for record in container.authorization_service.list_audit_records(
+        for record in container.require(AppKey.AUTHORIZATION_SERVICE).list_audit_records(
             limit=limit,
             offset=offset,
             action=action,
@@ -377,7 +485,7 @@ def check_authorization(
     payload: AuthorizationCheckRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> AuthorizationDecisionResponse:
-    decision = container.authorization_service.check(
+    decision = container.require(AppKey.AUTHORIZATION_SERVICE).check(
         _authorization_request_from_payload(payload),
     )
     return _to_decision_response(decision)
@@ -391,7 +499,7 @@ def _set_policy_enabled(
     enabled: bool,
 ) -> AuthorizationPolicyResponse:
     try:
-        policy = container.authorization_service.set_policy_enabled(
+        policy = container.require(AppKey.AUTHORIZATION_SERVICE).set_policy_enabled(
             policy_id,
             enabled=enabled,
             actor_type=payload.actor.type,
@@ -518,3 +626,17 @@ def _to_audit_response(record) -> AuthorizationAuditResponse:
         metadata=dict(record.metadata),
         created_at=record.created_at.isoformat(),
     )
+
+
+def _agent_grant_policy_id(
+    *,
+    agent_id: str,
+    kind: str,
+    target_id: str,
+) -> str:
+    def _clean(value: str) -> str:
+        return "".join(char if char.isalnum() else "_" for char in value)
+
+    if kind == "effect":
+        return f"local_allow_agent_effect__{_clean(agent_id)}__{_clean(target_id)}"
+    return f"local_allow_agent_tool__{_clean(agent_id)}__{_clean(target_id)}"

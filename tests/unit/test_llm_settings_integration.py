@@ -19,11 +19,12 @@ from crxzipple.modules.llm.domain import (
     LlmSourceKind,
 )
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.support import SqliteTestHarness
 
 
 class LlmSettingsIntegrationTestCase(unittest.TestCase):
-    def test_legacy_settings_payload_converts_to_owner_input_and_profile(self) -> None:
+    def test_settings_payload_converts_to_owner_input_and_profile(self) -> None:
         config = {
             "profile_id": "settings-openai",
             "provider": "openai",
@@ -40,7 +41,7 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
             },
-            "credential_binding": "env:OPENAI_API_KEY",
+            "credential_binding_id": "openai-api-key",
             "timeout_seconds": 120,
             "max_concurrency": 2,
             "concurrency_key": "provider:openai",
@@ -62,10 +63,10 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
             register_input.default_params.extra_body,
             {"chat_template_kwargs": {"enable_thinking": False}},
         )
-        self.assertEqual(register_input.credential_binding, "env:OPENAI_API_KEY")
+        self.assertEqual(register_input.credential_binding_id, "openai-api-key")
         self.assertEqual(register_input.source_kind, LlmSourceKind.IMPORTED)
         self.assertEqual(profile.id, "settings-openai")
-        self.assertEqual(profile.credential_binding, "env:OPENAI_API_KEY")
+        self.assertEqual(profile.credential_binding_id, "openai-api-key")
 
     def test_mapping_config_defaults_to_imported_runtime_cache_input(self) -> None:
         register_input = register_llm_profile_input_from_config(
@@ -75,25 +76,62 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
                 "api_family": "openai_chat_compatible",
                 "model_name": "llama3.2",
                 "default_params": LlmDefaults(top_p=0.9),
-                "credential_binding_ref": {
-                    "binding_id": "compatible-dev",
-                    "source_ref": "env:OPENAI_COMPATIBLE_TOKEN",
-                },
+                "credential_binding_id": "compatible-dev",
             },
         )
 
         self.assertEqual(register_input.source_kind, LlmSourceKind.IMPORTED)
         self.assertEqual(register_input.default_params.top_p, 0.9)
-        self.assertEqual(
-            register_input.credential_binding,
-            "env:OPENAI_COMPATIBLE_TOKEN",
-        )
+        self.assertEqual(register_input.credential_binding_id, "compatible-dev")
+
+    def test_legacy_credential_source_keys_are_rejected(self) -> None:
+        base_config = {
+            "id": "legacy-openai",
+            "provider": "openai",
+            "api_family": "openai_responses",
+            "model_name": "gpt-5",
+        }
+        for forbidden_key, forbidden_value in (
+            ("credential_binding", "env:OPENAI_API_KEY"),
+            ("credential_binding_ref", "file:/tmp/openai-token"),
+            ("auth_ref", "codex_auth_json"),
+        ):
+            with self.subTest(forbidden_key=forbidden_key):
+                with self.assertRaises(ValueError):
+                    register_llm_profile_input_from_config(
+                        {**base_config, forbidden_key: forbidden_value},
+                    )
+
+    def test_credential_binding_id_rejects_direct_sources(self) -> None:
+        base_config = {
+            "id": "legacy-openai",
+            "provider": "openai",
+            "api_family": "openai_responses",
+            "model_name": "gpt-5",
+        }
+        for forbidden_binding_id in (
+            "env:OPENAI_API_KEY",
+            "file:/tmp/openai-token",
+            "codex_auth_json",
+            "auth_ref",
+        ):
+            with self.subTest(forbidden_binding_id=forbidden_binding_id):
+                with self.assertRaises(ValueError):
+                    register_llm_profile_input_from_config(
+                        {
+                            **base_config,
+                            "credential_binding_id": forbidden_binding_id,
+                        },
+                    )
 
     def test_settings_profile_config_can_sync_into_llm_runtime_index(self) -> None:
         harness = SqliteTestHarness()
         harness.initialize_schema()
-        container = harness.build_container()
-        service = LlmApplicationService(container.uow_factory, LlmAdapterRegistry())
+        container = harness.build_runtime_container()
+        service = LlmApplicationService(
+            container.require(AppKey.UNIT_OF_WORK_FACTORY),
+            LlmAdapterRegistry(),
+        )
 
         try:
             synced = service.sync_profiles(

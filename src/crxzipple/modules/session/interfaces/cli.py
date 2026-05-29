@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typer
 
-from crxzipple.interfaces.cli.context import ensure_container
+from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
@@ -94,7 +94,7 @@ def build_cli() -> typer.Typer:
         ),
     ) -> None:
         container = ensure_container(ctx)
-        session = container.session_service.ensure_session(
+        session = container.require(AppKey.SESSION_SERVICE).ensure_session(
             build_ensure_session_input(
                 key=session_key,
                 runtime_binding_payload=_parse_json_option(
@@ -129,7 +129,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            session = container.session_service.get_session(session_key)
+            session = container.require(AppKey.SESSION_SERVICE).get_session(session_key)
         except SessionNotFoundError as exc:
             _exit_not_found(exc)
         echo_data(SessionDTO.from_entity(session))
@@ -142,7 +142,7 @@ def build_cli() -> typer.Typer:
         container = ensure_container(ctx)
         items = [
             SessionDTO.from_entity(session)
-            for session in container.session_service.list_sessions(agent_id=agent_id)
+            for session in container.require(AppKey.SESSION_SERVICE).list_sessions(agent_id=agent_id)
         ]
         echo_data(items)
 
@@ -195,7 +195,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         resolution_service: SessionResolutionService = (
-            container.session_resolution_service
+            container.require(AppKey.SESSION_RESOLUTION_SERVICE)
         )
         bundle = resolution_service.resolve(
             build_resolve_session_input(
@@ -258,7 +258,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            message = container.session_service.append_message(
+            message = container.require(AppKey.SESSION_SERVICE).append_message(
                 AppendSessionMessageInput(
                     session_key=session_key,
                     role=role,
@@ -296,7 +296,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            items = container.session_service.list_messages(
+            items = container.require(AppKey.SESSION_SERVICE).list_messages(
                 ListSessionMessagesInput(
                     session_key=session_key,
                     limit=limit,
@@ -315,7 +315,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            items = container.session_service.list_instances(
+            items = container.require(AppKey.SESSION_SERVICE).list_instances(
                 ListSessionInstancesInput(session_key=session_key),
             )
         except SessionNotFoundError as exc:
@@ -342,7 +342,7 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            session = container.session_service.reset_session(
+            session = container.require(AppKey.SESSION_SERVICE).reset_session(
                 ResetSessionInput(
                     session_key=session_key,
                     status=status,

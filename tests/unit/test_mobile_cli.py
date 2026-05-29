@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from crxzipple.interfaces.runtime_container import AppKey
 from tests.unit.cli_test_support import *
 
 from crxzipple.modules.mobile.domain import (
@@ -19,6 +20,18 @@ class _StaticMobileConfigStore:
 
     def load(self):  # noqa: ANN201
         return self._config
+
+
+class _MobileCliContainer:
+    def __init__(self, *, facade: object, serializer: object, config_store: object) -> None:
+        self._values = {
+            AppKey.MOBILE_FACADE: facade,
+            AppKey.MOBILE_RESULT_SERIALIZER: serializer,
+            AppKey.MOBILE_SYSTEM_CONFIG_STORE: config_store,
+        }
+
+    def require(self, key: AppKey) -> object:
+        return self._values[key]
 
 
 class MobileCliTestCase(CliModuleTestCase):
@@ -41,10 +54,10 @@ class MobileCliTestCase(CliModuleTestCase):
                     value={"app_package": "com.google.android.gm", "app_activity": ".ComposeActivity"},
                 )
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=MobileResultSerializer(),
-            mobile_system_config_store=_StaticMobileConfigStore("pixel"),
+        container = _MobileCliContainer(
+            facade=_Facade(),
+            serializer=MobileResultSerializer(),
+            config_store=_StaticMobileConfigStore("pixel"),
         )
 
         with patch(
@@ -95,10 +108,10 @@ class MobileCliTestCase(CliModuleTestCase):
                     value={"snapshot": '- android.widget.Button "Send" [ref=m1]'},
                 )
 
-        container = SimpleNamespace(
-            mobile_facade=_Facade(),
-            mobile_result_serializer=MobileResultSerializer(),
-            mobile_system_config_store=_StaticMobileConfigStore("pixel"),
+        container = _MobileCliContainer(
+            facade=_Facade(),
+            serializer=MobileResultSerializer(),
+            config_store=_StaticMobileConfigStore("pixel"),
         )
 
         with patch(

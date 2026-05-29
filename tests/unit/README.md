@@ -38,6 +38,34 @@ Split a file when one of these becomes true:
   - `tool_test_support.py`
   - `skill_test_support.py`
 
+## Runtime Markers
+
+Markers are assigned centrally in `tests/conftest.py`.
+
+- `fast`: module-local tests that avoid full HTTP/CLI/runtime assembly.
+- `runtime`: tests that assemble the runtime container, HTTP app, CLI app, worker loop, or daemon surface.
+- `benchmark`: CLI benchmark command coverage; these tests must not run real multi-worker SQLite benchmarks.
+- `integration` / `live`: external browser/service smoke tests under `tests/integration`.
+
+Useful commands:
+
+```bash
+make test-unit-fast
+make test-unit-runtime
+make test-unit
+
+PYTHONPATH=src pytest -q tests/unit -m fast
+PYTHONPATH=src pytest -q tests/unit -m runtime
+PYTHONPATH=src pytest -q -o faulthandler_timeout=120 tests/unit --durations=120 --durations-min=0.2
+PYTHONPATH=src pytest --collect-only -q tests -m live
+```
+
+Do not move slow live/browser/benchmark behavior into unmarked unit tests. If a test only verifies CLI or HTTP wiring, fake the module port instead of launching real worker loops.
+
+`CliModuleTestCase` injects a shared runtime container for commands invoked with the test's default `self.env`. This keeps multi-command CLI scenarios from rebuilding the whole app for every subcommand while preserving Typer parsing and output coverage. Use a custom env or explicit `obj` when a test must verify fresh settings loading or a custom container.
+
+`tests/conftest.py` deliberately forces unit tests onto the file events backend and clears Redis event env vars. Do not remove that isolation to make local dev-stack behavior convenient; cross-process Redis coverage belongs in integration/runtime tests.
+
 ## Anti-Patterns
 
 - Reintroducing deleted aggregator files like `test_tool.py` or `test_orchestration.py`

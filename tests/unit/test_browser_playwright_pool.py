@@ -83,26 +83,47 @@ class _FakeBrowser:
 
 
 class _FakeChromium:
-    def __init__(self, connect_calls: list[tuple[str, int]]) -> None:
+    def __init__(
+        self,
+        connect_calls: list[tuple[str, int]],
+        target_sequence: list[str] | None = None,
+    ) -> None:
         self._connect_calls = connect_calls
+        self._target_sequence = target_sequence if target_sequence is not None else ["tab-1"]
 
     def connect_over_cdp(self, cdp_url: str, timeout: int):  # noqa: ANN001
         self._connect_calls.append((cdp_url, timeout))
-        return _FakeBrowser(target_id="tab-1")
+        if len(self._target_sequence) > 1:
+            target_id = self._target_sequence.pop(0)
+        else:
+            target_id = self._target_sequence[0]
+        return _FakeBrowser(target_id=target_id)
 
 
 class _FakePlaywright:
-    def __init__(self, connect_calls: list[tuple[str, int]]) -> None:
-        self.chromium = _FakeChromium(connect_calls)
+    def __init__(
+        self,
+        connect_calls: list[tuple[str, int]],
+        target_sequence: list[str] | None = None,
+    ) -> None:
+        self.chromium = _FakeChromium(connect_calls, target_sequence=target_sequence)
 
 
 class _FakeManager:
-    def __init__(self, connect_calls: list[tuple[str, int]]) -> None:
+    def __init__(
+        self,
+        connect_calls: list[tuple[str, int]],
+        target_sequence: list[str] | None = None,
+    ) -> None:
         self._connect_calls = connect_calls
+        self._target_sequence = target_sequence
         self.stopped = False
 
     def start(self) -> _FakePlaywright:
-        return _FakePlaywright(self._connect_calls)
+        return _FakePlaywright(
+            self._connect_calls,
+            target_sequence=self._target_sequence,
+        )
 
     def stop(self) -> None:
         self.stopped = True
@@ -253,6 +274,42 @@ class BrowserPlaywrightPoolTestCase(unittest.TestCase):
                     pool.resolve_page(profile=profile, target_id="tab-1")
 
                 self.assertEqual(len(connect_calls), 2)
+            finally:
+                pool.close()
+
+    def test_resolve_page_reconnects_when_cached_cdp_browser_misses_target(self) -> None:
+        connect_calls: list[tuple[str, int]] = []
+        target_sequence = ["old-tab", "tab-1"]
+
+        def _fake_sync_playwright() -> _FakeManager:
+            return _FakeManager(connect_calls, target_sequence=target_sequence)
+
+        profile = ResolvedBrowserProfile(
+            name="crxzipple",
+            driver="managed",
+            cdp_url="http://127.0.0.1:18800",
+            cdp_port=18800,
+            user_data_dir=None,
+            attach_only=False,
+            is_loopback=True,
+        )
+
+        with patch(
+            "crxzipple.modules.browser.infrastructure.playwright.sync_playwright",
+            _fake_sync_playwright,
+        ):
+            pool = PlaywrightCdpSessionPool(connect_timeout_ms=1234)
+            try:
+                page = pool.resolve_page(profile=profile, target_id="tab-1")
+
+                self.assertEqual(page.target_id, "tab-1")
+                self.assertEqual(
+                    connect_calls,
+                    [
+                        ("http://127.0.0.1:18800", 1234),
+                        ("http://127.0.0.1:18800", 1234),
+                    ],
+                )
             finally:
                 pool.close()
 

@@ -27,7 +27,7 @@ import type {
 import DataTable from "@/shared/ui/DataTable.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
-import { loadMemoryOperations, writeLongTermMemory } from "../api";
+import { loadMemoryFileDetail, loadMemoryOperations, writeLongTermMemory } from "../api";
 import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 interface ChartSegmentView {
@@ -139,6 +139,8 @@ const memoryTextKeys: Record<string, string> = {
 const page = ref<OperationsMemoryReadModel | null>(null);
 const loading = ref(false);
 const loadError = ref<string | null>(null);
+const detailLoading = ref(false);
+const detailCache = ref<Record<string, OperationsMemoryFileDetail>>({});
 const selectedTabId = ref<string | null>(null);
 const selectedFileId = ref<string | null>(null);
 const queryInput = ref("");
@@ -217,9 +219,13 @@ const memoryAgentOptions = computed(() => {
 const selectedWriteAgentId = computed(() => writeAgentId.value.trim() || defaultMemoryAgentId(page.value) || "");
 const drawerDetail = computed<OperationsMemoryFileDetail | null>(() => {
   if (!selectedFileId.value) return null;
-  return page.value?.file_details.find((item) => item.file_id === selectedFileId.value) ?? null;
+  return (
+    detailCache.value[selectedFileId.value]
+    ?? page.value?.file_details.find((item) => item.file_id === selectedFileId.value)
+    ?? null
+  );
 });
-const drawerOpen = computed(() => Boolean(drawerDetail.value));
+const drawerOpen = computed(() => Boolean(selectedFileId.value));
 
 function selectTab(tabId: string) {
   selectedTabId.value = tabId;
@@ -228,15 +234,42 @@ function selectTab(tabId: string) {
 
 function selectRow(row: DataTableRow) {
   if (!selectableTabs.has(activeTab.value)) return;
-  selectedFileId.value = resolveFileId(row);
+  const fileId = resolveFileId(row);
+  selectedFileId.value = fileId;
+  if (fileId) void ensureFileDetail(fileId);
 }
 
 function resolveFileId(row: DataTableRow): string | null {
   const id = rowId(row);
+  if (id) return id;
   const details = page.value?.file_details ?? [];
-  if (id && details.some((item) => item.file_id === id)) return id;
   const file = isUiTableRow(row) ? cellValueText(row.cells.file) : cellValueText(row.file);
   return details.find((item) => item.file_id.endsWith(`:${file}`))?.file_id ?? null;
+}
+
+async function ensureFileDetail(fileId: string) {
+  if (detailCache.value[fileId]) return;
+  const embedded = page.value?.file_details.find((item) => item.file_id === fileId);
+  if (embedded) {
+    detailCache.value = { ...detailCache.value, [fileId]: embedded };
+    return;
+  }
+  detailLoading.value = true;
+  try {
+    const detail = await loadMemoryFileDetail(fileId);
+    if (detail) {
+      detailCache.value = { ...detailCache.value, [fileId]: detail };
+    }
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+function hasVisibleFileId(model: OperationsMemoryReadModel, fileId: string): boolean {
+  if (model.file_details.some((item) => item.file_id === fileId)) return true;
+  return model.source_files.rows.some((row) => rowId(row) === fileId);
 }
 
 function rowId(row: DataTableRow): string | null {
@@ -422,8 +455,10 @@ async function refreshPage() {
       writeAgentId.value = defaultMemoryAgentId(loaded.page) ?? "";
     }
     loadError.value = null;
-    if (selectedFileId.value && !loaded.page.file_details.some((item) => item.file_id === selectedFileId.value)) {
+    if (selectedFileId.value && !hasVisibleFileId(loaded.page, selectedFileId.value)) {
       selectedFileId.value = null;
+    } else if (selectedFileId.value) {
+      void ensureFileDetail(selectedFileId.value);
     }
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : String(error);
@@ -708,43 +743,58 @@ onUnmounted(() => {
       </aside>
     </section>
 
-    <aside v-if="drawerDetail" class="detail-drawer">
-      <header>
-        <div>
-          <span>{{ t("operations.memory.drawer.file") }}</span>
-          <h3>{{ drawerDetail.title }}</h3>
-          <p><StatusDot :tone="drawerDetail.tone" />{{ memoryText(drawerDetail.status) }}</p>
-        </div>
-        <button type="button" :aria-label="t('common.collapseDetails')" @click="selectedFileId = null">
-          <X :size="16" />
-        </button>
-      </header>
-
-      <section class="drawer-section">
-        <h4>{{ t("operations.memory.drawer.summary") }}</h4>
-        <dl class="drawer-kv">
-          <div v-for="item in detailItems(drawerDetail.summary)" :key="item.label">
-            <dt>{{ item.label }}</dt>
-            <dd :class="`tone-${item.tone ?? 'neutral'}`">{{ item.value }}</dd>
+    <aside v-if="selectedFileId" class="detail-drawer">
+      <template v-if="drawerDetail">
+        <header>
+          <div>
+            <span>{{ t("operations.memory.drawer.file") }}</span>
+            <h3>{{ drawerDetail.title }}</h3>
+            <p><StatusDot :tone="drawerDetail.tone" />{{ memoryText(drawerDetail.status) }}</p>
           </div>
-        </dl>
-      </section>
+          <button type="button" :aria-label="t('common.collapseDetails')" @click="selectedFileId = null">
+            <X :size="16" />
+          </button>
+        </header>
 
-      <section class="drawer-section">
-        <h4>{{ t("operations.memory.drawer.excerpt") }}</h4>
-        <pre class="excerpt">{{ drawerDetail.excerpt || t("operations.memory.empty.excerpt") }}</pre>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.memory.drawer.summary") }}</h4>
+          <dl class="drawer-kv">
+            <div v-for="item in detailItems(drawerDetail.summary)" :key="item.label">
+              <dt>{{ item.label }}</dt>
+              <dd :class="`tone-${item.tone ?? 'neutral'}`">{{ item.value }}</dd>
+            </div>
+          </dl>
+        </section>
 
-      <section class="drawer-section">
-        <h4>{{ t("operations.memory.drawer.related") }}</h4>
-        <DataTable :columns="drawerDetail.related.columns" :rows="drawerDetail.related.rows" section-id="memory-detail-events" :page-size="4" />
-        <p v-if="!drawerDetail.related.rows.length" class="panel-empty">{{ emptyState(drawerDetail.related) }}</p>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.memory.drawer.excerpt") }}</h4>
+          <pre class="excerpt">{{ drawerDetail.excerpt || t("operations.memory.empty.excerpt") }}</pre>
+        </section>
 
-      <section class="drawer-section raw-section">
-        <h4>{{ t("operations.memory.drawer.raw") }}</h4>
-        <pre>{{ detailPayload(drawerDetail.raw_payload) }}</pre>
-      </section>
+        <section class="drawer-section">
+          <h4>{{ t("operations.memory.drawer.related") }}</h4>
+          <DataTable :columns="drawerDetail.related.columns" :rows="drawerDetail.related.rows" section-id="memory-detail-events" :page-size="4" />
+          <p v-if="!drawerDetail.related.rows.length" class="panel-empty">{{ emptyState(drawerDetail.related) }}</p>
+        </section>
+
+        <section class="drawer-section raw-section">
+          <h4>{{ t("operations.memory.drawer.raw") }}</h4>
+          <pre>{{ detailPayload(drawerDetail.raw_payload) }}</pre>
+        </section>
+      </template>
+      <template v-else>
+        <header>
+          <div>
+            <span>{{ t("operations.memory.drawer.file") }}</span>
+            <h3>{{ selectedFileId }}</h3>
+            <p><StatusDot tone="neutral" />{{ t("common.loading") }}</p>
+          </div>
+          <button type="button" :aria-label="t('common.collapseDetails')" @click="selectedFileId = null">
+            <X :size="16" />
+          </button>
+        </header>
+        <p class="panel-empty">{{ detailLoading ? t("common.loading") : t("table.noRecords") }}</p>
+      </template>
     </aside>
   </main>
 </template>

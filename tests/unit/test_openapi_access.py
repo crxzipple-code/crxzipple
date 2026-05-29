@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 
 from crxzipple.core.config import OpenApiCredentialBinding, OpenApiProviderSettings
-from crxzipple.modules.access import AccessApplicationService
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.domain.value_objects import ToolParameter
 from crxzipple.modules.tool.infrastructure.discovery.openapi import (
@@ -16,33 +15,36 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
 )
 from crxzipple.modules.tool.infrastructure.runtimes.openapi_remote import (
     _build_request,
-    _resolve_secret_source,
+    _resolve_credential_binding,
 )
+from crxzipple.shared.access import AccessCredentialKind
 from tests.unit.support import openapi_fixture_path
 
 
 class OpenApiAccessTestCase(unittest.TestCase):
-    def test_resolves_file_credential_source_through_injected_access_provider(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            credential_path = Path(tempdir) / "token.txt"
-            credential_path.write_text("file-token\n", encoding="utf-8")
+    def test_resolves_access_binding_id_through_injected_access_provider(self) -> None:
+        credential_provider = _FakeCredentialProvider("access-token")
 
-            resolved = _resolve_secret_source(
-                f"file:{credential_path}",
-                scheme_name="bearerAuth",
-                operation=_operation(),
-                credential_provider=AccessApplicationService(),
-            )
+        resolved = _resolve_credential_binding(
+            "binding.openapi.token",
+            scheme_name="bearerAuth",
+            operation=_operation(),
+            credential_provider=credential_provider,
+        )
 
-        self.assertEqual(resolved, "file-token")
+        self.assertEqual(resolved, "access-token")
+        binding, _consumer = credential_provider.calls[0]
+        self.assertEqual(binding.binding_id, "binding.openapi.token")
+        self.assertEqual(binding.source_ref, "binding.openapi.token")
+        self.assertEqual(binding.source_type, "binding")
 
-    def test_rejects_literal_sources_for_openapi_credentials(self) -> None:
+    def test_rejects_missing_openapi_credential_binding_id(self) -> None:
         with self.assertRaises(ToolValidationError):
-            _resolve_secret_source(
-                "inline-token",
+            _resolve_credential_binding(
+                None,
                 scheme_name="bearerAuth",
                 operation=_operation(),
-                credential_provider=AccessApplicationService(),
+                credential_provider=_FakeCredentialProvider("unused"),
             )
 
     def test_build_request_resolves_openapi_credentials_from_injected_provider(self) -> None:
@@ -51,7 +53,7 @@ class OpenApiAccessTestCase(unittest.TestCase):
             credential_bindings=(
                 OpenApiCredentialBinding(
                     scheme_name="ApiKeyQuery",
-                    source="env:OPENAPI_TOOL_TOKEN",
+                    credential_binding_id="binding.openapi.query",
                 ),
             ),
         )
@@ -65,8 +67,9 @@ class OpenApiAccessTestCase(unittest.TestCase):
         self.assertIn(("api_key", "injected-openapi-token"), query_items)
         self.assertEqual(len(credential_provider.calls), 1)
         binding, consumer = credential_provider.calls[0]
-        self.assertEqual(binding.source_ref, "env:OPENAPI_TOOL_TOKEN")
-        self.assertEqual(binding.source_type, "env")
+        self.assertEqual(binding.source_ref, "binding.openapi.query")
+        self.assertEqual(binding.source_type, "binding")
+        self.assertEqual(binding.expected_kind, AccessCredentialKind.API_KEY)
         self.assertEqual(consumer.module, "tool")
         self.assertEqual(consumer.component, "openapi_remote")
         self.assertEqual(consumer.runtime_ref, "openapi.sample_api.echo_message")
@@ -80,11 +83,11 @@ class OpenApiAccessTestCase(unittest.TestCase):
                 credential_bindings=(
                     OpenApiCredentialBinding(
                         scheme_name="ApiKeyQuery",
-                        source="env:SAMPLE_QUERY_KEY",
+                        credential_binding_id="binding.sample.query",
                     ),
                     OpenApiCredentialBinding(
                         scheme_name="BearerAuth",
-                        source="env:SAMPLE_BEARER_TOKEN",
+                        credential_binding_id="binding.sample.bearer",
                     ),
                 ),
             ),
@@ -94,11 +97,156 @@ class OpenApiAccessTestCase(unittest.TestCase):
 
         self.assertEqual(
             specs["sample_api.echo_message"].access_requirement_sets,
-            (("env:SAMPLE_QUERY_KEY",),),
+            (("binding.sample.query",),),
         )
         self.assertEqual(
             specs["sample_api.search_docs"].access_requirement_sets,
-            (("env:SAMPLE_BEARER_TOKEN",),),
+            (("binding.sample.bearer",),),
+        )
+        echo_requirement = specs[
+            "sample_api.echo_message"
+        ].credential_requirements[0].requirements[0]
+        self.assertEqual(echo_requirement.slot.slot, "ApiKeyQuery")
+        self.assertEqual(echo_requirement.slot.binding_id, "binding.sample.query")
+        self.assertEqual(echo_requirement.slot.expected_kind.value, "api_key")
+        self.assertEqual(echo_requirement.transport.value, "query")
+        self.assertEqual(echo_requirement.parameter_name, "api_key")
+
+        search_requirement = specs[
+            "sample_api.search_docs"
+        ].credential_requirements[0].requirements[0]
+        self.assertEqual(search_requirement.slot.slot, "BearerAuth")
+        self.assertEqual(search_requirement.slot.binding_id, "binding.sample.bearer")
+        self.assertEqual(search_requirement.slot.expected_kind.value, "bearer_token")
+        self.assertEqual(search_requirement.transport.value, "oauth_authorization_header")
+
+    def test_openapi_discovery_maps_security_scheme_credential_kinds(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            spec_path = Path(tempdir) / "security.json"
+            spec_path.write_text(
+                """
+                {
+                  "openapi": "3.0.3",
+                  "info": {"title": "Security API", "version": "1.0.0"},
+                  "servers": [{"url": "https://security.example.test"}],
+                  "components": {
+                    "securitySchemes": {
+                      "HeaderKey": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "X-Api-Key"
+                      },
+                      "BasicAuth": {"type": "http", "scheme": "basic"},
+                      "OAuth": {
+                        "type": "oauth2",
+                        "flows": {
+                          "authorizationCode": {
+                            "authorizationUrl": "https://auth.example.test/authorize",
+                            "tokenUrl": "https://auth.example.test/token",
+                            "scopes": {"docs:read": "Read docs"}
+                          }
+                        }
+                      },
+                      "Oidc": {
+                        "type": "openIdConnect",
+                        "openIdConnectUrl": "https://auth.example.test/.well-known/openid-configuration"
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/header": {
+                      "get": {
+                        "operationId": "header",
+                        "security": [{"HeaderKey": []}],
+                        "responses": {"200": {"description": "ok"}}
+                      }
+                    },
+                    "/basic": {
+                      "get": {
+                        "operationId": "basic",
+                        "security": [{"BasicAuth": []}],
+                        "responses": {"200": {"description": "ok"}}
+                      }
+                    },
+                    "/oauth": {
+                      "get": {
+                        "operationId": "oauth",
+                        "security": [{"OAuth": ["docs:read"]}],
+                        "responses": {"200": {"description": "ok"}}
+                      }
+                    },
+                    "/oidc": {
+                      "get": {
+                        "operationId": "oidc",
+                        "security": [{"Oidc": []}],
+                        "responses": {"200": {"description": "ok"}}
+                      }
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            specs = {
+                spec.id: spec
+                for spec in OpenApiDiscoveryProvider(
+                    OpenApiProviderSettings(
+                        name="security_api",
+                        spec_location=str(spec_path),
+                        credential_bindings=(
+                            OpenApiCredentialBinding(
+                                scheme_name="HeaderKey",
+                                credential_binding_id="binding.header",
+                            ),
+                            OpenApiCredentialBinding(
+                                scheme_name="BasicAuth",
+                                username_binding_id="binding.basic.username",
+                                password_binding_id="binding.basic.password",
+                            ),
+                            OpenApiCredentialBinding(
+                                scheme_name="OAuth",
+                                credential_binding_id="account.oauth",
+                            ),
+                            OpenApiCredentialBinding(
+                                scheme_name="Oidc",
+                                credential_binding_id="account.oidc",
+                            ),
+                        ),
+                    ),
+                ).discover_specs()
+            }
+
+        header = specs["security_api.header"].credential_requirements[0].requirements[0]
+        self.assertEqual(header.slot.expected_kind.value, "api_key")
+        self.assertEqual(header.transport.value, "header")
+        self.assertEqual(header.parameter_name, "X-Api-Key")
+
+        basic = specs["security_api.basic"].credential_requirements[0].requirements
+        self.assertEqual(
+            [item.slot.slot for item in basic],
+            ["BasicAuth.username", "BasicAuth.password"],
+        )
+        self.assertEqual(
+            [item.slot.binding_id for item in basic],
+            ["binding.basic.username", "binding.basic.password"],
+        )
+        self.assertEqual({item.slot.expected_kind.value for item in basic}, {"basic"})
+
+        oauth = specs["security_api.oauth"].credential_requirements[0].requirements[0]
+        self.assertEqual(oauth.slot.expected_kind.value, "oauth2_account")
+        self.assertEqual(oauth.slot.scopes, ("docs:read",))
+        self.assertEqual(
+            oauth.setup_flow_hint.authorization_url,
+            "https://auth.example.test/authorize",
+        )
+        self.assertEqual(oauth.setup_flow_hint.token_url, "https://auth.example.test/token")
+
+        oidc = specs["security_api.oidc"].credential_requirements[0].requirements[0]
+        self.assertEqual(oidc.slot.expected_kind.value, "openid_connect")
+        self.assertEqual(
+            oidc.setup_flow_hint.authorization_url,
+            "https://auth.example.test/.well-known/openid-configuration",
         )
 
 

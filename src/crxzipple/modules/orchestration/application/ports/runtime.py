@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:
     from crxzipple.modules.orchestration.application.engine import PromptPreview
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from crxzipple.modules.tool.domain import Tool, ToolExecutionTarget
 
 
-class OrchestrationSchedulerSubmitPort(Protocol):
+class OrchestrationSubmissionPort(Protocol):
     def submit_turn(
         self,
         data: "SubmitOrchestrationTurnInput",
@@ -52,6 +52,12 @@ class OrchestrationSchedulerSubmitPort(Protocol):
     ) -> "OrchestrationRun":
         ...
 
+
+class OrchestrationRunEnqueuedCallbackBindingPort(Protocol):
+    on_run_enqueued: Callable[["OrchestrationRun"], None] | None
+
+
+class OrchestrationIngressProcessingPort(Protocol):
     def process_run_request(
         self,
         *,
@@ -100,7 +106,8 @@ class OrchestrationSchedulerMaintenancePort(Protocol):
 
 
 class OrchestrationSchedulerRuntimePort(
-    OrchestrationSchedulerSubmitPort,
+    OrchestrationSubmissionPort,
+    OrchestrationIngressProcessingPort,
     OrchestrationSchedulerMaintenancePort,
     Protocol,
 ):
@@ -118,6 +125,15 @@ class OrchestrationRunQueryPort(OrchestrationRunLookupPort, Protocol):
         *,
         status: "OrchestrationRunStatus | None" = None,
     ) -> "list[OrchestrationRun]":
+        ...
+
+
+class OrchestrationExecutorLeaseQueryPort(Protocol):
+    def list_executor_leases(
+        self,
+        *,
+        status: "OrchestrationExecutorLeaseStatus | None" = None,
+    ) -> "list[OrchestrationExecutorLease]":
         ...
 
 

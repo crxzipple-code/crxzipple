@@ -20,8 +20,6 @@ from crxzipple.modules.browser.infrastructure import (
     InMemoryBrowserRuntimeStateStore,
     InMemoryBrowserSystemConfigStore,
     InMemoryCdpBackedPlaywrightActionEngine,
-    InMemoryMcpActionEngine,
-    InMemoryMcpControlEngine,
     StaticBrowserEngineRegistry,
 )
 from crxzipple.modules.daemon import (
@@ -76,6 +74,12 @@ class BrowserCdpHostDaemonIntegrationTestCase(unittest.TestCase):
                     cdp_port_range_start=int(fake_cdp.base_url.rsplit(":", 1)[1]),
                     cdp_port_range_end=int(fake_cdp.base_url.rsplit(":", 1)[1]) + 8,
                 )
+                cdp_port = int(fake_cdp.base_url.rsplit(":", 1)[1])
+                remote_allow_origins = (
+                    f"http://127.0.0.1:{cdp_port},"
+                    f"http://localhost:{cdp_port},"
+                    f"http://[::1]:{cdp_port}"
+                )
                 expected_user_data_dir = (
                     Path(temp_dir).resolve() / "crxzipple" / "userdata"
                 )
@@ -87,57 +91,59 @@ class BrowserCdpHostDaemonIntegrationTestCase(unittest.TestCase):
                             "pid": 8123,
                             "command": (
                                 f"/Applications/Google Chrome "
-                                f"--remote-debugging-port={int(fake_cdp.base_url.rsplit(':', 1)[1])} "
+                                f"--remote-debugging-port={cdp_port} "
+                                f"--remote-allow-origins={remote_allow_origins} "
                                 f"--user-data-dir={expected_user_data_dir} about:blank"
                             ),
                         },
                     ],
                     daemon_service=daemon_service,
                 )
-                coordinator = BrowserExecutionCoordinatorService(
-                    system_config_store=InMemoryBrowserSystemConfigStore(system),
-                    profile_resolver=DefaultBrowserProfileResolver(),
-                    capabilities_resolver=DefaultBrowserCapabilitiesResolver(),
-                    runtime_state_store=InMemoryBrowserRuntimeStateStore(),
-                    ref_store=InMemoryBrowserRefStore(),
-                    execution_planner=DefaultBrowserExecutionPlanner(),
-                    engine_registry=StaticBrowserEngineRegistry(
-                        cdp_control=engine,
-                        mcp_control=InMemoryMcpControlEngine(),
-                        cdp_backed_playwright=InMemoryCdpBackedPlaywrightActionEngine(),
-                        mcp_backed=InMemoryMcpActionEngine(),
-                    ),
-                    tab_ops_factory=DefaultBrowserProfileTabOpsFactory(),
-                    selection_ops_factory=DefaultBrowserProfileSelectionOpsFactory(),
-                )
-                control_assembler = DefaultBrowserControlCommandAssembler()
-
-                open_result = coordinator.execute(
-                    control_assembler.assemble(
-                        profile_name="crxzipple",
-                        kind="open-tab",
-                        payload={"url": "https://example.com"},
+                try:
+                    coordinator = BrowserExecutionCoordinatorService(
+                        system_config_store=InMemoryBrowserSystemConfigStore(system),
+                        profile_resolver=DefaultBrowserProfileResolver(),
+                        capabilities_resolver=DefaultBrowserCapabilitiesResolver(),
+                        runtime_state_store=InMemoryBrowserRuntimeStateStore(),
+                        ref_store=InMemoryBrowserRefStore(),
+                        execution_planner=DefaultBrowserExecutionPlanner(),
+                        engine_registry=StaticBrowserEngineRegistry(
+                            cdp_control=engine,
+                            cdp_backed_playwright=InMemoryCdpBackedPlaywrightActionEngine(),
+                        ),
+                        tab_ops_factory=DefaultBrowserProfileTabOpsFactory(),
+                        selection_ops_factory=DefaultBrowserProfileSelectionOpsFactory(),
                     )
-                )
+                    control_assembler = DefaultBrowserControlCommandAssembler()
 
-                self.assertTrue(open_result.ok)
-                instance = daemon_service.list_instances(service_key="host:browser:crxzipple")[0]
-                self.assertEqual(instance.status, "ready")
-                self.assertEqual(instance.pid, 8123)
-                self.assertEqual(instance.endpoint, fake_cdp.base_url)
-                leases = daemon_service.list_leases(service_key="host:browser:crxzipple")
-                self.assertEqual(leases, ())
-
-                reset_result = coordinator.execute(
-                    control_assembler.assemble(
-                        profile_name="crxzipple",
-                        kind="reset",
+                    open_result = coordinator.execute(
+                        control_assembler.assemble(
+                            profile_name="crxzipple",
+                            kind="open-tab",
+                            payload={"url": "https://example.com"},
+                        )
                     )
-                )
 
-                self.assertTrue(reset_result.ok)
-                instance = daemon_service.list_instances(service_key="host:browser:crxzipple")[0]
-                self.assertEqual(instance.status, "stopped")
+                    self.assertTrue(open_result.ok)
+                    instance = daemon_service.list_instances(service_key="host:browser:crxzipple")[0]
+                    self.assertEqual(instance.status, "ready")
+                    self.assertEqual(instance.pid, 8123)
+                    self.assertEqual(instance.endpoint, fake_cdp.base_url)
+                    leases = daemon_service.list_leases(service_key="host:browser:crxzipple")
+                    self.assertEqual(leases, ())
+
+                    reset_result = coordinator.execute(
+                        control_assembler.assemble(
+                            profile_name="crxzipple",
+                            kind="reset",
+                        )
+                    )
+
+                    self.assertTrue(reset_result.ok)
+                    instance = daemon_service.list_instances(service_key="host:browser:crxzipple")[0]
+                    self.assertEqual(instance.status, "stopped")
+                finally:
+                    engine.close()
         finally:
             fake_cdp.close()
 

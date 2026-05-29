@@ -13,7 +13,7 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from crxzipple.bootstrap import AppContainer
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.access.application.importer import AccessSettingsBootstrapImporter
 from crxzipple.modules.settings.application import (
@@ -130,7 +130,10 @@ _KIND_DESCRIPTIONS = {
         "must go through the LLM module API."
     ),
     "tool-catalog": "Tool provider, MCP provider, and local root configuration imported from bootstrap settings.",
-    "skill-catalog": "Skill enablement configuration. No Settings-owned skill resources have been imported yet.",
+    "skill-catalog": (
+        "Governance entry for Skills-owned sources, packages, enablement "
+        "policies, and readiness. Writes go through the Skills module API."
+    ),
     "memory-config": "Memory retrieval and vector configuration imported from bootstrap settings.",
     "access-assets": "Settings-owned access configuration resources. Access runtime readiness remains owned by Access.",
     "channel-profiles": (
@@ -290,6 +293,204 @@ _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"([^&;\s]+)",
     re.IGNORECASE,
 )
+_RUNTIME_DEFAULT_TOP_LEVEL_KEYS = frozenset(
+    {"config_id", "id", "enabled", "orchestration", "tool_worker", "metadata"},
+)
+_RUNTIME_DEFAULT_GROUP_KEYS = {
+    "orchestration": frozenset(
+        {
+            "run_lease_seconds",
+            "run_heartbeat_seconds",
+            "executor_max_concurrent_assignments",
+            "auto_compaction_enabled",
+            "auto_compaction_reserve_tokens",
+            "auto_compaction_soft_threshold_tokens",
+        },
+    ),
+    "tool_worker": frozenset(
+        {
+            "run_max_attempts",
+            "run_lease_seconds",
+            "run_heartbeat_seconds",
+            "max_in_flight",
+            "default_run_concurrency",
+            "image_run_concurrency",
+            "shared_state_run_concurrency",
+            "remote_default_max_concurrency",
+        },
+    ),
+}
+_RUNTIME_DEFAULT_NUMERIC_FIELDS = frozenset(
+    {
+        "orchestration.run_lease_seconds",
+        "orchestration.run_heartbeat_seconds",
+        "orchestration.executor_max_concurrent_assignments",
+        "orchestration.auto_compaction_reserve_tokens",
+        "orchestration.auto_compaction_soft_threshold_tokens",
+        "tool_worker.run_max_attempts",
+        "tool_worker.run_lease_seconds",
+        "tool_worker.run_heartbeat_seconds",
+        "tool_worker.max_in_flight",
+        "tool_worker.default_run_concurrency",
+        "tool_worker.image_run_concurrency",
+        "tool_worker.shared_state_run_concurrency",
+        "tool_worker.remote_default_max_concurrency",
+    },
+)
+_RUNTIME_DEFAULT_BOOL_FIELDS = frozenset({"orchestration.auto_compaction_enabled"})
+_RUNTIME_DEFAULT_FIELD_SPECS = (
+    {
+        "path": "orchestration.run_lease_seconds",
+        "group": "orchestration",
+        "unit": "seconds",
+        "default": 30,
+        "minimum": 1,
+        "apply_requirement": "orchestration_restart",
+        "consumer": "orchestration",
+    },
+    {
+        "path": "orchestration.run_heartbeat_seconds",
+        "group": "orchestration",
+        "unit": "seconds",
+        "default": 5.0,
+        "minimum": 0.1,
+        "apply_requirement": "orchestration_restart",
+        "consumer": "orchestration",
+    },
+    {
+        "path": "orchestration.executor_max_concurrent_assignments",
+        "group": "orchestration",
+        "unit": "assignments",
+        "default": 4,
+        "minimum": 1,
+        "apply_requirement": "executor_restart",
+        "consumer": "orchestration_executor",
+    },
+    {
+        "path": "orchestration.auto_compaction_enabled",
+        "group": "compaction",
+        "unit": "boolean",
+        "default": True,
+        "apply_requirement": "orchestration_restart",
+        "consumer": "orchestration",
+    },
+    {
+        "path": "orchestration.auto_compaction_reserve_tokens",
+        "group": "compaction",
+        "unit": "tokens",
+        "default": 20_000,
+        "minimum": 1,
+        "apply_requirement": "orchestration_restart",
+        "consumer": "orchestration",
+    },
+    {
+        "path": "orchestration.auto_compaction_soft_threshold_tokens",
+        "group": "compaction",
+        "unit": "tokens",
+        "default": 4_000,
+        "minimum": 1,
+        "apply_requirement": "orchestration_restart",
+        "consumer": "orchestration",
+    },
+    {
+        "path": "tool_worker.run_max_attempts",
+        "group": "tool_worker",
+        "unit": "attempts",
+        "default": 3,
+        "minimum": 1,
+        "apply_requirement": "tool_worker_restart",
+        "consumer": "tool_worker",
+    },
+    {
+        "path": "tool_worker.run_lease_seconds",
+        "group": "tool_worker",
+        "unit": "seconds",
+        "default": 30,
+        "minimum": 1,
+        "apply_requirement": "tool_worker_restart",
+        "consumer": "tool_worker",
+    },
+    {
+        "path": "tool_worker.run_heartbeat_seconds",
+        "group": "tool_worker",
+        "unit": "seconds",
+        "default": 5.0,
+        "minimum": 0.1,
+        "apply_requirement": "tool_worker_restart",
+        "consumer": "tool_worker",
+    },
+    {
+        "path": "tool_worker.max_in_flight",
+        "group": "tool_worker",
+        "unit": "runs",
+        "default": 4,
+        "minimum": 1,
+        "apply_requirement": "tool_worker_restart",
+        "consumer": "tool_worker",
+    },
+    {
+        "path": "tool_worker.default_run_concurrency",
+        "group": "tool_worker",
+        "unit": "runs",
+        "default": 4,
+        "minimum": 1,
+        "apply_requirement": "tool_runtime_restart",
+        "consumer": "tool_runtime",
+    },
+    {
+        "path": "tool_worker.image_run_concurrency",
+        "group": "tool_worker",
+        "unit": "runs",
+        "default": 4,
+        "minimum": 1,
+        "apply_requirement": "tool_runtime_restart",
+        "consumer": "tool_runtime",
+    },
+    {
+        "path": "tool_worker.shared_state_run_concurrency",
+        "group": "tool_worker",
+        "unit": "runs",
+        "default": 1,
+        "minimum": 1,
+        "apply_requirement": "tool_runtime_restart",
+        "consumer": "tool_runtime",
+    },
+    {
+        "path": "tool_worker.remote_default_max_concurrency",
+        "group": "tool_worker",
+        "unit": "calls",
+        "default": 16,
+        "minimum": 1,
+        "apply_requirement": "tool_runtime_restart",
+        "consumer": "tool_runtime",
+    },
+)
+_RUNTIME_DEFAULT_APPLY_REQUIREMENTS = (
+    {
+        "id": "orchestration_restart",
+        "mode": "restart_required",
+        "owner": "orchestration",
+        "applies_after": "API/daemon or orchestration executor restart",
+    },
+    {
+        "id": "executor_restart",
+        "mode": "restart_required",
+        "owner": "daemon",
+        "applies_after": "daemon spec refresh and executor process restart",
+    },
+    {
+        "id": "tool_worker_restart",
+        "mode": "restart_required",
+        "owner": "tool",
+        "applies_after": "tool worker process restart",
+    },
+    {
+        "id": "tool_runtime_restart",
+        "mode": "restart_required",
+        "owner": "tool",
+        "applies_after": "tool runtime service re-assembly or worker restart",
+    },
+)
 
 
 class SettingsActionRequest(BaseModel):
@@ -389,7 +590,7 @@ def bootstrap_import_settings(
     if not payload.reason:
         raise HTTPException(status_code=400, detail="Settings bootstrap import requires a reason.")
     core_result = import_core_settings_resources(
-        container.settings,
+        container.require(AppKey.CORE_SETTINGS),
         actions=_settings_action_service(container),
         queries=_settings_query_service(container),
         actor=payload.actor,
@@ -426,7 +627,7 @@ def _overview_payload(query: SettingsQueryService) -> dict[str, Any]:
     )
     missing = [
         kind
-        for kind in ("skill-catalog", "access-assets", "event-registry", "backup-restore")
+        for kind in ("access-assets", "event-registry", "backup-restore")
         if counts.get(kind, 0) == 0
     ]
     health_status = "warning" if missing else "ready"
@@ -594,7 +795,17 @@ def _resource_detail_payload(
     latest = versions[-1] if versions else None
     audits = _resource_audits(query, resource)
     policy = _kind_policy_payload(resource.resource_kind)
-    return {
+    effective_config = (
+        summary["effective_config"]
+        if isinstance(summary["effective_config"], Mapping)
+        else {}
+    )
+    validation = (
+        _runtime_defaults_validation_payload(effective_config)
+        if resource.resource_kind == "runtime-defaults"
+        else _validation_from_version(latest)
+    )
+    payload = {
         "resource": resource.resource_kind,
         "kind": resource.resource_kind,
         "id": resource.id,
@@ -627,12 +838,20 @@ def _resource_detail_payload(
             ],
             "actions": _resource_actions(resource.resource_kind, resource.id),
         },
-        "validation": _validation_from_version(latest),
+        "validation": validation,
         "impact": _impact_payload(resource.resource_kind, resource.id),
         "audit": _audit_summary_payload(audits),
         "actions": _resource_actions(resource.resource_kind, resource.id),
         "versions": [_redact_value(version.to_payload()) for version in versions],
     }
+    if resource.resource_kind == "runtime-defaults":
+        payload["runtime_defaults"] = _runtime_defaults_read_model(
+            resource=resource,
+            latest=latest,
+            effective_config=effective_config,
+            summary=summary,
+        )
+    return payload
 
 
 def _resource_summary_payload(
@@ -771,6 +990,12 @@ def _run_settings_action(
             if resolved_id is None:
                 raise ValueError(f"{action} action requires a resource_id.")
             resource = _require_resource_for_action(query, resolved_kind, resolved_id)
+            effective_config = dict(query.get_effective(resource.id).effective_value)
+            validation = (
+                _runtime_defaults_validation_payload(effective_config)
+                if resolved_kind == "runtime-defaults"
+                else _validation_payload("valid")
+            )
             audit = actions.record_operator_attempt(
                 action_type=_action_type(action),
                 target_type=resolved_kind,
@@ -784,15 +1009,28 @@ def _run_settings_action(
                 "resource_id": resource.id,
                 "mutation": action,
                 "applied": False,
-                "validation": _validation_payload("valid"),
+                "validation": validation,
                 "impact": _impact_payload(resolved_kind, resource.id),
             }
+            if resolved_kind == "runtime-defaults":
+                result["apply_requirement"] = list(_RUNTIME_DEFAULT_APPLY_REQUIREMENTS)
             audit = actions.mark_operator_attempt_succeeded(audit.id, result=result)
             return _action_response(action, resolved_kind, resource.id, audit, result)
         if action == "create":
             resolved_id = resolved_id or _resource_id_from_payload(payload.payload)
             if resolved_id is None:
                 raise ValueError("Create action requires resource_id or payload.id.")
+            if resolved_kind == "runtime-defaults":
+                _ensure_runtime_defaults_payload_is_valid(
+                    actions,
+                    action=action,
+                    kind=resolved_kind,
+                    resource_id=resolved_id,
+                    actor=payload.actor,
+                    risk=payload.risk,
+                    request_payload=payload,
+                    candidate=payload.payload,
+                )
             result = actions.create_resource(
                 CreateSettingsResourceInput(
                     resource_id=resolved_id,
@@ -819,6 +1057,17 @@ def _run_settings_action(
                 dict(query.get_effective(resource.id).effective_value),
                 payload.payload,
             )
+            if resolved_kind == "runtime-defaults":
+                _ensure_runtime_defaults_payload_is_valid(
+                    actions,
+                    action=action,
+                    kind=resolved_kind,
+                    resource_id=resource.id,
+                    actor=payload.actor,
+                    risk=payload.risk,
+                    request_payload=payload,
+                    candidate=merged,
+                )
             result = actions.update_resource(
                 UpdateSettingsResourceInput(
                     resource_id=resource.id,
@@ -902,6 +1151,25 @@ def _result_response(
     }
     if result.resolution is not None:
         payload["resolution"] = _resolution_payload(result.resolution)
+    if kind == "runtime-defaults" and result.resource is not None:
+        effective_config = (
+            result.resolution.effective_value
+            if result.resolution is not None
+            else result.version.payload if result.version is not None else {}
+        )
+        if isinstance(effective_config, Mapping):
+            payload["runtime_defaults"] = _runtime_defaults_read_model(
+                resource=result.resource,
+                latest=result.version,
+                effective_config=effective_config,
+                summary={
+                    "source": result.version.source if result.version is not None else None,
+                    "version": result.version.version_number if result.version is not None else None,
+                    "resolution": payload.get("resolution", {}),
+                },
+            )
+            payload["validation"] = _runtime_defaults_validation_payload(effective_config)
+        payload["apply_requirement"] = list(_RUNTIME_DEFAULT_APPLY_REQUIREMENTS)
     return _action_response(action, kind, resource_id, result.audit, payload, status=result.status)
 
 
@@ -952,17 +1220,11 @@ def _record_failed_action(
 
 
 def _settings_query_service(container: AppContainer) -> SettingsQueryService:
-    service = getattr(container, "settings_query_service", None)
-    if service is None:
-        raise HTTPException(status_code=503, detail="Settings query service is not configured.")
-    return service
+    return container.require(AppKey.SETTINGS_QUERY_SERVICE)
 
 
 def _settings_action_service(container: AppContainer) -> SettingsActionService:
-    service = getattr(container, "settings_action_service", None)
-    if service is None:
-        raise HTTPException(status_code=503, detail="Settings action service is not configured.")
-    return service
+    return container.require(AppKey.SETTINGS_ACTION_SERVICE)
 
 
 def _resource_counts(query: SettingsQueryService) -> dict[str, int]:
@@ -1314,6 +1576,201 @@ def _key_value_section(title: str, values: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_defaults_read_model(
+    *,
+    resource: SettingsResource,
+    latest: SettingsResourceVersion | None,
+    effective_config: Mapping[str, Any],
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    resolution = summary.get("resolution") if isinstance(summary.get("resolution"), Mapping) else {}
+    source = summary.get("source")
+    version = summary.get("version")
+    return {
+        "schema": "runtime-defaults.v1",
+        "resource_id": resource.id,
+        "status": resource.status.value,
+        "enabled": resource.enabled,
+        "source": source if source is not None else latest.source if latest is not None else None,
+        "version": version if version is not None else latest.version_number if latest is not None else None,
+        "updated_at": _format_datetime(resource.updated_at),
+        "resolved_at": resolution.get("resolved_at"),
+        "effective_payload": _redact_value(dict(effective_config)),
+        "groups": [
+            _runtime_default_group_payload("orchestration", effective_config),
+            _runtime_default_group_payload("compaction", effective_config),
+            _runtime_default_group_payload("tool_worker", effective_config),
+        ],
+        "apply_requirements": list(_RUNTIME_DEFAULT_APPLY_REQUIREMENTS),
+        "validation": _runtime_defaults_validation_payload(effective_config),
+    }
+
+
+def _runtime_default_group_payload(
+    group: str,
+    effective_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = [
+        _runtime_default_field_payload(spec, effective_config)
+        for spec in _RUNTIME_DEFAULT_FIELD_SPECS
+        if spec["group"] == group
+    ]
+    return {
+        "id": group,
+        "fields": fields,
+    }
+
+
+def _runtime_default_field_payload(
+    spec: Mapping[str, Any],
+    effective_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    path = str(spec["path"])
+    value = _runtime_default_value(effective_config, path)
+    default = spec.get("default")
+    return {
+        "path": path,
+        "value": value if value is not None else default,
+        "default": default,
+        "unit": spec.get("unit"),
+        "minimum": spec.get("minimum"),
+        "consumer": spec.get("consumer"),
+        "apply_requirement": spec.get("apply_requirement"),
+        "input": "toggle" if path in _RUNTIME_DEFAULT_BOOL_FIELDS else "number",
+    }
+
+
+def _runtime_default_value(payload: Mapping[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _runtime_defaults_validation_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    errors = _runtime_defaults_payload_errors(payload)
+    status_value = "invalid" if errors else "valid"
+    validation = _validation_payload(status_value)
+    validation["checks"] = {
+        "title": "Runtime Defaults Validation",
+        "columns": ["Check", "Result"],
+        "rows": [
+            {
+                "Check": "schema",
+                "Result": "pass" if not errors else "failed",
+            },
+            {
+                "Check": "orchestration",
+                "Result": _runtime_default_group_result(payload, "orchestration"),
+            },
+            {
+                "Check": "tool_worker",
+                "Result": _runtime_default_group_result(payload, "tool_worker"),
+            },
+        ],
+    }
+    validation["result"] = {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": [],
+        "metadata": {"schema": "runtime-defaults.v1"},
+    }
+    return validation
+
+
+def _runtime_default_group_result(payload: Mapping[str, Any], group: str) -> str:
+    value = payload.get(group)
+    if not isinstance(value, Mapping):
+        return "missing"
+    unknown = set(value) - _RUNTIME_DEFAULT_GROUP_KEYS[group]
+    return "unknown fields" if unknown else "pass"
+
+
+def _ensure_runtime_defaults_payload_is_valid(
+    actions: SettingsActionService,
+    *,
+    action: str,
+    kind: str,
+    resource_id: str | None,
+    actor: str | None,
+    risk: str | None,
+    request_payload: SettingsActionRequest,
+    candidate: Mapping[str, Any],
+) -> None:
+    errors = _runtime_defaults_payload_errors(candidate)
+    if not errors:
+        return
+    audit = _record_failed_action(
+        actions,
+        action=action,
+        kind=kind,
+        resource_id=resource_id,
+        actor=actor,
+        risk=risk,
+        request_payload=request_payload,
+        error={
+            "code": "runtime_defaults_validation_failed",
+            "errors": errors,
+        },
+        default_reason="runtime defaults validation failed",
+    )
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "code": "runtime_defaults_validation_failed",
+            "message": "Runtime Defaults payload failed schema validation.",
+            "errors": errors,
+            "audit": _audit_payload(audit),
+        },
+    )
+
+
+def _runtime_defaults_payload_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    unknown_top_level = set(payload) - _RUNTIME_DEFAULT_TOP_LEVEL_KEYS
+    for key in sorted(unknown_top_level):
+        errors.append(f"unknown top-level field: {key}")
+    config_id = payload.get("config_id", payload.get("id"))
+    if config_id is not None and (not isinstance(config_id, str) or not config_id.strip()):
+        errors.append("config_id must be a non-empty string when provided.")
+    if "enabled" in payload and not isinstance(payload["enabled"], bool):
+        errors.append("enabled must be a boolean when provided.")
+    if "metadata" in payload and not isinstance(payload["metadata"], Mapping):
+        errors.append("metadata must be an object when provided.")
+    for group, allowed_fields in _RUNTIME_DEFAULT_GROUP_KEYS.items():
+        group_value = payload.get(group)
+        if group_value is None:
+            continue
+        if not isinstance(group_value, Mapping):
+            errors.append(f"{group} must be an object.")
+            continue
+        unknown_nested = set(group_value) - allowed_fields
+        for key in sorted(unknown_nested):
+            errors.append(f"unknown {group} field: {key}")
+        for key, value in group_value.items():
+            path = f"{group}.{key}"
+            if path in _RUNTIME_DEFAULT_NUMERIC_FIELDS:
+                _append_positive_number_error(errors, path, value)
+            elif path in _RUNTIME_DEFAULT_BOOL_FIELDS and not isinstance(value, bool):
+                errors.append(f"{path} must be a boolean.")
+    return errors
+
+
+def _append_positive_number_error(errors: list[str], path: str, value: Any) -> None:
+    if isinstance(value, bool):
+        errors.append(f"{path} must be a positive number.")
+        return
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        errors.append(f"{path} must be a positive number.")
+        return
+    if parsed <= 0:
+        errors.append(f"{path} must be positive.")
+
+
 def _validation_from_version(version: SettingsResourceVersion | None) -> dict[str, Any]:
     if version is None:
         return _validation_payload("unknown")
@@ -1524,7 +1981,10 @@ def _redact_value(value: Any, *, _key: str | None = None) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in plain.items():
             key_text = str(key)
-            if _is_sensitive_key(key_text):
+            if _is_sensitive_key(key_text) and not _is_safe_numeric_token_count_key(
+                key_text,
+                item,
+            ):
                 redacted[key] = _REDACTED_VALUE
             else:
                 redacted[key] = _redact_value(item, _key=key_text)
@@ -1539,6 +1999,13 @@ def _redact_value(value: Any, *, _key: str | None = None) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     normalized = _normalize_secret_key(key)
     return any(_normalize_secret_key(part) in normalized for part in _SECRET_KEY_PARTS)
+
+
+def _is_safe_numeric_token_count_key(key: str, value: Any) -> bool:
+    normalized = _normalize_secret_key(key)
+    if not normalized.endswith("tokens"):
+        return False
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _is_database_url_key(key: str | None) -> bool:

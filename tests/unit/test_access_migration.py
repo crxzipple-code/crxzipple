@@ -33,7 +33,7 @@ class LegacyLlmProfile:
     provider: str
     api_family: str
     model_name: str
-    credential_binding: str
+    credential_binding_id: str
     enabled: bool = True
 
 
@@ -110,7 +110,7 @@ class AccessMigrationTests(unittest.TestCase):
                         provider="openai",
                         api_family="responses",
                         model_name="gpt-5",
-                        credential_binding="super-secret-llm-token",
+                        credential_binding_id="openai-api-key",
                     ),
                 ),
                 tool_specs=(
@@ -156,22 +156,20 @@ class AccessMigrationTests(unittest.TestCase):
         self.assertGreaterEqual(len(plan.consumer_bindings), 1)
 
         payload = json.dumps(asdict(plan), sort_keys=True, default=str)
-        self.assertIn("llm_profiles[*].credential_binding", payload)
+        self.assertIn("llm_profiles[*].credential_binding_id", payload)
         self.assertIn("tool.access_requirement_sets", payload)
         self.assertIn("CRXZIPPLE_READY_AUTH_REQUIREMENTS", payload)
         self.assertIn("OPENAI_TOOL_KEY", payload)
         self.assertIn("WEBHOOK_ACCOUNT_TOKEN", payload)
         self.assertIn("LARK_APP_SECRET", payload)
-        self.assertIn("literal:***", payload)
 
-        self.assertNotIn("super-secret-llm-token", payload)
         self.assertNotIn("super-secret-webhook-token", payload)
         self.assertNotIn("super-secret-channel-token", payload)
 
     def test_thin_container_adapter_only_collects_snapshots(self) -> None:
         class Settings:
             llm_profiles = (
-                {"id": "model", "credential_binding": "env:MODEL_TOKEN"},
+                {"id": "model", "credential_binding_id": "model-token"},
             )
             ready_auth_requirements = ("github:oauth_connector(repo_read)",)
 
@@ -204,7 +202,7 @@ class AccessMigrationTests(unittest.TestCase):
         plan = build_access_migration_plan(snapshot)
         payload = json.dumps(asdict(plan), sort_keys=True, default=str)
 
-        self.assertIn("env:MODEL_TOKEN", payload)
+        self.assertIn("model-token", payload)
         self.assertIn("env:TOOL_TOKEN", payload)
         self.assertIn("env:WEBHOOK_TOKEN", payload)
         self.assertNotIn("runtime-abac.yaml", payload)
@@ -219,7 +217,7 @@ class AccessMigrationTests(unittest.TestCase):
                         provider="openai",
                         api_family="responses",
                         model_name="gpt-5",
-                        credential_binding="super-secret-token",
+                        credential_binding_id="openai-api-key",
                     ),
                 ),
                 tool_specs=(
@@ -259,7 +257,6 @@ class AccessMigrationTests(unittest.TestCase):
         self.assertEqual(second.created["consumer_bindings"], 0)
         self.assertEqual(second.skipped["assets"], len(plan.assets))
         self.assertNotIn("super-secret-token", payload)
-        self.assertIn("literal:***", payload)
 
     def test_settings_bootstrap_importer_writes_access_plan_as_settings_truth(self) -> None:
         settings_services = create_in_memory_settings_services()

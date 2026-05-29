@@ -25,10 +25,9 @@ class SkillManifest:
     suggested_tools: tuple[str, ...] = field(default_factory=tuple)
     allowed_tools: tuple[str, ...] = field(default_factory=tuple)
     required_effects: tuple[str, ...] = field(default_factory=tuple)
-    required_auth: tuple[str, ...] = field(default_factory=tuple)
-    required_secrets: tuple[str, ...] = field(default_factory=tuple)
-    required_credential_files: tuple[str, ...] = field(default_factory=tuple)
+    required_access: tuple[str, ...] = field(default_factory=tuple)
     surfaces: tuple[str, ...] = field(default_factory=tuple)
+    supported_platforms: tuple[str, ...] = field(default_factory=tuple)
     setup_hints: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -39,9 +38,8 @@ class SkillRequirements:
     suggested_tools: tuple[str, ...] = field(default_factory=tuple)
     required_effects: tuple[str, ...] = field(default_factory=tuple)
     surfaces: tuple[str, ...] = field(default_factory=tuple)
-    compatibility_auth: tuple[str, ...] = field(default_factory=tuple)
-    compatibility_secrets: tuple[str, ...] = field(default_factory=tuple)
-    compatibility_credential_files: tuple[str, ...] = field(default_factory=tuple)
+    supported_platforms: tuple[str, ...] = field(default_factory=tuple)
+    required_access: tuple[str, ...] = field(default_factory=tuple)
     setup_hints: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -53,9 +51,8 @@ class SkillRequirements:
             suggested_tools=suggested_tools,
             required_effects=manifest.required_effects,
             surfaces=manifest.surfaces,
-            compatibility_auth=manifest.required_auth,
-            compatibility_secrets=manifest.required_secrets,
-            compatibility_credential_files=manifest.required_credential_files,
+            supported_platforms=manifest.supported_platforms,
+            required_access=manifest.required_access,
             setup_hints=manifest.setup_hints,
         )
 
@@ -66,10 +63,7 @@ class SkillRequirements:
             "suggested_tools": list(self.suggested_tools),
             "required_effects": list(self.required_effects),
             "surfaces": list(self.surfaces),
-            "compatibility_auth": list(self.compatibility_auth),
-            "compatibility_secrets": list(self.compatibility_secrets),
-            "compatibility_credential_files": list(
-                self.compatibility_credential_files,
-            ),
+            "supported_platforms": list(self.supported_platforms),
+            "required_access": list(self.required_access),
             "setup_hints": list(self.setup_hints),
         }

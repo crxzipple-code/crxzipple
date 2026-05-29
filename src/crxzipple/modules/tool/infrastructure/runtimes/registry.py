@@ -46,12 +46,31 @@ class ToolRuntimeRegistry:
         *,
         concurrency_key: str | None = None,
         max_concurrency: int | None = None,
+        replace: bool = False,
     ) -> None:
+        if runtime_key in self._registrations and not replace:
+            raise ValueError(f"Tool runtime '{runtime_key}' is already registered.")
         self._registrations[runtime_key] = ToolRuntimeRegistration(
             runtime_key=runtime_key,
             handler=handler,
             concurrency_key=concurrency_key,
             max_concurrency=max_concurrency,
+        )
+
+    def register_or_replace(
+        self,
+        runtime_key: str,
+        handler: AsyncToolHandler,
+        *,
+        concurrency_key: str | None = None,
+        max_concurrency: int | None = None,
+    ) -> None:
+        self.register(
+            runtime_key,
+            handler,
+            concurrency_key=concurrency_key,
+            max_concurrency=max_concurrency,
+            replace=True,
         )
 
     def get_registration(self, runtime_key: str) -> ToolRuntimeRegistration | None:

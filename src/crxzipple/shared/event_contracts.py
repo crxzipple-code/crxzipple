@@ -248,6 +248,30 @@ TOOL_CATALOG_EVENT_NAMES: tuple[str, ...] = (
     "tool.disabled",
 )
 
+TOOL_SOURCE_EVENT_NAMES: tuple[str, ...] = (
+    "tool.source.created",
+    "tool.source.updated",
+    "tool.source.disabled",
+    "tool.source.restored",
+    "tool.source.deleted",
+    "tool.source.discovery_completed",
+    "tool.source.discovery_failed",
+)
+
+TOOL_FUNCTION_EVENT_NAMES: tuple[str, ...] = (
+    "tool.function.created",
+    "tool.function.updated",
+    "tool.function.stale",
+    "tool.function.deprecated",
+    "tool.function.enabled",
+    "tool.function.disabled",
+    "tool.function.policy_updated",
+)
+
+TOOL_CLI_EVENT_NAMES: tuple[str, ...] = (
+    "tool.cli.output_observed",
+)
+
 LLM_INVOCATION_EVENT_NAMES: tuple[str, ...] = (
     "llm.invocation_started",
     "llm.invocation_succeeded",
@@ -268,6 +292,9 @@ TOOL_LLM_EVENT_NAMES: tuple[str, ...] = (
     *TOOL_ASSIGNMENT_EVENT_NAMES,
     *TOOL_WORKER_EVENT_NAMES,
     *TOOL_CATALOG_EVENT_NAMES,
+    *TOOL_SOURCE_EVENT_NAMES,
+    *TOOL_FUNCTION_EVENT_NAMES,
+    *TOOL_CLI_EVENT_NAMES,
     *LLM_INVOCATION_EVENT_NAMES,
     *LLM_PROFILE_EVENT_NAMES,
     *LLM_STREAM_EVENT_NAMES,
@@ -339,6 +366,57 @@ _TOOL_CATALOG_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("tool_name", "Display-safe tool name.", "string"),
     EventDefinitionField("enabled", "Tool enabled state after the change.", "boolean"),
     EventDefinitionField("status", "Normalized catalog status after the change.", "string"),
+    *_OPERATIONS_DISPLAY_FIELDS,
+)
+
+_TOOL_SOURCE_FIELDS: tuple[EventDefinitionField, ...] = (
+    _EVENT_NAME_FIELD,
+    EventDefinitionField("source_id", "Tool source catalog identifier.", "string", True),
+    EventDefinitionField("kind", "Tool source catalog kind.", "string"),
+    EventDefinitionField("display_name", "Display-safe source name.", "string"),
+    EventDefinitionField("status", "Source status after the change.", "string"),
+    EventDefinitionField("previous_status", "Source status before the change.", "string"),
+    EventDefinitionField("revision", "Source catalog revision.", "integer"),
+    EventDefinitionField("config_hash", "Stable source configuration hash.", "string"),
+    EventDefinitionField("discovery_status", "Discovery run status.", "string"),
+    EventDefinitionField("function_count", "Function count discovered from the source.", "integer"),
+    EventDefinitionField(
+        "provider_backend_count",
+        "Provider backend count discovered from the source.",
+        "integer",
+    ),
+    EventDefinitionField("error_message", "Discovery or source lifecycle error message.", "string"),
+    EventDefinitionField("changed_fields", "Changed source fields.", "array"),
+    *_OPERATIONS_DISPLAY_FIELDS,
+)
+
+_TOOL_FUNCTION_FIELDS: tuple[EventDefinitionField, ...] = (
+    _EVENT_NAME_FIELD,
+    EventDefinitionField("function_id", "Tool function identifier.", "string", True),
+    EventDefinitionField("source_id", "Owning tool source identifier.", "string", True),
+    EventDefinitionField("stable_key", "Source-stable function key.", "string"),
+    EventDefinitionField("schema_hash", "Stable function schema hash.", "string"),
+    EventDefinitionField("status", "Function catalog status after the change.", "string"),
+    EventDefinitionField("previous_status", "Function catalog status before the change.", "string"),
+    EventDefinitionField("enabled", "Function enabled state after the change.", "boolean"),
+    EventDefinitionField("revision", "Function catalog revision.", "integer"),
+    EventDefinitionField("changed_fields", "Changed function fields.", "array"),
+    *_OPERATIONS_DISPLAY_FIELDS,
+)
+
+_TOOL_CLI_FIELDS: tuple[EventDefinitionField, ...] = (
+    _EVENT_NAME_FIELD,
+    EventDefinitionField("source_id", "Owning configured CLI source identifier.", "string", True),
+    EventDefinitionField("provider", "Configured CLI provider name.", "string"),
+    EventDefinitionField("process_id", "Process application session identifier.", "string", True),
+    EventDefinitionField("session_key", "Optional caller correlation key.", "string"),
+    EventDefinitionField("stream", "Observed stream: stdout, stderr, or status.", "string", True),
+    EventDefinitionField("offset", "Stream offset before this observation.", "integer"),
+    EventDefinitionField("next_offset", "Stream offset after this observation.", "integer"),
+    EventDefinitionField("text", "Observed output text chunk.", "string"),
+    EventDefinitionField("text_length", "Observed output text length.", "integer"),
+    EventDefinitionField("status", "Process status when this observation was made.", "string"),
+    EventDefinitionField("exit_code", "Process exit code when known.", "integer"),
     *_OPERATIONS_DISPLAY_FIELDS,
 )
 
@@ -472,6 +550,48 @@ def tool_llm_event_definitions() -> tuple[EventDefinition, ...]:
         )
         for event_name in TOOL_CATALOG_EVENT_NAMES
     )
+    source_definitions = tuple(
+        _lifecycle_definition(
+            event_name=event_name,
+            owner="tool",
+            description="Tool source lifecycle fact emitted by the tool module.",
+            producers=("ToolSourceCommandService",),
+            consumers=("operations observer", "trace read model"),
+            fields=_TOOL_SOURCE_FIELDS,
+            notes=(
+                "tool source state is tool-owned; operations observes configured and bundled source facts",
+            ),
+        )
+        for event_name in TOOL_SOURCE_EVENT_NAMES
+    )
+    function_definitions = tuple(
+        _lifecycle_definition(
+            event_name=event_name,
+            owner="tool",
+            description="Tool function catalog lifecycle fact emitted by the tool module.",
+            producers=("ToolCatalogReconcileService", "ToolFunctionCommandService"),
+            consumers=("operations observer", "trace read model"),
+            fields=_TOOL_FUNCTION_FIELDS,
+            notes=(
+                "tool function catalog state is tool-owned; operations observes source reconciliation outcomes",
+            ),
+        )
+        for event_name in TOOL_FUNCTION_EVENT_NAMES
+    )
+    cli_definitions = tuple(
+        _lifecycle_definition(
+            event_name=event_name,
+            owner="tool",
+            description="Configured CLI process output observation fact emitted by the tool module.",
+            producers=("CliGuidedRuntime",),
+            consumers=("operations observer", "trace read model", "settings console"),
+            fields=_TOOL_CLI_FIELDS,
+            notes=(
+                "CLI output facts are incremental observations keyed by process_id and stream offset",
+            ),
+        )
+        for event_name in TOOL_CLI_EVENT_NAMES
+    )
     invocation_definitions = tuple(
         _lifecycle_definition(
             event_name=event_name,
@@ -515,6 +635,9 @@ def tool_llm_event_definitions() -> tuple[EventDefinition, ...]:
         *assignment_definitions,
         *worker_definitions,
         *catalog_definitions,
+        *source_definitions,
+        *function_definitions,
+        *cli_definitions,
         *invocation_definitions,
         *profile_definitions,
         *stream_definitions,

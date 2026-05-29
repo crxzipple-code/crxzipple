@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import json
 import threading
@@ -10,11 +11,15 @@ from threading import Event as ThreadEvent
 from typing import Any
 
 from crxzipple.core.logger import get_logger
-from crxzipple.modules.events import EventsApplicationService
 from crxzipple.modules.events.domain import EventTopicWatch
 from crxzipple.modules.tool.application.catalog_service import ToolCatalogService
 from crxzipple.modules.tool.application.concurrency import ToolRunConcurrencyPolicy
 from crxzipple.modules.tool.application.dispatch_events import ToolRuntimeEventService
+from crxzipple.modules.tool.application.ports import ToolEventWaitPort
+from crxzipple.modules.tool.application.provider_backend_service import (
+    PROVIDER_BACKEND_METADATA_KEY,
+    provider_backend_execution_context_payload,
+)
 from crxzipple.modules.tool.application.service_support import (
     DISPATCH_LEASE_EXHAUSTED_REASON,
     DISPATCH_LEASE_EXPIRED_REASON,
@@ -22,6 +27,7 @@ from crxzipple.modules.tool.application.service_support import (
     PreparedToolRunExecution,
     ToolServiceBase,
     ToolServiceDependencies,
+    build_tool_from_function,
 )
 from crxzipple.modules.tool.domain.entities import (
     Tool,
@@ -37,10 +43,13 @@ from crxzipple.modules.tool.domain.exceptions import (
 from crxzipple.modules.tool.domain.value_objects import (
     ToolExecutionContext,
     ToolExecutionTarget,
+    ToolFunctionStatus,
     ToolMode,
     ToolRunAssignmentStatus,
+    ToolRunError,
     ToolRunResult,
     ToolRunStatus,
+    ToolSourceStatus,
 )
 from crxzipple.shared.content_blocks import (
     FILE_BLOCK_TYPE,
@@ -190,7 +199,7 @@ class ToolWorkerService(ToolServiceBase):
         max_runs: int | None = None,
         max_idle_cycles: int | None = None,
         stop_event: ThreadEvent | None = None,
-        events_service: EventsApplicationService | None = None,
+        events_service: ToolEventWaitPort | None = None,
         runtime_event_service: ToolRuntimeEventService | None = None,
         max_in_flight: int = 1,
     ) -> int:
@@ -216,7 +225,7 @@ class ToolWorkerService(ToolServiceBase):
         max_runs: int | None,
         max_idle_cycles: int | None,
         stop_event: ThreadEvent,
-        events_service: EventsApplicationService | None,
+        events_service: ToolEventWaitPort | None,
         runtime_event_service: ToolRuntimeEventService | None,
         max_in_flight: int,
     ) -> int:
@@ -434,7 +443,9 @@ class ToolWorkerService(ToolServiceBase):
             for run in excluded_runs.values():
                 if run.is_terminal():
                     continue
-                tool = self.catalog_service.resolve_tool(run.tool_id)
+                tool = self._resolve_run_tool_for_concurrency(uow, run)
+                if tool is None:
+                    continue
                 self.concurrency_policy.reserve(
                     run=run,
                     tool=tool,
@@ -449,7 +460,9 @@ class ToolWorkerService(ToolServiceBase):
             run = runs_by_id.get(assignment.run_id)
             if run is None or run.is_terminal():
                 continue
-            tool = self.catalog_service.resolve_tool(run.tool_id)
+            tool = self._resolve_run_tool_for_concurrency(uow, run)
+            if tool is None:
+                continue
             if not self.concurrency_policy.can_start(
                 run=run,
                 tool=tool,
@@ -471,7 +484,7 @@ class ToolWorkerService(ToolServiceBase):
         *,
         stop_event: ThreadEvent,
         timeout_seconds: float,
-        events_service: EventsApplicationService | None,
+        events_service: ToolEventWaitPort | None,
         runtime_event_service: ToolRuntimeEventService | None,
     ) -> None:
         if events_service is None:
@@ -657,7 +670,7 @@ class ToolWorkerService(ToolServiceBase):
         except Exception as exc:
             return PreparedToolRunCompletion(
                 run_id=prepared.run_id,
-                error_message=self._exception_message(exc),
+                error_message=self._exception_run_error(exc),
             )
         return PreparedToolRunCompletion(
             run_id=prepared.run_id,
@@ -690,7 +703,9 @@ class ToolWorkerService(ToolServiceBase):
                 uow.commit()
                 return run
 
-            tool = self.catalog_service.resolve_tool(run.tool_id)
+            tool = self._resolve_run_catalog_tool(uow, run)
+            if tool is None:
+                tool = self.catalog_service.resolve_tool(run.tool_id)
             if tool is None:
                 raise ToolNotFoundError(f"Tool '{run.tool_id}' was not found.")
 
@@ -719,6 +734,21 @@ class ToolWorkerService(ToolServiceBase):
                 if execution_context is not None
                 else run.invocation_context
             )
+            resolved_execution_context = _execution_context_with_tool_run_id(
+                resolved_execution_context,
+                run.id,
+            )
+            provider_backend_payload = run.metadata.get(
+                PROVIDER_BACKEND_METADATA_KEY,
+            )
+            resolved_execution_context = _execution_context_with_provider_backend(
+                resolved_execution_context,
+                (
+                    provider_backend_payload
+                    if isinstance(provider_backend_payload, Mapping)
+                    else None
+                ),
+            )
             return PreparedToolRunExecution(
                 tool=tool,
                 arguments=arguments,
@@ -727,6 +757,40 @@ class ToolWorkerService(ToolServiceBase):
                 worker_id=run.worker_id,
                 execution_context=resolved_execution_context,
             )
+
+    def _resolve_run_tool_for_concurrency(self, uow, run: ToolRun) -> Tool | None:
+        if run.function_id is not None:
+            function = uow.tool_functions.get(run.function_id)
+            if function is not None:
+                return build_tool_from_function(function)
+        return self.catalog_service.resolve_tool(run.tool_id)
+
+    def _resolve_run_catalog_tool(self, uow, run: ToolRun) -> Tool | None:
+        if run.function_id is None:
+            return None
+        function = uow.tool_functions.get(run.function_id)
+        if function is None:
+            raise ToolValidationError(
+                f"Tool run '{run.id}' references missing function '{run.function_id}'.",
+            )
+        source = uow.tool_sources.get(function.source_id)
+        if source is None:
+            raise ToolValidationError(
+                f"Tool run '{run.id}' references missing source '{function.source_id}'.",
+            )
+        if source.status is not ToolSourceStatus.ACTIVE:
+            raise ToolValidationError(
+                f"Tool source '{source.source_id}' is {source.status.value}.",
+            )
+        if function.status is not ToolFunctionStatus.ACTIVE:
+            raise ToolValidationError(
+                f"Tool function '{function.function_id}' is {function.status.value}.",
+            )
+        if not function.enabled:
+            raise ToolValidationError(
+                f"Tool function '{function.function_id}' is disabled.",
+            )
+        return build_tool_from_function(function)
 
     def _complete_run_results(
         self,
@@ -1027,9 +1091,10 @@ class ToolWorkerService(ToolServiceBase):
         self,
         uow,
         failed_run: ToolRun,
-        message: str,
+        message: str | ToolRunError,
     ) -> None:
-        message = self._failure_message(message)
+        run_error = self._coerce_run_error(message)
+        failure_message = run_error.message
         if failed_run.status is ToolRunStatus.CANCEL_REQUESTED:
             failed_run.cancel()
             self.dispatch_port.cancel(uow.dispatch_tasks, uow, failed_run)
@@ -1037,31 +1102,31 @@ class ToolWorkerService(ToolServiceBase):
                 uow,
                 failed_run,
                 terminal_kind="cancelled",
-                reason=message,
+                reason=failure_message,
             )
         elif failed_run.target.mode is ToolMode.BACKGROUND and failed_run.can_retry():
             self._complete_background_tracking(
                 uow,
                 failed_run,
                 terminal_kind="failed",
-                reason=message,
+                reason=failure_message,
             )
-            failed_run.requeue(message)
+            failed_run.requeue(run_error)
             self.dispatch_port.requeue(
                 uow.dispatch_tasks,
                 uow,
                 failed_run,
-                reason=message,
+                reason=failure_message,
             )
         else:
-            failed_run.fail(message)
+            failed_run.fail(run_error)
             if failed_run.target.mode is ToolMode.BACKGROUND:
                 self.dispatch_port.fail(uow.dispatch_tasks, uow, failed_run)
                 self._complete_background_tracking(
                     uow,
                     failed_run,
                     terminal_kind="failed",
-                    reason=message,
+                    reason=failure_message,
                 )
 
     @staticmethod
@@ -1078,8 +1143,28 @@ class ToolWorkerService(ToolServiceBase):
             return message
         return f"{exc.__class__.__name__} raised without an error message."
 
+    @classmethod
+    def _exception_run_error(cls, exc: Exception) -> ToolRunError:
+        payload = _exception_payload(exc)
+        if payload is not None:
+            message = cls._failure_message(payload.get("message"))
+            code = str(payload.get("code") or "execution_failed").strip() or "execution_failed"
+            details = {
+                str(key): _safe_error_detail(value)
+                for key, value in payload.items()
+                if key not in {"message", "code"}
+            }
+            return ToolRunError(message=message, code=code, details=details)
+        return ToolRunError(message=cls._exception_message(exc))
+
+    @classmethod
+    def _coerce_run_error(cls, message: str | ToolRunError) -> ToolRunError:
+        if isinstance(message, ToolRunError):
+            return message
+        return ToolRunError(message=cls._failure_message(message))
+
     @staticmethod
-    def _failure_message(message: str) -> str:
+    def _failure_message(message: object) -> str:
         normalized = str(message).strip()
         return normalized or "Tool run failed without an error message."
 
@@ -1166,3 +1251,46 @@ class ToolWorkerService(ToolServiceBase):
                 },
             )
         return {"registrations": entries} if entries else {}
+
+
+def _execution_context_with_provider_backend(
+    execution_context: ToolExecutionContext | None,
+    provider_backend_payload: Mapping[str, Any] | None,
+) -> ToolExecutionContext | None:
+    payload = provider_backend_execution_context_payload(
+        execution_context.to_payload() if execution_context is not None else None,
+        provider_backend_payload,
+    )
+    if payload is None:
+        return execution_context
+    return ToolExecutionContext(attrs=payload)
+
+
+def _execution_context_with_tool_run_id(
+    execution_context: ToolExecutionContext | None,
+    run_id: str,
+) -> ToolExecutionContext:
+    payload = execution_context.to_payload() if execution_context is not None else {}
+    payload["tool_run_id"] = run_id
+    return ToolExecutionContext(attrs=payload)
+
+
+def _exception_payload(exc: Exception) -> dict[str, Any] | None:
+    to_payload = getattr(exc, "to_payload", None)
+    if not callable(to_payload):
+        return None
+    try:
+        payload = to_payload()
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _safe_error_detail(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _safe_error_detail(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_safe_error_detail(item) for item in value]
+    return str(value)

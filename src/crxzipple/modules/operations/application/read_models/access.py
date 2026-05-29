@@ -6,10 +6,18 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from crxzipple.modules.access.application.events import (
+    ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT,
+    ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT,
+    ACCESS_OPERATION_EVENT_NAMES,
+)
 from crxzipple.modules.access.interfaces.inventory import collect_access_inventory
 from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
+)
+from crxzipple.modules.operations.application.read_models.event_buckets import (
+    recent_event_buckets,
 )
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
@@ -24,11 +32,14 @@ from crxzipple.modules.operations.application.read_models.models import (
     OperationsTableSectionModel,
     RuntimeActionModel,
 )
+from crxzipple.shared.domain.events import named_event_topic
 from crxzipple.shared.time import coerce_utc_datetime, format_datetime_utc
 
-_MAX_ACCESS_EVENT_TOPICS = 120
 _MAX_RECENT_ACCESS_EVENTS = 240
 _RECENT_ACCESS_TOPIC_LIMIT = 80
+_ACCESS_EVENT_TOPICS = tuple(
+    named_event_topic(event_name) for event_name in ACCESS_OPERATION_EVENT_NAMES
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +82,8 @@ class AccessOperationsPage:
     active_tab: str
     actions: tuple[RuntimeActionModel, ...]
     access_targets: OperationsTableSectionModel
+    access_requirements: OperationsTableSectionModel
+    access_audit_summary: OperationsTableSectionModel
     missing_access: OperationsTableSectionModel
     credential_health: OperationsChartSectionModel
     provider_auth_blocked: OperationsTableSectionModel
@@ -132,6 +145,12 @@ class AccessOperationsReadModelProvider:
             events_service=self.events_service,
             definition_registry=self.event_definition_registry,
         )
+        event_buckets = recent_event_buckets(
+            self.operations_observation,
+            module="access",
+            hours=24,
+            limit=1000,
+        )
         health = _health(access_service=self.access_service, targets=targets)
         access_targets = _access_targets_table(
             visible_targets,
@@ -143,6 +162,11 @@ class AccessOperationsReadModelProvider:
             total=len(filtered_targets),
         )
         access_usage = _access_usage_table(visible_targets)
+        access_requirements = _access_requirements_table(
+            visible_targets,
+            total=len(filtered_targets),
+        )
+        access_audit_summary = _access_audit_summary_table(observed_events)
 
         return AccessOperationsPage(
             module="access",
@@ -160,23 +184,31 @@ class AccessOperationsReadModelProvider:
                 health=health,
                 targets=targets,
                 observed_events=observed_events,
+                event_buckets=event_buckets,
             ),
             tabs=_tabs(
                 targets=len(filtered_targets),
                 missing=len(missing_targets),
+                requirements=access_requirements.total,
                 usage=access_usage.total,
                 setup=len(_setup_flow_records(filtered_targets)),
                 events=len(observed_events),
+                audit=access_audit_summary.total,
             ),
             active_tab="targets",
             actions=_actions(),
             access_targets=access_targets,
+            access_requirements=access_requirements,
+            access_audit_summary=access_audit_summary,
             missing_access=missing_access,
             credential_health=_credential_health(targets),
             provider_auth_blocked=_provider_auth_blocked_table(missing_targets),
             credentials_by_kind=_credentials_by_kind(targets),
             expiring_soon=_expiring_soon_table(filtered_targets),
-            auth_success_rate=_auth_success_rate(targets),
+            auth_success_rate=_auth_success_rate(
+                observed_events,
+                event_buckets=event_buckets,
+            ),
             authentication_status=authentication_status,
             access_usage=access_usage,
             recent_access_events=_access_events_table(observed_events),
@@ -216,20 +248,10 @@ def _collect_inventory(
 ) -> dict[str, Any]:
     if provider.access_service is None:
         return {"ready": False, "targets": [], "counts": {"total": 0, "ready": 0, "blocked": 0}}
-    container = SimpleNamespace(
+    container = _AccessInventoryContainer(
         access_service=provider.access_service,
-        access_governance_repository=provider.access_governance_repository,
         settings_query_service=provider.settings_query_service,
         settings=SimpleNamespace(environment=provider.settings_environment),
-        llm_service=provider.llm_service or _NullService(),
-        tool_service=provider.tool_service or _NullService(),
-        channel_profile_service=provider.channel_profile_service or _NullService(),
-        lark_channel_runtime_service=provider.lark_channel_runtime_service
-        or _NullChannelRuntime(),
-        web_channel_runtime_service=provider.web_channel_runtime_service
-        or _NullChannelRuntime(),
-        webhook_channel_runtime_service=provider.webhook_channel_runtime_service
-        or _NullChannelRuntime(),
     )
     try:
         return dict(
@@ -241,6 +263,21 @@ def _collect_inventory(
         )
     except Exception:
         return {"ready": False, "targets": [], "counts": {"total": 0, "ready": 0, "blocked": 0}}
+
+
+@dataclass(slots=True)
+class _AccessInventoryContainer:
+    access_service: Any
+    settings_query_service: Any | None
+    settings: Any
+
+    def require(self, key: str) -> Any:
+        values = {
+            "access.service": self.access_service,
+            "settings.query_service": self.settings_query_service,
+            "core.settings": self.settings,
+        }
+        return values[key]
 
 
 def _recent_access_events(
@@ -284,16 +321,11 @@ def _recent_access_events_from_bus(
 ) -> tuple[OperationsObservedEvent, ...]:
     if events_service is None:
         return ()
-    topics = tuple(
-        topic
-        for topic in _safe_list_event_topics(events_service)
-        if _is_access_event_topic(topic)
-    )[:_MAX_ACCESS_EVENT_TOPICS]
     read_recent = getattr(events_service, "read_recent_event_topic", None)
     if not callable(read_recent):
         return ()
     events: list[OperationsObservedEvent] = []
-    for topic in topics:
+    for topic in _ACCESS_EVENT_TOPICS:
         try:
             records = tuple(
                 read_recent(topic, limit=_RECENT_ACCESS_TOPIC_LIMIT) or (),
@@ -314,38 +346,14 @@ def _recent_access_events_from_bus(
     return tuple(events[:_MAX_RECENT_ACCESS_EVENTS])
 
 
-def _safe_list_event_topics(events_service: Any) -> tuple[str, ...]:
-    list_topics = getattr(events_service, "list_event_topics", None)
-    if not callable(list_topics):
-        return ()
-    try:
-        return tuple(str(topic) for topic in list_topics() or () if str(topic))
-    except Exception:
-        return ()
-
-
-def _is_access_event_topic(topic: str) -> bool:
-    normalized = topic.strip().lower()
-    return (
-        normalized.startswith("access.")
-        or normalized.startswith("authorization.")
-        or normalized.startswith("auth.")
-        or normalized.startswith("events.named.access.")
-        or normalized.startswith("events.named.authorization.")
-        or normalized.startswith("events.named.auth.")
-    )
-
-
 def _is_access_observed_event(event: OperationsObservedEvent) -> bool:
     owner = event.owner.strip().lower()
     module = event.module.strip().lower()
     event_name = event.event_name.strip().lower()
     return (
-        owner in {"access", "authorization", "auth"}
-        or module in {"access", "authorization", "auth"}
+        owner == "access"
+        or module == "access"
         or event_name.startswith("access.")
-        or event_name.startswith("authorization.")
-        or event_name.startswith("auth.")
     )
 
 
@@ -386,11 +394,15 @@ def _metrics(
     health: str,
     targets: tuple[dict[str, Any], ...],
     observed_events: tuple[OperationsObservedEvent, ...],
+    event_buckets: tuple[dict[str, Any], ...] = (),
 ) -> tuple[MetricCardModel, ...]:
     ready = sum(1 for item in targets if _bool(item.get("ready")))
     blocked = len(targets) - ready
     setup = sum(1 for item in targets if _bool(item.get("setup_available")))
-    failed_events = sum(1 for item in observed_events if item.level == "error" or item.status in {"failed", "error"})
+    failed_events = _failed_access_event_count(
+        observed_events,
+        event_buckets=event_buckets,
+    )
     return (
         MetricCardModel("health", "Overall Health", _health_label(health), _health_delta(health), _health_tone(health)),
         MetricCardModel("access_assets", "Access Assets", str(len(targets)), f"{ready} ready", "info" if targets else "neutral"),
@@ -405,17 +417,21 @@ def _tabs(
     *,
     targets: int,
     missing: int,
+    requirements: int,
     usage: int,
     setup: int,
     events: int,
+    audit: int,
 ) -> tuple[OperationsTabModel, ...]:
     return (
         OperationsTabModel("targets", "Access Targets", targets),
+        OperationsTabModel("requirements", "Credential Requirements", requirements),
         OperationsTabModel("missing", "Missing Access", missing, "warning" if missing else "success"),
         OperationsTabModel("auth_status", "Authentication Status", targets),
         OperationsTabModel("usage", "Access Usage", usage),
         OperationsTabModel("setup", "Setup Flows", setup),
         OperationsTabModel("events", "Access Events", events),
+        OperationsTabModel("audit", "Audit Summary", audit),
         OperationsTabModel("fallbacks", "Fallback Problems", missing + events),
     )
 
@@ -495,6 +511,122 @@ def _missing_access_table(
         rows=tuple(rows),
         total=len(rows),
         empty_state="No missing access.",
+    )
+
+
+def _access_requirements_table(
+    targets: tuple[dict[str, Any], ...],
+    *,
+    total: int,
+) -> OperationsTableSectionModel:
+    rows: list[OperationsTableRowModel] = []
+    for target in targets:
+        checks = _checks(target)
+        if not checks:
+            rows.append(_access_requirement_row(target, None, len(rows)))
+            continue
+        for check in checks:
+            rows.append(_access_requirement_row(target, check, len(rows)))
+    return OperationsTableSectionModel(
+        id="access_requirements",
+        title="Credential Requirements",
+        columns=(
+            OperationsTableColumnModel("consumer", "Consumer"),
+            OperationsTableColumnModel("module", "Module"),
+            OperationsTableColumnModel("slot", "Slot"),
+            OperationsTableColumnModel("expected_kind", "Expected Kind"),
+            OperationsTableColumnModel("binding", "Binding"),
+            OperationsTableColumnModel("readiness", "Readiness"),
+            OperationsTableColumnModel("setup", "Setup"),
+            OperationsTableColumnModel("last_checked", "Last Checked"),
+        ),
+        rows=tuple(rows),
+        total=max(total, len(rows)),
+        empty_state="No credential requirements declared.",
+    )
+
+
+def _access_requirement_row(
+    target: dict[str, Any],
+    check: dict[str, Any] | None,
+    index: int,
+) -> OperationsTableRowModel:
+    status = _target_worst_status(target) if check is None else _text(
+        check.get("status"),
+        "unknown",
+    )
+    usages = _as_list(_metadata(target).get("usages"))
+    modules = sorted(
+        {
+            _text(_as_dict(usage).get("consumer_module"))
+            for usage in usages
+            if _text(_as_dict(usage).get("consumer_module"))
+        },
+    )
+    requirement = _text(check.get("requirement")) if check else _requirements_text(target)
+    return OperationsTableRowModel(
+        id=f"{_text(target.get('resource_id'), '')}:requirement:{index}",
+        cells={
+            "consumer": _required_by(target),
+            "module": ", ".join(modules) or "-",
+            "slot": requirement,
+            "expected_kind": _text(check.get("kind")) if check else _kind_label(
+                _text(_metadata(target).get("asset_kind")),
+            ),
+            "binding": _text(check.get("binding_id") or check.get("credential_binding_id"))
+            if check
+            else _target_label(target),
+            "readiness": _status_label(status),
+            "setup": "Available"
+            if (check and _bool(check.get("setup_available")))
+            or _bool(target.get("setup_available"))
+            else "-",
+            "last_checked": _text(check.get("observed_at")) if check else "-",
+        },
+        status=_status_label(status),
+        tone=_tone_for_status(status),
+    )
+
+
+def _access_audit_summary_table(
+    events: tuple[OperationsObservedEvent, ...],
+) -> OperationsTableSectionModel:
+    rows = [
+        OperationsTableRowModel(
+            id=f"{event.topic}:{event.cursor or event.id}",
+            cells={
+                "time": format_datetime_utc(event.occurred_at),
+                "action": event.event_name,
+                "target": event.entity_id or "-",
+                "status": event.status or event.level,
+                "operator": _text(event.payload.get("operator") or event.payload.get("actor")),
+                "source": event.topic,
+                "reason": _text(
+                    event.payload.get("reason")
+                    or event.payload.get("error")
+                    or event.payload.get("status"),
+                ),
+            },
+            status=event.status,
+            tone=_tone_for_status(event.status or event.level),
+        )
+        for event in events
+    ]
+    return OperationsTableSectionModel(
+        id="access_audit_summary",
+        title="Audit Summary",
+        columns=(
+            OperationsTableColumnModel("time", "Time"),
+            OperationsTableColumnModel("action", "Action"),
+            OperationsTableColumnModel("target", "Target"),
+            OperationsTableColumnModel("status", "Status"),
+            OperationsTableColumnModel("operator", "Operator"),
+            OperationsTableColumnModel("source", "Source"),
+            OperationsTableColumnModel("reason", "Reason"),
+        ),
+        rows=tuple(rows[:120]),
+        total=len(rows),
+        empty_state="No access audit records.",
     )
 
 
@@ -814,19 +946,61 @@ def _credentials_by_kind(
 
 
 def _auth_success_rate(
-    targets: tuple[dict[str, Any], ...],
+    events: tuple[OperationsObservedEvent, ...],
+    *,
+    event_buckets: tuple[dict[str, Any], ...] = (),
 ) -> OperationsChartSectionModel:
-    ready = sum(1 for target in targets if _bool(target.get("ready")))
-    blocked = len(targets) - ready
+    if event_buckets:
+        succeeded = sum(
+            _int(bucket.get("count"), 0)
+            for bucket in event_buckets
+            if bucket.get("event_name") == ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT
+        )
+        failed = sum(
+            _int(bucket.get("count"), 0)
+            for bucket in event_buckets
+            if bucket.get("event_name") == ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT
+        )
+    else:
+        succeeded = sum(
+            1 for event in events if event.event_name == ACCESS_CREDENTIAL_RESOLVE_SUCCEEDED_EVENT
+        )
+        failed = sum(
+            1 for event in events if event.event_name == ACCESS_CREDENTIAL_RESOLVE_FAILED_EVENT
+        )
+    total = succeeded + failed
     return OperationsChartSectionModel(
         "auth_success_rate",
-        "Access Readiness Share",
+        "Credential Resolve Success",
         "donut",
-        len(targets),
-        (
-            OperationsChartSegmentModel("ready", "Ready", ready, "success"),
-            OperationsChartSegmentModel("blocked", "Blocked", blocked, "warning" if blocked else "success"),
+        total,
+        tuple(
+            segment
+            for segment in (
+                OperationsChartSegmentModel("succeeded", "Succeeded", succeeded, "success"),
+                OperationsChartSegmentModel("failed", "Failed", failed, "danger" if failed else "success"),
+            )
+            if segment.value
         ),
+    )
+
+
+def _failed_access_event_count(
+    events: tuple[OperationsObservedEvent, ...],
+    *,
+    event_buckets: tuple[dict[str, Any], ...],
+) -> int:
+    if event_buckets:
+        return sum(
+            _int(bucket.get("count"), 0)
+            for bucket in event_buckets
+            if bucket.get("level") == "error"
+            or bucket.get("status") in {"failed", "error"}
+        )
+    return sum(
+        1
+        for item in events
+        if item.level == "error" or item.status in {"failed", "error"}
     )
 
 
@@ -1178,7 +1352,7 @@ def _kind_label(kind: str) -> str:
     mapping = {
         "env": "Env",
         "file": "File Credential",
-        "codex_auth_json": "Codex Auth JSON",
+        "oauth_account": "OAuth Account",
         "inline_credential": "Inline Credential",
         "credential_set": "Credential Set",
         "authorization_requirement": "Authorization Requirement",
@@ -1188,7 +1362,7 @@ def _kind_label(kind: str) -> str:
 
 
 def _kind_tone(kind: str) -> str:
-    if kind in {"env", "file", "codex_auth_json"}:
+    if kind in {"env", "file", "oauth_account"}:
         return "info"
     if kind == "inline_credential":
         return "warning"

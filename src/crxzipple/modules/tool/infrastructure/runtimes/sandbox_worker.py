@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from types import SimpleNamespace
 from typing import Any
 
 from crxzipple.core.config import load_settings
 from crxzipple.core.logger import configure_logging, get_logger
+from crxzipple.modules.tool.application.activation import ToolPackageApplyContext
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.modules.tool.domain.exceptions import ToolExecutionNotSupportedError
 from crxzipple.modules.tool.infrastructure.handler_invocation import (
@@ -15,7 +15,8 @@ from crxzipple.modules.tool.infrastructure.handler_invocation import (
 )
 from crxzipple.modules.tool.infrastructure.runtimes.registry import ToolRuntimeRegistry
 from crxzipple.modules.tool.infrastructure.tool_packages import (
-    register_scanned_tool_packages,
+    apply_tool_package_plans,
+    discover_tool_package_plans,
 )
 
 logger = get_logger(__name__)
@@ -77,11 +78,13 @@ async def _execute(
     execution_context: ToolExecutionContext | None,
 ) -> Any:
     registry = ToolRuntimeRegistry()
-    register_scanned_tool_packages(
-        SimpleNamespace(
+    apply_tool_package_plans(
+        ToolPackageApplyContext(
             sandbox_tool_registry=registry,
         ),
+        discover_tool_package_plans(),
         include_openapi=False,
+        include_local=False,
     )
     handler = registry.get_handler(runtime_key)
     if handler is None:

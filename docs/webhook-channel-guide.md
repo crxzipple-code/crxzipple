@@ -48,7 +48,8 @@ ChannelProfile(
 )
 ```
 
-If inbound signature validation is required, add metadata on the account:
+If inbound signature validation is required, bind the account's signing secret
+slot to an Access credential binding:
 
 ```python
 ChannelProfile(
@@ -57,8 +58,10 @@ ChannelProfile(
         ChannelAccountProfile(
             account_id="default",
             transport_mode="webhook",
+            credential_bindings={
+                "webhook_signing_secret": "access-binding:webhook-secret",
+            },
             metadata={
-                "webhook_signing_secret": "top-secret",
                 # Optional. Defaults to X-Crx-Webhook-Signature
                 "webhook_signature_header": "X-Crx-Webhook-Signature",
             },
@@ -67,7 +70,9 @@ ChannelProfile(
 )
 ```
 
-`webhook_signing_secret` enables inbound request verification for that account.
+The `webhook_signing_secret` slot enables inbound request verification for
+that account. The secret value stays in Access; channel profiles store only the
+binding id.
 
 ## Inbound Endpoint
 
@@ -128,8 +133,8 @@ On success the endpoint returns the accepted run:
 
 ## Signature Validation
 
-If the selected webhook account has `webhook_signing_secret`, the inbound
-endpoint requires a signature header.
+If the selected webhook account has a `webhook_signing_secret` credential
+binding, the inbound endpoint requires a signature header.
 
 Default header:
 
@@ -140,7 +145,7 @@ X-Crx-Webhook-Signature
 Expected algorithm:
 
 ```text
-hex(HMAC-SHA256(raw_request_body, webhook_signing_secret))
+hex(HMAC-SHA256(raw_request_body, resolved_webhook_signing_secret))
 ```
 
 Both of these forms are accepted:

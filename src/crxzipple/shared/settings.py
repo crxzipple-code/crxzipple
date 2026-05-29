@@ -357,7 +357,6 @@ class ToolProviderConfig:
     base_url: str | None = None
     spec_path: str | None = None
     package_ref: str | None = None
-    credential_binding: str | None = None
     credential_bindings: Mapping[str, Any] | tuple[Mapping[str, Any], ...] = field(
         default_factory=dict
     )
@@ -389,11 +388,6 @@ class ToolProviderConfig:
         )
         object.__setattr__(
             self,
-            "credential_binding",
-            _normalize_optional_text(self.credential_binding),
-        )
-        object.__setattr__(
-            self,
             "credential_bindings",
             _credential_bindings_value(self.credential_bindings),
         )
@@ -411,6 +405,10 @@ class ToolProviderConfig:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "ToolProviderConfig":
+        if payload.get("credential_binding") is not None:
+            raise ValueError(
+                "Tool provider config must use credential_bindings with Access binding ids.",
+            )
         return cls(
             provider_id=str(payload.get("provider_id") or payload.get("id") or ""),
             provider_kind=str(
@@ -437,11 +435,6 @@ class ToolProviderConfig:
             package_ref=(
                 str(payload["package_ref"])
                 if payload.get("package_ref") is not None
-                else None
-            ),
-            credential_binding=(
-                str(payload["credential_binding"])
-                if payload.get("credential_binding") is not None
                 else None
             ),
             credential_bindings=_credential_bindings_value(
@@ -509,146 +502,6 @@ class ToolRootConfig:
                 else None
             ),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class ToolEnablementConfig:
-    tool_id: str | None = None
-    enabled: bool = True
-    scope: str = "tool"
-    pattern: str | None = None
-    provider_id: str | None = None
-    source_kind: str | None = None
-    allowed_modes: tuple[str, ...] = field(default_factory=tuple)
-    denied_consumers: tuple[str, ...] = field(default_factory=tuple)
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "tool_id", _normalize_optional_text(self.tool_id))
-        object.__setattr__(
-            self, "scope", _normalize_text(self.scope, field_name="scope")
-        )
-        object.__setattr__(self, "pattern", _normalize_optional_text(self.pattern))
-        object.__setattr__(
-            self, "provider_id", _normalize_optional_text(self.provider_id)
-        )
-        object.__setattr__(
-            self, "source_kind", _normalize_optional_text(self.source_kind)
-        )
-        object.__setattr__(
-            self, "allowed_modes", _normalize_text_tuple(self.allowed_modes)
-        )
-        object.__setattr__(
-            self, "denied_consumers", _normalize_text_tuple(self.denied_consumers)
-        )
-        if (
-            self.tool_id is None
-            and self.pattern is None
-            and self.provider_id is None
-            and self.source_kind is None
-            and self.scope == "tool"
-        ):
-            raise ValueError(
-                "tool_id, pattern, provider_id, source_kind, or non-tool scope is required."
-            )
-
-    def to_payload(self) -> JsonObject:
-        return _dataclass_payload(self)
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ToolEnablementConfig":
-        selector_keys = ("scope", "pattern", "provider_id", "source_kind")
-        tool_id = payload.get("tool_id")
-        if tool_id is None and not any(
-            payload.get(key) is not None for key in selector_keys
-        ):
-            tool_id = payload.get("id")
-        return cls(
-            tool_id=str(tool_id) if tool_id is not None else None,
-            enabled=_bool_from_payload(payload.get("enabled")),
-            scope=str(payload.get("scope") or "tool"),
-            pattern=(
-                str(payload["pattern"]) if payload.get("pattern") is not None else None
-            ),
-            provider_id=(
-                str(payload["provider_id"])
-                if payload.get("provider_id") is not None
-                else None
-            ),
-            source_kind=(
-                str(payload["source_kind"])
-                if payload.get("source_kind") is not None
-                else None
-            ),
-            allowed_modes=_tuple_from_payload(payload.get("allowed_modes")),
-            denied_consumers=_tuple_from_payload(payload.get("denied_consumers")),
-            metadata=_mapping_payload(
-                payload.get("metadata")
-                if isinstance(payload.get("metadata"), Mapping)
-                else None
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SkillEnablementConfig:
-    skill_id: str | None = None
-    enabled: bool = True
-    scope: str = "skill"
-    pattern: str | None = None
-    source: str | None = None
-    requirement_ids: tuple[str, ...] = field(default_factory=tuple)
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "skill_id", _normalize_optional_text(self.skill_id))
-        object.__setattr__(
-            self, "scope", _normalize_text(self.scope, field_name="scope")
-        )
-        object.__setattr__(self, "pattern", _normalize_optional_text(self.pattern))
-        object.__setattr__(self, "source", _normalize_optional_text(self.source))
-        object.__setattr__(
-            self, "requirement_ids", _normalize_text_tuple(self.requirement_ids)
-        )
-        if (
-            self.skill_id is None
-            and self.pattern is None
-            and self.source is None
-            and self.scope == "skill"
-        ):
-            raise ValueError(
-                "skill_id, pattern, source, or non-skill scope is required."
-            )
-
-    def to_payload(self) -> JsonObject:
-        return _dataclass_payload(self)
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "SkillEnablementConfig":
-        selector_keys = ("scope", "pattern", "source")
-        skill_id = payload.get("skill_id")
-        if skill_id is None and not any(
-            payload.get(key) is not None for key in selector_keys
-        ):
-            skill_id = payload.get("id")
-        return cls(
-            skill_id=str(skill_id) if skill_id is not None else None,
-            enabled=_bool_from_payload(payload.get("enabled")),
-            scope=str(payload.get("scope") or "skill"),
-            pattern=(
-                str(payload["pattern"]) if payload.get("pattern") is not None else None
-            ),
-            source=(
-                str(payload["source"]) if payload.get("source") is not None else None
-            ),
-            requirement_ids=_tuple_from_payload(payload.get("requirement_ids")),
-            metadata=_mapping_payload(
-                payload.get("metadata")
-                if isinstance(payload.get("metadata"), Mapping)
-                else None
-            ),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class AccessConfig:
@@ -727,7 +580,7 @@ class MemoryConfig:
     vector_provider: str = "local"
     vector_model: str | None = None
     vector_base_url: str | None = None
-    vector_credential_binding: str | None = None
+    vector_credential_binding_id: str | None = None
     vector_timeout_seconds: int = 30
     watch_interval_seconds: float | None = None
     defaults: Mapping[str, Any] = field(default_factory=dict)
@@ -758,8 +611,8 @@ class MemoryConfig:
         )
         object.__setattr__(
             self,
-            "vector_credential_binding",
-            _normalize_optional_text(self.vector_credential_binding),
+            "vector_credential_binding_id",
+            _normalize_optional_text(self.vector_credential_binding_id),
         )
         if self.vector_timeout_seconds <= 0:
             raise ValueError("vector_timeout_seconds must be positive.")
@@ -771,6 +624,10 @@ class MemoryConfig:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "MemoryConfig":
+        if payload.get("vector_credential_binding") is not None:
+            raise ValueError(
+                "Memory config must use vector_credential_binding_id.",
+            )
         return cls(
             config_id=str(payload.get("config_id") or payload.get("id") or ""),
             enabled=bool(payload.get("enabled", True)),
@@ -791,9 +648,9 @@ class MemoryConfig:
                 if payload.get("vector_base_url") is not None
                 else None
             ),
-            vector_credential_binding=(
-                str(payload["vector_credential_binding"])
-                if payload.get("vector_credential_binding") is not None
+            vector_credential_binding_id=(
+                str(payload["vector_credential_binding_id"])
+                if payload.get("vector_credential_binding_id") is not None
                 else None
             ),
             vector_timeout_seconds=int(payload.get("vector_timeout_seconds") or 30),
@@ -821,7 +678,6 @@ class RuntimeDefaultsConfig:
     enabled: bool = True
     orchestration: Mapping[str, Any] = field(default_factory=dict)
     tool_worker: Mapping[str, Any] = field(default_factory=dict)
-    daemon: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -845,11 +701,6 @@ class RuntimeDefaultsConfig:
             tool_worker=_mapping_payload(
                 payload.get("tool_worker")
                 if isinstance(payload.get("tool_worker"), Mapping)
-                else None
-            ),
-            daemon=_mapping_payload(
-                payload.get("daemon")
-                if isinstance(payload.get("daemon"), Mapping)
                 else None
             ),
             metadata=_mapping_payload(

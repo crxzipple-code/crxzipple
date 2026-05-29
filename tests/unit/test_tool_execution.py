@@ -7,6 +7,7 @@ import crxzipple.modules.tool as tool_module
 import crxzipple.modules.tool.application as tool_application_module
 from crxzipple.modules.tool.domain import (
     Tool,
+    ToolExecutionNotAllowedError,
     ToolExecutionTarget,
     ToolRun,
     ToolRunResult,
@@ -24,19 +25,19 @@ class ToolExecutionTestCase(ToolTestCaseBase):
     def test_tool_service_surface_prefers_assignment_runtime_over_queue_execution_helpers(
         self,
     ) -> None:
-        self.assertFalse(hasattr(self.container.tool_service, "assign_next_available"))
-        self.assertFalse(hasattr(self.container.tool_service, "process_next_assigned_run"))
-        self.assertFalse(hasattr(self.container.tool_service, "register_worker"))
-        self.assertFalse(hasattr(self.container.tool_service, "heartbeat_run"))
-        self.assertFalse(hasattr(self.container.tool_service, "recover_abandoned_runs"))
-        self.assertFalse(hasattr(self.container.tool_service, "handle_recovered_dispatch_task"))
-        self.assertFalse(hasattr(self.container.tool_service, "_create_runs"))
-        self.assertFalse(hasattr(self.container.tool_service, "_complete_run_results"))
-        self.assertFalse(hasattr(self.container.tool_service, "claim_next_queued_run"))
-        self.assertFalse(hasattr(self.container.tool_service, "process_next_queued_run"))
-        self.assertFalse(hasattr(self.container.tool_service, "execute_background_run"))
-        self.assertTrue(hasattr(self.container.tool_scheduler_service, "assign_next_available"))
-        self.assertFalse(hasattr(self.container.tool_scheduler_service, "claim_next_queued_run"))
+        self.assertFalse(hasattr(self.tool_service, "assign_next_available"))
+        self.assertFalse(hasattr(self.tool_service, "process_next_assigned_run"))
+        self.assertFalse(hasattr(self.tool_service, "register_worker"))
+        self.assertFalse(hasattr(self.tool_service, "heartbeat_run"))
+        self.assertFalse(hasattr(self.tool_service, "recover_abandoned_runs"))
+        self.assertFalse(hasattr(self.tool_service, "handle_recovered_dispatch_task"))
+        self.assertFalse(hasattr(self.tool_service, "_create_runs"))
+        self.assertFalse(hasattr(self.tool_service, "_complete_run_results"))
+        self.assertFalse(hasattr(self.tool_service, "claim_next_queued_run"))
+        self.assertFalse(hasattr(self.tool_service, "process_next_queued_run"))
+        self.assertFalse(hasattr(self.tool_service, "execute_background_run"))
+        self.assertTrue(hasattr(self.tool_scheduler_service, "assign_next_available"))
+        self.assertFalse(hasattr(self.tool_scheduler_service, "claim_next_queued_run"))
         self.assertTrue(hasattr(tool_application_module, "ToolSchedulerRuntimePort"))
         self.assertTrue(hasattr(tool_application_module, "ToolWorkerRuntimePort"))
         self.assertFalse(hasattr(tool_application_module, "ToolBackgroundSchedulerService"))
@@ -45,14 +46,15 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertTrue(hasattr(tool_module, "ToolWorkerRuntimePort"))
         self.assertFalse(hasattr(tool_module, "ToolBackgroundSchedulerService"))
         self.assertFalse(hasattr(tool_module, "ToolWorkerService"))
-        self.assertFalse(hasattr(self.container.tool_service, "scheduler_service"))
-        parameters = tuple(inspect.signature(self.container.tool_service.__class__).parameters)
+        self.assertFalse(hasattr(self.tool_service, "scheduler_service"))
+        parameters = tuple(inspect.signature(self.tool_service.__class__).parameters)
         self.assertEqual(
             parameters,
             (
                 "catalog_service",
                 "worker_service",
                 "submission_service",
+                "runtime_pool_service",
             ),
         )
 
@@ -196,23 +198,20 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         )
 
     def test_empty_exception_message_fails_tool_with_readable_error(self) -> None:
-        self.container.tool_service.discover_local_tools()
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="empty_exception_tool",
-                name="Empty Exception Tool",
-                description="Raises an exception with no message.",
-                runtime_key="empty_exception_tool",
-            ),
+        tool = self.seed_tool(
+            tool_id="empty_exception_tool",
+            name="Empty Exception Tool",
+            description="Raises an exception with no message.",
+            runtime_key="empty_exception_tool",
         )
 
         async def empty_exception_tool(_arguments: dict[str, object]) -> ToolRunResult:
             raise RuntimeError()
 
-        self.container.local_tool_catalog.register(tool, empty_exception_tool)
+        self.local_runtime_registry.register(tool, empty_exception_tool)
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="empty_exception_tool",
                     arguments={},
@@ -229,15 +228,12 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         )
 
     def test_execute_externalizes_inline_tool_attachments_to_artifact_refs(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="inline_image_tool",
-                name="Inline Image Tool",
-                description="Returns an inline image block.",
-                runtime_key="inline_image_tool",
-            ),
+        tool = self.seed_tool(
+            tool_id="inline_image_tool",
+            name="Inline Image Tool",
+            description="Returns an inline image block.",
+            runtime_key="inline_image_tool",
         )
 
         async def inline_image_tool(_arguments: dict[str, object]) -> ToolRunResult:
@@ -254,10 +250,10 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                 details={"ok": True},
             )
 
-        self.container.local_tool_catalog.register(tool, inline_image_tool)
+        self.local_runtime_registry.register(tool, inline_image_tool)
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="inline_image_tool",
                     arguments={},
@@ -269,23 +265,20 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(tool_run.result.blocks[0], {"type": "text", "text": "Generated image."})
         attachment_block = tool_run.result.blocks[1]
         self.assertEqual(attachment_block["type"], "image_ref")
-        artifact = self.container.artifact_service.get_artifact(
+        artifact = self.artifact_service.get_artifact(
             attachment_block["artifact_id"],
         )
         self.assertEqual(artifact.mime_type, "image/png")
         self.assertEqual(artifact.name, "generated.png")
 
     def test_execute_fails_when_tool_result_details_exceed_budget(self) -> None:
-        self.container.tool_service.details_max_chars = 128
-        self.container.tool_service.discover_local_tools()
+        self.tool_service.details_max_chars = 128
 
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="oversized_details_tool",
-                name="Oversized Details Tool",
-                description="Returns oversized details payload.",
-                runtime_key="oversized_details_tool",
-            ),
+        tool = self.seed_tool(
+            tool_id="oversized_details_tool",
+            name="Oversized Details Tool",
+            description="Returns oversized details payload.",
+            runtime_key="oversized_details_tool",
         )
 
         async def oversized_details_tool(_arguments: dict[str, object]) -> ToolRunResult:
@@ -294,10 +287,10 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                 details={"payload": "x" * 512},
             )
 
-        self.container.local_tool_catalog.register(tool, oversized_details_tool)
+        self.local_runtime_registry.register(tool, oversized_details_tool)
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="oversized_details_tool",
                     arguments={},
@@ -312,10 +305,9 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertIn("details exceed the allowed size budget", tool_run.error.message)
 
     def test_executes_local_inline_async_tool_and_persists_run(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "hello"},
@@ -327,28 +319,53 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(tool_run.output_payload["message"], "hello")
         self.assertIsNotNone(tool_run.started_at)
         self.assertIsNotNone(tool_run.completed_at)
+        self.assertEqual(tool_run.function_id, "echo")
+        self.assertEqual(tool_run.source_id, "bundled.local_package.debug")
+        self.assertIsNotNone(tool_run.function_revision)
+        self.assertIsNotNone(tool_run.source_revision)
+        self.assertIsNotNone(tool_run.schema_hash)
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             persisted = uow.tool_runs.get(tool_run.id)
 
         self.assertIsNotNone(persisted)
+        assert persisted is not None
         self.assertEqual(persisted.status, ToolRunStatus.SUCCEEDED)
+        self.assertEqual(persisted.function_id, "echo")
+        self.assertEqual(persisted.source_id, "bundled.local_package.debug")
+        self.assertIsNotNone(persisted.schema_hash)
         self.assertEqual(persisted.output_payload["received"]["message"], "hello")
 
         event_names = [
             event.event_name
-            for event in self.container.event_bus.published_events
+            for event in self.event_bus.published_events
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.created", event_names)
         self.assertIn("tool.run.started", event_names)
         self.assertIn("tool.run.succeeded", event_names)
 
+    def test_execution_gate_blocks_disabled_tool_source(self) -> None:
+        source_commands = self.container.require(AppKey.TOOL_SOURCE_COMMAND_SERVICE)
+        source_commands.disable_source("bundled.local_package.debug")
+
+        with self.assertRaisesRegex(
+            ToolExecutionNotAllowedError,
+            "source 'bundled.local_package.debug' is disabled",
+        ):
+            asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="echo",
+                        arguments={"message": "blocked"},
+                    ),
+                ),
+            )
+
     def test_executes_local_tool_with_generic_execution_context_without_persisting_it_in_input_payload(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "scoped hello"},
@@ -375,7 +392,7 @@ class ToolExecutionTestCase(ToolTestCaseBase):
             },
         )
 
-        with self.container.uow_factory() as uow:
+        with self.uow_factory() as uow:
             persisted = uow.tool_runs.get(tool_run.id)
 
         self.assertIsNotNone(persisted)
@@ -383,13 +400,11 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(persisted.input_payload, {"message": "scoped hello"})
 
     def test_execute_many_batches_inline_run_creation_and_runs_concurrently(self) -> None:
-        tool = self.container.tool_service.register(
-            RegisterToolInput(
-                id="batch_inline_tool",
-                name="Batch Inline Tool",
-                description="Exercises batch inline tool creation.",
-                runtime_key="batch_inline_tool",
-            ),
+        tool = self.seed_tool(
+            tool_id="batch_inline_tool",
+            name="Batch Inline Tool",
+            description="Exercises batch inline tool creation.",
+            runtime_key="batch_inline_tool",
         )
         active_count = 0
         max_active_count = 0
@@ -416,10 +431,10 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                 with active_lock:
                     active_count -= 1
 
-        self.container.local_tool_catalog.register(tool, batch_inline_tool)
-        original_create_runs = self.container.tool_service.submission_service._create_runs
+        self.local_runtime_registry.register(tool, batch_inline_tool)
+        original_create_runs = self.tool_service.submission_service._create_runs
         original_complete_run_results = (
-            self.container.tool_service.worker_service._complete_run_results
+            self.tool_service.worker_service._complete_run_results
         )
         batch_sizes: list[int] = []
         completion_batch_sizes: list[int] = []
@@ -433,20 +448,20 @@ class ToolExecutionTestCase(ToolTestCaseBase):
             return original_complete_run_results(completions)
 
         with patch.object(
-            self.container.tool_service.dispatch_port,
+            self.tool_service.dispatch_port,
             "complete",
-            wraps=self.container.tool_service.dispatch_port.complete,
+            wraps=self.tool_service.dispatch_port.complete,
         ) as dispatch_complete_spy, patch.object(
-            self.container.tool_service.submission_service,
+            self.tool_service.submission_service,
             "_create_runs",
             side_effect=create_runs_spy,
         ), patch.object(
-            self.container.tool_service.worker_service,
+            self.tool_service.worker_service,
             "_complete_run_results",
             side_effect=complete_run_results_spy,
         ):
             runs = asyncio.run(
-                self.container.tool_service.execute_many(
+                self.tool_service.execute_many(
                     (
                         ExecuteToolInput(
                             tool_id="batch_inline_tool",
@@ -474,10 +489,9 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(max_active_count, 2)
 
     def test_executes_local_background_tool_with_generic_execution_context(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         queued_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "background scoped hello"},
@@ -503,7 +517,7 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                     self.container,
                     worker_id="worker-background-context",
                 )
-            persisted = self.container.tool_service.get_tool_run(queued_run.id)
+            persisted = self.tool_service.get_tool_run(queued_run.id)
             if persisted.status is ToolRunStatus.SUCCEEDED:
                 break
             time.sleep(0.05)
@@ -529,19 +543,17 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         )
 
     def test_executes_sandbox_inline_async_tool_via_runtime_router(self) -> None:
-        self.container.tool_service.register(
-            RegisterToolInput(
-                id="sandbox_echo",
-                name="Sandbox Echo",
-                description="Executes through the sandbox adapter.",
-                supported_environments=(ToolEnvironment.SANDBOX,),
-                source_kind=ToolSourceKind.MANUAL,
-                runtime_key="sandbox.echo",
-            ),
+        self.seed_tool(
+            tool_id="sandbox_echo",
+            name="Sandbox Echo",
+            description="Executes through the sandbox adapter.",
+            supported_environments=(ToolEnvironment.SANDBOX,),
+            definition_origin=ToolDefinitionOrigin.LOCAL_DISCOVERY,
+            runtime_key="sandbox.echo",
         )
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="sandbox_echo",
                     arguments={"message": "sandbox hello"},
@@ -562,10 +574,9 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         )
 
     def test_executes_local_inline_thread_tool_and_reports_thread_context(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "thread hello"},
@@ -583,10 +594,9 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         )
 
     def test_executes_local_inline_process_tool_and_reports_process_context(self) -> None:
-        self.container.tool_service.discover_local_tools()
 
         tool_run = asyncio.run(
-            self.container.tool_service.execute(
+            self.tool_service.execute(
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "process hello"},

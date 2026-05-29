@@ -3,13 +3,26 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from crxzipple.interfaces.runtime_container import AppKey
 from crxzipple.modules.orchestration.domain import (
     OrchestrationExecutorLease,
 )
 from tests.unit.cli_test_support import *
 
 
+class _RuntimeCliFakeContainer:
+    def __init__(self, values: dict[AppKey, object]) -> None:
+        self._values = values
+
+    def require(self, key: AppKey) -> object:
+        return self._values[key]
+
+
 class OrchestrationCliTestCase(CliModuleTestCase):
+    def setUp(self) -> None:
+            super().setUp()
+            self.env["APP_LLM_PROFILE_PATHS"] = os.pathsep
+
     def test_orchestration_intake_command_accepts_prepares_and_enqueues_run(self) -> None:
             llm_result = self.runner.invoke(
                 app,
@@ -20,6 +33,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     "openai",
                     "openai_responses",
                     "gpt-5.4-mini",
+                    "--credential-binding-id",
+                    "openai-api-key",
                 ],
                 env=self.env,
             )
@@ -109,6 +124,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     "openai",
                     "openai_responses",
                     "gpt-5.4-mini",
+                    "--credential-binding-id",
+                    "openai-api-key",
                 ],
                 env=self.env,
             )
@@ -276,8 +293,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
     def test_orchestration_executor_process_next_completes_minimal_llm_run(self) -> None:
             server = SampleLlmApiServer()
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
             server.start()
 
             try:
@@ -292,8 +309,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                         "llama3.2",
                         "--base-url",
                         f"{server.base_url}/v1",
-                        "--credential-binding",
-                        "env:OPENAI_COMPATIBLE_TOKEN",
+                        "--credential-binding-id",
+                        "openai-api-key",
                     ],
                     env=self.env,
                 )
@@ -396,9 +413,9 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 )
             finally:
                 if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                    os.environ.pop("OPENAI_API_KEY", None)
                 else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                    os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
 
     def test_orchestration_executor_heartbeat_command_records_executor_lease(self) -> None:
@@ -453,6 +470,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     "openai",
                     "openai_responses",
                     "gpt-5.4-mini",
+                    "--credential-binding-id",
+                    "openai-api-key",
                 ],
                 env=self.env,
             )
@@ -507,8 +526,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
     def test_orchestration_executor_run_processes_assignments_until_limit(self) -> None:
             server = SampleLlmApiServer()
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
             server.start()
 
             try:
@@ -523,8 +542,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                         "llama3.2",
                         "--base-url",
                         f"{server.base_url}/v1",
-                        "--credential-binding",
-                        "env:OPENAI_COMPATIBLE_TOKEN",
+                        "--credential-binding-id",
+                        "openai-api-key",
                     ],
                     env=self.env,
                 )
@@ -618,9 +637,9 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 self.assertEqual(payload["result_payload"]["output_text"], "hello from sample llm")
             finally:
                 if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                    os.environ.pop("OPENAI_API_KEY", None)
                 else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                    os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
 
     def test_orchestration_scheduler_help_only_exposes_scheduler_commands(self) -> None:
@@ -692,8 +711,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
     def test_process_assignment_inline_command_targets_requested_run(self) -> None:
             server = SampleLlmApiServer()
-            previous_token = os.environ.get("OPENAI_COMPATIBLE_TOKEN")
-            os.environ["OPENAI_COMPATIBLE_TOKEN"] = "sample-compat-token"
+            previous_token = os.environ.get("OPENAI_API_KEY")
+            os.environ["OPENAI_API_KEY"] = "sample-compat-token"
             server.start()
 
             try:
@@ -708,8 +727,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                         "llama3.2",
                         "--base-url",
                         f"{server.base_url}/v1",
-                        "--credential-binding",
-                        "env:OPENAI_COMPATIBLE_TOKEN",
+                        "--credential-binding-id",
+                        "openai-api-key",
                     ],
                     env=self.env,
                 )
@@ -803,9 +822,9 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 self.assertEqual(json.loads(second_get.stdout)["status"], "queued")
             finally:
                 if previous_token is None:
-                    os.environ.pop("OPENAI_COMPATIBLE_TOKEN", None)
+                    os.environ.pop("OPENAI_API_KEY", None)
                 else:
-                    os.environ["OPENAI_COMPATIBLE_TOKEN"] = previous_token
+                    os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
 
     def test_admit_assignment_command_targets_requested_run_without_processing(self) -> None:
@@ -818,6 +837,8 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     "openai",
                     "openai_responses",
                     "gpt-5.4-mini",
+                    "--credential-binding-id",
+                    "openai-api-key",
                 ],
                 env=self.env,
             )
@@ -965,16 +986,15 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_executor_service = _FakeExecutorService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {AppKey.ORCHESTRATION_EXECUTOR_SERVICE: _FakeExecutorService()},
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1057,16 +1077,19 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_scheduler_service = _FakeSchedulerService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: (
+                                _FakeSchedulerService()
+                            ),
+                        },
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._scheduler_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1146,12 +1169,30 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                     return 7
 
             class _FakeContainer:
-                operations_observer_runtime_event_service = _FakeOperationsObserverRuntime()
-                operations_projection_materializer = None
+                def __init__(self) -> None:
+                    self._values = {
+                        AppKey.OPERATIONS_OBSERVER_RUNTIME_EVENT_SERVICE: (
+                            _FakeOperationsObserverRuntime()
+                        ),
+                        AppKey.OPERATIONS_PROJECTION_MATERIALIZER: None,
+                    }
+
+                def require(self, key):
+                    return self._values[key]
+
+                def close(self) -> None:
+                    pass
+
+            class _FakeRuntimeContainer:
+                def __enter__(self):
+                    return _FakeContainer()
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    return None
 
             with patch(
-                "crxzipple.modules.operations.interfaces.worker_cli.build_container",
-                return_value=_FakeContainer(),
+                "crxzipple.modules.operations.interfaces.worker_cli.runtime_container",
+                return_value=_FakeRuntimeContainer(),
             ):
                 result = self.runner.invoke(
                     app,
@@ -1191,6 +1232,67 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 {
                     "processed_events": 7,
                     "worker_id": "operations-observer-1",
+                },
+            )
+
+    def test_operations_observer_rebuild_only_rebuilds_projections(self) -> None:
+            calls: list[str] = []
+
+            class _FakeProjectionStore:
+                def clear(self, **kwargs):  # noqa: ANN001
+                    calls.append(f"clear:{kwargs}")
+                    return 3
+
+            class _FakeMaterializer:
+                def materialize_all(self) -> int:
+                    calls.append("materialize_all")
+                    return 10
+
+            class _FakeContainer:
+                def __init__(self) -> None:
+                    self._values = {
+                        AppKey.OPERATIONS_PROJECTION_STORE: _FakeProjectionStore(),
+                        AppKey.OPERATIONS_PROJECTION_MATERIALIZER: _FakeMaterializer(),
+                    }
+
+                def require(self, key):
+                    return self._values[key]
+
+                def close(self) -> None:
+                    pass
+
+            class _FakeRuntimeContainer:
+                def __enter__(self):
+                    return _FakeContainer()
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    return None
+
+            with patch(
+                "crxzipple.modules.operations.interfaces.worker_cli.runtime_container",
+                return_value=_FakeRuntimeContainer(),
+            ):
+                result = self.runner.invoke(
+                    app,
+                    [
+                        "operations-observer",
+                        "rebuild",
+                        "--worker-id",
+                        "operations-observer-1",
+                    ],
+                    env=self.env,
+                )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(calls, ["clear:{}", "materialize_all"])
+            self.assertEqual(
+                json.loads(result.stdout),
+                {
+                    "processed_events": 0,
+                    "materialized_modules": 10,
+                    "worker_id": "operations-observer-1",
+                    "observation_reset": False,
+                    "projection_reset": True,
                 },
             )
 
@@ -1273,16 +1375,15 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_executor_service = _FakeExecutorService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {AppKey.ORCHESTRATION_EXECUTOR_SERVICE: _FakeExecutorService()},
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1325,16 +1426,15 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_executor_service = _FakeExecutorService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {AppKey.ORCHESTRATION_EXECUTOR_SERVICE: _FakeExecutorService()},
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1369,16 +1469,19 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_scheduler_service = _FakeSchedulerService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: (
+                                _FakeSchedulerService()
+                            ),
+                        },
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._scheduler_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1427,16 +1530,15 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_executor_service = _FakeExecutorService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {AppKey.ORCHESTRATION_EXECUTOR_SERVICE: _FakeExecutorService()},
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1500,16 +1602,15 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_executor_service = _FakeExecutorService()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {AppKey.ORCHESTRATION_EXECUTOR_SERVICE: _FakeExecutorService()},
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._executor_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1683,18 +1784,22 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_scheduler_service = fake_scheduler
-                        orchestration_executor_service = fake_executor
-                        orchestration_run_query_service = _FakeRunQueryService()
-
-                    return _FakeContainer()
+                    container = _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: fake_scheduler,
+                            AppKey.ORCHESTRATION_EXECUTOR_SERVICE: fake_executor,
+                            AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
+                                _FakeRunQueryService()
+                            ),
+                        },
+                    )
+                    return container, container
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._linked_runtime_containers",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -1778,32 +1883,205 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 "orchestration.executor.assignment_completions",
             )
 
+    def _invoke_benchmark_tool_io_with_fakes(
+        self,
+        *,
+        same_lane: bool = False,
+        max_active_tool_calls: int,
+    ):
+            class _FakeStatus:
+                value = "completed"
+
+            class _FakeRun:
+                status = _FakeStatus()
+                worker_id = "executor-tool-io-1"
+
+                def __init__(self, run_id: str) -> None:
+                    self.id = run_id
+
+            class _FakeSchedulerService:
+                def __init__(self) -> None:
+                    self.main_keys: list[str] = []
+                    self.run_calls: list[dict[str, object]] = []
+
+                def submit_turn(self, data, *, inline_worker_id=None):  # noqa: ANN001, ANN201
+                    del inline_worker_id
+                    self.main_keys.append(data.context.main_key)
+                    return _FakeRun(data.accept_input.run_id)
+
+                def run_until_stopped(
+                    self,
+                    *,
+                    worker_id: str,
+                    poll_interval_seconds: float,
+                    max_runs: int | None = None,
+                    max_idle_cycles: int | None = None,
+                    stop_event=None,
+                ) -> int:
+                    del stop_event
+                    self.run_calls.append(
+                        {
+                            "worker_id": worker_id,
+                            "poll_interval_seconds": poll_interval_seconds,
+                            "max_runs": max_runs,
+                            "max_idle_cycles": max_idle_cycles,
+                        },
+                    )
+                    return max_runs or 0
+
+            class _FakeExecutorService:
+                def __init__(self) -> None:
+                    self.heartbeats: list[dict[str, object]] = []
+                    self.run_calls: list[dict[str, object]] = []
+
+                def heartbeat_executor(
+                    self,
+                    *,
+                    worker_id: str,
+                    max_inflight_assignments: int | None = None,
+                    inflight_assignment_count: int | None = None,
+                    draining: bool | None = None,
+                    metadata: dict[str, object] | None = None,
+                ):  # noqa: ANN201
+                    self.heartbeats.append(
+                        {
+                            "worker_id": worker_id,
+                            "max_inflight_assignments": max_inflight_assignments,
+                            "inflight_assignment_count": inflight_assignment_count,
+                            "draining": draining,
+                            "metadata": metadata,
+                        },
+                    )
+                    return object()
+
+                def list_executor_leases(self, *, status=None):  # noqa: ANN001, ANN201
+                    del status
+                    return []
+
+                def run_until_stopped(
+                    self,
+                    *,
+                    worker_id: str,
+                    poll_interval_seconds: float,
+                    max_runs: int | None = None,
+                    max_idle_cycles: int | None = None,
+                    max_concurrent_assignments: int = 1,
+                    stop_event=None,
+                ) -> int:
+                    del stop_event
+                    self.run_calls.append(
+                        {
+                            "worker_id": worker_id,
+                            "poll_interval_seconds": poll_interval_seconds,
+                            "max_runs": max_runs,
+                            "max_idle_cycles": max_idle_cycles,
+                            "max_concurrent_assignments": max_concurrent_assignments,
+                        },
+                    )
+                    return max_runs or 0
+
+                def runtime_metrics_snapshot(self) -> dict[str, object]:
+                    return {
+                        "timings": [
+                            {
+                                "name": "orchestration.executor.advance_phase_seconds",
+                                "labels": {"phase": "engine"},
+                                "count": 2,
+                            },
+                            {
+                                "name": "orchestration.engine.phase_seconds",
+                                "labels": {"phase": "tool_execution"},
+                                "count": 2,
+                            },
+                        ],
+                    }
+
+            class _FakeRunQueryService:
+                def list_runs(self, *, status=None):  # noqa: ANN001, ANN201
+                    del status
+                    return []
+
+                def get_run(self, run_id: str) -> _FakeRun:
+                    return _FakeRun(run_id)
+
+            class _FakeStats:
+                def snapshot(self) -> dict[str, int]:
+                    return {
+                        "started_tool_calls": 4,
+                        "completed_tool_calls": 4,
+                        "active_tool_calls": 0,
+                        "max_active_tool_calls": max_active_tool_calls,
+                        "started_llm_invocations": 2,
+                        "completed_llm_invocations": 2,
+                    }
+
+            fake_scheduler = _FakeSchedulerService()
+            fake_executor = _FakeExecutorService()
+
+            class _FakeContainerContext:
+                def __enter__(self):
+                    container = _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: fake_scheduler,
+                            AppKey.ORCHESTRATION_EXECUTOR_SERVICE: fake_executor,
+                            AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
+                                _FakeRunQueryService()
+                            ),
+                        },
+                    )
+                    return container, container
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            command = [
+                "orchestration-executor",
+                "benchmark-tool-io",
+                "--agent-id",
+                "tool-io-single-lane-agent" if same_lane else "tool-io-agent",
+                "--run-count",
+                "2",
+                "--tool-calls-per-run",
+                "2",
+                "--tool-sleep-seconds",
+                "0.2",
+                "--run-id-prefix",
+                "tool-io-single-lane-cli" if same_lane else "tool-io-cli",
+                "--main-key",
+                "tool-io-single-lane-cli" if same_lane else "tool-io-cli",
+                "--max-concurrent-assignments",
+                "2",
+                "--poll-interval-seconds",
+                "0.01",
+                "--scheduler-poll-interval-seconds",
+                "0.01",
+            ]
+            if same_lane:
+                command.append("--same-lane")
+
+            with (
+                patch(
+                    "crxzipple.modules.orchestration.interfaces.worker_cli._linked_runtime_containers",
+                    return_value=_FakeContainerContext(),
+                ),
+                patch(
+                    "crxzipple.modules.orchestration.interfaces.worker_cli._register_tool_io_benchmark_runtime",
+                    return_value=(
+                        "benchmark.tool_io.fake",
+                        "benchmark_tool_io_sleep_fake",
+                        _FakeStats(),
+                    ),
+                ),
+            ):
+                result = self.runner.invoke(app, command, env=self.env)
+
+            return result, fake_scheduler, fake_executor
+
     def test_orchestration_executor_benchmark_tool_io_reports_cross_run_concurrency(self) -> None:
-            result = self.runner.invoke(
-                app,
-                [
-                    "orchestration-executor",
-                    "benchmark-tool-io",
-                    "--agent-id",
-                    "tool-io-agent",
-                    "--run-count",
-                    "2",
-                    "--tool-calls-per-run",
-                    "2",
-                    "--tool-sleep-seconds",
-                    "0.2",
-                    "--run-id-prefix",
-                    "tool-io-cli",
-                    "--main-key",
-                    "tool-io-cli",
-                    "--max-concurrent-assignments",
-                    "2",
-                    "--poll-interval-seconds",
-                    "0.01",
-                    "--scheduler-poll-interval-seconds",
-                    "0.01",
-                ],
-                env=self.env,
+            result, fake_scheduler, fake_executor = (
+                self._invoke_benchmark_tool_io_with_fakes(
+                    max_active_tool_calls=4,
+                )
             )
 
             self.assertEqual(result.exit_code, 0, result.stderr)
@@ -1819,6 +2097,17 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             self.assertEqual(payload["completed_tool_call_count"], 4)
             self.assertGreaterEqual(payload["max_active_tool_calls"], 3)
             self.assertEqual(payload["executor"]["max_concurrent_assignments"], 2)
+            self.assertEqual(
+                fake_scheduler.main_keys,
+                [
+                    "tool-io-cli-tool-io-cli-0001",
+                    "tool-io-cli-tool-io-cli-0002",
+                ],
+            )
+            self.assertEqual(
+                [call["max_concurrent_assignments"] for call in fake_executor.run_calls],
+                [2],
+            )
             timing_phases = {
                 (item["name"], item.get("labels", {}).get("phase"))
                 for item in payload["runtime_metrics"]["timings"]
@@ -1833,32 +2122,11 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             )
 
     def test_orchestration_executor_benchmark_tool_io_same_lane_counts_each_run(self) -> None:
-            result = self.runner.invoke(
-                app,
-                [
-                    "orchestration-executor",
-                    "benchmark-tool-io",
-                    "--agent-id",
-                    "tool-io-single-lane-agent",
-                    "--run-count",
-                    "2",
-                    "--tool-calls-per-run",
-                    "2",
-                    "--tool-sleep-seconds",
-                    "0.2",
-                    "--run-id-prefix",
-                    "tool-io-single-lane-cli",
-                    "--main-key",
-                    "tool-io-single-lane-cli",
-                    "--same-lane",
-                    "--max-concurrent-assignments",
-                    "2",
-                    "--poll-interval-seconds",
-                    "0.01",
-                    "--scheduler-poll-interval-seconds",
-                    "0.01",
-                ],
-                env=self.env,
+            result, fake_scheduler, fake_executor = (
+                self._invoke_benchmark_tool_io_with_fakes(
+                    same_lane=True,
+                    max_active_tool_calls=2,
+                )
             )
 
             self.assertEqual(result.exit_code, 0, result.stderr)
@@ -1869,6 +2137,17 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             self.assertEqual(payload["expected_tool_call_count"], 4)
             self.assertEqual(payload["completed_tool_call_count"], 4)
             self.assertLessEqual(payload["max_active_tool_calls"], 2)
+            self.assertEqual(
+                fake_scheduler.main_keys,
+                [
+                    "tool-io-single-lane-cli-tool-io-single-lane-cli",
+                    "tool-io-single-lane-cli-tool-io-single-lane-cli",
+                ],
+            )
+            self.assertEqual(
+                [call["max_concurrent_assignments"] for call in fake_executor.run_calls],
+                [1],
+            )
 
     def test_orchestration_executor_benchmark_daemon_runtime_waits_for_daemons(self) -> None:
             class _FakeStatus:
@@ -1920,18 +2199,21 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_scheduler_service = fake_scheduler
-                        orchestration_run_query_service = _FakeRunQueryService()
-                        daemon_manager = fake_daemon_manager
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: fake_scheduler,
+                            AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
+                                _FakeRunQueryService()
+                            ),
+                            AppKey.DAEMON_MANAGER: fake_daemon_manager,
+                        },
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._admin_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -2002,18 +2284,23 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_scheduler_service = _FakeSchedulerService()
-                        orchestration_run_query_service = _FakeRunQueryService()
-                        daemon_manager = _FakeDaemonManager()
-
-                    return _FakeContainer()
+                    return _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: (
+                                _FakeSchedulerService()
+                            ),
+                            AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
+                                _FakeRunQueryService()
+                            ),
+                            AppKey.DAEMON_MANAGER: _FakeDaemonManager(),
+                        },
+                    )
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._admin_container",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(
@@ -2064,18 +2351,24 @@ class OrchestrationCliTestCase(CliModuleTestCase):
 
             class _FakeContainerContext:
                 def __enter__(self):
-                    class _FakeContainer:
-                        orchestration_scheduler_service = fake_scheduler
-                        orchestration_executor_service = _FakeExecutorService()
-                        orchestration_run_query_service = _FakeRunQueryService()
-
-                    return _FakeContainer()
+                    container = _RuntimeCliFakeContainer(
+                        {
+                            AppKey.ORCHESTRATION_SCHEDULER_SERVICE: fake_scheduler,
+                            AppKey.ORCHESTRATION_EXECUTOR_SERVICE: (
+                                _FakeExecutorService()
+                            ),
+                            AppKey.ORCHESTRATION_RUN_QUERY_SERVICE: (
+                                _FakeRunQueryService()
+                            ),
+                        },
+                    )
+                    return container, container
 
                 def __exit__(self, exc_type, exc, tb):
                     return False
 
             with patch(
-                "crxzipple.modules.orchestration.interfaces.worker_cli._worker_container",
+                "crxzipple.modules.orchestration.interfaces.worker_cli._linked_runtime_containers",
                 return_value=_FakeContainerContext(),
             ):
                 result = self.runner.invoke(

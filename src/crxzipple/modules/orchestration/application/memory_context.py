@@ -3,8 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from crxzipple.modules.memory.application import MemoryExcerpt
-from crxzipple.modules.orchestration.application.ports import MemoryPort
+from crxzipple.modules.memory.application import (
+    MemoryActorContext,
+    MemoryRecallItem,
+    MemoryRecallRequest,
+    MemoryRuntimePort,
+)
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 
 
@@ -18,35 +22,46 @@ class RecalledMemory:
 
 
 def recall_prompt_memories(
-    memory_service: MemoryPort,
+    memory_service: MemoryRuntimePort,
     *,
     run: OrchestrationRun,
+    session_key: str | None = None,
+    workspace_dir: str | None = None,
 ) -> tuple[RecalledMemory, ...]:
     if run.agent_id is None or not run.agent_id.strip():
         return ()
-    context = memory_service.resolve_context(space_id=run.agent_id)
-    if context is None:
-        return ()
-    memory_service.warm_context(context=context)
-    for path in ("MEMORY.md", "memory.md"):
-        excerpt = memory_service.get(
-            context=context,
-            path=path,
+    try:
+        result = memory_service.recall(
+            MemoryRecallRequest(
+                actor=MemoryActorContext(
+                    agent_id=run.agent_id,
+                    run_id=run.id,
+                    session_key=session_key,
+                    active_session_id=run.active_session_id,
+                    workspace_dir=workspace_dir,
+                ),
+                query=run.inbound_instruction.content,
+                max_items=6,
+                metadata={"purpose": "prompt_bootstrap"},
+            ),
         )
-        if excerpt is None or not excerpt.text.strip():
-            continue
-        return (_to_recalled_memory(excerpt),)
-    return ()
+    except ValueError:
+        return ()
+    return tuple(
+        _to_recalled_memory(item)
+        for item in result.items
+        if item.text.strip()
+    )
 
 
-def _to_recalled_memory(excerpt: MemoryExcerpt) -> RecalledMemory:
+def _to_recalled_memory(item: MemoryRecallItem) -> RecalledMemory:
     title = "Long-Term Memory"
-    if excerpt.path.strip():
-        title = Path(excerpt.path).name
+    if item.path.strip():
+        title = Path(item.path).name
     return RecalledMemory(
-        id=excerpt.path,
+        id=item.citation,
         title=title,
-        summary=f"Bootstrap memory from {excerpt.path}",
-        content=excerpt.text,
+        summary=f"Bootstrap memory from {item.path}",
+        content=item.text,
         tags=(),
     )

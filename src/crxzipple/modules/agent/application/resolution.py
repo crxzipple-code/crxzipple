@@ -17,15 +17,6 @@ class ToolCatalogQueryPort(Protocol):
     def list_tools(self) -> list[Any]: ...
 
 
-class SkillCatalogQueryPort(Protocol):
-    def list_available(
-        self,
-        *,
-        workspace_dir: str | None = None,
-        surface: str = "interactive",
-    ) -> list[Any]: ...
-
-
 class AccessReadinessQueryPort(Protocol):
     def check_requirement(
         self,
@@ -57,7 +48,7 @@ class AgentResolvedLlm:
     model_name: str | None = None
     capabilities: tuple[str, ...] = ()
     context_window_tokens: int | None = None
-    credential_binding: str | None = None
+    credential_binding_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,25 +58,12 @@ class AgentResolvedTool:
     enabled: bool
     name: str | None = None
     kind: str | None = None
-    source_kind: str | None = None
+    definition_origin: str | None = None
     access_requirements: tuple[str, ...] = ()
     access_requirement_sets: tuple[tuple[str, ...], ...] = ()
     required_effect_ids: tuple[str, ...] = ()
     requires_confirmation: bool = False
     mutates_state: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class AgentResolvedSkill:
-    skill_id: str
-    resolved: bool
-    name: str | None = None
-    source: str | None = None
-    required_tools: tuple[str, ...] = ()
-    optional_tools: tuple[str, ...] = ()
-    suggested_tools: tuple[str, ...] = ()
-    required_effects: tuple[str, ...] = ()
-    access_requirements: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +111,6 @@ class AgentResolutionSummary:
     status: str
     llm_routes: int
     tools: int
-    skills: int
     access_grants: int
     authorization_grants: int
     issues: int
@@ -146,7 +123,6 @@ class AgentProfileResolution:
     summary: AgentResolutionSummary
     llm_routes: tuple[AgentResolvedLlm, ...] = ()
     tools: tuple[AgentResolvedTool, ...] = ()
-    skills: tuple[AgentResolvedSkill, ...] = ()
     access_grants: tuple[AgentAccessGrant, ...] = ()
     authorization_grants: tuple[AgentAuthorizationGrant, ...] = ()
     validation: tuple[AgentValidationIssue, ...] = ()
@@ -160,14 +136,12 @@ class AgentProfileResolutionQueryService:
         agent_profiles: AgentProfileQueryPort,
         llm_profiles: LlmProfileQueryPort | None = None,
         tool_catalog: ToolCatalogQueryPort | None = None,
-        skill_catalog: SkillCatalogQueryPort | None = None,
         access_readiness: AccessReadinessQueryPort | None = None,
         authorization_policies: AuthorizationPolicyQueryPort | None = None,
     ) -> None:
         self.agent_profiles = agent_profiles
         self.llm_profiles = llm_profiles
         self.tool_catalog = tool_catalog
-        self.skill_catalog = skill_catalog
         self.access_readiness = access_readiness
         self.authorization_policies = authorization_policies
 
@@ -179,9 +153,6 @@ class AgentProfileResolutionQueryService:
             or runtime.workspace
             or runtime.home_dir
         )
-        attrs = dict(runtime.attrs)
-        tool_ids = _text_list(attrs.get("tool_ids", attrs.get("tools", ())))
-        skill_ids = _text_list(attrs.get("skill_ids", attrs.get("skills", ())))
 
         validation: list[AgentValidationIssue] = []
         trace: list[AgentResolutionTrace] = [
@@ -197,24 +168,18 @@ class AgentProfileResolutionQueryService:
             validation=validation,
             trace=trace,
         )
-        tools, tool_access = self._resolve_tools(
-            tool_ids,
-            validation=validation,
+        authorization_grants = self._resolve_authorization_grants(
+            profile.id,
             trace=trace,
         )
-        skills, skill_access = self._resolve_skills(
-            skill_ids,
-            workspace_dir=workspace_dir,
+        tools, tool_access = self._resolve_tools(
+            authorization_grants,
             validation=validation,
             trace=trace,
         )
         access_grants = self._resolve_access_grants(
-            [*llm_access, *tool_access, *skill_access],
+            [*llm_access, *tool_access],
             workspace_dir=workspace_dir,
-        )
-        authorization_grants = self._resolve_authorization_grants(
-            profile.id,
-            trace=trace,
         )
 
         status = "valid"
@@ -230,14 +195,12 @@ class AgentProfileResolutionQueryService:
                 status=status,
                 llm_routes=len(llm_routes),
                 tools=len(tools),
-                skills=len(skills),
                 access_grants=len(access_grants),
                 authorization_grants=len(authorization_grants),
                 issues=len(validation),
             ),
             llm_routes=tuple(llm_routes),
             tools=tuple(tools),
-            skills=tuple(skills),
             access_grants=tuple(access_grants),
             authorization_grants=tuple(authorization_grants),
             validation=tuple(validation),
@@ -305,7 +268,9 @@ class AgentProfileResolutionQueryService:
                 )
                 continue
 
-            credential_binding = _optional_text(getattr(llm, "credential_binding", None))
+            credential_binding_id = _optional_text(
+                getattr(llm, "credential_binding_id", None),
+            )
             enabled = bool(getattr(llm, "enabled", False))
             rows.append(
                 AgentResolvedLlm(
@@ -319,9 +284,7 @@ class AgentProfileResolutionQueryService:
                     context_window_tokens=_optional_int(
                         getattr(llm, "context_window_tokens", None),
                     ),
-                    credential_binding=_public_credential_binding_label(
-                        credential_binding,
-                    ),
+                    credential_binding_id=credential_binding_id,
                 ),
             )
             if not enabled:
@@ -333,12 +296,12 @@ class AgentProfileResolutionQueryService:
                         ref=f"llm:{llm_id}",
                     ),
                 )
-            if credential_binding:
+            if credential_binding_id:
                 access.append(
                     _pending_access_grant(
                         source_type="llm",
                         source_id=llm_id,
-                        requirement=credential_binding,
+                        requirement=credential_binding_id,
                         grant_kind="credential_binding",
                     ),
                 )
@@ -346,7 +309,7 @@ class AgentProfileResolutionQueryService:
 
     def _resolve_tools(
         self,
-        tool_ids: list[str],
+        authorization_grants: list[AgentAuthorizationGrant],
         *,
         validation: list[AgentValidationIssue],
         trace: list[AgentResolutionTrace],
@@ -381,6 +344,10 @@ class AgentProfileResolutionQueryService:
 
         rows: list[AgentResolvedTool] = []
         access: list[AgentAccessGrant] = []
+        tool_ids = _tool_ids_from_authorization_grants(
+            authorization_grants,
+            tool_by_id=tool_by_id,
+        )
         for tool_id in dict.fromkeys(tool_ids):
             tool = tool_by_id.get(tool_id)
             if tool is None:
@@ -396,7 +363,7 @@ class AgentProfileResolutionQueryService:
                         severity="error",
                         code="agent.tool_not_found",
                         message=(
-                            f"Tool '{tool_id}' is selected but was not found in Tool catalog."
+                            f"Tool '{tool_id}' is authorized for this agent but was not found in Tool catalog."
                         ),
                         ref=f"tool:{tool_id}",
                     ),
@@ -417,7 +384,9 @@ class AgentProfileResolutionQueryService:
                     enabled=enabled,
                     name=_optional_text(getattr(tool, "name", None)),
                     kind=_enum_value(getattr(tool, "kind", None)),
-                    source_kind=_enum_value(getattr(tool, "source_kind", None)),
+                    definition_origin=_enum_value(
+                        getattr(tool, "definition_origin", None),
+                    ),
                     access_requirements=access_requirements,
                     access_requirement_sets=access_requirement_sets,
                     required_effect_ids=_text_tuple(
@@ -434,7 +403,7 @@ class AgentProfileResolutionQueryService:
                     AgentValidationIssue(
                         severity="warning",
                         code="agent.tool_disabled",
-                        message=f"Tool '{tool_id}' is selected but disabled.",
+                        message=f"Tool '{tool_id}' is authorized for this agent but disabled.",
                         ref=f"tool:{tool_id}",
                     ),
                 )
@@ -446,105 +415,6 @@ class AgentProfileResolutionQueryService:
                     _pending_access_grant(
                         source_type="tool",
                         source_id=tool_id,
-                        requirement=requirement,
-                        grant_kind="requirement",
-                    ),
-                )
-        return rows, access
-
-    def _resolve_skills(
-        self,
-        skill_ids: list[str],
-        *,
-        workspace_dir: str | None,
-        validation: list[AgentValidationIssue],
-        trace: list[AgentResolutionTrace],
-    ) -> tuple[list[AgentResolvedSkill], list[AgentAccessGrant]]:
-        skill_by_id: dict[str, Any] = {}
-        if self.skill_catalog is None:
-            trace.append(
-                AgentResolutionTrace(
-                    source="skills",
-                    status="unavailable",
-                    detail="Skills catalog query port is not configured",
-                ),
-            )
-        else:
-            try:
-                skills = self.skill_catalog.list_available(
-                    workspace_dir=workspace_dir,
-                    surface="interactive",
-                )
-                skill_by_id = {item.name: item for item in skills}
-                trace.append(
-                    AgentResolutionTrace(
-                        source="skills",
-                        status="resolved",
-                        detail=f"{len(skill_by_id)} skills available",
-                    ),
-                )
-            except Exception as exc:  # pragma: no cover - defensive partial stack guard
-                trace.append(
-                    AgentResolutionTrace(
-                        source="skills",
-                        status="error",
-                        detail=str(exc),
-                    ),
-                )
-
-        rows: list[AgentResolvedSkill] = []
-        access: list[AgentAccessGrant] = []
-        for skill_id in dict.fromkeys(skill_ids):
-            skill = skill_by_id.get(skill_id)
-            if skill is None:
-                rows.append(AgentResolvedSkill(skill_id=skill_id, resolved=False))
-                validation.append(
-                    AgentValidationIssue(
-                        severity="warning",
-                        code="agent.skill_not_found",
-                        message=(
-                            f"Skill '{skill_id}' is selected but was not found "
-                            "for this workspace/surface."
-                        ),
-                        ref=f"skill:{skill_id}",
-                    ),
-                )
-                continue
-
-            requirements = getattr(skill, "requirements", None)
-            access_requirements = (
-                _text_tuple(getattr(requirements, "compatibility_auth", ()))
-                + _text_tuple(getattr(requirements, "compatibility_secrets", ()))
-                + _text_tuple(
-                    getattr(requirements, "compatibility_credential_files", ()),
-                )
-            )
-            rows.append(
-                AgentResolvedSkill(
-                    skill_id=skill_id,
-                    resolved=True,
-                    name=_optional_text(getattr(skill, "name", None)),
-                    source=_optional_text(getattr(skill, "source", None)),
-                    required_tools=_text_tuple(
-                        getattr(requirements, "required_tools", ()),
-                    ),
-                    optional_tools=_text_tuple(
-                        getattr(requirements, "optional_tools", ()),
-                    ),
-                    suggested_tools=_text_tuple(
-                        getattr(requirements, "suggested_tools", ()),
-                    ),
-                    required_effects=_text_tuple(
-                        getattr(requirements, "required_effects", ()),
-                    ),
-                    access_requirements=access_requirements,
-                ),
-            )
-            for requirement in access_requirements:
-                access.append(
-                    _pending_access_grant(
-                        source_type="skill",
-                        source_id=skill_id,
                         requirement=requirement,
                         grant_kind="requirement",
                     ),
@@ -685,11 +555,7 @@ def _pending_access_grant(
     return AgentAccessGrant(
         source_type=source_type,
         source_id=source_id,
-        requirement=(
-            _public_credential_binding_label(requirement)
-            if grant_kind == "credential_binding"
-            else requirement
-        ),
+        requirement=requirement,
         grant_kind=grant_kind,
         _raw_requirement=requirement,
     )
@@ -737,6 +603,31 @@ def _authorization_grant_from_policy(
     )
 
 
+def _tool_ids_from_authorization_grants(
+    grants: list[AgentAuthorizationGrant],
+    *,
+    tool_by_id: dict[str, Any],
+) -> list[str]:
+    tool_ids: list[str] = []
+    granted_effect_ids: set[str] = set()
+    for grant in grants:
+        if grant.effect != "allow" or grant.status != "enabled":
+            continue
+        tool_ids.extend(grant.tool_ids)
+        granted_effect_ids.update(grant.effect_ids)
+
+    if granted_effect_ids:
+        for tool in tool_by_id.values():
+            required_effect_ids = _text_tuple(
+                getattr(tool, "required_effect_ids", ()),
+            )
+            if required_effect_ids and all(
+                effect_id in granted_effect_ids for effect_id in required_effect_ids
+            ):
+                tool_ids.append(str(getattr(tool, "id", "")).strip())
+    return [tool_id for tool_id in dict.fromkeys(tool_ids) if tool_id]
+
+
 def _authorization_action(actions: tuple[str, ...]) -> str | None:
     for candidate in ("tool.effect.authorize", "tool.authorize"):
         if any(fnmatch(candidate, pattern) for pattern in actions):
@@ -778,10 +669,6 @@ def _dict_payload(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _text_list(value: object) -> list[str]:
-    return list(_text_tuple(value))
-
-
 def _text_tuple(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value.strip(),) if value.strip() else ()
@@ -819,20 +706,3 @@ def _optional_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _public_credential_binding_label(binding: str | None) -> str | None:
-    if binding is None or not binding.strip():
-        return None
-    normalized = binding.strip()
-    if normalized.startswith("env:"):
-        env_name = normalized.removeprefix("env:").strip()
-        return f"env:{env_name}" if env_name else "env"
-    if normalized.startswith("file:"):
-        return "file credential"
-    if normalized.startswith("codex_auth_json") or normalized in {
-        "codex-cli",
-        "codex_auth_json",
-    }:
-        return "codex_auth_json"
-    return "credential binding"

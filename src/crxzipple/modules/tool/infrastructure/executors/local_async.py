@@ -11,7 +11,7 @@ from typing import Any
 from crxzipple.modules.tool.domain import ToolExecutionContext
 from crxzipple.modules.tool.domain import Tool
 from crxzipple.modules.tool.domain.exceptions import ToolExecutionNotSupportedError
-from crxzipple.modules.tool.infrastructure.discovery import LocalToolCatalog, LocalToolHandler
+from crxzipple.modules.tool.infrastructure.discovery import LocalToolRuntimeRegistry, LocalToolHandler
 from crxzipple.modules.tool.infrastructure.handler_invocation import (
     invoke_tool_handler,
 )
@@ -33,11 +33,11 @@ def _invoke_handler_sync(
 
 
 class LocalAsyncToolExecutor:
-    def __init__(self, catalog: LocalToolCatalog) -> None:
-        self.catalog = catalog
+    def __init__(self, registry: LocalToolRuntimeRegistry) -> None:
+        self.registry = registry
 
-    def list_local_tools(self) -> list[Tool]:
-        return self.catalog.list_local_tools()
+    def list_registered_tools(self) -> list[Tool]:
+        return self.registry.list_registered_tools()
 
     async def execute_async(
         self,
@@ -91,7 +91,7 @@ class LocalAsyncToolExecutor:
             ) from exc
 
     def _resolve_handler(self, tool: Tool, *, strategy_label: str) -> LocalToolHandler:
-        handler = self.catalog.get_handler(tool.resolved_runtime_key())
+        handler = self.registry.get_handler(tool.resolved_runtime_key())
         if handler is None:
             raise ToolExecutionNotSupportedError(
                 f"No local {strategy_label} handler is registered for tool '{tool.id}'.",

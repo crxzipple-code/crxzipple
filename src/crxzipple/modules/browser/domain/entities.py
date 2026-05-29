@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypeAlias
 
 from .exceptions import BrowserValidationError
@@ -8,6 +9,10 @@ from .value_objects import BrowserStoredRef
 from .value_objects import _normalize_optional_text, _normalize_profile_name
 
 _PAGE_STATE_METADATA_KEY = "page_state_by_target"
+_HOST_GENERATION_METADATA_KEY = "host_generation"
+_PAGE_GENERATION_KEY = "page_generation"
+_PAGE_GENERATION_REASON_KEY = "page_generation_reason"
+_SNAPSHOT_GENERATION_KEY = "snapshot_generation"
 _ACTIVE_OVERLAY_SELECTOR_KEY = "active_overlay_selector"
 _ACTIVE_OVERLAY_KIND_KEY = "active_overlay_kind"
 _ACTIVE_OVERLAY_SOURCE_REF_KEY = "active_overlay_source_ref"
@@ -26,6 +31,108 @@ BrowserAttachmentStatus: TypeAlias = Literal[
     "closed",
     "failed",
 ]
+BrowserProfileAllocationStatus: TypeAlias = Literal[
+    "active",
+    "released",
+    "expired",
+    "failed",
+    "lost",
+]
+BrowserProfileAllocationConsumerKind: TypeAlias = Literal[
+    "tool_run",
+    "orchestration_run",
+    "session",
+    "agent",
+    "manual",
+]
+
+
+def _normalize_browser_ref(value: object) -> str | None:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        return None
+    if normalized.startswith("mcp:"):
+        return None
+    return normalized
+
+
+def _normalize_allocation_id(value: object) -> str:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        raise BrowserValidationError("allocation id is required.")
+    return normalized
+
+
+def _normalize_pool_id(value: object) -> str:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        raise BrowserValidationError("pool id is required.")
+    return normalized.lower()
+
+
+def _normalize_consumer_id(value: object) -> str:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        raise BrowserValidationError("consumer id is required.")
+    return normalized
+
+
+def _normalize_consumer_kind(value: object) -> str:
+    normalized = (_normalize_optional_text(value) or "").lower()
+    if normalized not in {
+        "tool_run",
+        "orchestration_run",
+        "session",
+        "agent",
+        "manual",
+    }:
+        raise BrowserValidationError(
+            "consumer_kind must be one of: agent, manual, orchestration_run, session, tool_run.",
+        )
+    return normalized
+
+
+def _normalize_allocation_status(value: object) -> str:
+    normalized = (_normalize_optional_text(value) or "").lower()
+    if normalized not in {"active", "released", "expired", "failed", "lost"}:
+        raise BrowserValidationError(
+            "allocation status must be one of: active, expired, failed, lost, released.",
+        )
+    return normalized
+
+
+def _ensure_aware_utc(value: datetime, *, label: str) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    normalized = value.astimezone(timezone.utc)
+    if normalized.year < 2000:
+        raise BrowserValidationError(f"{label} is invalid.")
+    return normalized
+
+
+def _normalize_target_host(value: object) -> str | None:
+    normalized = _normalize_optional_text(value)
+    return normalized.lower() if normalized is not None else None
+
+
+def _normalize_target_ids(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidates: object = (value,)
+    else:
+        candidates = value
+    if not isinstance(candidates, (list, tuple, set)):
+        return ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        target_id = _normalize_optional_text(str(item) if item is not None else None)
+        if target_id is None or target_id in seen:
+            continue
+        seen.add(target_id)
+        normalized.append(target_id)
+    return tuple(normalized)
 
 
 @dataclass(slots=True)
@@ -40,7 +147,7 @@ class BrowserProfileRuntimeState:
 
     def __post_init__(self) -> None:
         self.profile_name = _normalize_profile_name(self.profile_name)
-        self.browser_ref = _normalize_optional_text(self.browser_ref)
+        self.browser_ref = _normalize_browser_ref(self.browser_ref)
         self.last_target_id = _normalize_optional_text(self.last_target_id)
         self.last_error = _normalize_optional_text(self.last_error)
         if self.attachment_status not in {
@@ -71,7 +178,7 @@ class BrowserProfileRuntimeState:
         running_pid: int | None = None,
     ) -> None:
         self.attachment_status = "attached"
-        self.browser_ref = _normalize_optional_text(browser_ref) or self.browser_ref
+        self.browser_ref = _normalize_browser_ref(browser_ref) or self.browser_ref
         self.running_pid = running_pid if running_pid is not None else self.running_pid
         self.last_error = None
 
@@ -84,12 +191,27 @@ class BrowserProfileRuntimeState:
 
     def mark_failed(self, reason: str) -> None:
         self.attachment_status = "failed"
+        self.browser_ref = None
+        self.running_pid = None
+        self.last_target_id = None
         self.last_error = _normalize_optional_text(reason)
 
     def mark_closed(self) -> None:
         self.attachment_status = "closed"
         self.browser_ref = None
         self.running_pid = None
+
+    def host_generation(self) -> str | None:
+        return _normalize_optional_text(self.metadata.get(_HOST_GENERATION_METADATA_KEY))
+
+    def remember_host_generation(self, generation: str | None) -> bool:
+        normalized = _normalize_optional_text(generation)
+        previous = self.host_generation()
+        if normalized is None:
+            self.metadata.pop(_HOST_GENERATION_METADATA_KEY, None)
+        else:
+            self.metadata[_HOST_GENERATION_METADATA_KEY] = normalized
+        return previous is not None and normalized is not None and previous != normalized
 
     def remember_target(self, target_id: str | None) -> None:
         self.last_target_id = _normalize_optional_text(target_id)
@@ -105,7 +227,44 @@ class BrowserProfileRuntimeState:
         if normalized_target is None or normalized_kind is None:
             return
         state = self._page_state(normalized_target)
+        state.setdefault(_PAGE_GENERATION_KEY, 1)
         state["last_action_kind"] = normalized_kind
+
+    def remember_page_opened(self, *, target_id: str) -> None:
+        normalized_target = _normalize_optional_text(target_id)
+        if normalized_target is None:
+            return
+        state = self._page_state(normalized_target)
+        state.setdefault(_PAGE_GENERATION_KEY, 1)
+        state[_PAGE_GENERATION_REASON_KEY] = "open-tab"
+
+    def reset_page_state(
+        self,
+        *,
+        target_id: str,
+        reason: str,
+    ) -> None:
+        normalized_target = _normalize_optional_text(target_id)
+        normalized_reason = _normalize_optional_text(reason) or "changed"
+        if normalized_target is None:
+            return
+        previous_generation = self.page_generation(target_id=normalized_target)
+        page_states = self.metadata.get(_PAGE_STATE_METADATA_KEY)
+        if not isinstance(page_states, dict):
+            page_states = {}
+            self.metadata[_PAGE_STATE_METADATA_KEY] = page_states
+        page_states[normalized_target] = {
+            _PAGE_GENERATION_KEY: previous_generation + 1,
+            _PAGE_GENERATION_REASON_KEY: normalized_reason,
+        }
+
+    def page_generation(self, *, target_id: str) -> int:
+        state = self.page_state(target_id=target_id) or {}
+        try:
+            numeric = int(state.get(_PAGE_GENERATION_KEY) or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(numeric, 0)
 
     def remember_page_snapshot(
         self,
@@ -121,8 +280,10 @@ class BrowserProfileRuntimeState:
         if normalized_target is None or normalized_format is None:
             return
         state = self._page_state(normalized_target)
+        state.setdefault(_PAGE_GENERATION_KEY, 1)
         state["last_action_kind"] = "snapshot"
         state["current_ref_generation"] = max(int(generation), 1)
+        state[_SNAPSHOT_GENERATION_KEY] = max(int(generation), 1)
         state["last_snapshot_format"] = normalized_format
         state["last_snapshot_ref_count"] = max(int(ref_count), 0)
         state["last_snapshot_frame_count"] = max(int(frame_count), 0)
@@ -156,7 +317,9 @@ class BrowserProfileRuntimeState:
             "snapshot",
         )
         state["last_action_kind"] = "snapshot"
+        state.setdefault(_PAGE_GENERATION_KEY, 1)
         state["current_ref_generation"] = latest_generation
+        state[_SNAPSHOT_GENERATION_KEY] = latest_generation
         state["last_snapshot_format"] = snapshot_format
         state["last_snapshot_ref_count"] = len(active_refs)
         state["last_snapshot_frame_count"] = len({ref.frame_path for ref in active_refs})
@@ -356,6 +519,9 @@ class BrowserProfileRuntimeState:
         if not page_states:
             self.metadata.pop(_PAGE_STATE_METADATA_KEY, None)
 
+    def forget_all_pages(self) -> None:
+        self.metadata.pop(_PAGE_STATE_METADATA_KEY, None)
+
     def page_state(self, *, target_id: str) -> dict[str, Any] | None:
         normalized_target = _normalize_optional_text(target_id)
         if normalized_target is None:
@@ -376,3 +542,96 @@ class BrowserProfileRuntimeState:
             state = {}
             page_states[target_id] = state
         return state
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserProfileAllocation:
+    allocation_id: str
+    pool_id: str
+    profile_name: str
+    consumer_kind: BrowserProfileAllocationConsumerKind
+    consumer_id: str
+    target_host: str | None = None
+    status: BrowserProfileAllocationStatus = "active"
+    acquired_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc) + timedelta(seconds=900),
+    )
+    last_heartbeat_at: datetime | None = None
+    released_at: datetime | None = None
+    release_reason: str | None = None
+    owned_target_ids: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        acquired_at = _ensure_aware_utc(self.acquired_at, label="acquired_at")
+        expires_at = _ensure_aware_utc(self.expires_at, label="expires_at")
+        if expires_at <= acquired_at:
+            raise BrowserValidationError("expires_at must be after acquired_at.")
+        released_at = (
+            _ensure_aware_utc(self.released_at, label="released_at")
+            if self.released_at is not None
+            else None
+        )
+        last_heartbeat_at = (
+            _ensure_aware_utc(self.last_heartbeat_at, label="last_heartbeat_at")
+            if self.last_heartbeat_at is not None
+            else None
+        )
+        object.__setattr__(
+            self,
+            "allocation_id",
+            _normalize_allocation_id(self.allocation_id),
+        )
+        object.__setattr__(self, "pool_id", _normalize_pool_id(self.pool_id))
+        object.__setattr__(self, "profile_name", _normalize_profile_name(self.profile_name))
+        object.__setattr__(
+            self,
+            "consumer_kind",
+            _normalize_consumer_kind(self.consumer_kind),
+        )
+        object.__setattr__(self, "consumer_id", _normalize_consumer_id(self.consumer_id))
+        object.__setattr__(self, "target_host", _normalize_target_host(self.target_host))
+        object.__setattr__(
+            self,
+            "status",
+            _normalize_allocation_status(self.status),
+        )
+        object.__setattr__(self, "acquired_at", acquired_at)
+        object.__setattr__(self, "expires_at", expires_at)
+        object.__setattr__(self, "last_heartbeat_at", last_heartbeat_at)
+        object.__setattr__(self, "released_at", released_at)
+        object.__setattr__(
+            self,
+            "release_reason",
+            _normalize_optional_text(self.release_reason),
+        )
+        object.__setattr__(
+            self,
+            "owned_target_ids",
+            _normalize_target_ids(self.owned_target_ids),
+        )
+        object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.status == "active" and self.released_at is not None:
+            raise BrowserValidationError("active allocation must not define released_at.")
+        if self.status != "active" and self.released_at is None:
+            raise BrowserValidationError("inactive allocation must define released_at.")
+
+    def is_active_at(self, now: datetime) -> bool:
+        normalized_now = _ensure_aware_utc(now, label="now")
+        return self.status == "active" and self.expires_at > normalized_now
+
+    def matches_consumer(
+        self,
+        *,
+        pool_id: str,
+        consumer_kind: str,
+        consumer_id: str,
+        target_host: str | None = None,
+    ) -> bool:
+        return (
+            self.pool_id == _normalize_pool_id(pool_id)
+            and self.consumer_kind == _normalize_consumer_kind(consumer_kind)
+            and self.consumer_id == _normalize_consumer_id(consumer_id)
+            and self.target_host == _normalize_target_host(target_host)
+        )

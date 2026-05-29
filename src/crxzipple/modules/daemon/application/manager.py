@@ -19,13 +19,12 @@ from crxzipple.modules.daemon.domain import (
 )
 from crxzipple.shared.http import request_url
 from crxzipple.modules.process import (
-    ProcessApplicationService,
     ProcessNotFoundError,
     ProcessSession,
     ProcessStatus,
 )
 
-from .ports import EndpointProbe, ShellResolver
+from .ports import DaemonProcessControlPort, EndpointProbe, ShellResolver
 from .services import DaemonApplicationService
 
 
@@ -34,7 +33,7 @@ class DaemonManager:
         self,
         *,
         daemon_service: DaemonApplicationService,
-        process_service: ProcessApplicationService,
+        process_service: DaemonProcessControlPort,
         working_directory: str,
         shell_resolver: ShellResolver,
         python_executable: str | None = None,
@@ -63,15 +62,6 @@ class DaemonManager:
             "APP_EVENTS_REDIS_KEY_PREFIX",
             "APP_EVENTS_REDIS_BLOCK_MS",
             "APP_EVENTS_REDIS_DEDUPE_TTL_SECONDS",
-            "APP_ORCHESTRATION_RUN_LEASE_SECONDS",
-            "APP_ORCHESTRATION_RUN_HEARTBEAT_SECONDS",
-            "APP_ORCHESTRATION_EXECUTOR_MAX_CONCURRENT_ASSIGNMENTS",
-            "APP_TOOL_RUN_LEASE_SECONDS",
-            "APP_TOOL_RUN_HEARTBEAT_SECONDS",
-            "APP_TOOL_WORKER_MAX_IN_FLIGHT",
-            "APP_TOOL_WORKER_DEFAULT_RUN_CONCURRENCY",
-            "APP_TOOL_WORKER_IMAGE_RUN_CONCURRENCY",
-            "APP_TOOL_WORKER_SHARED_STATE_RUN_CONCURRENCY",
         )
 
     def list_instances(
@@ -110,6 +100,11 @@ class DaemonManager:
                 return
             ordered_keys.append(normalized)
 
+        def _push_startable(spec) -> None:  # noqa: ANN001
+            if spec.start_policy == "lazy":
+                return
+            _push(spec.key)
+
         if include_eager:
             for spec in self.daemon_service.list_service_specs():
                 if spec.start_policy == "eager":
@@ -118,18 +113,18 @@ class DaemonManager:
             service_set = self.daemon_service.get_service_set(service_set_key)
             for role in service_set.service_roles:
                 for spec in self.daemon_service.list_service_specs(role=role):
-                    _push(spec.key)
+                    _push_startable(spec)
             for group in service_set.service_groups:
                 for spec in self.daemon_service.list_service_specs(service_group=group):
-                    _push(spec.key)
+                    _push_startable(spec)
             for key in service_set.service_keys:
                 _push(key)
         for role in service_roles:
             for spec in self.daemon_service.list_service_specs(role=role):
-                _push(spec.key)
+                _push_startable(spec)
         for group in service_groups:
             for spec in self.daemon_service.list_service_specs(service_group=group):
-                _push(spec.key)
+                _push_startable(spec)
         for key in service_keys:
             _push(key)
         return tuple(ordered_keys)
@@ -151,13 +146,27 @@ class DaemonManager:
         return self.daemon_service.list_instances(service_key=spec.key)
 
     def ensure_service(self, service_key: str) -> tuple[DaemonInstance, ...]:
+        return self._ensure_service(service_key, stack=())
+
+    def _ensure_service(
+        self,
+        service_key: str,
+        *,
+        stack: tuple[str, ...],
+    ) -> tuple[DaemonInstance, ...]:
         spec = self.daemon_service.get_service_spec(service_key)
+        if spec.key in stack:
+            cycle = " -> ".join((*stack, spec.key))
+            raise DaemonValidationError(
+                f"Daemon service dependency cycle detected: {cycle}.",
+            )
         if not self._supports_process_management(spec):
             if self._supports_endpoint_healthcheck(spec):
                 return self.healthcheck_service(spec.key)
             raise DaemonValidationError(
                 f"Daemon service '{spec.key}' does not support process-backed ensure.",
             )
+        self._ensure_required_services(spec, stack=(*stack, spec.key))
         instances = list(self.refresh_service(spec.key))
         active_instances = [
             instance
@@ -174,6 +183,7 @@ class DaemonManager:
         spec = self.daemon_service.get_service_spec(service_key)
         if not self._supports_process_management(spec):
             return self.healthcheck_service(spec.key)
+        self._ensure_required_services(spec, stack=(spec.key,))
         instances = list(self.refresh_service(spec.key))
         instances = [self._reconcile_runtime_environment(spec, instance) for instance in instances]
         active_instances = [
@@ -400,6 +410,12 @@ class DaemonManager:
             session = self.process_service.get_session(process_id=process_id)
         except ProcessNotFoundError:
             updated = replace(instance)
+            self._clear_process_runtime(updated)
+            updated.metadata = {
+                **dict(updated.metadata),
+                "manifest_status": "stale",
+                "stale_reason": "process session was not found",
+            }
             updated.mark_failed("process session was not found")
             return updated
         return self._merge_process_status(spec, instance, session)
@@ -484,6 +500,41 @@ class DaemonManager:
         instance.mark_ready(pid=session.pid)
         self.daemon_service.save_instance(instance)
         return instance
+
+    def _ensure_required_services(
+        self,
+        spec: DaemonServiceSpec,
+        *,
+        stack: tuple[str, ...],
+    ) -> None:
+        for required_key in self._required_service_keys(spec):
+            if required_key in stack:
+                cycle = " -> ".join((*stack, required_key))
+                raise DaemonValidationError(
+                    f"Daemon service dependency cycle detected: {cycle}.",
+                )
+            instances = self._ensure_service(required_key, stack=stack)
+            if not any(instance.status == "ready" for instance in instances):
+                raise DaemonValidationError(
+                    f"Daemon service '{spec.key}' requires '{required_key}' to be ready.",
+                )
+
+    @staticmethod
+    def _required_service_keys(spec: DaemonServiceSpec) -> tuple[str, ...]:
+        raw_values: list[object] = []
+        raw_single = spec.metadata.get("requires_service_key")
+        if raw_single is not None:
+            raw_values.append(raw_single)
+        raw_many = spec.metadata.get("requires_service_keys")
+        if isinstance(raw_many, list | tuple):
+            raw_values.extend(raw_many)
+        return tuple(
+            dict.fromkeys(
+                str(value).strip().lower()
+                for value in raw_values
+                if str(value).strip()
+            ),
+        )
 
     def _reconcile_runtime_environment(
         self,

@@ -1,5 +1,17 @@
 kind: local_package
 namespace: mobile
+capabilities:
+  - mobile.device_read
+  - mobile.action
+  - mobile.screenshot
+  - artifact.write
+dependencies:
+  - id: mobile_facade
+    kind: service_dependency
+    description: Mobile application facade used to execute Android control and action requests.
+  - id: mobile_result_serializer
+    kind: service_dependency
+    description: Serializer used to convert mobile results into tool payloads.
 local_tools:
   - id: mobile_devices
     name: Mobile Devices

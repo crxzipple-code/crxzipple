@@ -9,6 +9,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentIdentity,
     AgentInstructionPolicy,
     AgentLlmRoutingPolicy,
+    AgentMemoryBinding,
     AgentRuntimePreferences,
 )
 from crxzipple.shared.domain import AggregateRoot
@@ -19,7 +20,6 @@ from crxzipple.shared.time import coerce_utc_datetime
 @dataclass(kw_only=True)
 class AgentProfile(AggregateRoot[str]):
     name: str
-    description: str = ""
     enabled: bool = True
     identity: AgentIdentity = field(default_factory=AgentIdentity)
     instruction_policy: AgentInstructionPolicy = field(
@@ -30,6 +30,7 @@ class AgentProfile(AggregateRoot[str]):
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
     )
+    memory: AgentMemoryBinding = field(default_factory=AgentMemoryBinding)
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
@@ -52,7 +53,6 @@ class AgentProfile(AggregateRoot[str]):
             raise AgentValidationError(
                 "Agent profile max_turns must be greater than zero.",
             )
-        self.description = self.description.strip()
         self.created_at = coerce_utc_datetime(self.created_at)
         self.updated_at = coerce_utc_datetime(self.updated_at)
 
@@ -60,13 +60,13 @@ class AgentProfile(AggregateRoot[str]):
         self,
         *,
         name: str | None = None,
-        description: str | None = None,
         enabled: bool | None = None,
         identity: AgentIdentity | None = None,
         instruction_policy: AgentInstructionPolicy | None = None,
         llm_routing_policy: AgentLlmRoutingPolicy | None = None,
         execution_policy: AgentExecutionPolicy | None = None,
         runtime_preferences: AgentRuntimePreferences | None = None,
+        memory: AgentMemoryBinding | None = None,
         reason: str | None = None,
         actor: str | None = None,
     ) -> None:
@@ -74,8 +74,6 @@ class AgentProfile(AggregateRoot[str]):
             if not name.strip():
                 raise AgentValidationError("Agent profile name cannot be empty.")
             self.name = name
-        if description is not None:
-            self.description = description.strip()
         if enabled is not None:
             self.enabled = enabled
         if identity is not None:
@@ -100,6 +98,8 @@ class AgentProfile(AggregateRoot[str]):
             self.execution_policy = execution_policy
         if runtime_preferences is not None:
             self.runtime_preferences = runtime_preferences
+        if memory is not None:
+            self.memory = memory
         self.updated_at = datetime.now(timezone.utc)
         self.record_event(
             Event(

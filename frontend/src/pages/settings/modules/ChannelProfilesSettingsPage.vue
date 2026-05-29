@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { ArrowRight, Copy, GitBranch, MessageCircle, Plus, Power, RefreshCcw, Save, Trash2 } from "lucide-vue-next";
+import { AlertTriangle, ArrowRight, Copy, GitBranch, KeyRound, MessageCircle, Plus, Power, RefreshCcw, Save, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 
 import DataTable from "@/shared/ui/DataTable.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
+import { useI18n } from "@/shared/i18n";
 import {
   listSettingsResources,
 } from "../api";
 import {
   deleteChannelProfile,
+  getAccessOverviewForChannelSettings,
   getChannelProfile,
   listChannelProfiles,
   setChannelProfileEnabled,
   upsertChannelProfile,
+  type AccessCredentialBindingPayload,
+  type AccessCredentialRequirementPayload,
+  type AccessOverviewPayload,
   type ChannelProfileApiPayload,
   type ChannelProfileWritePayload,
 } from "../ownerApis/channelProfiles";
@@ -58,6 +63,28 @@ interface SettingsResourcePagePayload {
   detail?: SettingsResourceDetailPayload | null;
 }
 
+interface ChannelCredentialSlotRow {
+  kind: "slot" | "empty" | "not_reported";
+  accountIndex: number;
+  accountId: string;
+  slot: string;
+  displayName: string;
+  provider: string;
+  expectedKind: string;
+  required: boolean;
+  bindingId: string;
+  ready: boolean;
+  status: string;
+  setup: string;
+  reason: string;
+  requirementId: string;
+}
+
+interface CredentialCompatibility {
+  compatible: boolean;
+  reason: string;
+}
+
 const settingsPage = ref<SettingsResourcePagePayload | null>(null);
 const selectedDetail = ref<SettingsResourceDetailPayload | null>(null);
 const selectedResourceId = ref<string | null>(null);
@@ -70,8 +97,29 @@ const ownerActionMessage = ref<string | null>(null);
 const ownerActionLoading = ref(false);
 const editMode = ref<"create" | "update">("update");
 const editorText = ref("");
+const accessOverview = ref<AccessOverviewPayload | null>(null);
+const accessError = ref<string | null>(null);
+const { t } = useI18n();
 
 const resources = computed(() => settingsPage.value?.resources ?? []);
+const channelColumns = computed(() => [
+  { key: "Name", label: t("settings.channelProfiles.table.name") },
+  { key: "Channel ID", label: t("settings.channelProfiles.table.channelId") },
+  { key: "Type", label: t("settings.channelProfiles.table.type") },
+  { key: "Status", label: t("settings.channelProfiles.table.status") },
+  { key: "Source", label: t("settings.channelProfiles.table.source") },
+  { key: "Version", label: t("settings.channelProfiles.table.version") },
+  { key: "Updated At", label: t("settings.channelProfiles.table.updatedAt") },
+]);
+const keyValueColumns = computed(() => [
+  { key: "Key", label: t("settings.channelProfiles.table.key") },
+  { key: "Value", label: t("settings.channelProfiles.table.value") },
+]);
+const resolutionColumns = computed(() => [
+  { key: "Layer", label: t("settings.channelProfiles.table.layer") },
+  { key: "Source", label: t("settings.channelProfiles.table.source") },
+  { key: "Version", label: t("settings.channelProfiles.table.version") },
+]);
 const selectedResource = computed(() =>
   resources.value.find((resource) => settingsResourceId(resource) === selectedResourceId.value)
   ?? resources.value[0]
@@ -86,8 +134,8 @@ const channelRows = computed<TableRow[]>(() =>
       Name: textValue(resource.display_name, settingsResourceId(resource)),
       "Channel ID": settingsResourceId(resource),
       Type: textValue(config.channel_kind, textValue(config.channel_type, "-")),
-      Status: resource.enabled === false ? "disabled" : textValue(resource.status, "ready"),
-      Source: textValue(resource.source, resource.resolution?.source?.name ?? "settings_application"),
+      Status: resource.enabled === false ? t("common.disabled") : statusLabel(textValue(resource.status, "ready")),
+      Source: sourceLabel(textValue(resource.source, resource.resolution?.source?.name ?? "settings_application")),
       Version: textValue(resource.version, "-"),
       "Updated At": formatTime(resource.updated_at),
     };
@@ -101,15 +149,35 @@ const effectiveRows = computed<TableRow[]>(() =>
 );
 const resolutionRows = computed<TableRow[]>(() =>
   (activeDetail.value?.resolution?.sources ?? []).map((source, index) => ({
-    Layer: index === 0 ? "primary" : "source",
-    Source: textValue(source.name, textValue(source.kind, "settings")),
+    Layer: index === 0 ? t("settings.channelProfiles.resolution.primary") : t("settings.channelProfiles.resolution.source"),
+    Source: sourceLabel(textValue(source.name, textValue(source.kind, "settings"))),
     Version: textValue(source.version_id, "-"),
   })),
 );
 const totalResources = computed(() => settingsPage.value?.list?.total ?? resources.value.length);
 const selectedChannelType = computed(() => selectedResourceId.value ?? textValue(activeDetail.value?.resource_id));
 const canWriteOwnerProfile = computed(() => !ownerActionLoading.value && editorText.value.trim().length > 0);
-const ownerFormTitle = computed(() => editMode.value === "create" ? "Create Channel Profile" : "Update Channel Profile");
+const ownerFormTitle = computed(() => editMode.value === "create" ? t("settings.channelProfiles.form.createTitle") : t("settings.channelProfiles.form.updateTitle"));
+const accessCredentialBindings = computed(() => accessOverview.value?.credential_bindings ?? []);
+const accessCredentialRequirements = computed(() => accessOverview.value?.credential_requirements ?? []);
+const selectedCredentialRows = computed(() => credentialSlotRowsForConfig(selectedConfig.value, accessCredentialRequirements.value));
+const credentialSlotCount = computed(() => selectedCredentialRows.value.filter((row) => row.kind === "slot").length);
+const credentialRequirementState = computed(() => {
+  const accounts = channelAccountsFromConfig(selectedConfig.value);
+  if (!accounts.length) return "no-accounts";
+  if (selectedCredentialRows.value.some((row) => row.kind === "not_reported")) return "not-reported";
+  if (credentialSlotCount.value === 0) return "empty";
+  if (selectedCredentialRows.value.some((row) => row.kind === "slot" && !row.ready)) return "attention";
+  return "ready";
+});
+const credentialRequirementNote = computed(() => {
+  if (credentialRequirementState.value === "no-accounts") return t("settings.channelProfiles.credential.noAccounts");
+  if (credentialRequirementState.value === "not-reported") return t("settings.channelProfiles.credential.notReported");
+  if (credentialRequirementState.value === "empty") return t("settings.channelProfiles.credential.empty");
+  if (accessError.value) return t("settings.channelProfiles.credential.accessUnavailable", { error: accessError.value });
+  if (credentialRequirementState.value === "attention") return t("settings.channelProfiles.credential.attention");
+  return t("settings.channelProfiles.credential.ready");
+});
 
 onMounted(() => {
   void loadChannelProfiles();
@@ -119,10 +187,12 @@ async function loadChannelProfiles(): Promise<void> {
   isLoading.value = true;
   loadError.value = null;
   try {
-    const [profiles, overlay] = await Promise.all([
+    const [profiles, overlay, access] = await Promise.all([
       listChannelProfiles(),
       loadSettingsOverlay(),
+      loadAccessOverview(),
     ]);
+    accessOverview.value = access;
     const payload = buildChannelProfilePage(profiles, overlay);
     settingsPage.value = payload;
     const first = profiles[0] ?? null;
@@ -139,6 +209,16 @@ async function loadChannelProfiles(): Promise<void> {
     selectedDetail.value = null;
   } finally {
     isLoading.value = false;
+  }
+}
+
+async function loadAccessOverview(): Promise<AccessOverviewPayload | null> {
+  accessError.value = null;
+  try {
+    return await getAccessOverviewForChannelSettings();
+  } catch (error) {
+    accessError.value = error instanceof Error ? error.message : String(error);
+    return null;
   }
 }
 
@@ -210,12 +290,13 @@ async function submitOwnerProfile(): Promise<void> {
   ownerActionLoading.value = true;
   try {
     const payload = parseEditorPayload();
+    assertCredentialBindingsSaveable(payload);
     const channelType = textValue(payload.channel_type, selectedChannelType.value).trim().toLowerCase();
     if (!channelType) {
-      throw new Error("channel_type is required by the Channels API.");
+      throw new Error(t("settings.channelProfiles.error.channelTypeRequired"));
     }
     const saved = await upsertChannelProfile(channelType, payload);
-    ownerActionMessage.value = `${saved.channel_type} saved through /channels/profiles.`;
+    ownerActionMessage.value = t("settings.channelProfiles.notice.saved", { channel: saved.channel_type });
     editMode.value = "update";
     await handleOwnerActionCompleted(saved.channel_type);
   } catch (error) {
@@ -233,7 +314,10 @@ async function toggleOwnerEnabled(enabled: boolean): Promise<void> {
   ownerActionLoading.value = true;
   try {
     const profile = await setChannelProfileEnabled(channelType, enabled);
-    ownerActionMessage.value = `${profile.channel_type} ${enabled ? "enabled" : "disabled"} through Channels API.`;
+    ownerActionMessage.value = t("settings.channelProfiles.notice.enabledChanged", {
+      channel: profile.channel_type,
+      status: enabled ? t("common.enabled") : t("common.disabled"),
+    });
     await handleOwnerActionCompleted(profile.channel_type);
   } catch (error) {
     ownerActionError.value = error instanceof Error ? error.message : String(error);
@@ -247,11 +331,11 @@ async function removeOwnerProfile(): Promise<void> {
   ownerActionMessage.value = null;
   const channelType = selectedChannelType.value;
   if (!channelType) return;
-  if (!window.confirm(`Delete channel profile '${channelType}' through /channels/profiles?`)) return;
+  if (!window.confirm(t("settings.channelProfiles.confirm.delete", { channel: channelType }))) return;
   ownerActionLoading.value = true;
   try {
     await deleteChannelProfile(channelType);
-    ownerActionMessage.value = `${channelType} deleted through Channels API.`;
+    ownerActionMessage.value = t("settings.channelProfiles.notice.deleted", { channel: channelType });
     await loadChannelProfiles();
   } catch (error) {
     ownerActionError.value = error instanceof Error ? error.message : String(error);
@@ -266,10 +350,10 @@ function parseEditorPayload(): ChannelProfileWritePayload {
     value = JSON.parse(editorText.value);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSON: ${detail}`);
+    throw new Error(t("settings.channelProfiles.error.invalidJson", { detail }));
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Channel profile payload must be a JSON object.");
+    throw new Error(t("settings.channelProfiles.error.payloadObject"));
   }
   return channelWritePayloadFromConfig(value as JsonRecord);
 }
@@ -297,8 +381,8 @@ function buildChannelProfilePage(
   overlay: SettingsResourcePagePayload | null,
 ): SettingsResourcePagePayload {
   return {
-    title: overlay?.title ?? "Channel Profiles",
-    description: overlay?.description ?? "Channel profiles from Channels module with Settings governance overlay.",
+    title: overlay?.title ?? t("settings.channelProfiles.title"),
+    description: overlay?.description ?? t("settings.channelProfiles.subtitle"),
     status: overlay?.status ?? (profiles.length ? "ready" : "empty"),
     resources: profiles.map(channelProfileToResource),
     list: { total: profiles.length },
@@ -323,7 +407,7 @@ function channelProfileToResource(profile: ChannelProfileApiPayload): SettingsRe
     },
     payload: effectiveConfig,
     effective_config: effectiveConfig,
-    resolution: ownerResolution("Channels module API", effectiveConfig),
+    resolution: ownerResolution(t("settings.channelProfiles.source.channelsApi"), effectiveConfig),
   };
 }
 
@@ -335,8 +419,8 @@ function channelProfileToDetail(profile: ChannelProfileApiPayload): SettingsReso
       status: "owner-api",
       checks: {
         rows: [
-          { Check: "truth source", Result: "Channels module API" },
-          { Check: "settings role", Result: "governance overlay only" },
+          { Check: t("settings.channelProfiles.validation.truthSource"), Result: t("settings.channelProfiles.source.channelsApi") },
+          { Check: t("settings.channelProfiles.validation.settingsRole"), Result: t("settings.channelProfiles.validation.governanceOverlayOnly") },
         ],
       },
     },
@@ -355,6 +439,266 @@ function channelProfileConfig(profile: ChannelProfileApiPayload): JsonRecord {
     account_count: profile.accounts.length,
     metadata: profile.metadata,
   };
+}
+
+function credentialSlotRowsForConfig(
+  config: JsonRecord,
+  accessRequirements: AccessCredentialRequirementPayload[],
+): ChannelCredentialSlotRow[] {
+  const channelType = textValue(config.channel_type ?? config.channel_kind, selectedChannelType.value).toLowerCase();
+  return channelAccountsFromConfig(config).flatMap((account, accountIndex) => {
+    const accountId = textValue(account.account_id, `account-${accountIndex + 1}`);
+    if (!("credential_requirements" in account)) {
+      return [emptyCredentialSlotRow("not_reported", accountIndex, accountId)];
+    }
+    const requirementSet = objectValue(account.credential_requirements);
+    const requirements = Array.isArray(requirementSet?.requirements)
+      ? requirementSet.requirements.map(objectValue).filter((item): item is JsonRecord => item !== null)
+      : [];
+    if (!requirements.length) {
+      return [emptyCredentialSlotRow("empty", accountIndex, accountId)];
+    }
+    const localBindings = objectValue(account.credential_bindings) ?? {};
+    return requirements.map((requirement) => {
+      const slot = objectValue(requirement.slot) ?? {};
+      const slotName = textValue(slot.slot, textValue(requirement.requirement_id, "credential"));
+      const requirementId = textValue(
+        requirement.requirement_id,
+        `channels.${channelType}.account:${accountId}.${slotName}`,
+      );
+      const accessRequirement = findAccessRequirement(accessRequirements, requirementId, channelType, accountId, slotName);
+      const bindingId = textValue(
+        accessRequirement?.binding_id,
+        textValue(slot.binding_id, textValue(localBindings[slotName], "")),
+      );
+      const required = typeof accessRequirement?.required === "boolean"
+        ? accessRequirement.required
+        : slot.required !== false;
+      const status = textValue(accessRequirement?.status, bindingId ? "bound" : required ? "missing" : "optional");
+      const ready = typeof accessRequirement?.ready === "boolean"
+        ? accessRequirement.ready
+        : Boolean(bindingId) || !required;
+      const setupHint = objectValue(accessRequirement?.setup_flow_hint) ?? objectValue(requirement.setup_flow_hint);
+      return {
+        kind: "slot",
+        accountIndex,
+        accountId,
+        slot: slotName,
+        displayName: textValue(accessRequirement?.display_name, textValue(slot.display_name, slotName)),
+        provider: textValue(accessRequirement?.provider, textValue(requirement.provider, "-")),
+        expectedKind: textValue(accessRequirement?.expected_kind, textValue(slot.expected_kind, "credential")),
+        required,
+        bindingId,
+        ready,
+        status,
+        setup: formatSetupHint(setupHint),
+        reason: textValue(accessRequirement?.reason, ""),
+        requirementId,
+      };
+    });
+  });
+}
+
+function emptyCredentialSlotRow(
+  kind: "empty" | "not_reported",
+  accountIndex: number,
+  accountId: string,
+): ChannelCredentialSlotRow {
+  return {
+    kind,
+    accountIndex,
+    accountId,
+    slot: "-",
+    displayName: kind === "empty"
+      ? t("settings.channelProfiles.credential.noRequirement")
+      : t("settings.channelProfiles.credential.requirementNotReported"),
+    provider: "-",
+    expectedKind: "-",
+    required: false,
+    bindingId: "",
+    ready: kind === "empty",
+    status: kind === "empty" ? "empty" : "not_reported",
+    setup: "-",
+    reason: "",
+    requirementId: "",
+  };
+}
+
+function channelAccountsFromConfig(config: JsonRecord): JsonRecord[] {
+  return arrayOfRecords(config.accounts);
+}
+
+function findAccessRequirement(
+  requirements: AccessCredentialRequirementPayload[],
+  requirementId: string,
+  channelType: string,
+  accountId: string,
+  slot: string,
+): AccessCredentialRequirementPayload | null {
+  return requirements.find((requirement) => requirement.requirement_id === requirementId)
+    ?? requirements.find((requirement) => (
+      requirement.consumer_module === "channels"
+      && requirement.consumer_id === `channels.${channelType}.account:${accountId}`
+      && requirement.slot === slot
+    ))
+    ?? null;
+}
+
+function updateSlotBinding(row: ChannelCredentialSlotRow, bindingId: string): void {
+  if (row.kind !== "slot") return;
+  const binding = accessCredentialBindings.value.find((item) => item.binding_id === bindingId);
+  if (binding && !credentialBindingCompatibility(binding, row.expectedKind).compatible) return;
+  let value: JsonRecord;
+  try {
+    const parsed = editorText.value.trim() ? JSON.parse(editorText.value) : {};
+    value = objectValue(parsed) ?? {};
+  } catch {
+    value = { ...selectedConfig.value };
+  }
+  const accounts = arrayOfRecords(value.accounts).map((account) => ({ ...account }));
+  const account = accounts[row.accountIndex] ?? { account_id: row.accountId };
+  const credentialBindings = { ...(objectValue(account.credential_bindings) ?? {}) };
+  if (bindingId) credentialBindings[row.slot] = bindingId;
+  else delete credentialBindings[row.slot];
+  account.credential_bindings = credentialBindings;
+  accounts[row.accountIndex] = account;
+  value.accounts = accounts;
+  editorText.value = JSON.stringify(channelWritePayloadFromConfig(value), null, 2);
+}
+
+function handleSlotBindingChange(row: ChannelCredentialSlotRow, event: Event): void {
+  const target = event.target instanceof HTMLSelectElement ? event.target : null;
+  updateSlotBinding(row, target?.value ?? "");
+}
+
+function assertCredentialBindingsSaveable(payload: ChannelProfileWritePayload): void {
+  const config = payload as unknown as JsonRecord;
+  const rows = credentialSlotRowsForConfig(config, accessCredentialRequirements.value).filter((row) => row.kind === "slot");
+  for (const row of rows) {
+    if (row.required && !row.bindingId) {
+      throw new Error(t("settings.channelProfiles.error.requiredBinding", {
+        account: row.accountId,
+        slot: row.slot,
+      }));
+    }
+    if (!row.bindingId) continue;
+    const binding = accessCredentialBindings.value.find((item) => item.binding_id === row.bindingId);
+    if (!binding) continue;
+    const compatibility = credentialBindingCompatibility(binding, row.expectedKind);
+    if (!compatibility.compatible) {
+      throw new Error(t("settings.channelProfiles.error.incompatibleBinding", {
+        account: row.accountId,
+        slot: row.slot,
+        binding: row.bindingId,
+        reason: compatibility.reason,
+      }));
+    }
+  }
+}
+
+function credentialOptionsForRow(row: ChannelCredentialSlotRow): AccessCredentialBindingPayload[] {
+  if (row.kind !== "slot") return [];
+  return [...accessCredentialBindings.value].sort((left, right) => {
+    const leftCompatible = credentialBindingCompatibility(left, row.expectedKind).compatible;
+    const rightCompatible = credentialBindingCompatibility(right, row.expectedKind).compatible;
+    if (leftCompatible !== rightCompatible) return leftCompatible ? -1 : 1;
+    return credentialBindingRank(left) - credentialBindingRank(right)
+      || left.binding_id.localeCompare(right.binding_id);
+  });
+}
+
+function credentialBindingCompatibility(
+  binding: AccessCredentialBindingPayload,
+  expectedKind: string,
+): CredentialCompatibility {
+  const expected = normalizedCredentialText(expectedKind);
+  if (!expected || expected === "credential" || expected === "any") return { compatible: true, reason: "" };
+  const bindingKind = normalizedCredentialText(binding.binding_kind);
+  const sourceKind = normalizedCredentialText(binding.source_kind);
+  const compatibleKinds = credentialKindAliases(expected);
+  if (compatibleKinds.has(bindingKind) || compatibleKinds.has(sourceKind)) return { compatible: true, reason: "" };
+  if (["credential", "credential_binding", "secret", "token"].includes(bindingKind)) {
+    return { compatible: true, reason: "" };
+  }
+  return {
+    compatible: false,
+    reason: t("settings.channelProfiles.error.bindingKindMismatch", {
+      binding: binding.binding_id,
+      actual: credentialBindingTypeLabel(binding),
+      expected: credentialKindLabel(expected),
+    }),
+  };
+}
+
+function credentialKindAliases(expectedKind: string): Set<string> {
+  const aliases: Record<string, string[]> = {
+    api_key: ["api_key", "apikey", "bearer", "bearer_token", "token"],
+    bearer_token: ["bearer", "bearer_token", "token", "api_key"],
+    app_secret: ["app_secret", "secret"],
+    webhook_secret: ["webhook_secret", "secret"],
+    basic: ["basic", "basic_auth", "username_password"],
+    oauth2_account: ["oauth2_account", "oauth_account", "oauth2", "oauth"],
+    openid_connect: ["openid_connect", "oidc", "oauth2_account"],
+    certificate: ["certificate", "cert"],
+  };
+  return new Set([expectedKind, ...(aliases[expectedKind] ?? [])]);
+}
+
+function credentialBindingRank(binding: AccessCredentialBindingPayload): number {
+  const status = normalizedCredentialText(binding.status) || "active";
+  if (["active", "ready", "enabled"].includes(status)) return 0;
+  if (["degraded", "warning", "pending"].includes(status)) return 1;
+  if (["disabled", "revoked", "blocked", "failed"].includes(status)) return 2;
+  return 3;
+}
+
+function normalizedCredentialText(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function credentialBindingTypeLabel(binding: AccessCredentialBindingPayload): string {
+  const kind = textValue(binding.binding_kind, textValue(binding.source_kind, t("settings.channelProfiles.credential.generic")));
+  const source = textValue(binding.source_kind, "");
+  return source && source !== kind ? `${kind} / ${source}` : kind;
+}
+
+function credentialKindLabel(value: string): string {
+  return value.replace(/_/g, " ");
+}
+
+function formatCredentialBindingLabel(binding: AccessCredentialBindingPayload, expectedKind: string): string {
+  const preview = binding.masked_preview ? ` · ${binding.masked_preview}` : "";
+  const status = binding.status ? ` · ${statusLabel(binding.status)}` : "";
+  const compatibility = credentialBindingCompatibility(binding, expectedKind);
+  const suffix = compatibility.compatible ? "" : ` · ${compatibility.reason}`;
+  return `${binding.binding_id} · ${credentialBindingTypeLabel(binding)}${preview}${status}${suffix}`;
+}
+
+function formatCredentialBindingHelp(row: ChannelCredentialSlotRow): string {
+  if (row.kind !== "slot") return credentialRequirementNote.value;
+  if (row.bindingId) {
+    const binding = accessCredentialBindings.value.find((item) => item.binding_id === row.bindingId);
+    if (!binding) return t("settings.channelProfiles.credential.missingInAccess", { binding: row.bindingId });
+    const compatibility = credentialBindingCompatibility(binding, row.expectedKind);
+    if (!compatibility.compatible) return compatibility.reason;
+    return t("settings.channelProfiles.credential.boundHelp", {
+      preview: binding.masked_preview ?? t("settings.channelProfiles.credential.secretHeldByAccess"),
+      binding: binding.binding_id,
+    });
+  }
+  if (row.required) return t("settings.channelProfiles.credential.requiredMissing");
+  return t("settings.channelProfiles.credential.optionalUnbound");
+}
+
+function formatSetupHint(value: JsonRecord | null): string {
+  if (!value) return "-";
+  if (setupProviderMissing(value)) return t("settings.channelProfiles.credential.needsAccessSetupProvider");
+  return setupKindLabel(textValue(value.flow_kind ?? value.kind, "-"));
+}
+
+function setupProviderMissing(value: JsonRecord): boolean {
+  const metadata = objectValue(value.metadata);
+  return metadata?.setup_provider_missing === true;
 }
 
 function ownerResolution(name: string, value: JsonRecord): SettingsResourceSummaryPayload["resolution"] {
@@ -407,6 +751,59 @@ function textValue(value: unknown, fallback = ""): string {
   return fallback;
 }
 
+function statusLabel(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const keys: Record<string, string> = {
+    active: "common.active",
+    disabled: "common.disabled",
+    enabled: "common.enabled",
+    empty: "settings.channelProfiles.status.empty",
+    owner_api: "settings.channelProfiles.status.ownerApi",
+    ready: "common.ready",
+    unknown: "status.unknown",
+  };
+  const key = keys[normalized];
+  return key ? t(key) : value;
+}
+
+function credentialStatusLabel(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const keys: Record<string, string> = {
+    bound: "settings.channelProfiles.credential.status.bound",
+    disabled: "common.disabled",
+    empty: "settings.channelProfiles.credential.status.empty",
+    missing: "settings.channelProfiles.credential.status.missing",
+    not_reported: "settings.channelProfiles.credential.status.notReported",
+    optional: "settings.channelProfiles.credential.status.optional",
+    ready: "common.ready",
+  };
+  const key = keys[normalized];
+  return key ? t(key) : value;
+}
+
+function sourceLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  const keys: Record<string, string> = {
+    "channels module api": "settings.channelProfiles.source.channelsApi",
+    channels_module_api: "settings.channelProfiles.source.channelsApi",
+    settings: "nav.settings",
+    settings_application: "settings.channelProfiles.source.settingsApplication",
+  };
+  const key = keys[normalized];
+  return key ? t(key) : value;
+}
+
+function setupKindLabel(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const keys: Record<string, string> = {
+    manual: "settings.channelProfiles.credential.setupManual",
+    browser_oauth: "settings.channelProfiles.credential.setupBrowserOauth",
+    device_code: "settings.channelProfiles.credential.setupDeviceCode",
+  };
+  const key = keys[normalized];
+  return key ? t(key) : value;
+}
+
 function formatValue(value: unknown): string {
   if (value === null || value === undefined || value === "") return "-";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
@@ -429,16 +826,16 @@ function formatTime(value: unknown): string {
   <main class="settings-module channel-settings scroll-area">
     <header class="channel-page-header">
       <div>
-        <p>Settings / <strong>Channel Profiles</strong></p>
-        <h1>{{ textValue(activeDetail?.display_name, textValue(activeDetail?.title, "Channel Profiles")) }} <span><i class="channel-status-dot" />{{ textValue(activeDetail?.status, settingsPage?.status ?? "unknown") }}</span></h1>
-        <div class="channel-id">ID: <code>{{ selectedResourceId ?? "-" }}</code><Copy :size="13" /></div>
+        <p>{{ t("nav.settings") }} / <strong>{{ t("settings.channelProfiles.title") }}</strong></p>
+        <h1>{{ textValue(activeDetail?.display_name, textValue(activeDetail?.title, t("settings.channelProfiles.title"))) }} <span><i class="channel-status-dot" />{{ statusLabel(textValue(activeDetail?.status, settingsPage?.status ?? "unknown")) }}</span></h1>
+        <div class="channel-id">{{ t("settings.channelProfiles.field.id") }}: <code>{{ selectedResourceId ?? "-" }}</code><Copy :size="13" /></div>
       </div>
       <div class="settings-header-actions">
         <UiButton size="sm" variant="secondary" :disabled="isLoading" @click="beginCreateProfile">
-          <Plus :size="14" /> New
+          <Plus :size="14" /> {{ t("settings.channelProfiles.action.new") }}
         </UiButton>
         <UiButton size="sm" variant="secondary" :disabled="isLoading" @click="loadChannelProfiles">
-          <RefreshCcw :size="14" /> Refresh
+          <RefreshCcw :size="14" /> {{ t("common.refresh") }}
         </UiButton>
       </div>
     </header>
@@ -449,8 +846,8 @@ function formatTime(value: unknown): string {
 
     <section class="channel-layout">
       <aside class="settings-panel channel-picker">
-        <label><MessageCircle :size="14" /><input disabled placeholder="Search loaded profiles..." /></label>
-        <select disabled><option>Channels owner profiles</option></select>
+        <label><MessageCircle :size="14" /><input disabled :placeholder="t('settings.channelProfiles.searchPlaceholder')" /></label>
+        <select disabled><option>{{ t("settings.channelProfiles.ownerProfiles") }}</option></select>
         <div class="channel-list">
           <button
             v-for="resource in resources"
@@ -461,20 +858,20 @@ function formatTime(value: unknown): string {
           >
             <span><MessageCircle :size="18" /></span>
             <strong>{{ textValue(resource.display_name, settingsResourceId(resource)) }}<small>{{ settingsResourceId(resource) }}</small></strong>
-            <em>{{ resource.enabled === false ? "disabled" : textValue(resource.status, "ready") }}</em>
+            <em>{{ resource.enabled === false ? t("common.disabled") : statusLabel(textValue(resource.status, "ready")) }}</em>
           </button>
         </div>
-        <p class="channel-owner-note">Create and update channel profiles through the Channels module API. Settings only shows governance policy.</p>
+        <p class="channel-owner-note">{{ t("settings.channelProfiles.ownerNote") }}</p>
       </aside>
 
       <div class="channel-workspace">
         <section class="settings-panel">
           <div class="settings-panel-heading">
-            <h2>Channel Profiles</h2>
-            <span>{{ isLoading ? "Loading" : `${channelRows.length} / ${totalResources}` }}</span>
+            <h2>{{ t("settings.channelProfiles.title") }}</h2>
+            <span>{{ isLoading ? t("common.loading") : `${channelRows.length} / ${totalResources}` }}</span>
           </div>
           <DataTable
-            :columns="['Name', 'Channel ID', 'Type', 'Status', 'Source', 'Version', 'Updated At']"
+            :columns="channelColumns"
             :rows="channelRows"
             section-id="channel-profiles"
             clickable-rows
@@ -484,55 +881,106 @@ function formatTime(value: unknown): string {
 
         <section v-if="!isLoading && !resources.length && editMode !== 'create'" class="settings-panel settings-empty-state">
           <MessageCircle :size="24" />
-          <h2>No channel profiles</h2>
-          <p><code>/channels/profiles</code> returned no profiles. Profile truth and write workflows remain in Channels; Settings only shows governance policy.</p>
+          <h2>{{ t("settings.channelProfiles.empty.title") }}</h2>
+          <p>{{ t("settings.channelProfiles.empty.body") }}</p>
         </section>
 
         <section v-else class="channel-top-grid">
           <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Effective Configuration</h2></div>
-            <DataTable :columns="['Key', 'Value']" :rows="effectiveRows" section-id="channel-effective-config" />
-            <p v-if="detailLoading">Loading selected channel detail...</p>
+            <div class="settings-panel-heading"><h2>{{ t("settings.channelProfiles.section.effectiveConfig") }}</h2></div>
+            <DataTable :columns="keyValueColumns" :rows="effectiveRows" section-id="channel-effective-config" />
+            <p v-if="detailLoading">{{ t("settings.channelProfiles.loadingDetail") }}</p>
             <p v-if="detailError" class="settings-tone-danger">{{ detailError }}</p>
           </article>
 
-          <article class="settings-panel">
-            <div class="settings-panel-heading"><h2>Resolution Trace</h2></div>
-            <DataTable :columns="['Layer', 'Source', 'Version']" :rows="resolutionRows" section-id="channel-resolution-trace" />
+          <article class="settings-panel channel-credentials">
+            <div class="settings-panel-heading">
+              <h2><KeyRound :size="15" /> {{ t("settings.channelProfiles.section.credentialSlots") }}</h2>
+              <span>{{ accessError ? t("settings.channelProfiles.credential.accessDegraded") : t("settings.channelProfiles.credential.slotCount", { count: credentialSlotCount }) }}</span>
+            </div>
+            <p :class="['channel-credential-note', credentialRequirementState === 'attention' || credentialRequirementState === 'not-reported' ? 'is-warning' : '']">
+              <AlertTriangle v-if="credentialRequirementState === 'attention' || credentialRequirementState === 'not-reported'" :size="13" />
+              {{ credentialRequirementNote }}
+            </p>
+            <div class="channel-slot-list">
+              <div
+                v-for="row in selectedCredentialRows"
+                :key="`${row.accountIndex}:${row.slot}:${row.kind}`"
+                :class="['channel-slot-row', `is-${row.kind}`, row.ready ? 'is-ready' : 'is-blocked']"
+              >
+                <div class="channel-slot-main">
+                  <strong>{{ row.displayName }}<small>{{ row.accountId }} / {{ row.slot }}</small></strong>
+                  <span>{{ row.provider }} · {{ row.expectedKind }} · {{ row.required ? t("settings.channelProfiles.credential.required") : t("settings.channelProfiles.credential.optional") }}</span>
+                </div>
+                <div class="channel-slot-state">
+                  <em>{{ credentialStatusLabel(row.status) }}</em>
+                  <small>{{ t("settings.channelProfiles.credential.setup", { setup: row.setup }) }}</small>
+                </div>
+                <template v-if="row.kind === 'slot'">
+                  <select
+                    :value="row.bindingId"
+                    :disabled="ownerActionLoading"
+                    :aria-invalid="row.required && !row.bindingId"
+                    @change="handleSlotBindingChange(row, $event)"
+                  >
+                    <option value="" :disabled="row.required">{{ t("settings.channelProfiles.credential.noBinding") }}</option>
+                    <option
+                      v-if="row.bindingId && !accessCredentialBindings.some((binding) => binding.binding_id === row.bindingId)"
+                      :value="row.bindingId"
+                    >
+                      {{ t("settings.channelProfiles.credential.missingInAccess", { binding: row.bindingId }) }}
+                    </option>
+                    <option
+                      v-for="binding in credentialOptionsForRow(row)"
+                      :key="binding.binding_id"
+                      :value="binding.binding_id"
+                      :disabled="!credentialBindingCompatibility(binding, row.expectedKind).compatible"
+                    >
+                      {{ formatCredentialBindingLabel(binding, row.expectedKind) }}
+                    </option>
+                  </select>
+                  <small :class="['channel-slot-help', row.ready ? '' : 'is-warning']">{{ formatCredentialBindingHelp(row) }}</small>
+                </template>
+              </div>
+            </div>
           </article>
 
           <aside class="channel-side-stack">
             <article class="settings-panel">
-              <div class="settings-panel-heading"><h2>Summary</h2></div>
+              <div class="settings-panel-heading"><h2>{{ t("settings.channelProfiles.section.resolutionTrace") }}</h2></div>
+              <DataTable :columns="resolutionColumns" :rows="resolutionRows" section-id="channel-resolution-trace" />
+            </article>
+            <article class="settings-panel">
+              <div class="settings-panel-heading"><h2>{{ t("settings.channelProfiles.section.summary") }}</h2></div>
               <dl class="settings-kv">
-                <div><dt>Status</dt><dd>{{ textValue(activeDetail?.status, "unknown") }}</dd></div>
-                <div><dt>Enabled</dt><dd>{{ activeDetail?.enabled === false ? "false" : "true" }}</dd></div>
-                <div><dt>Source</dt><dd>{{ textValue(activeDetail?.source, activeDetail?.resolution?.source?.name ?? "-") }}</dd></div>
-                <div><dt>Version</dt><dd>{{ textValue(activeDetail?.version, "-") }}</dd></div>
-                <div><dt>Overrides</dt><dd>{{ activeDetail?.resolution?.override_trace?.length ?? 0 }}</dd></div>
-                <div><dt>Versions</dt><dd>{{ selectedDetail?.versions?.length ?? 0 }}</dd></div>
+                <div><dt>{{ t("settings.channelProfiles.table.status") }}</dt><dd>{{ statusLabel(textValue(activeDetail?.status, "unknown")) }}</dd></div>
+                <div><dt>{{ t("settings.channelProfiles.field.enabled") }}</dt><dd>{{ activeDetail?.enabled === false ? t("common.no") : t("common.yes") }}</dd></div>
+                <div><dt>{{ t("settings.channelProfiles.table.source") }}</dt><dd>{{ sourceLabel(textValue(activeDetail?.source, activeDetail?.resolution?.source?.name ?? "-")) }}</dd></div>
+                <div><dt>{{ t("settings.channelProfiles.table.version") }}</dt><dd>{{ textValue(activeDetail?.version, "-") }}</dd></div>
+                <div><dt>{{ t("settings.channelProfiles.field.overrides") }}</dt><dd>{{ activeDetail?.resolution?.override_trace?.length ?? 0 }}</dd></div>
+                <div><dt>{{ t("settings.channelProfiles.field.versions") }}</dt><dd>{{ selectedDetail?.versions?.length ?? 0 }}</dd></div>
               </dl>
             </article>
             <article class="settings-panel channel-owner-editor">
               <div class="settings-panel-heading">
                 <h2>{{ ownerFormTitle }}</h2>
-                <span>Channels owner API</span>
+                <span>{{ t("settings.channelProfiles.form.ownerApi") }}</span>
               </div>
               <textarea v-model="editorText" spellcheck="false" />
               <div class="settings-header-actions compact-actions">
                 <UiButton size="sm" variant="primary" :disabled="!canWriteOwnerProfile" @click="submitOwnerProfile">
-                  <Save :size="14" /> Save
+                  <Save :size="14" /> {{ t("settings.channelProfiles.action.save") }}
                 </UiButton>
                 <UiButton size="sm" variant="secondary" :disabled="ownerActionLoading || !selectedChannelType" @click="toggleOwnerEnabled(activeDetail?.enabled === false)">
-                  <Power :size="14" /> {{ activeDetail?.enabled === false ? "Enable" : "Disable" }}
+                  <Power :size="14" /> {{ activeDetail?.enabled === false ? t("settings.channelProfiles.action.enable") : t("settings.channelProfiles.action.disable") }}
                 </UiButton>
                 <UiButton size="sm" variant="danger" :disabled="ownerActionLoading || !selectedChannelType" @click="removeOwnerProfile">
-                  <Trash2 :size="14" /> Delete
+                  <Trash2 :size="14" /> {{ t("settings.channelProfiles.action.delete") }}
                 </UiButton>
               </div>
               <p v-if="ownerActionMessage" class="settings-tone-success">{{ ownerActionMessage }}</p>
               <p v-if="ownerActionError" class="settings-tone-danger">{{ ownerActionError }}</p>
-              <p class="channel-owner-note">Writes go directly to <code>/channels/profiles</code>. Runtime readiness remains in Operations.</p>
+              <p class="channel-owner-note">{{ t("settings.channelProfiles.form.writeHint") }}</p>
             </article>
           </aside>
         </section>
@@ -540,9 +988,9 @@ function formatTime(value: unknown): string {
     </section>
 
     <footer class="settings-footer">
-      <span><GitBranch :size="14" />Governance overlay: /ui/settings/channel-profiles</span>
-      <span><MessageCircle :size="14" />Truth source: Channels module API</span>
-      <a>Audit History <ArrowRight :size="13" /></a>
+      <span><GitBranch :size="14" />{{ t("settings.channelProfiles.footer.governanceOverlay") }}</span>
+      <span><MessageCircle :size="14" />{{ t("settings.channelProfiles.footer.truthSource") }}</span>
+      <a>{{ t("settings.channelProfiles.footer.auditHistory") }} <ArrowRight :size="13" /></a>
     </footer>
   </main>
 </template>
@@ -711,7 +1159,7 @@ function formatTime(value: unknown): string {
 }
 
 .channel-top-grid {
-  grid-template-columns: 0.9fr 1.05fr 1.05fr;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr) 340px;
 }
 
 .channel-side-stack {
@@ -737,6 +1185,119 @@ function formatTime(value: unknown): string {
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.channel-credentials {
+  min-width: 0;
+}
+
+.channel-credentials h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.channel-credential-note {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.channel-credential-note.is-warning,
+.channel-slot-help.is-warning {
+  color: var(--color-warning);
+}
+
+.channel-slot-list {
+  display: grid;
+  gap: 8px;
+}
+
+.channel-slot-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 8px;
+  align-items: start;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-input);
+}
+
+.channel-slot-row.is-slot {
+  grid-template-columns: minmax(0, 1fr) 92px;
+}
+
+.channel-slot-row.is-empty,
+.channel-slot-row.is-not_reported {
+  border-style: dashed;
+}
+
+.channel-slot-row.is-blocked {
+  border-color: color-mix(in srgb, var(--color-warning) 50%, var(--border-subtle));
+}
+
+.channel-slot-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.channel-slot-main strong {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.channel-slot-main small,
+.channel-slot-main span,
+.channel-slot-state small,
+.channel-slot-help {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.channel-slot-state {
+  display: grid;
+  gap: 3px;
+  justify-items: end;
+  text-align: right;
+}
+
+.channel-slot-state em {
+  color: var(--color-success);
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+.channel-slot-row.is-blocked .channel-slot-state em {
+  color: var(--color-warning);
+}
+
+.channel-slot-row select {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.channel-slot-row select[aria-invalid="true"] {
+  border-color: var(--color-warning);
+}
+
+.channel-slot-help {
+  grid-column: 1 / -1;
 }
 
 .compact-actions {

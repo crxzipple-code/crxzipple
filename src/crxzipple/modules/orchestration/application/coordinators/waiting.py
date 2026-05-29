@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
-from crxzipple.modules.agent.application import AgentApplicationService
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
 from crxzipple.modules.llm.domain import ToolCallIntent
 from crxzipple.modules.orchestration.application.engine import OrchestrationEngine
-from crxzipple.modules.orchestration.application.ports import RunDispatchPort
+from crxzipple.modules.orchestration.application.ports import (
+    RunDispatchPort,
+    SessionMessageListPort,
+)
 from crxzipple.modules.orchestration.domain import (
     ApprovalDecision,
     OrchestrationQueuePolicy,
@@ -21,10 +23,7 @@ from crxzipple.modules.orchestration.domain import (
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
 )
-from crxzipple.modules.session.application import (
-    ListSessionMessagesInput,
-    SessionApplicationService,
-)
+from crxzipple.modules.session.application import ListSessionMessagesInput
 from crxzipple.modules.session.domain import SessionMessageKind
 from crxzipple.modules.tool.domain import ToolRun, ToolRunStatus
 from crxzipple.shared.domain.aggregates import AggregateRoot
@@ -67,8 +66,8 @@ class RunWaitCoordinator:
     uow_factory: Callable[[], WaitCoordinatorUnitOfWork]
     dispatch_port: RunDispatchPort
     engine: OrchestrationEngine | None
-    session_service: SessionApplicationService | None
-    agent_service: AgentApplicationService | None
+    session_service: SessionMessageListPort | None
+    agent_service: object | None
     get_run: Callable[[str], OrchestrationRun]
     resume_input_factory: Callable[..., "ResumeOrchestrationRunInput"]
     grant_run_tool_authorization: Callable[..., None]

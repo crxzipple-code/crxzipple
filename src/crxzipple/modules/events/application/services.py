@@ -130,3 +130,8 @@ class EventsApplicationService:
             source_topic=source_topic,
             cursor=cursor,
         )
+
+    def close(self) -> None:
+        close_backend = getattr(self.backend, "close", None)
+        if callable(close_backend):
+            close_backend()

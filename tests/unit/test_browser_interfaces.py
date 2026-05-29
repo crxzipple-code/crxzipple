@@ -12,15 +12,17 @@ from crxzipple.modules.browser.application import (
     DefaultBrowserProfileSelectionOpsFactory,
     DefaultBrowserProfileTabOpsFactory,
 )
-from crxzipple.modules.browser.domain import BrowserProfileConfig, BrowserSystemConfig
+from crxzipple.modules.browser.domain import (
+    BrowserProfileConfig,
+    BrowserSystemConfig,
+    BrowserValidationError,
+)
 from crxzipple.modules.browser.infrastructure import (
     InMemoryBrowserRefStore,
     InMemoryBrowserRuntimeStateStore,
     InMemoryBrowserSystemConfigStore,
     InMemoryCdpBackedPlaywrightActionEngine,
     InMemoryCdpControlEngine,
-    InMemoryMcpActionEngine,
-    InMemoryMcpControlEngine,
     StaticBrowserEngineRegistry,
 )
 from crxzipple.modules.browser.interfaces import (
@@ -54,9 +56,7 @@ class BrowserInterfacesTestCase(unittest.TestCase):
             execution_planner=DefaultBrowserExecutionPlanner(),
             engine_registry=StaticBrowserEngineRegistry(
                 cdp_control=InMemoryCdpControlEngine(),
-                mcp_control=InMemoryMcpControlEngine(),
                 cdp_backed_playwright=InMemoryCdpBackedPlaywrightActionEngine(),
-                mcp_backed=InMemoryMcpActionEngine(),
             ),
             tab_ops_factory=DefaultBrowserProfileTabOpsFactory(),
             selection_ops_factory=DefaultBrowserProfileSelectionOpsFactory(),
@@ -106,8 +106,27 @@ class BrowserInterfacesTestCase(unittest.TestCase):
 
         self.assertTrue(click_result.ok)
         self.assertEqual(click_result.target_id, open_result.target_id)
-        self.assertEqual(click_result.value["engine"], "mcp-backed")
+        self.assertEqual(click_result.value["engine"], "cdp-backed-playwright")
         self.assertEqual(click_result.value["ref"], "e3")
+
+    def test_facade_rejects_public_cdp_raw_actions(self) -> None:
+        open_result = self.facade.execute(
+            BrowserControlRequest(
+                profile_name="crxzipple",
+                kind="open-tab",
+                payload={"url": "https://example.com"},
+            )
+        )
+
+        with self.assertRaisesRegex(BrowserValidationError, "internal debug/admin"):
+            self.facade.execute(
+                BrowserPageActionRequest(
+                    profile_name="crxzipple",
+                    kind="cdp-raw",
+                    target_id=open_result.target_id,
+                    payload={"method": "Runtime.evaluate"},
+                )
+            )
 
     def test_result_serializer_shapes_control_result_for_transport_layers(self) -> None:
         open_result = self.facade.execute(
@@ -149,7 +168,7 @@ class BrowserInterfacesTestCase(unittest.TestCase):
         self.assertEqual(serialized["command"]["family"], "page-action")
         self.assertEqual(serialized["command"]["target"]["ref"], "e9")
         self.assertEqual(serialized["command"]["target"]["selector"], "#confirm")
-        self.assertEqual(serialized["value"]["engine"], "mcp-backed")
+        self.assertEqual(serialized["value"]["engine"], "cdp-backed-playwright")
         self.assertEqual(serialized["value"]["tab"]["target_id"], open_result.target_id)
 
 

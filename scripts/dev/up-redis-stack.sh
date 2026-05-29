@@ -117,7 +117,10 @@ start_daemon_supervisor() {
   rm -f "${PID_DIR}/daemon.pid"
   (
     cd "${ROOT_DIR}"
-    APP_LOG_LEVEL=WARNING "${CRXZIPPLE_PYTHON}" -m crxzipple.main daemon run --service-set workers --service-set channels-stack
+    APP_LOG_LEVEL=WARNING "${CRXZIPPLE_PYTHON}" -m crxzipple.main daemon run \
+      --service-set workers \
+      --service-set channels-stack \
+      --service-set browser-stack
   ) >"${logfile}" 2>&1
 
   local status
