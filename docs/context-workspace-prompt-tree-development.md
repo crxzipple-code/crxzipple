@@ -1022,7 +1022,7 @@ python -m crxzipple.main daemon status
 - 不保留 workspace bootstrap 直接扫文件的 normal turn 主路径。
 - 不保留 context_workspace 的万能跨模块代理。
 
-## Open Questions
+## Settled Decisions
 
 1. Session reset 默认是否清空 context workspace？
    已按默认不清空落地：reset 后旧 instance 的消息会作为
@@ -1038,10 +1038,12 @@ python -m crxzipple.main daemon status
    节点。被挡资源的审计原因不进入 Agent prompt。
 
 4. Context tree 是否需要 daemon？
-   初期不需要独立 daemon。它是应用服务 + persistence + events。后续如果有自动折叠/摘要任务，再接 daemon scheduler。
+   已决策为当前不需要独立 daemon。它是应用服务 + persistence + events。
+   只有出现自动折叠、自动摘要、过期归档等后台任务时，才接 daemon scheduler。
 
 5. Tree render 使用 XML-like 是否固定？
-   固定为默认 prompt body 格式，但内部 domain model 是 typed JSON，不把 XML 当存储真相。
+   已固定为默认 prompt body 格式。内部 domain model 仍是 typed JSON；
+   XML-like 只作为 LLM-facing render，不作为存储真相。
 
 ## 完成定义
 
