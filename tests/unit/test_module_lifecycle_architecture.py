@@ -317,6 +317,41 @@ def test_operations_source_read_model_context_is_explicitly_typed() -> None:
     assert 'getattr(container, "settings_query_service"' not in factory
 
 
+def test_orchestration_does_not_reintroduce_retired_prompt_helpers() -> None:
+    retired_paths = (
+        "src/crxzipple/modules/orchestration/application/prompt_assembler.py",
+        "src/crxzipple/modules/orchestration/application/memory_context.py",
+        "src/crxzipple/modules/orchestration/application/workspace_context.py",
+        "src/crxzipple/modules/orchestration/application/prompting/flow_prompts.py",
+    )
+    forbidden_terms = (
+        "PromptAssembler",
+        "load_workspace_context_files",
+        "workspace_context_files",
+        "build_available_tools_block",
+        "recall_prompt_memories",
+    )
+    scanned_roots = (
+        REPO_ROOT / "src" / "crxzipple" / "app" / "assembly",
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration",
+    )
+    violations: list[str] = []
+
+    for relative_path in retired_paths:
+        path = REPO_ROOT / relative_path
+        if path.exists():
+            violations.append(f"{relative_path}: retired file exists")
+
+    for root in scanned_roots:
+        for path in sorted(root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for term in forbidden_terms:
+                if term in text:
+                    violations.append(f"{path.relative_to(REPO_ROOT)}: {term}")
+
+    assert violations == []
+
+
 def test_tool_handler_factory_deps_are_manifest_driven() -> None:
     tool_packages = (
         REPO_ROOT
