@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from crxzipple.core.logger import get_logger
 from crxzipple.modules.llm.domain import (
     LlmMessage,
     LlmMessageRole,
@@ -52,9 +51,6 @@ from crxzipple.shared.runtime_metrics import (
     get_runtime_metrics_registry,
 )
 from crxzipple.shared.content_blocks import text_content_block
-
-logger = get_logger(__name__)
-
 
 @dataclass(frozen=True, slots=True)
 class EngineAdvanceOutcome:
@@ -107,8 +103,8 @@ class OrchestrationEngine:
     llm_port: LlmPort
     tool_resolver: ToolResolver
     tool_execution_port: ToolExecutionPort
+    context_snapshot_port: ContextRenderSnapshotPort
     memory_port: MemoryRuntimePort | None = None
-    context_snapshot_port: ContextRenderSnapshotPort | None = None
     detailed_phase_metrics_enabled: bool = False
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
@@ -538,41 +534,45 @@ class OrchestrationEngine:
         self,
         run: OrchestrationRun,
         prompt: PromptSurface,
-    ) -> ContextRenderSnapshotRecord | None:
-        if self.context_snapshot_port is None:
-            return None
+    ) -> ContextRenderSnapshotRecord:
         try:
-            return self.context_snapshot_port.record_run_prompt_snapshot(
+            snapshot = self.context_snapshot_port.record_run_prompt_snapshot(
                 run=run,
                 prompt=prompt,
             )
         except Exception as exc:  # pragma: no cover - defensive runtime guard.
-            logger.warning(
-                "Failed to record context render snapshot for orchestration run %s: %s",
-                run.id,
-                exc,
+            raise OrchestrationValidationError(
+                "Context Workspace prompt render failed for orchestration run "
+                f"'{run.id}': {exc}",
+            ) from exc
+        if snapshot is None:
+            raise OrchestrationValidationError(
+                "Context Workspace prompt render did not return a snapshot for "
+                f"orchestration run '{run.id}'.",
             )
-            return None
+        return snapshot
 
     def _preview_context_render_snapshot(
         self,
         run: OrchestrationRun,
         prompt: PromptSurface,
-    ) -> ContextRenderSnapshotRecord | None:
-        if self.context_snapshot_port is None:
-            return None
+    ) -> ContextRenderSnapshotRecord:
         try:
-            return self.context_snapshot_port.preview_run_prompt_snapshot(
+            snapshot = self.context_snapshot_port.preview_run_prompt_snapshot(
                 run=run,
                 prompt=prompt,
             )
         except Exception as exc:  # pragma: no cover - defensive runtime guard.
-            logger.warning(
-                "Failed to render context preview for orchestration run %s: %s",
-                run.id,
-                exc,
+            raise OrchestrationValidationError(
+                "Context Workspace prompt preview failed for orchestration run "
+                f"'{run.id}': {exc}",
+            ) from exc
+        if snapshot is None:
+            raise OrchestrationValidationError(
+                "Context Workspace prompt preview did not return a render record for "
+                f"orchestration run '{run.id}'.",
             )
-            return None
+        return snapshot
 
     @classmethod
     def _prompt_with_context_snapshot(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from crxzipple.app.integration.context_workspace_orchestration import (
     ContextWorkspacePromptSnapshotAdapter,
 )
@@ -48,6 +50,7 @@ from crxzipple.modules.orchestration.application.tool_resolver import (
 from crxzipple.modules.orchestration.domain import (
     InboundInstruction,
     OrchestrationRun,
+    OrchestrationValidationError,
 )
 from crxzipple.modules.tool.domain import Tool, ToolExecutionTarget
 
@@ -397,6 +400,31 @@ def test_engine_appends_context_artifact_blocks_to_real_prompt() -> None:
     assert artifact_message.content[1]["data"] == "cG5n"
 
 
+def test_engine_fails_when_context_render_record_is_missing() -> None:
+    engine = OrchestrationEngine(
+        prompt_surface=_FakePromptSurfaceBuilder(
+            tool_schemas=(ToolSchema(name="web_search", description="Search the web."),),
+        ),
+        session_recorder=_FakeSessionRecorder(),
+        llm_port=object(),
+        tool_resolver=_FakeToolResolver(tools=(_resolved_tool("web_search"),)),
+        tool_execution_port=object(),
+        context_snapshot_port=_MissingContextSnapshotPort(),
+    )
+
+    with pytest.raises(
+        OrchestrationValidationError,
+        match="Context Workspace prompt render did not return a snapshot",
+    ):
+        engine._build_advance_context(_run())  # noqa: SLF001
+
+    with pytest.raises(
+        OrchestrationValidationError,
+        match="Context Workspace prompt preview did not return a render record",
+    ):
+        engine.preview_prompt(_run())
+
+
 def _run() -> OrchestrationRun:
     return OrchestrationRun(
         id="run-context",
@@ -529,6 +557,26 @@ class _FakeContextSnapshotPort:
             tool_schema_mirror_available=self._tool_schema_mirror_available,
             artifact_content_blocks=self._artifact_content_blocks,
         )
+
+
+class _MissingContextSnapshotPort:
+    def preview_run_prompt_snapshot(
+        self,
+        *,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+    ) -> None:
+        del run, prompt
+        return None
+
+    def record_run_prompt_snapshot(
+        self,
+        *,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+    ) -> None:
+        del run, prompt
+        return None
 
 
 def _resolved_tool(tool_id: str) -> ResolvedTool:
