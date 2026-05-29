@@ -120,7 +120,7 @@ class ContextWorkspaceService:
 
     def _refresh_expanded_children(self, workspace: ContextWorkspace) -> None:
         for node in self._nodes.list_for_workspace(workspace.id):
-            if node.state.collapsed:
+            if node.state.collapsed and not _preloads_children(node):
                 continue
             self._load_owner_children(workspace, node)
 
@@ -442,6 +442,10 @@ def _default_root_node_seeds(
             display_order=70,
         ),
     )
+
+
+def _preloads_children(node: ContextNode) -> bool:
+    return node.owner == "tool" and node.id == "tools.available"
 
 
 def _agent_identity_node_seed(

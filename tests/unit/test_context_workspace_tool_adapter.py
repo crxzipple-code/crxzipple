@@ -123,6 +123,33 @@ def test_tool_schema_mirror_follows_context_node_state() -> None:
     assert "tool_schemas" not in rendered_after_disable.provider_attachments
 
 
+def test_tool_schema_mirror_is_preloaded_from_available_tool_surface() -> None:
+    services = _context_services(
+        _FakeToolService(
+            Tool(
+                id="fetch_weather",
+                name="Fetch Weather",
+                description="Fetch current weather for a location.",
+            ),
+        ),
+    )
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:tools",
+            agent_id="assistant",
+            metadata={"available_tool_names": ["fetch_weather"]},
+        ),
+    )
+    rendered = services["render"].render_prompt_body(
+        RenderContextPromptInput(session_key="session:tools"),
+    )
+
+    assert rendered.tool_schema_mirror_available
+    assert rendered.mirrored_node_ids == ("tools.tool.fetch_weather",)
+    assert rendered.provider_attachments["tool_schemas"][0]["name"] == "fetch_weather"
+
+
 def test_owner_refresh_preserves_tool_schema_toggle_state() -> None:
     services = _context_services(
         _FakeToolService(

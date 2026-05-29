@@ -283,7 +283,7 @@ def test_engine_uses_context_mirror_as_real_tool_schema_surface() -> None:
     assert [item.tool.id for item in context.resolved_tools.tools] == ["fetch_weather"]
 
 
-def test_engine_preserves_legacy_tool_surface_when_context_mirror_not_ready() -> None:
+def test_engine_drops_provider_tool_surface_when_context_mirror_not_ready() -> None:
     snapshot_port = _FakeContextSnapshotPort(tool_schemas=None)
     engine = OrchestrationEngine(
         prompt_surface=_FakePromptSurfaceBuilder(
@@ -298,8 +298,8 @@ def test_engine_preserves_legacy_tool_surface_when_context_mirror_not_ready() ->
 
     context = engine._build_advance_context(_run())  # noqa: SLF001
 
-    assert [schema.name for schema in context.prompt.tool_schemas] == ["web_search"]
-    assert [item.tool.id for item in context.resolved_tools.tools] == ["web_search"]
+    assert context.prompt.tool_schemas == ()
+    assert context.resolved_tools.tools == ()
 
 
 def test_engine_allows_context_mirror_to_disable_all_tool_schemas() -> None:

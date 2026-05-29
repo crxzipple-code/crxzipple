@@ -591,10 +591,8 @@ class OrchestrationEngine:
         prompt: PromptSurface,
         context_render_snapshot: ContextRenderSnapshotRecord | None,
     ) -> PromptSurface:
-        if context_render_snapshot is None:
-            return prompt
-        if context_render_snapshot.tool_schemas is None:
-            return prompt
+        if context_render_snapshot is None or context_render_snapshot.tool_schemas is None:
+            return replace(prompt, tool_schemas=())
         return replace(
             prompt,
             tool_schemas=context_render_snapshot.tool_schemas,
@@ -657,10 +655,11 @@ class OrchestrationEngine:
         prompt: PromptSurface,
         context_render_snapshot: ContextRenderSnapshotRecord | None,
     ) -> ResolvedToolSet:
-        if context_render_snapshot is None:
-            return resolved_tools
-        if context_render_snapshot.tool_schemas is None:
-            return resolved_tools
+        if context_render_snapshot is None or context_render_snapshot.tool_schemas is None:
+            return ResolvedToolSet(
+                tools=(),
+                blocked_access=resolved_tools.blocked_access,
+            )
         visible_tool_names = {
             schema.name for schema in prompt.tool_schemas if schema.name.strip()
         }

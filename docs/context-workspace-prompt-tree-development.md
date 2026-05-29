@@ -620,7 +620,8 @@ class ProviderAttachmentBundle:
 - 解析 LLM profile 和 provider capability。
 - 构建 active session transcript message surface。
 - 生成 `agent.identity` / `run.runtime` 等 context blocks。
-- 解析 skill readiness metadata 和初始 tool schema surface。
+- 解析 skill readiness metadata 和授权后的 tool candidate surface，供 Context Workspace
+  生成 `tools.available` 节点。
 - 生成 flow hint 供 Context Workspace 写入 `run.flow` node。
 
 它不再渲染最终 prompt body，不再注入 tool/skill/memory/workspace/session bulk/flow 文本，
@@ -811,7 +812,7 @@ tests/integration/test_context_workspace_prompt_render.py
 - 已接入第一版 provider attachment mirror：render 时会把 `schema_enabled` 的 tool nodes 镜像成 `provider_attachments.tool_schemas`，并记录 `mirrored_node_ids`，`disable_tool_schema` 后不会出现在 mirror bundle。
 - Owner provider refresh 会保留已有 child node state，避免重新 ensure/refresh 时把 `schema_enabled=false`、pin/collapse 等用户/agent 操作冲回默认值。
 - 已接入真实 orchestration run 的 Context render snapshot：真实 advance 会 ensure session workspace 并保存 tree snapshot；`preview_prompt` 不落快照。
-- 真实 LLM 调用的 tool schema surface 从 Context Tree mirror 读取：mirror 未加载时保留 PromptSurfaceBuilder 的初始 schema，mirror 已加载时以 `schema_enabled` 的 tool nodes 为准，全部禁用时传空 schema。
+- 真实 LLM 调用的 tool schema surface 只从 Context Tree mirror 读取：`tools.available` 会根据当前授权后的 prompt surface 预加载 tool function nodes，provider 只接收 `schema_enabled` 的 tool nodes；mirror 不可用时不再回退到 PromptSurfaceBuilder 初始 schema。
 - 已接入 Memory / Artifact / Workspace owner adapters；Memory recall、artifact open、workspace bootstrap file expand 都走 Context Tree。
 - Memory scope nodes 已带 governance metadata，Workbench Context 面板可按 private/shared/project/team/system 筛选。
 - 已替换 PromptSurfaceBuilder 的主体 blocks；真实 provider prompt 由 Context Workspace render snapshot + transcript + provider attachment mirror 组成。
@@ -886,7 +887,7 @@ npm run build
 - [x] Tool adapter 产出当前 prompt surface 已解析的 tool function nodes。
 - [x] `enable_tool_schema` / `disable_tool_schema` 会影响 render mirror bundle。
 - [x] Provider attachment bundle 生成 tool schemas。
-- [x] 真实 LLM provider tool schemas 切换为 tree mirror bundle，mirror 未准备好时保留旧路径。
+- [x] 真实 LLM provider tool schemas 切换为 tree mirror bundle，mirror 未准备好时不再回退到旧 schema surface。
 - [x] `context_tree.list/expand/collapse/pin/unpin/estimate/enable_tool_schema/disable_tool_schema` 作为 Tool local package 进入 catalog。
 - [x] mirror 可用时真实 advance 移除 legacy `available_tools` system block。
 - [x] 删除/停用 `build_available_tools_block` 的主路径，工具可调用面由 provider schema 承担，可见面由 `tools.available` 节点承担。
