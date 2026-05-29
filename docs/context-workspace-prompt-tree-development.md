@@ -1029,10 +1029,13 @@ python -m crxzipple.main daemon status
    `session.history.folded` 下的 folded ranges 披露；显式清空策略后续再单独设计。
 
 2. `pin` 是否跨 session？
-   建议不跨 session。跨 session 的偏好应该进 agent profile 或 settings policy。
+   已按不跨 session 落地：pin/unpin 是 workspace-local node state，同一 node id
+   在不同 session workspace 中互不影响。跨 session 偏好应进入 agent profile 或 settings policy。
 
 3. Human force action 是否会进入 Agent view？
-   进入的是结果状态，不进入被挡资源的原因。审计原因只在 Human/Runtime view。
+   已按 Agent view 过滤落地：Human/Runtime tree 可包含 `prompt_visible=false`
+   的节点和原因，render snapshot / Agent prompt body 只包含 `prompt_visible=true`
+   节点。被挡资源的审计原因不进入 Agent prompt。
 
 4. Context tree 是否需要 daemon？
    初期不需要独立 daemon。它是应用服务 + persistence + events。后续如果有自动折叠/摘要任务，再接 daemon scheduler。
