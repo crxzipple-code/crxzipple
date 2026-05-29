@@ -96,6 +96,36 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
     assert snapshot.metadata["parallel_recording"] is True
 
 
+def test_context_workspace_adapter_previews_tree_prompt_without_snapshot_write() -> None:
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    snapshots = InMemoryContextRenderSnapshotRepository()
+    adapter = ContextWorkspacePromptSnapshotAdapter(
+        workspace_service=ContextWorkspaceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+        ),
+        render_service=ContextRenderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+    )
+
+    snapshot_record = adapter.preview_run_prompt_snapshot(
+        run=_run(),
+        prompt=_prompt(
+            tool_schemas=(ToolSchema(name="fetch_weather", description="Fetch weather."),),
+        ),
+    )
+
+    assert snapshot_record is not None
+    assert snapshot_record.snapshot_id == "ctxpreview_run-context"
+    assert "<context_tree" in snapshot_record.prompt_body
+    assert "tools.available" in snapshot_record.included_node_ids
+    assert snapshots.get_by_run("run-context") is None
+
+
 def test_context_workspace_adapter_records_agent_and_runtime_blocks_as_tree_content() -> None:
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
@@ -205,10 +235,18 @@ def test_context_workspace_adapter_mirrors_opened_artifact_blocks(tmp_path) -> N
     assert snapshot.provider_attachments["artifact_content_candidates"][0]["artifact_id"] == "image-1"
 
 
-def test_engine_records_context_snapshot_only_for_real_advance_context() -> None:
-    snapshot_port = _FakeContextSnapshotPort()
+def test_engine_preview_uses_context_tree_without_recording_snapshot() -> None:
+    snapshot_port = _FakeContextSnapshotPort(
+        prompt_body="<context_tree><node id=\"session.current\" /></context_tree>",
+        tool_schemas=(ToolSchema(name="fetch_weather", description="Fetch weather."),),
+    )
     engine = OrchestrationEngine(
-        prompt_surface=_FakePromptSurfaceBuilder(),
+        prompt_surface=_FakePromptSurfaceBuilder(
+            tool_schemas=(
+                ToolSchema(name="fetch_weather", description="Fetch weather."),
+                ToolSchema(name="web_search", description="Search the web."),
+            ),
+        ),
         session_recorder=_FakeSessionRecorder(),
         llm_port=object(),
         tool_resolver=_FakeToolResolver(),
@@ -219,6 +257,16 @@ def test_engine_records_context_snapshot_only_for_real_advance_context() -> None
     preview = engine.preview_prompt(_run())
 
     assert preview.llm_id == "test-llm"
+    assert preview.messages[0].metadata == {
+        "prompt_block_kind": "context_workspace",
+        "context_render_snapshot_id": "preview-run-context",
+    }
+    assert "session.current" in preview.messages[0].content
+    assert [schema.name for schema in preview.tool_schemas] == ["fetch_weather"]
+    assert preview.prompt_report is not None
+    assert preview.prompt_report.context_render is not None
+    assert preview.prompt_report.context_render.snapshot_id == "preview-run-context"
+    assert snapshot_port.preview_calls == [("run-context", "session:context")]
     assert snapshot_port.calls == []
 
     context = engine._build_advance_context(_run())  # noqa: SLF001
@@ -453,6 +501,16 @@ class _FakeContextSnapshotPort:
             else tool_schema_mirror_available
         )
         self.calls: list[tuple[str, str]] = []
+        self.preview_calls: list[tuple[str, str]] = []
+
+    def preview_run_prompt_snapshot(
+        self,
+        *,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+    ) -> ContextRenderSnapshotRecord:
+        self.preview_calls.append((run.id, prompt.session_key))
+        return self._snapshot_record(snapshot_id=f"preview-{run.id}")
 
     def record_run_prompt_snapshot(
         self,
@@ -461,8 +519,11 @@ class _FakeContextSnapshotPort:
         prompt: PromptSurface,
     ) -> ContextRenderSnapshotRecord:
         self.calls.append((run.id, prompt.session_key))
+        return self._snapshot_record(snapshot_id=f"snapshot-{run.id}")
+
+    def _snapshot_record(self, *, snapshot_id: str) -> ContextRenderSnapshotRecord:
         return ContextRenderSnapshotRecord(
-            snapshot_id=f"snapshot-{run.id}",
+            snapshot_id=snapshot_id,
             prompt_body=self._prompt_body,
             tool_schemas=self._tool_schemas,
             tool_schema_mirror_available=self._tool_schema_mirror_available,

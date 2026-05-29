@@ -956,11 +956,13 @@ npm run build
 - [x] orchestration run metadata 写入 `context_render_snapshot_id`，prompt report 内外部命名收成 context。
 - [x] prompt report 写入 context render snapshot id、tree estimate、included/mirrored node ids；`estimated_total_tokens` 优先使用 render estimate。
 - [x] prompt report 拆出 `ContextRenderReport` 值对象，减少 PromptSurfaceBuilder 与 render snapshot 字段耦合。
+- [x] prompt preview/debug surface 也走 Context Workspace render 和 provider mirror；预览只产出 transient render record，不写正式 `context_render_snapshots`。
 
 验收：
 
 - 新 prompt body 主体是 `<context_tree>`。
 - provider attachments 来自 tree nodes。
+- prompt preview 看到的 messages/tool schemas 与真实 provider surface 同源。
 - 旧 block path 不再被 normal turn 使用。
 
 ### CW-9：Operations / UI

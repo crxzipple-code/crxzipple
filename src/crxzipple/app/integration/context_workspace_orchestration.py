@@ -44,11 +44,36 @@ class ContextWorkspacePromptSnapshotAdapter:
         self._render_service = render_service
         self._artifact_service = artifact_service
 
+    def preview_run_prompt_snapshot(
+        self,
+        *,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+    ) -> ContextRenderSnapshotRecord | None:
+        return self._render_run_prompt_snapshot(
+            run=run,
+            prompt=prompt,
+            persist=False,
+        )
+
     def record_run_prompt_snapshot(
         self,
         *,
         run: OrchestrationRun,
         prompt: PromptSurface,
+    ) -> ContextRenderSnapshotRecord | None:
+        return self._render_run_prompt_snapshot(
+            run=run,
+            prompt=prompt,
+            persist=True,
+        )
+
+    def _render_run_prompt_snapshot(
+        self,
+        *,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+        persist: bool,
     ) -> ContextRenderSnapshotRecord | None:
         session_key = prompt.session_key.strip()
         agent_id = str(run.agent_id or "").strip()
@@ -88,43 +113,49 @@ class ContextWorkspacePromptSnapshotAdapter:
                 run_id=run.id,
             ),
         )
-        snapshot = self._render_service.record_render_snapshot(
-            RecordContextRenderSnapshotInput(
-                session_key=session_key,
-                run_id=run.id,
-                prompt_body=rendered.prompt_body,
-                provider_attachments=_snapshot_provider_attachments(
-                    rendered.provider_attachments,
-                    prompt=prompt,
-                ),
-                estimate=rendered.estimate,
-                included_node_ids=rendered.included_node_ids,
-                mirrored_node_ids=rendered.mirrored_node_ids,
-                metadata={
-                    "parallel_recording": True,
-                    "active_session_id": prompt.active_session_id,
-                    "mode": prompt.mode.value,
-                    "flow_context": flow_context.to_payload(),
-                    "workspace_dir": prompt.workspace_dir,
-                    "prompt_report": (
-                        prompt.report.to_payload() if prompt.report is not None else None
-                    ),
-                },
-            ),
+        provider_attachments = _snapshot_provider_attachments(
+            rendered.provider_attachments,
+            prompt=prompt,
         )
+        snapshot_id = f"ctxpreview_{run.id}"
+        if persist:
+            snapshot = self._render_service.record_render_snapshot(
+                RecordContextRenderSnapshotInput(
+                    session_key=session_key,
+                    run_id=run.id,
+                    prompt_body=rendered.prompt_body,
+                    provider_attachments=provider_attachments,
+                    estimate=rendered.estimate,
+                    included_node_ids=rendered.included_node_ids,
+                    mirrored_node_ids=rendered.mirrored_node_ids,
+                    metadata={
+                        "parallel_recording": True,
+                        "active_session_id": prompt.active_session_id,
+                        "mode": prompt.mode.value,
+                        "flow_context": flow_context.to_payload(),
+                        "workspace_dir": prompt.workspace_dir,
+                        "prompt_report": (
+                            prompt.report.to_payload()
+                            if prompt.report is not None
+                            else None
+                        ),
+                    },
+                ),
+            )
+            snapshot_id = snapshot.id
         return ContextRenderSnapshotRecord(
-            snapshot_id=snapshot.id,
+            snapshot_id=snapshot_id,
             prompt_body=rendered.prompt_body,
             estimate=rendered.estimate.to_payload(),
             included_node_ids=rendered.included_node_ids,
             mirrored_node_ids=rendered.mirrored_node_ids,
             tool_schemas=_mirrored_tool_schemas(
-                rendered.provider_attachments,
+                provider_attachments,
                 mirror_available=rendered.tool_schema_mirror_available,
             ),
             tool_schema_mirror_available=rendered.tool_schema_mirror_available,
             artifact_content_blocks=_artifact_content_blocks(
-                rendered.provider_attachments,
+                provider_attachments,
                 artifact_service=self._artifact_service,
             ),
         )

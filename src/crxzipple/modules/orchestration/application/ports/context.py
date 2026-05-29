@@ -180,6 +180,14 @@ class ContextRenderSnapshotRecord:
 
 
 class ContextRenderSnapshotPort(Protocol):
+    def preview_run_prompt_snapshot(
+        self,
+        *,
+        run: "OrchestrationRun",
+        prompt: "PromptSurface",
+    ) -> ContextRenderSnapshotRecord | None:
+        ...
+
     def record_run_prompt_snapshot(
         self,
         *,

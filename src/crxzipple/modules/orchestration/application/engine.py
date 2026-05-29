@@ -135,12 +135,20 @@ class OrchestrationEngine:
 
     def preview_prompt(self, run: OrchestrationRun) -> PromptSurfacePreview:
         surface = self._build_prompt_surface(run)
+        context_render_snapshot = self._preview_context_render_snapshot(
+            run,
+            surface.prompt,
+        )
+        prompt = self._prompt_with_context_snapshot(
+            surface.prompt,
+            context_render_snapshot,
+        )
         return PromptSurfacePreview(
-            llm_id=surface.prompt.llm_id,
-            mode=surface.prompt.mode,
-            messages=surface.prompt.messages,
-            tool_schemas=surface.prompt.tool_schemas,
-            prompt_report=surface.prompt.report,
+            llm_id=prompt.llm_id,
+            mode=prompt.mode,
+            messages=prompt.messages,
+            tool_schemas=prompt.tool_schemas,
+            prompt_report=prompt.report,
         )
 
     def advance_once(
@@ -227,20 +235,8 @@ class OrchestrationEngine:
                 run,
                 surface.prompt,
             )
-        prompt = self._prompt_with_context_render_report(
+        prompt = self._prompt_with_context_snapshot(
             surface.prompt,
-            context_render_snapshot,
-        )
-        prompt = self._prompt_with_context_provider_mirror(
-            prompt,
-            context_render_snapshot,
-        )
-        prompt = self._prompt_with_context_workspace_body(
-            prompt,
-            context_render_snapshot,
-        )
-        prompt = self._prompt_with_context_artifact_mirror(
-            prompt,
             context_render_snapshot,
         )
         resolved_tools = self._resolved_tools_for_prompt(
@@ -557,6 +553,49 @@ class OrchestrationEngine:
                 exc,
             )
             return None
+
+    def _preview_context_render_snapshot(
+        self,
+        run: OrchestrationRun,
+        prompt: PromptSurface,
+    ) -> ContextRenderSnapshotRecord | None:
+        if self.context_snapshot_port is None:
+            return None
+        try:
+            return self.context_snapshot_port.preview_run_prompt_snapshot(
+                run=run,
+                prompt=prompt,
+            )
+        except Exception as exc:  # pragma: no cover - defensive runtime guard.
+            logger.warning(
+                "Failed to render context preview for orchestration run %s: %s",
+                run.id,
+                exc,
+            )
+            return None
+
+    @classmethod
+    def _prompt_with_context_snapshot(
+        cls,
+        prompt: PromptSurface,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> PromptSurface:
+        prompt = cls._prompt_with_context_render_report(
+            prompt,
+            context_render_snapshot,
+        )
+        prompt = cls._prompt_with_context_provider_mirror(
+            prompt,
+            context_render_snapshot,
+        )
+        prompt = cls._prompt_with_context_workspace_body(
+            prompt,
+            context_render_snapshot,
+        )
+        return cls._prompt_with_context_artifact_mirror(
+            prompt,
+            context_render_snapshot,
+        )
 
     @staticmethod
     def _prompt_with_context_render_report(
