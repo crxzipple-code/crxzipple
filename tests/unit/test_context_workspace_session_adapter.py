@@ -20,6 +20,7 @@ from crxzipple.modules.session.application import (
     AppendSessionMessageInput,
     ArchiveSessionMessagesInput,
     EnsureSessionInput,
+    ResetSessionInput,
     SessionApplicationService,
 )
 from crxzipple.modules.session.infrastructure import (
@@ -210,6 +211,80 @@ def test_session_adapter_exposes_folded_history_as_exact_archived_ranges() -> No
     assert {
         node.owner_ref["visibility"] for node in archived_message_nodes
     } == {"archived"}
+
+
+def test_session_adapter_keeps_reset_history_as_folded_ranges() -> None:
+    session_service = _session_service()
+    session = session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:reset",
+            agent_id="assistant",
+        ),
+    )
+    old_session_id = session.active_session_id
+    session_service.append_message(
+        AppendSessionMessageInput(
+            session_key="session:reset",
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "before reset"}]},
+        ),
+    )
+    session_service.reset_session(
+        ResetSessionInput(
+            session_key="session:reset",
+            reason="manual",
+        ),
+    )
+    session_service.append_message(
+        AppendSessionMessageInput(
+            session_key="session:reset",
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "after reset"}]},
+        ),
+    )
+    services = _context_services(session_service, recent_limit=2)
+
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:reset",
+            agent_id="assistant",
+        ),
+    )
+    tree = services["tree"].list_tree("session:reset")
+    folded_node = next(node for node in tree.nodes if node.id == "session.history.folded")
+
+    assert folded_node.owner_ref["folded_count"] == 1
+    assert folded_node.owner_ref["active_session_id"] != old_session_id
+
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:reset",
+            node_id=folded_node.id,
+            action=ContextAction.EXPAND,
+        ),
+    )
+    range_tree = services["tree"].list_tree("session:reset")
+    range_node = next(node for node in range_tree.nodes if node.parent_id == folded_node.id)
+
+    assert range_node.id.startswith("session.history.range.")
+    assert range_node.owner_ref["session_id"] == old_session_id
+    assert range_node.owner_ref["history_kind"] == "folded"
+
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:reset",
+            node_id=range_node.id,
+            action=ContextAction.EXPAND,
+        ),
+    )
+    message_tree = services["tree"].list_tree("session:reset")
+    reset_history = [
+        node for node in message_tree.nodes if node.parent_id == range_node.id
+    ]
+
+    assert [node.owner_ref["session_id"] for node in reset_history] == [old_session_id]
+    assert reset_history[0].owner_ref["visibility"] == "default"
+    assert "before reset" in reset_history[0].summary
 
 
 def _context_services(

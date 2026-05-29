@@ -740,17 +740,21 @@ context.action.failed
 
 ### Unit Tests
 
-新增：
+已落地：
 
 ```text
 tests/unit/test_context_workspace_domain.py
 tests/unit/test_context_workspace_tree_service.py
-tests/unit/test_context_workspace_render.py
-tests/unit/test_context_workspace_estimate.py
-tests/unit/test_context_workspace_visibility.py
-tests/unit/test_context_workspace_events.py
 tests/unit/test_context_workspace_http.py
 tests/unit/test_context_tree_tool.py
+tests/unit/test_context_workspace_memory_adapter.py
+tests/unit/test_context_workspace_session_adapter.py
+tests/unit/test_context_workspace_workspace_adapter.py
+tests/unit/test_context_workspace_artifact_adapter.py
+tests/unit/test_context_workspace_skill_adapter.py
+tests/unit/test_context_workspace_tool_adapter.py
+tests/unit/test_orchestration_context_workspace_snapshot.py
+tests/unit/test_operations_context_workspace_read_model.py
 ```
 
 覆盖：
@@ -758,15 +762,16 @@ tests/unit/test_context_tree_tool.py
 - workspace ensure idempotent。
 - node expand/collapse/pin 状态迁移。
 - action 不存在/不可用时报错。
-- owner adapter 不返回不可见节点。
-- render 保留树结构。
+- owner adapter 通过各自 adapter 单测覆盖可见节点生成和按需展开。
+- render/estimate/provider attachment mirror 由 tree service、tool 和 orchestration snapshot tests 覆盖。
 - provider attachments 只镜像 enabled nodes。
 - run snapshot 保存后树变化不影响历史 snapshot。
 - estimate 聚合正确。
 
-### Integration Tests
+### Integration / Flow Checks
 
-新增：
+当前未保留单独 integration test 文件；真实链路由 orchestration snapshot、turn/http、Operations projection
+和 Workbench API 单测覆盖。后续如果需要更长链路验收，再新增：
 
 ```text
 tests/integration/test_context_workspace_session_flow.py
@@ -990,7 +995,6 @@ npm run build
 ```bash
 PYTHONPATH=src pytest -q tests/unit/test_context_workspace_domain.py
 PYTHONPATH=src pytest -q tests/unit/test_context_workspace_tree_service.py
-PYTHONPATH=src pytest -q tests/unit/test_context_workspace_render.py
 PYTHONPATH=src pytest -q tests/unit/test_context_tree_tool.py
 PYTHONPATH=src pytest -q tests/unit/test_orchestration_context.py tests/unit/test_prompt_transcript.py
 PYTHONPATH=src pytest -q tests/unit/test_tool_access_architecture.py tests/unit/test_skills_context.py tests/unit/test_memory_runtime_service.py
@@ -1021,7 +1025,8 @@ python -m crxzipple.main daemon status
 ## Open Questions
 
 1. Session reset 默认是否清空 context workspace？
-   建议默认不清空，只新增 reset/folded node；显式 reset policy 才清空。
+   已按默认不清空落地：reset 后旧 instance 的消息会作为
+   `session.history.folded` 下的 folded ranges 披露；显式清空策略后续再单独设计。
 
 2. `pin` 是否跨 session？
    建议不跨 session。跨 session 的偏好应该进 agent profile 或 settings policy。

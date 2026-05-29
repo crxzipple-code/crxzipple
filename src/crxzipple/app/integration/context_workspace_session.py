@@ -53,9 +53,9 @@ class SessionContextNodeProvider:
         if request.node.id.startswith("session.messages.older"):
             return self._older_message_children(request)
         if request.node.id == "session.history.folded":
-            return self._archived_range_children(request)
-        if request.node.id.startswith("session.history.archived."):
-            return self._archived_message_children(request)
+            return self._folded_range_children(request)
+        if request.node.id.startswith("session.history.range."):
+            return self._folded_message_children(request)
         return ()
 
     def _current_session_children(
@@ -171,12 +171,12 @@ class SessionContextNodeProvider:
                     ),
                 )
 
-        archived_count = sum(
-            1
-            for message in all_messages
-            if message.visibility is SessionMessageVisibility.ARCHIVED
+        folded_messages = _folded_history_messages(
+            tuple(all_messages),
+            active_session_id=session.active_session_id,
         )
-        if archived_count > 0:
+        folded_count = len(folded_messages)
+        if folded_count > 0:
             seeds.append(
                 ContextNodeSeed(
                     node_id="session.history.folded",
@@ -185,13 +185,14 @@ class SessionContextNodeProvider:
                     kind="session_history",
                     title="Folded History",
                     summary=(
-                        f"{archived_count} archived messages are available "
+                        f"{folded_count} folded messages are available "
                         "as folded history."
                     ),
                     actions=_BASIC_ACTIONS,
                     owner_ref={
                         "session_key": session_key,
-                        "archived_count": archived_count,
+                        "active_session_id": session.active_session_id,
+                        "folded_count": folded_count,
                     },
                     estimate=ContextEstimate(text_chars=80, text_tokens=20),
                     display_order=30,
@@ -290,7 +291,7 @@ class SessionContextNodeProvider:
                 )
         return tuple(seeds)
 
-    def _archived_range_children(
+    def _folded_range_children(
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
@@ -305,21 +306,23 @@ class SessionContextNodeProvider:
             )
         except SessionNotFoundError:
             return ()
-        archived_messages = tuple(
-            message
-            for message in messages
-            if message.visibility is SessionMessageVisibility.ARCHIVED
+        active_session_id = _optional_text(
+            request.node.owner_ref.get("active_session_id"),
+        )
+        folded_messages = _folded_history_messages(
+            tuple(messages),
+            active_session_id=active_session_id,
         )
         ranges: list[ContextNodeSeed] = []
         display_order = 10
-        for session_id, session_messages in _messages_by_session(archived_messages):
+        for session_id, session_messages in _messages_by_session(folded_messages):
             for chunk in _chunks(session_messages, self._recent_limit):
                 first_sequence_no = chunk[0].sequence_no
                 last_sequence_no = chunk[-1].sequence_no
                 ranges.append(
                     ContextNodeSeed(
                         node_id=(
-                            "session.history.archived."
+                            "session.history.range."
                             f"{_node_part(session_id)}."
                             f"{first_sequence_no}.{last_sequence_no}"
                         ),
@@ -339,29 +342,37 @@ class SessionContextNodeProvider:
                         owner_ref={
                             "session_key": session_key,
                             "session_id": session_id,
+                            "active_session_id": active_session_id,
                             "from_sequence_no": first_sequence_no,
                             "to_sequence_no": last_sequence_no,
                             "message_count": len(chunk),
-                            "visibility": SessionMessageVisibility.ARCHIVED.value,
+                            "history_kind": "folded",
                         },
                         estimate=_messages_estimate(chunk),
                         display_order=display_order,
                         metadata={
                             "message_count": len(chunk),
-                            "visibility": SessionMessageVisibility.ARCHIVED.value,
+                            "history_kind": "folded",
+                            "archived_count": sum(
+                                1
+                                for message in chunk
+                                if message.visibility
+                                is SessionMessageVisibility.ARCHIVED
+                            ),
                         },
                     ),
                 )
                 display_order += 10
         return tuple(ranges)
 
-    def _archived_message_children(
+    def _folded_message_children(
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
         session_key = request.workspace.session_key
         owner_ref = request.node.owner_ref
         session_id = _optional_text(owner_ref.get("session_id"))
+        active_session_id = _optional_text(owner_ref.get("active_session_id"))
         from_sequence_no = _optional_int(owner_ref.get("from_sequence_no"))
         to_sequence_no = _optional_int(owner_ref.get("to_sequence_no"))
         if session_id is None or from_sequence_no is None or to_sequence_no is None:
@@ -382,7 +393,10 @@ class SessionContextNodeProvider:
             _message_node_seed(message, parent_id=request.node.id)
             for message in messages
             if message.session_id == session_id
-            and message.visibility is SessionMessageVisibility.ARCHIVED
+            and _is_folded_history_message(
+                message,
+                active_session_id=active_session_id,
+            )
         )
 
 
@@ -512,6 +526,33 @@ def _messages_by_session(
         )
         for session_id, items in sorted(grouped.items())
     )
+
+
+def _folded_history_messages(
+    messages: tuple[SessionMessage, ...],
+    *,
+    active_session_id: str | None,
+) -> tuple[SessionMessage, ...]:
+    return tuple(
+        message
+        for message in messages
+        if _is_folded_history_message(
+            message,
+            active_session_id=active_session_id,
+        )
+    )
+
+
+def _is_folded_history_message(
+    message: SessionMessage,
+    *,
+    active_session_id: str | None,
+) -> bool:
+    if message.visibility is SessionMessageVisibility.ARCHIVED:
+        return True
+    if active_session_id is None:
+        return False
+    return message.session_id != active_session_id
 
 
 def _chunks(
