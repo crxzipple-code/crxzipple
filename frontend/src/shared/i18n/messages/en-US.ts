@@ -233,6 +233,8 @@ export const enUS = {
   "workbench.context.action.unpin": "Unpin",
   "workbench.context.action.enableSchema": "Enable schema",
   "workbench.context.action.disableSchema": "Disable schema",
+  "workbench.context.sourceCollapseAll": "Fold source",
+  "workbench.context.sourceExpandAll": "Unfold source",
   "workbench.context.memory.filterLabel": "Memory layer filter",
   "workbench.context.memory.private": "Private",
   "workbench.context.memory.shared": "Shared",

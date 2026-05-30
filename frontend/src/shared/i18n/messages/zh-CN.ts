@@ -233,6 +233,8 @@ export const zhCN = {
   "workbench.context.action.unpin": "取消钉住",
   "workbench.context.action.enableSchema": "启用 schema",
   "workbench.context.action.disableSchema": "禁用 schema",
+  "workbench.context.sourceCollapseAll": "折叠源码",
+  "workbench.context.sourceExpandAll": "展开源码",
   "workbench.context.memory.filterLabel": "记忆层筛选",
   "workbench.context.memory.private": "私有",
   "workbench.context.memory.shared": "共享",

@@ -284,6 +284,8 @@ const filteredContextNodeRows = computed(() => (
   reflowContextNodeRows(filterContextNodeRows(contextNodeRows.value, contextMemoryLayerFilter.value))
 ));
 const contextXmlTree = computed(() => buildContextXmlTree(filteredContextNodeRows.value));
+const contextXmlFoldableNodeIds = computed(() => collectContextXmlFoldableNodeIds(contextXmlTree.value));
+const contextXmlHasFoldableNodes = computed(() => contextXmlFoldableNodeIds.value.length > 0);
 const contextXmlLines = computed(() => (
   buildContextXmlLines(contextXmlTree.value, contextXmlDisplayFoldedNodeIds.value)
     .map((line, index) => ({ ...line, lineNumber: index + 1 }))
@@ -1507,6 +1509,19 @@ function buildContextXmlLines(
   return lines;
 }
 
+function collectContextXmlFoldableNodeIds(items: ContextXmlTreeItem[], ids: string[] = []) {
+  for (const item of items) {
+    const node = item.node;
+    const renderedChildren = node.state.collapsed ? [] : item.children;
+    const summary = node.summary?.trim() ? node.summary.trim() : null;
+    if (summary || renderedChildren.length > 0) {
+      ids.push(node.id);
+    }
+    collectContextXmlFoldableNodeIds(renderedChildren, ids);
+  }
+  return ids;
+}
+
 function contextMemoryLayer(node: WorkbenchContextNode): ContextMemoryLayerFilter | null {
   const value = node.metadata.governance_scope ?? node.metadata.layer_kind ?? node.owner_ref.layer_kind;
   if (
@@ -1636,6 +1651,14 @@ function toggleContextXmlDisplayFold(nodeId: string) {
     next.add(nodeId);
   }
   contextXmlDisplayFoldedNodeIds.value = next;
+}
+
+function collapseAllContextXmlDisplay() {
+  contextXmlDisplayFoldedNodeIds.value = new Set(contextXmlFoldableNodeIds.value);
+}
+
+function expandAllContextXmlDisplay() {
+  contextXmlDisplayFoldedNodeIds.value = new Set();
 }
 
 function runContextXmlBusinessAction(node: WorkbenchContextNode, actionId: string) {
@@ -2923,6 +2946,16 @@ function handleTurnsWheel(event: WheelEvent) {
           </div>
           <div v-if="!contextXmlLines.length" class="asset-empty">{{ t("workbench.context.emptyNodes") }}</div>
           <div v-else class="context-xml-viewer" role="tree">
+            <div class="context-xml-toolbar" v-if="contextXmlHasFoldableNodes">
+              <button type="button" @click="collapseAllContextXmlDisplay">
+                <ChevronRight :size="13" />
+                <span>{{ t("workbench.context.sourceCollapseAll") }}</span>
+              </button>
+              <button type="button" @click="expandAllContextXmlDisplay">
+                <ChevronDown :size="13" />
+                <span>{{ t("workbench.context.sourceExpandAll") }}</span>
+              </button>
+            </div>
             <div
               v-for="line in contextXmlLines"
               :key="line.key"
@@ -3097,7 +3130,7 @@ function handleTurnsWheel(event: WheelEvent) {
 <style scoped>
 .workbench-page {
   display: grid;
-  grid-template-columns: 324px minmax(560px, 1fr) 328px;
+  grid-template-columns: 300px minmax(430px, 1fr) clamp(440px, 34vw, 620px);
   height: calc(100dvh - var(--shell-topbar-height));
   overflow: hidden;
   background:
@@ -4860,10 +4893,49 @@ dd {
   font-family: var(--font-mono);
 }
 
+.context-xml-toolbar {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  width: max-content;
+  min-width: 100%;
+  padding: 0 8px 6px 58px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-raised) 20%, transparent), transparent),
+    var(--surface-inset);
+}
+
+.context-xml-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.context-xml-toolbar button:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 44%, transparent);
+  color: var(--color-accent);
+}
+
 .context-xml-line-row {
   display: grid;
-  grid-template-columns: 36px 18px minmax(0, 1fr) auto;
+  grid-template-columns: 36px 20px max-content auto;
   align-items: center;
+  width: max-content;
+  min-width: 100%;
   min-height: 21px;
   padding-right: 8px;
   color: var(--text-secondary);
@@ -4897,7 +4969,7 @@ dd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
+  min-width: 20px;
 }
 
 .context-xml-display-toggle {
@@ -4908,8 +4980,8 @@ dd {
   height: 16px;
   border: 0;
   border-radius: var(--radius-1);
-  background: transparent;
-  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-raised) 42%, transparent);
+  color: var(--color-accent);
   cursor: pointer;
 }
 
@@ -4920,15 +4992,15 @@ dd {
 
 .context-xml-source-line {
   display: block;
-  min-width: 0;
-  overflow: hidden;
+  min-width: max-content;
+  overflow: visible;
   padding-left: calc(var(--xml-depth) * var(--xml-indent));
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 21px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-overflow: clip;
+  white-space: pre;
 }
 
 .context-xml-punct {
@@ -4961,11 +5033,16 @@ dd {
 }
 
 .context-xml-actions {
+  position: sticky;
+  right: 0;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
   padding-left: 8px;
+  background:
+    linear-gradient(90deg, transparent, var(--surface-inset) 12px),
+    var(--surface-inset);
 }
 
 .context-xml-action {
