@@ -4,7 +4,6 @@ import {
   Bot,
   Box,
   Boxes,
-  Braces,
   Brain,
   CheckCircle2,
   ChevronDown,
@@ -1430,29 +1429,63 @@ function contextMemoryLayer(node: WorkbenchContextNode): ContextMemoryLayerFilte
   return null;
 }
 
-function contextMemoryAccessLabel(node: WorkbenchContextNode) {
+function contextMemoryAccessCode(node: WorkbenchContextNode) {
   if (contextMemoryLayer(node) === null) return null;
   const readable = node.metadata.readable === true || node.owner_ref.readable === true;
   const writable = node.metadata.writable === true || node.owner_ref.writable === true;
-  if (readable && writable) return t("workbench.context.memory.readWrite");
-  if (readable) return t("workbench.context.memory.readOnly");
-  if (writable) return t("workbench.context.memory.writeOnly");
+  if (readable && writable) return "read_write";
+  if (readable) return "read_only";
+  if (writable) return "write_only";
   return null;
-}
-
-function contextNodeStateLabel(node: WorkbenchContextNode) {
-  const labels = [
-    node.state.prompt_visible ? t("workbench.context.state.visible") : t("workbench.context.state.hidden"),
-    node.state.collapsed ? t("workbench.context.state.collapsed") : t("workbench.context.state.expanded"),
-  ];
-  if (node.state.pinned) labels.unshift(t("workbench.context.state.pinned"));
-  if (node.state.schema_enabled) labels.push(t("workbench.context.state.schemaEnabled"));
-  return labels.join(" · ");
 }
 
 function contextNodeTokenLabel(node: WorkbenchContextNode) {
   const tokens = node.estimate.text_tokens + node.estimate.tool_schema_tokens + node.estimate.file_tokens;
   return formatNumber(tokens);
+}
+
+function xmlText(value: unknown) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function xmlAttributeText(value: unknown) {
+  return xmlText(value).replace(/"/g, "&quot;");
+}
+
+function contextNodeXmlState(node: WorkbenchContextNode) {
+  if (node.state.opened) return "opened";
+  return node.state.collapsed ? "collapsed" : "expanded";
+}
+
+function contextNodeXmlTag(node: WorkbenchContextNode) {
+  const tag = (node.kind || node.owner || "node").replace(/[^A-Za-z0-9_.:-]/g, "_");
+  return /^[A-Za-z_:]/.test(tag) ? tag : `node_${tag}`;
+}
+
+function contextNodeXmlAttributes(node: WorkbenchContextNodeRow) {
+  const attrs = [
+    { name: "id", value: node.id },
+    { name: "label", value: node.title },
+    { name: "owner", value: node.owner },
+    { name: "state", value: contextNodeXmlState(node) },
+  ];
+  if (!node.state.prompt_visible) attrs.push({ name: "prompt_visible", value: "false" });
+  if (node.state.pinned) attrs.push({ name: "pinned", value: "true" });
+  if (node.state.schema_enabled) attrs.push({ name: "schema_enabled", value: "true" });
+  if (node.childCount) attrs.push({ name: "children", value: String(node.childCount) });
+  const memoryAccess = contextMemoryAccessCode(node);
+  if (memoryAccess) attrs.push({ name: "memory_access", value: memoryAccess });
+  const actions = contextNodeXmlActions(node);
+  if (actions) attrs.push({ name: "actions", value: actions });
+  attrs.push({ name: "tokens", value: contextNodeTokenLabel(node) });
+  return attrs;
+}
+
+function contextNodeXmlActions(node: WorkbenchContextNode) {
+  return node.actions.join(" ");
 }
 
 function contextNodeActions(node: WorkbenchContextNode) {
@@ -2789,36 +2822,46 @@ function handleTurnsWheel(event: WheelEvent) {
                   <span v-else class="context-node-row__toggle-spacer" />
                 </span>
               </div>
-              <div class="context-node-row__body">
-                <div class="context-node-row__main">
-                  <Braces :size="14" />
-                  <span>
-                    <strong>{{ node.title }}</strong>
-                    <small :title="node.id">{{ compactIdentifier(node.id) }} · {{ node.owner }} / {{ node.kind }}</small>
-                  </span>
+              <div class="context-node-row__body context-xml-node">
+                <div class="context-xml-line">
+                  <code class="context-xml-code" :title="node.id">
+                    <span class="context-xml-punct">&lt;</span><span class="context-xml-tag">{{ contextNodeXmlTag(node) }}</span>
+                    <template
+                      v-for="attribute in contextNodeXmlAttributes(node)"
+                      :key="`${node.id}:attr:${attribute.name}`"
+                    >
+                      <span class="context-xml-attr"> {{ attribute.name }}</span><span class="context-xml-equals">=</span><span class="context-xml-value">"{{ xmlAttributeText(attribute.value) }}"</span>
+                    </template>
+                    <span v-if="node.summary" class="context-xml-punct">&gt;</span>
+                    <span v-else class="context-xml-punct"> /&gt;</span>
+                  </code>
+                  <div v-if="contextNodeActions(node).length" class="context-xml-actions">
+                    <button
+                      v-for="action in contextNodeActions(node)"
+                      :key="action.id"
+                      type="button"
+                      class="context-xml-action"
+                      :disabled="contextActionBusy !== null"
+                      @click="runContextNodeAction(node, action.id)"
+                    >
+                      <Loader2
+                        v-if="contextActionBusy === contextActionBusyKey(node, action.id)"
+                        class="motion-spin"
+                        :size="11"
+                      />
+                      <span>{{ action.label }}</span>
+                    </button>
+                  </div>
                 </div>
-                <p v-if="node.summary">{{ node.summary }}</p>
-                <div class="context-node-row__meta">
-                  <UiBadge :tone="node.state.prompt_visible ? 'success' : 'neutral'">{{ contextNodeStateLabel(node) }}</UiBadge>
-                  <span>{{ t("common.tokens") }} {{ contextNodeTokenLabel(node) }}</span>
-                  <span v-if="node.childCount">{{ t("workbench.context.children", { count: node.childCount }) }}</span>
-                  <span v-if="contextMemoryAccessLabel(node)">{{ contextMemoryAccessLabel(node) }}</span>
+                <div v-if="node.summary" class="context-xml-child-line">
+                  <code class="context-xml-code">
+                    <span class="context-xml-punct">&lt;</span><span class="context-xml-tag">summary</span><span class="context-xml-punct">&gt;</span><span class="context-xml-text">{{ xmlText(node.summary) }}</span><span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">summary</span><span class="context-xml-punct">&gt;</span>
+                  </code>
                 </div>
-                <div v-if="contextNodeActions(node).length" class="context-node-row__actions">
-                  <button
-                    v-for="action in contextNodeActions(node)"
-                    :key="action.id"
-                    type="button"
-                    :disabled="contextActionBusy !== null"
-                    @click="runContextNodeAction(node, action.id)"
-                  >
-                    <Loader2
-                      v-if="contextActionBusy === contextActionBusyKey(node, action.id)"
-                      class="motion-spin"
-                      :size="12"
-                    />
-                    <span>{{ action.label }}</span>
-                  </button>
+                <div v-if="node.summary" class="context-xml-child-line context-xml-child-line--close">
+                  <code class="context-xml-code">
+                    <span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">{{ contextNodeXmlTag(node) }}</span><span class="context-xml-punct">&gt;</span>
+                  </code>
                 </div>
               </div>
             </article>
@@ -4607,8 +4650,7 @@ dd {
   margin: 0;
 }
 
-.context-tree-card__heading button,
-.context-node-row__actions button {
+.context-tree-card__heading button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4624,7 +4666,7 @@ dd {
 }
 
 .context-tree-card__heading button:disabled,
-.context-node-row__actions button:disabled {
+.context-xml-action:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -4684,22 +4726,27 @@ dd {
 .context-node-list {
   display: grid;
   gap: 0;
-  max-height: min(54vh, 560px);
+  max-height: min(58vh, 620px);
   overflow: auto;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);
-  background: color-mix(in srgb, var(--surface-raised) 42%, transparent);
+  background: var(--surface-inset);
+  font-family: var(--font-mono);
 }
 
 .context-node-row {
   position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 4px;
+  column-gap: 2px;
   min-width: 0;
   padding: 0 8px 0 0;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
   background: transparent;
+}
+
+.context-node-row:hover {
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
 }
 
 .context-node-row:last-child {
@@ -4708,25 +4755,26 @@ dd {
 
 .context-node-row--hidden {
   background: color-mix(in srgb, var(--surface-inset) 38%, transparent);
+  opacity: 0.72;
 }
 
 .context-node-row__prefix {
   display: flex;
   align-self: stretch;
-  min-height: 48px;
-  padding-left: 6px;
+  min-height: 26px;
+  padding-left: 5px;
 }
 
 .context-node-row__guide,
 .context-node-row__joint {
   position: relative;
-  flex: 0 0 14px;
-  width: 14px;
+  flex: 0 0 12px;
+  width: 12px;
 }
 
 .context-node-row__joint {
-  flex-basis: 24px;
-  width: 24px;
+  flex-basis: 20px;
+  width: 20px;
 }
 
 .context-node-row__guide::before,
@@ -4740,22 +4788,22 @@ dd {
 .context-node-row__guide--active::before {
   top: -1px;
   bottom: -1px;
-  left: 7px;
-  border-left: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+  left: 6px;
+  border-left: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
 }
 
 .context-node-row__joint:not(.context-node-row__joint--root)::before {
-  top: 24px;
-  left: -7px;
-  width: 16px;
-  border-top: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+  top: 13px;
+  left: -6px;
+  width: 13px;
+  border-top: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
 }
 
 .context-node-row__joint:not(.context-node-row__joint--root)::after {
   top: -1px;
-  bottom: calc(100% - 24px);
-  left: -7px;
-  border-left: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+  bottom: calc(100% - 13px);
+  left: -6px;
+  border-left: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
 }
 
 .context-node-row__joint:not(.context-node-row__joint--root):not(.context-node-row__joint--last)::after {
@@ -4769,21 +4817,22 @@ dd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-top: 13px;
-  border-radius: 999px;
+  width: 18px;
+  height: 18px;
+  margin-top: 4px;
+  border-radius: var(--radius-1);
 }
 
 .context-node-row__toggle {
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-base);
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
 }
 
 .context-node-row__toggle:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--color-accent) 54%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
   color: var(--color-accent);
 }
 
@@ -4794,79 +4843,104 @@ dd {
 
 .context-node-row__toggle-spacer::before {
   content: "";
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--text-muted) 48%, transparent);
 }
 
 .context-node-row__body {
   display: grid;
-  gap: 5px;
   min-width: 0;
-  padding: 8px 0;
+  padding: 4px 0;
 }
 
-.context-node-row__main,
-.context-node-row__meta,
-.context-node-row__actions {
-  display: flex;
+.context-xml-node {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.context-xml-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  min-width: 0;
+  gap: 8px;
+  min-height: 20px;
 }
 
-.context-node-row__main {
-  gap: 7px;
-}
-
-.context-node-row__main svg {
-  flex: 0 0 auto;
-  color: var(--color-accent);
-}
-
-.context-node-row__main span {
-  min-width: 0;
-}
-
-.context-node-row__main strong,
-.context-node-row__main small {
+.context-xml-code {
   display: block;
   min-width: 0;
   overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.context-node-row__main strong {
-  color: var(--text-primary);
-  font-size: 13px;
+.context-xml-child-line {
+  min-width: 0;
+  padding-left: 18px;
 }
 
-.context-node-row__main small,
-.context-node-row__meta {
+.context-xml-child-line--close {
+  opacity: 0.8;
+}
+
+.context-xml-punct {
+  color: color-mix(in srgb, var(--text-muted) 86%, transparent);
+}
+
+.context-xml-tag {
+  color: color-mix(in srgb, var(--color-accent) 88%, var(--text-primary));
+}
+
+.context-xml-attr {
+  color: color-mix(in srgb, var(--color-warning) 78%, var(--text-secondary));
+}
+
+.context-xml-equals {
   color: var(--text-muted);
-  font-size: 11px;
 }
 
-.context-node-row p {
-  margin: 0;
-  display: -webkit-box;
-  overflow: hidden;
+.context-xml-value {
+  color: color-mix(in srgb, var(--color-success) 78%, var(--text-primary));
+}
+
+.context-xml-text {
   color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.35;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
 }
 
-.context-node-row__meta {
-  flex-wrap: wrap;
-  gap: 6px;
+.context-xml-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
 }
 
-.context-node-row__actions {
-  flex-wrap: wrap;
-  gap: 6px;
+.context-xml-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 20px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.context-xml-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-accent) 42%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
 }
 
 .asset-link {
