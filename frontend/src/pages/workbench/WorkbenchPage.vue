@@ -2967,7 +2967,7 @@ function handleTurnsWheel(event: WheelEvent) {
               :aria-expanded="contextXmlLineCanFold(line) ? !line.displayFolded : undefined"
             >
               <span class="context-xml-line-number">{{ line.lineNumber }}</span>
-              <span class="context-xml-fold-gutter">
+              <code class="context-xml-source-line" :title="line.node.id">
                 <button
                   v-if="contextXmlLineCanFold(line)"
                   type="button"
@@ -2978,8 +2978,7 @@ function handleTurnsWheel(event: WheelEvent) {
                   <ChevronRight v-if="line.displayFolded" :size="13" />
                   <ChevronDown v-else :size="13" />
                 </button>
-              </span>
-              <code class="context-xml-source-line" :title="line.node.id">
+                <span v-else class="context-xml-display-spacer" aria-hidden="true" />
                 <template v-if="line.kind === 'close'">
                   <span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">{{ line.tag }}</span><span class="context-xml-punct">&gt;</span>
                 </template>
@@ -4932,7 +4931,7 @@ dd {
 
 .context-xml-line-row {
   display: grid;
-  grid-template-columns: 36px 20px max-content auto;
+  grid-template-columns: 36px max-content auto;
   align-items: center;
   width: max-content;
   min-width: 100%;
@@ -4965,22 +4964,21 @@ dd {
   user-select: none;
 }
 
-.context-xml-fold-gutter {
+.context-xml-display-toggle,
+.context-xml-display-spacer {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 20px;
-}
-
-.context-xml-display-toggle {
-  display: inline-flex;
+  flex: 0 0 16px;
   align-items: center;
   justify-content: center;
   width: 16px;
   height: 16px;
+  margin-right: 2px;
+}
+
+.context-xml-display-toggle {
   border: 0;
   border-radius: var(--radius-1);
-  background: color-mix(in srgb, var(--surface-raised) 42%, transparent);
+  background: transparent;
   color: var(--color-accent);
   cursor: pointer;
 }
@@ -4991,7 +4989,8 @@ dd {
 }
 
 .context-xml-source-line {
-  display: block;
+  display: inline-flex;
+  align-items: center;
   min-width: max-content;
   overflow: visible;
   padding-left: calc(var(--xml-depth) * var(--xml-indent));
