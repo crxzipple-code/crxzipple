@@ -117,6 +117,7 @@ const contextTreeLoading = ref(false);
 const contextTreeError = ref<string | null>(null);
 const contextActionBusy = ref<string | null>(null);
 const contextMemoryLayerFilter = ref<ContextMemoryLayerFilter>("all");
+const contextXmlDisplayFoldedNodeIds = ref<Set<string>>(new Set());
 const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
 const pendingRunId = ref<string | null>(null);
@@ -282,6 +283,11 @@ const contextNodeRows = computed(() => flattenContextNodes(contextTree.value?.no
 const filteredContextNodeRows = computed(() => (
   reflowContextNodeRows(filterContextNodeRows(contextNodeRows.value, contextMemoryLayerFilter.value))
 ));
+const contextXmlTree = computed(() => buildContextXmlTree(filteredContextNodeRows.value));
+const contextXmlLines = computed(() => (
+  buildContextXmlLines(contextXmlTree.value, contextXmlDisplayFoldedNodeIds.value)
+    .map((line, index) => ({ ...line, lineNumber: index + 1 }))
+));
 const contextMemoryLayerOptions = computed<Array<{ id: ContextMemoryLayerFilter; label: string; count: number }>>(() => {
   const rows = contextNodeRows.value;
   const countFor = (layer: ContextMemoryLayerFilter) => (
@@ -346,6 +352,17 @@ watch(
     if (activeInspectorTab.value === "context") {
       void refreshContextTree();
     }
+  },
+);
+
+watch(
+  () => [
+    contextTree.value?.workspace?.session_key ?? "",
+    contextTree.value?.workspace?.active_revision ?? "",
+    contextMemoryLayerFilter.value,
+  ],
+  () => {
+    contextXmlDisplayFoldedNodeIds.value = new Set();
   },
 );
 
@@ -1348,6 +1365,29 @@ interface WorkbenchContextNodeRow extends WorkbenchContextNode {
   isLastChild: boolean;
 }
 
+interface ContextXmlTreeItem {
+  node: WorkbenchContextNodeRow;
+  children: ContextXmlTreeItem[];
+}
+
+type ContextXmlLineKind = "open" | "close" | "summary" | "self" | "folded";
+
+interface ContextXmlLine {
+  key: string;
+  kind: ContextXmlLineKind;
+  node: WorkbenchContextNodeRow;
+  depth: number;
+  tag: string;
+  attributes: Array<{ name: string; value: string }>;
+  hasBody: boolean;
+  displayFolded: boolean;
+  summary: string | null;
+}
+
+interface NumberedContextXmlLine extends ContextXmlLine {
+  lineNumber: number;
+}
+
 function flattenContextNodes(nodes: WorkbenchContextNode[]): WorkbenchContextNodeRow[] {
   return buildContextNodeRows(nodes);
 }
@@ -1415,6 +1455,58 @@ function filterContextNodeRows(rows: WorkbenchContextNodeRow[], filter: ContextM
   return rows.filter((node) => included.has(node.id));
 }
 
+function buildContextXmlTree(rows: WorkbenchContextNodeRow[]): ContextXmlTreeItem[] {
+  const items = new Map<string, ContextXmlTreeItem>();
+  for (const row of rows) {
+    items.set(row.id, { node: row, children: [] });
+  }
+  const roots: ContextXmlTreeItem[] = [];
+  for (const row of rows) {
+    const item = items.get(row.id);
+    if (!item) continue;
+    const parent = row.parent_id ? items.get(row.parent_id) : null;
+    if (parent) {
+      parent.children.push(item);
+    } else {
+      roots.push(item);
+    }
+  }
+  return roots;
+}
+
+function buildContextXmlLines(
+  items: ContextXmlTreeItem[],
+  foldedIds: Set<string>,
+  depth = 0,
+): ContextXmlLine[] {
+  const lines: ContextXmlLine[] = [];
+  for (const item of items) {
+    const node = item.node;
+    const renderedChildren = node.state.collapsed ? [] : item.children;
+    const tag = contextNodeXmlTag(node);
+    const attributes = contextNodeXmlAttributes(node);
+    const summary = node.summary?.trim() ? node.summary.trim() : null;
+    const hasBody = Boolean(summary) || renderedChildren.length > 0;
+    const displayFolded = hasBody && foldedIds.has(node.id);
+    const base = { node, depth, tag, attributes, hasBody, displayFolded, summary };
+    if (!hasBody) {
+      lines.push({ ...base, key: `${node.id}:self`, kind: "self" });
+      continue;
+    }
+    if (displayFolded) {
+      lines.push({ ...base, key: `${node.id}:folded`, kind: "folded" });
+      continue;
+    }
+    lines.push({ ...base, key: `${node.id}:open`, kind: "open" });
+    if (summary) {
+      lines.push({ ...base, key: `${node.id}:summary`, kind: "summary", depth: depth + 1 });
+    }
+    lines.push(...buildContextXmlLines(renderedChildren, foldedIds, depth + 1));
+    lines.push({ ...base, key: `${node.id}:close`, kind: "close" });
+  }
+  return lines;
+}
+
 function contextMemoryLayer(node: WorkbenchContextNode): ContextMemoryLayerFilter | null {
   const value = node.metadata.governance_scope ?? node.metadata.layer_kind ?? node.owner_ref.layer_kind;
   if (
@@ -1475,7 +1567,6 @@ function contextNodeXmlAttributes(node: WorkbenchContextNodeRow) {
   if (!node.state.prompt_visible) attrs.push({ name: "prompt_visible", value: "false" });
   if (node.state.pinned) attrs.push({ name: "pinned", value: "true" });
   if (node.state.schema_enabled) attrs.push({ name: "schema_enabled", value: "true" });
-  if (node.childCount) attrs.push({ name: "children", value: String(node.childCount) });
   const memoryAccess = contextMemoryAccessCode(node);
   if (memoryAccess) attrs.push({ name: "memory_access", value: memoryAccess });
   const actions = contextNodeXmlActions(node);
@@ -1503,6 +1594,56 @@ function contextNodeActions(node: WorkbenchContextNode) {
     });
   }
   return actions;
+}
+
+function contextNodeBusinessActions(node: WorkbenchContextNode) {
+  const toggleAction = contextNodeToggleAction(node);
+  return toggleAction ? [toggleAction, ...contextNodeActions(node)] : contextNodeActions(node);
+}
+
+function contextXmlLineActions(line: NumberedContextXmlLine) {
+  return line.kind === "summary" || line.kind === "close" ? [] : contextNodeBusinessActions(line.node);
+}
+
+function contextXmlLineStyle(line: NumberedContextXmlLine) {
+  return { "--xml-depth": String(line.depth) };
+}
+
+function contextXmlLineCanFold(line: NumberedContextXmlLine) {
+  return line.hasBody && (line.kind === "open" || line.kind === "folded");
+}
+
+function contextXmlLineClasses(line: NumberedContextXmlLine) {
+  return {
+    "context-xml-line-row--hidden": !line.node.state.prompt_visible,
+    "context-xml-line-row--summary": line.kind === "summary",
+    "context-xml-line-row--close": line.kind === "close",
+    "context-xml-line-row--folded": line.kind === "folded",
+  };
+}
+
+function contextXmlBusinessActionBusyKey(node: WorkbenchContextNode, actionId: string) {
+  return actionId === "expand" || actionId === "collapse"
+    ? contextNodeToggleBusyKey(node)
+    : contextActionBusyKey(node, actionId);
+}
+
+function toggleContextXmlDisplayFold(nodeId: string) {
+  const next = new Set(contextXmlDisplayFoldedNodeIds.value);
+  if (next.has(nodeId)) {
+    next.delete(nodeId);
+  } else {
+    next.add(nodeId);
+  }
+  contextXmlDisplayFoldedNodeIds.value = next;
+}
+
+function runContextXmlBusinessAction(node: WorkbenchContextNode, actionId: string) {
+  if (actionId === "expand" || actionId === "collapse") {
+    void runContextNodeToggle(node);
+    return;
+  }
+  void runContextNodeAction(node, actionId);
 }
 
 function contextNodeToggleAction(node: WorkbenchContextNode) {
@@ -2780,91 +2921,75 @@ function handleTurnsWheel(event: WheelEvent) {
               </button>
             </div>
           </div>
-          <div v-if="!filteredContextNodeRows.length" class="asset-empty">{{ t("workbench.context.emptyNodes") }}</div>
-          <div v-else class="context-node-list" role="tree">
-            <article
-              v-for="node in filteredContextNodeRows"
-              :key="node.id"
-              class="context-node-row"
-              :class="{
-                'context-node-row--root': node.depth === 0,
-                'context-node-row--hidden': !node.state.prompt_visible,
-                'context-node-row--last': node.isLastChild,
-              }"
+          <div v-if="!contextXmlLines.length" class="asset-empty">{{ t("workbench.context.emptyNodes") }}</div>
+          <div v-else class="context-xml-viewer" role="tree">
+            <div
+              v-for="line in contextXmlLines"
+              :key="line.key"
+              class="context-xml-line-row"
+              :class="contextXmlLineClasses(line)"
+              :style="contextXmlLineStyle(line)"
               role="treeitem"
-              :aria-level="node.depth + 1"
-              :aria-expanded="contextNodeToggleAction(node) ? !node.state.collapsed : undefined"
+              :aria-level="line.depth + 1"
+              :aria-expanded="contextXmlLineCanFold(line) ? !line.displayFolded : undefined"
             >
-              <div class="context-node-row__prefix" aria-hidden="true">
-                <span
-                  v-for="(continues, guideIndex) in node.ancestorContinues"
-                  :key="`${node.id}:guide:${guideIndex}`"
-                  class="context-node-row__guide"
-                  :class="{ 'context-node-row__guide--active': continues }"
-                />
-                <span class="context-node-row__joint" :class="{ 'context-node-row__joint--root': node.depth === 0, 'context-node-row__joint--last': node.isLastChild }">
-                  <button
-                    v-if="contextNodeToggleAction(node)"
-                    type="button"
-                    class="context-node-row__toggle"
-                    :title="contextNodeToggleAction(node)?.label"
-                    :disabled="contextActionBusy !== null"
-                    @click="runContextNodeToggle(node)"
+              <span class="context-xml-line-number">{{ line.lineNumber }}</span>
+              <span class="context-xml-fold-gutter">
+                <button
+                  v-if="contextXmlLineCanFold(line)"
+                  type="button"
+                  class="context-xml-display-toggle"
+                  :aria-label="line.displayFolded ? t('workbench.context.action.expand') : t('workbench.context.action.collapse')"
+                  @click="toggleContextXmlDisplayFold(line.node.id)"
+                >
+                  <ChevronRight v-if="line.displayFolded" :size="13" />
+                  <ChevronDown v-else :size="13" />
+                </button>
+              </span>
+              <code class="context-xml-source-line" :title="line.node.id">
+                <template v-if="line.kind === 'close'">
+                  <span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">{{ line.tag }}</span><span class="context-xml-punct">&gt;</span>
+                </template>
+                <template v-else-if="line.kind === 'summary'">
+                  <span class="context-xml-punct">&lt;</span><span class="context-xml-tag">summary</span><span class="context-xml-punct">&gt;</span><span class="context-xml-text">{{ xmlText(line.summary) }}</span><span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">summary</span><span class="context-xml-punct">&gt;</span>
+                </template>
+                <template v-else>
+                  <span class="context-xml-punct">&lt;</span><span class="context-xml-tag">{{ line.tag }}</span>
+                  <template
+                    v-for="attribute in line.attributes"
+                    :key="`${line.key}:attr:${attribute.name}`"
                   >
-                    <Loader2
-                      v-if="contextActionBusy === contextNodeToggleBusyKey(node)"
-                      class="motion-spin"
-                      :size="12"
-                    />
-                    <ChevronRight v-else-if="node.state.collapsed" :size="14" />
-                    <ChevronDown v-else :size="14" />
-                  </button>
-                  <span v-else class="context-node-row__toggle-spacer" />
-                </span>
+                    <span class="context-xml-attr"> {{ attribute.name }}</span><span class="context-xml-equals">=</span><span class="context-xml-value">"{{ xmlAttributeText(attribute.value) }}"</span>
+                  </template>
+                  <template v-if="line.kind === 'self'">
+                    <span class="context-xml-punct"> /&gt;</span>
+                  </template>
+                  <template v-else-if="line.kind === 'folded'">
+                    <span class="context-xml-punct">&gt;</span><span class="context-xml-ellipsis">…</span><span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">{{ line.tag }}</span><span class="context-xml-punct">&gt;</span>
+                  </template>
+                  <template v-else>
+                    <span class="context-xml-punct">&gt;</span>
+                  </template>
+                </template>
+              </code>
+              <div v-if="contextXmlLineActions(line).length" class="context-xml-actions">
+                <button
+                  v-for="action in contextXmlLineActions(line)"
+                  :key="action.id"
+                  type="button"
+                  class="context-xml-action"
+                  :disabled="contextActionBusy !== null"
+                  @click="runContextXmlBusinessAction(line.node, action.id)"
+                >
+                  <Loader2
+                    v-if="contextActionBusy === contextXmlBusinessActionBusyKey(line.node, action.id)"
+                    class="motion-spin"
+                    :size="11"
+                  />
+                  <span>{{ action.label }}</span>
+                </button>
               </div>
-              <div class="context-node-row__body context-xml-node">
-                <div class="context-xml-line">
-                  <code class="context-xml-code" :title="node.id">
-                    <span class="context-xml-punct">&lt;</span><span class="context-xml-tag">{{ contextNodeXmlTag(node) }}</span>
-                    <template
-                      v-for="attribute in contextNodeXmlAttributes(node)"
-                      :key="`${node.id}:attr:${attribute.name}`"
-                    >
-                      <span class="context-xml-attr"> {{ attribute.name }}</span><span class="context-xml-equals">=</span><span class="context-xml-value">"{{ xmlAttributeText(attribute.value) }}"</span>
-                    </template>
-                    <span v-if="node.summary" class="context-xml-punct">&gt;</span>
-                    <span v-else class="context-xml-punct"> /&gt;</span>
-                  </code>
-                  <div v-if="contextNodeActions(node).length" class="context-xml-actions">
-                    <button
-                      v-for="action in contextNodeActions(node)"
-                      :key="action.id"
-                      type="button"
-                      class="context-xml-action"
-                      :disabled="contextActionBusy !== null"
-                      @click="runContextNodeAction(node, action.id)"
-                    >
-                      <Loader2
-                        v-if="contextActionBusy === contextActionBusyKey(node, action.id)"
-                        class="motion-spin"
-                        :size="11"
-                      />
-                      <span>{{ action.label }}</span>
-                    </button>
-                  </div>
-                </div>
-                <div v-if="node.summary" class="context-xml-child-line">
-                  <code class="context-xml-code">
-                    <span class="context-xml-punct">&lt;</span><span class="context-xml-tag">summary</span><span class="context-xml-punct">&gt;</span><span class="context-xml-text">{{ xmlText(node.summary) }}</span><span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">summary</span><span class="context-xml-punct">&gt;</span>
-                  </code>
-                </div>
-                <div v-if="node.summary" class="context-xml-child-line context-xml-child-line--close">
-                  <code class="context-xml-code">
-                    <span class="context-xml-punct">&lt;/</span><span class="context-xml-tag">{{ contextNodeXmlTag(node) }}</span><span class="context-xml-punct">&gt;</span>
-                  </code>
-                </div>
-              </div>
-            </article>
+            </div>
           </div>
         </UiCard>
       </template>
@@ -4723,171 +4848,87 @@ dd {
   white-space: pre-wrap;
 }
 
-.context-node-list {
+.context-xml-viewer {
+  --xml-indent: 18px;
   display: grid;
-  gap: 0;
-  max-height: min(58vh, 620px);
+  max-height: min(62vh, 680px);
   overflow: auto;
+  padding: 6px 0;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);
   background: var(--surface-inset);
   font-family: var(--font-mono);
 }
 
-.context-node-row {
-  position: relative;
+.context-xml-line-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 2px;
-  min-width: 0;
-  padding: 0 8px 0 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
-  background: transparent;
+  grid-template-columns: 36px 18px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 21px;
+  padding-right: 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
-.context-node-row:hover {
-  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+.context-xml-line-row:hover {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 
-.context-node-row:last-child {
-  border-bottom: 0;
+.context-xml-line-row--hidden {
+  opacity: 0.62;
 }
 
-.context-node-row--hidden {
-  background: color-mix(in srgb, var(--surface-inset) 38%, transparent);
-  opacity: 0.72;
+.context-xml-line-row--summary {
+  color: var(--text-muted);
 }
 
-.context-node-row__prefix {
-  display: flex;
+.context-xml-line-number {
   align-self: stretch;
-  min-height: 26px;
-  padding-left: 5px;
+  padding-right: 8px;
+  border-right: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  color: color-mix(in srgb, var(--text-muted) 72%, transparent);
+  line-height: 21px;
+  text-align: right;
+  user-select: none;
 }
 
-.context-node-row__guide,
-.context-node-row__joint {
-  position: relative;
-  flex: 0 0 12px;
-  width: 12px;
-}
-
-.context-node-row__joint {
-  flex-basis: 20px;
-  width: 20px;
-}
-
-.context-node-row__guide::before,
-.context-node-row__joint::before,
-.context-node-row__joint::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-}
-
-.context-node-row__guide--active::before {
-  top: -1px;
-  bottom: -1px;
-  left: 6px;
-  border-left: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
-}
-
-.context-node-row__joint:not(.context-node-row__joint--root)::before {
-  top: 13px;
-  left: -6px;
-  width: 13px;
-  border-top: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
-}
-
-.context-node-row__joint:not(.context-node-row__joint--root)::after {
-  top: -1px;
-  bottom: calc(100% - 13px);
-  left: -6px;
-  border-left: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
-}
-
-.context-node-row__joint:not(.context-node-row__joint--root):not(.context-node-row__joint--last)::after {
-  bottom: -1px;
-}
-
-.context-node-row__toggle,
-.context-node-row__toggle-spacer {
-  position: relative;
-  z-index: 1;
+.context-xml-fold-gutter {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-top: 4px;
-  border-radius: var(--radius-1);
+  min-width: 18px;
 }
 
-.context-node-row__toggle {
-  border: 1px solid transparent;
+.context-xml-display-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: var(--radius-1);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   cursor: pointer;
 }
 
-.context-node-row__toggle:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--color-accent) 54%, transparent);
-  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+.context-xml-display-toggle:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   color: var(--color-accent);
 }
 
-.context-node-row__toggle:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.context-node-row__toggle-spacer::before {
-  content: "";
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-muted) 48%, transparent);
-}
-
-.context-node-row__body {
-  display: grid;
-  min-width: 0;
-  padding: 4px 0;
-}
-
-.context-xml-node {
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.context-xml-line {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 20px;
-}
-
-.context-xml-code {
+.context-xml-source-line {
   display: block;
   min-width: 0;
   overflow: hidden;
+  padding-left: calc(var(--xml-depth) * var(--xml-indent));
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.45;
+  line-height: 21px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.context-xml-child-line {
-  min-width: 0;
-  padding-left: 18px;
-}
-
-.context-xml-child-line--close {
-  opacity: 0.8;
 }
 
 .context-xml-punct {
@@ -4914,11 +4955,17 @@ dd {
   color: var(--text-secondary);
 }
 
+.context-xml-ellipsis {
+  padding: 0 3px;
+  color: color-mix(in srgb, var(--text-muted) 76%, transparent);
+}
+
 .context-xml-actions {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
+  padding-left: 8px;
 }
 
 .context-xml-action {
