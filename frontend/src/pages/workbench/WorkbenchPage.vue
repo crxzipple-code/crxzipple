@@ -26,7 +26,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-vue-next";
-import { computed, nextTick, onUnmounted, ref, watch, type Component } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { dataMode } from "@/shared/api/client";
@@ -118,6 +118,7 @@ const contextTreeError = ref<string | null>(null);
 const contextActionBusy = ref<string | null>(null);
 const contextMemoryLayerFilter = ref<ContextMemoryLayerFilter>("all");
 const contextXmlDisplayFoldedNodeIds = ref<Set<string>>(new Set());
+const contextXmlContextMenu = ref<ContextXmlContextMenuState | null>(null);
 const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
 const pendingRunId = ref<string | null>(null);
@@ -383,8 +384,15 @@ if (dataMode === "api") {
 
 void loadRuntimeOptions();
 
+onMounted(() => {
+  window.addEventListener("click", closeContextXmlContextMenu);
+  window.addEventListener("keydown", handleContextXmlGlobalKeydown);
+});
+
 onUnmounted(() => {
   closeRelayStream?.();
+  window.removeEventListener("click", closeContextXmlContextMenu);
+  window.removeEventListener("keydown", handleContextXmlGlobalKeydown);
   if (refreshTimer !== null) {
     window.clearTimeout(refreshTimer);
   }
@@ -1390,6 +1398,14 @@ interface NumberedContextXmlLine extends ContextXmlLine {
   lineNumber: number;
 }
 
+interface ContextXmlContextMenuState {
+  x: number;
+  y: number;
+  node: WorkbenchContextNodeRow;
+  title: string;
+  actions: Array<{ id: string; label: string }>;
+}
+
 function flattenContextNodes(nodes: WorkbenchContextNode[]): WorkbenchContextNodeRow[] {
   return buildContextNodeRows(nodes);
 }
@@ -1634,6 +1650,7 @@ function contextXmlLineClasses(line: NumberedContextXmlLine) {
     "context-xml-line-row--summary": line.kind === "summary",
     "context-xml-line-row--close": line.kind === "close",
     "context-xml-line-row--folded": line.kind === "folded",
+    "context-xml-line-row--menu": contextXmlLineActions(line).length > 0,
   };
 }
 
@@ -1641,6 +1658,50 @@ function contextXmlBusinessActionBusyKey(node: WorkbenchContextNode, actionId: s
   return actionId === "expand" || actionId === "collapse"
     ? contextNodeToggleBusyKey(node)
     : contextActionBusyKey(node, actionId);
+}
+
+function openContextXmlContextMenu(event: MouseEvent, line: NumberedContextXmlLine) {
+  const actions = contextXmlLineActions(line);
+  if (!actions.length) {
+    contextXmlContextMenu.value = null;
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const menuWidth = 220;
+  const menuHeight = 34 + actions.length * 30;
+  const margin = 8;
+  contextXmlContextMenu.value = {
+    x: Math.min(event.clientX, window.innerWidth - menuWidth - margin),
+    y: Math.min(event.clientY, window.innerHeight - menuHeight - margin),
+    node: line.node,
+    title: line.node.title,
+    actions,
+  };
+}
+
+function closeContextXmlContextMenu() {
+  contextXmlContextMenu.value = null;
+}
+
+function contextXmlContextMenuStyle(menu: ContextXmlContextMenuState) {
+  return {
+    left: `${Math.max(8, menu.x)}px`,
+    top: `${Math.max(8, menu.y)}px`,
+  };
+}
+
+function handleContextXmlMenuAction(actionId: string) {
+  const menu = contextXmlContextMenu.value;
+  if (!menu) return;
+  closeContextXmlContextMenu();
+  runContextXmlBusinessAction(menu.node, actionId);
+}
+
+function handleContextXmlGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    closeContextXmlContextMenu();
+  }
 }
 
 function toggleContextXmlDisplayFold(nodeId: string) {
@@ -2965,6 +3026,7 @@ function handleTurnsWheel(event: WheelEvent) {
               role="treeitem"
               :aria-level="line.depth + 1"
               :aria-expanded="contextXmlLineCanFold(line) ? !line.displayFolded : undefined"
+              @contextmenu="openContextXmlContextMenu($event, line)"
             >
               <span class="context-xml-line-number">{{ line.lineNumber }}</span>
               <code class="context-xml-source-line" :title="line.node.id">
@@ -3004,23 +3066,31 @@ function handleTurnsWheel(event: WheelEvent) {
                   </template>
                 </template>
               </code>
-              <div v-if="contextXmlLineActions(line).length" class="context-xml-actions">
-                <button
-                  v-for="action in contextXmlLineActions(line)"
-                  :key="action.id"
-                  type="button"
-                  class="context-xml-action"
-                  :disabled="contextActionBusy !== null"
-                  @click="runContextXmlBusinessAction(line.node, action.id)"
-                >
-                  <Loader2
-                    v-if="contextActionBusy === contextXmlBusinessActionBusyKey(line.node, action.id)"
-                    class="motion-spin"
-                    :size="11"
-                  />
-                  <span>{{ action.label }}</span>
-                </button>
-              </div>
+            </div>
+            <div
+              v-if="contextXmlContextMenu"
+              class="context-xml-context-menu"
+              :style="contextXmlContextMenuStyle(contextXmlContextMenu)"
+              role="menu"
+              @click.stop
+              @contextmenu.prevent
+            >
+              <strong :title="contextXmlContextMenu.node.id">{{ contextXmlContextMenu.title }}</strong>
+              <button
+                v-for="action in contextXmlContextMenu.actions"
+                :key="action.id"
+                type="button"
+                role="menuitem"
+                :disabled="contextActionBusy !== null"
+                @click="handleContextXmlMenuAction(action.id)"
+              >
+                <Loader2
+                  v-if="contextActionBusy === contextXmlBusinessActionBusyKey(contextXmlContextMenu.node, action.id)"
+                  class="motion-spin"
+                  :size="11"
+                />
+                <span>{{ action.label }}</span>
+              </button>
             </div>
           </div>
         </UiCard>
@@ -4823,7 +4893,7 @@ dd {
 }
 
 .context-tree-card__heading button:disabled,
-.context-xml-action:disabled {
+.context-xml-context-menu button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -4946,6 +5016,10 @@ dd {
   background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 
+.context-xml-line-row--menu {
+  cursor: context-menu;
+}
+
 .context-xml-line-row--hidden {
   opacity: 0.62;
 }
@@ -5031,39 +5105,52 @@ dd {
   color: color-mix(in srgb, var(--text-muted) 76%, transparent);
 }
 
-.context-xml-actions {
-  position: sticky;
-  right: 0;
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
+.context-xml-context-menu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
   gap: 4px;
-  padding-left: 8px;
-  background:
-    linear-gradient(90deg, transparent, var(--surface-inset) 12px),
-    var(--surface-inset);
+  width: 220px;
+  padding: 7px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-panel);
 }
 
-.context-xml-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  min-height: 20px;
-  padding: 0 5px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-1);
-  background: transparent;
-  color: var(--color-accent);
-  font-family: var(--font-mono);
+.context-xml-context-menu strong {
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 6px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
   font-size: 11px;
-  cursor: pointer;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.context-xml-action:hover:not(:disabled) {
+.context-xml-context-menu button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.context-xml-context-menu button:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--color-accent) 42%, transparent);
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent);
 }
 
 .asset-link {
