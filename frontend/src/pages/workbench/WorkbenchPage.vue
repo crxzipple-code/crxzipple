@@ -281,7 +281,7 @@ const contextSessionKey = computed(() => {
 });
 const contextNodeRows = computed(() => flattenContextNodes(contextTree.value?.nodes ?? []));
 const filteredContextNodeRows = computed(() => (
-  filterContextNodeRows(contextNodeRows.value, contextMemoryLayerFilter.value)
+  reflowContextNodeRows(filterContextNodeRows(contextNodeRows.value, contextMemoryLayerFilter.value))
 ));
 const contextMemoryLayerOptions = computed<Array<{ id: ContextMemoryLayerFilter; label: string; count: number }>>(() => {
   const rows = contextNodeRows.value;
@@ -1345,9 +1345,19 @@ function compactInspectorValue(value: string | null | undefined) {
 interface WorkbenchContextNodeRow extends WorkbenchContextNode {
   depth: number;
   childCount: number;
+  ancestorContinues: boolean[];
+  isLastChild: boolean;
 }
 
 function flattenContextNodes(nodes: WorkbenchContextNode[]): WorkbenchContextNodeRow[] {
+  return buildContextNodeRows(nodes);
+}
+
+function reflowContextNodeRows(rows: WorkbenchContextNodeRow[]): WorkbenchContextNodeRow[] {
+  return buildContextNodeRows(rows);
+}
+
+function buildContextNodeRows(nodes: WorkbenchContextNode[]): WorkbenchContextNodeRow[] {
   const byParent = new Map<string | null, WorkbenchContextNode[]>();
   const knownIds = new Set(nodes.map((node) => node.id));
   for (const node of nodes) {
@@ -1365,16 +1375,24 @@ function flattenContextNodes(nodes: WorkbenchContextNode[]): WorkbenchContextNod
   }
   const rows: WorkbenchContextNodeRow[] = [];
   const visited = new Set<string>();
-  const visit = (parentId: string | null, depth: number) => {
-    for (const node of byParent.get(parentId) ?? []) {
+  const visit = (parentId: string | null, depth: number, ancestorContinues: boolean[]) => {
+    const siblings = byParent.get(parentId) ?? [];
+    for (const [index, node] of siblings.entries()) {
       if (visited.has(node.id)) continue;
       visited.add(node.id);
       const childCount = byParent.get(node.id)?.length ?? 0;
-      rows.push({ ...node, depth, childCount });
-      visit(node.id, depth + 1);
+      const continues = index < siblings.length - 1;
+      rows.push({
+        ...node,
+        depth,
+        childCount,
+        ancestorContinues,
+        isLastChild: !continues,
+      });
+      visit(node.id, depth + 1, [...ancestorContinues, continues]);
     }
   };
-  visit(null, 0);
+  visit(null, 0, []);
   return rows;
 }
 
@@ -1439,12 +1457,6 @@ function contextNodeTokenLabel(node: WorkbenchContextNode) {
 
 function contextNodeActions(node: WorkbenchContextNode) {
   const actions: Array<{ id: string; label: string }> = [];
-  if (node.actions.includes(node.state.collapsed ? "expand" : "collapse")) {
-    actions.push({
-      id: node.state.collapsed ? "expand" : "collapse",
-      label: node.state.collapsed ? t("workbench.context.action.expand") : t("workbench.context.action.collapse"),
-    });
-  }
   if (node.actions.includes(node.state.pinned ? "unpin" : "pin")) {
     actions.push({
       id: node.state.pinned ? "unpin" : "pin",
@@ -1458,6 +1470,26 @@ function contextNodeActions(node: WorkbenchContextNode) {
     });
   }
   return actions;
+}
+
+function contextNodeToggleAction(node: WorkbenchContextNode) {
+  const action = node.state.collapsed ? "expand" : "collapse";
+  if (!node.actions.includes(action)) return null;
+  return {
+    id: action,
+    label: node.state.collapsed ? t("workbench.context.action.expand") : t("workbench.context.action.collapse"),
+  };
+}
+
+function contextNodeToggleBusyKey(node: WorkbenchContextNode) {
+  const action = contextNodeToggleAction(node);
+  return action ? contextActionBusyKey(node, action.id) : "";
+}
+
+function runContextNodeToggle(node: WorkbenchContextNode) {
+  const action = contextNodeToggleAction(node);
+  if (!action) return;
+  void runContextNodeAction(node, action.id);
 }
 
 function contextActionBusyKey(node: WorkbenchContextNode, action: string) {
@@ -2716,42 +2748,78 @@ function handleTurnsWheel(event: WheelEvent) {
             </div>
           </div>
           <div v-if="!filteredContextNodeRows.length" class="asset-empty">{{ t("workbench.context.emptyNodes") }}</div>
-          <div v-else class="context-node-list">
+          <div v-else class="context-node-list" role="tree">
             <article
               v-for="node in filteredContextNodeRows"
               :key="node.id"
               class="context-node-row"
-              :style="{ paddingLeft: `${9 + node.depth * 14}px` }"
+              :class="{
+                'context-node-row--root': node.depth === 0,
+                'context-node-row--hidden': !node.state.prompt_visible,
+                'context-node-row--last': node.isLastChild,
+              }"
+              role="treeitem"
+              :aria-level="node.depth + 1"
+              :aria-expanded="contextNodeToggleAction(node) ? !node.state.collapsed : undefined"
             >
-              <div class="context-node-row__main">
-                <Braces :size="14" />
-                <span>
-                  <strong>{{ node.title }}</strong>
-                  <small :title="node.id">{{ compactIdentifier(node.id) }} · {{ node.owner }} / {{ node.kind }}</small>
+              <div class="context-node-row__prefix" aria-hidden="true">
+                <span
+                  v-for="(continues, guideIndex) in node.ancestorContinues"
+                  :key="`${node.id}:guide:${guideIndex}`"
+                  class="context-node-row__guide"
+                  :class="{ 'context-node-row__guide--active': continues }"
+                />
+                <span class="context-node-row__joint" :class="{ 'context-node-row__joint--root': node.depth === 0, 'context-node-row__joint--last': node.isLastChild }">
+                  <button
+                    v-if="contextNodeToggleAction(node)"
+                    type="button"
+                    class="context-node-row__toggle"
+                    :title="contextNodeToggleAction(node)?.label"
+                    :disabled="contextActionBusy !== null"
+                    @click="runContextNodeToggle(node)"
+                  >
+                    <Loader2
+                      v-if="contextActionBusy === contextNodeToggleBusyKey(node)"
+                      class="motion-spin"
+                      :size="12"
+                    />
+                    <ChevronRight v-else-if="node.state.collapsed" :size="14" />
+                    <ChevronDown v-else :size="14" />
+                  </button>
+                  <span v-else class="context-node-row__toggle-spacer" />
                 </span>
               </div>
-              <p v-if="node.summary">{{ node.summary }}</p>
-              <div class="context-node-row__meta">
-                <UiBadge :tone="node.state.prompt_visible ? 'success' : 'neutral'">{{ contextNodeStateLabel(node) }}</UiBadge>
-                <span>{{ t("common.tokens") }} {{ contextNodeTokenLabel(node) }}</span>
-                <span v-if="node.childCount">{{ t("workbench.context.children", { count: node.childCount }) }}</span>
-                <span v-if="contextMemoryAccessLabel(node)">{{ contextMemoryAccessLabel(node) }}</span>
-              </div>
-              <div v-if="contextNodeActions(node).length" class="context-node-row__actions">
-                <button
-                  v-for="action in contextNodeActions(node)"
-                  :key="action.id"
-                  type="button"
-                  :disabled="contextActionBusy !== null"
-                  @click="runContextNodeAction(node, action.id)"
-                >
-                  <Loader2
-                    v-if="contextActionBusy === contextActionBusyKey(node, action.id)"
-                    class="motion-spin"
-                    :size="12"
-                  />
-                  <span>{{ action.label }}</span>
-                </button>
+              <div class="context-node-row__body">
+                <div class="context-node-row__main">
+                  <Braces :size="14" />
+                  <span>
+                    <strong>{{ node.title }}</strong>
+                    <small :title="node.id">{{ compactIdentifier(node.id) }} · {{ node.owner }} / {{ node.kind }}</small>
+                  </span>
+                </div>
+                <p v-if="node.summary">{{ node.summary }}</p>
+                <div class="context-node-row__meta">
+                  <UiBadge :tone="node.state.prompt_visible ? 'success' : 'neutral'">{{ contextNodeStateLabel(node) }}</UiBadge>
+                  <span>{{ t("common.tokens") }} {{ contextNodeTokenLabel(node) }}</span>
+                  <span v-if="node.childCount">{{ t("workbench.context.children", { count: node.childCount }) }}</span>
+                  <span v-if="contextMemoryAccessLabel(node)">{{ contextMemoryAccessLabel(node) }}</span>
+                </div>
+                <div v-if="contextNodeActions(node).length" class="context-node-row__actions">
+                  <button
+                    v-for="action in contextNodeActions(node)"
+                    :key="action.id"
+                    type="button"
+                    :disabled="contextActionBusy !== null"
+                    @click="runContextNodeAction(node, action.id)"
+                  >
+                    <Loader2
+                      v-if="contextActionBusy === contextActionBusyKey(node, action.id)"
+                      class="motion-spin"
+                      :size="12"
+                    />
+                    <span>{{ action.label }}</span>
+                  </button>
+                </div>
               </div>
             </article>
           </div>
@@ -4615,20 +4683,128 @@ dd {
 
 .context-node-list {
   display: grid;
-  gap: 7px;
+  gap: 0;
   max-height: min(54vh, 560px);
   overflow: auto;
-  padding-right: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-raised) 42%, transparent);
 }
 
 .context-node-row {
+  position: relative;
   display: grid;
-  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 4px;
   min-width: 0;
-  padding: 9px;
+  padding: 0 8px 0 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+}
+
+.context-node-row:last-child {
+  border-bottom: 0;
+}
+
+.context-node-row--hidden {
+  background: color-mix(in srgb, var(--surface-inset) 38%, transparent);
+}
+
+.context-node-row__prefix {
+  display: flex;
+  align-self: stretch;
+  min-height: 48px;
+  padding-left: 6px;
+}
+
+.context-node-row__guide,
+.context-node-row__joint {
+  position: relative;
+  flex: 0 0 14px;
+  width: 14px;
+}
+
+.context-node-row__joint {
+  flex-basis: 24px;
+  width: 24px;
+}
+
+.context-node-row__guide::before,
+.context-node-row__joint::before,
+.context-node-row__joint::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.context-node-row__guide--active::before {
+  top: -1px;
+  bottom: -1px;
+  left: 7px;
+  border-left: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+}
+
+.context-node-row__joint:not(.context-node-row__joint--root)::before {
+  top: 24px;
+  left: -7px;
+  width: 16px;
+  border-top: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+}
+
+.context-node-row__joint:not(.context-node-row__joint--root)::after {
+  top: -1px;
+  bottom: calc(100% - 24px);
+  left: -7px;
+  border-left: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+}
+
+.context-node-row__joint:not(.context-node-row__joint--root):not(.context-node-row__joint--last)::after {
+  bottom: -1px;
+}
+
+.context-node-row__toggle,
+.context-node-row__toggle-spacer {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 13px;
+  border-radius: 999px;
+}
+
+.context-node-row__toggle {
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-2);
-  background: color-mix(in srgb, var(--surface-raised) 62%, transparent);
+  background: var(--surface-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.context-node-row__toggle:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-accent) 54%, transparent);
+  color: var(--color-accent);
+}
+
+.context-node-row__toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.context-node-row__toggle-spacer::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 48%, transparent);
+}
+
+.context-node-row__body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px 0;
 }
 
 .context-node-row__main,
