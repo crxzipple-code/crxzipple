@@ -3037,8 +3037,14 @@ function handleTurnsWheel(event: WheelEvent) {
                   :aria-label="line.displayFolded ? t('workbench.context.action.expand') : t('workbench.context.action.collapse')"
                   @click="toggleContextXmlDisplayFold(line.node.id)"
                 >
-                  <ChevronRight v-if="line.displayFolded" :size="13" />
-                  <ChevronDown v-else :size="13" />
+                  <svg
+                    class="context-xml-fold-triangle"
+                    :class="{ 'context-xml-fold-triangle--open': !line.displayFolded }"
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path d="M5.2 2.9c-.76-.5-1.78.04-1.78.95v8.3c0 .91 1.02 1.45 1.78.95l6.28-4.15c.66-.44.66-1.46 0-1.9L5.2 2.9Z" />
+                  </svg>
                 </button>
                 <span v-else class="context-xml-display-spacer" aria-hidden="true" />
                 <template v-if="line.kind === 'close'">
@@ -5041,25 +5047,38 @@ dd {
 .context-xml-display-toggle,
 .context-xml-display-spacer {
   display: inline-flex;
-  flex: 0 0 16px;
+  flex: 0 0 20px;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  margin-right: 2px;
+  width: 20px;
+  height: 18px;
+  margin-right: 3px;
 }
 
 .context-xml-display-toggle {
   border: 0;
   border-radius: var(--radius-1);
   background: transparent;
-  color: var(--color-accent);
+  color: color-mix(in srgb, var(--color-accent) 86%, var(--text-primary));
   cursor: pointer;
 }
 
 .context-xml-display-toggle:hover {
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   color: var(--color-accent);
+}
+
+.context-xml-fold-triangle {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  transform-origin: 50% 50%;
+  transition: transform 0.12s ease, color 0.12s ease;
+}
+
+.context-xml-fold-triangle--open {
+  transform: rotate(90deg);
 }
 
 .context-xml-source-line {
