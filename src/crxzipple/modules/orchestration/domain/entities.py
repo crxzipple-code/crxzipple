@@ -9,13 +9,17 @@ from crxzipple.modules.orchestration.domain.exceptions import (
 from crxzipple.modules.orchestration.domain.value_objects import (
     ApprovalDecision,
     ApprovalResolution,
+    ExecutionChainStatus,
+    ExecutionOwnerReference,
+    ExecutionStepItemKind,
+    ExecutionStepItemStatus,
+    ExecutionStepKind,
+    ExecutionStepStatus,
     InboundInstruction,
     OrchestrationBoundSessionTarget,
     OrchestrationIngressStatus,
     OrchestrationIngressRequestKind,
     OrchestrationExecutorLeaseStatus,
-    OrchestrationSchedulerSignalKind,
-    OrchestrationSchedulerSignalStatus,
     OrchestrationErrorPayload,
     OrchestrationQueuePolicy,
     OrchestrationRunStage,
@@ -38,7 +42,10 @@ from crxzipple.shared.orchestration_observation import (
     ORCHESTRATION_RUN_RESUMED_EVENT,
     ORCHESTRATION_RUN_WAITING_EVENT,
     ORCHESTRATION_RUN_WAITING_FOR_CONFIRMATION_EVENT,
+    ORCHESTRATION_RUN_WORKER_LEASE_RECOVERED_EVENT,
 )
+
+WAITING_REASON_MAX_CHARS = 100
 
 
 def _optional_payload_text(value: object) -> str | None:
@@ -50,6 +57,10 @@ def _optional_payload_text(value: object) -> str | None:
 
 def _optional_datetime_payload(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _optional_payload_dict(value: object) -> dict[str, object] | None:
+    return dict(value) if isinstance(value, dict) else None
 
 
 def _active_run_ids_from_metadata(metadata: dict[str, object]) -> list[str]:
@@ -65,6 +76,335 @@ def _active_run_ids_from_metadata(metadata: dict[str, object]) -> list[str]:
         for text in (_optional_payload_text(item),)
         if text is not None
     ]
+
+
+def _normalized_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _waiting_reason(value: str | None) -> str | None:
+    normalized = _normalized_optional_text(value)
+    if normalized is None:
+        return None
+    if len(normalized) <= WAITING_REASON_MAX_CHARS:
+        return normalized
+    return f"{normalized[: WAITING_REASON_MAX_CHARS - 3]}..."
+
+
+def _normalized_payload(value: dict[str, object] | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    return dict(value)
+
+
+@dataclass(kw_only=True)
+class ExecutionChain(AggregateRoot[str]):
+    turn_id: str
+    status: ExecutionChainStatus = ExecutionChainStatus.CREATED
+    active_step_id: str | None = None
+    step_count: int = 0
+    error_payload: OrchestrationErrorPayload | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise OrchestrationValidationError("Execution chain id cannot be empty.")
+        if not self.turn_id.strip():
+            raise OrchestrationValidationError("Execution chain turn_id cannot be empty.")
+        if not isinstance(self.status, ExecutionChainStatus):
+            self.status = ExecutionChainStatus(str(self.status))
+        self.active_step_id = _normalized_optional_text(self.active_step_id)
+        if self.step_count < 0:
+            raise OrchestrationValidationError(
+                "Execution chain step_count cannot be negative.",
+            )
+
+    @classmethod
+    def create(cls, *, chain_id: str, turn_id: str) -> "ExecutionChain":
+        return cls(id=chain_id, turn_id=turn_id)
+
+    def start(self, *, active_step_id: str | None = None) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionChainStatus.RUNNING
+        self.active_step_id = _normalized_optional_text(active_step_id)
+        self.started_at = self.started_at or timestamp
+        self.updated_at = timestamp
+
+    def set_active_step(self, step_id: str | None) -> None:
+        self.active_step_id = _normalized_optional_text(step_id)
+        self.updated_at = utcnow()
+
+    def increment_step_count(self) -> None:
+        self.step_count += 1
+        self.updated_at = utcnow()
+
+    def wait(self, *, active_step_id: str | None = None) -> None:
+        self.status = ExecutionChainStatus.WAITING
+        if active_step_id is not None:
+            self.active_step_id = _normalized_optional_text(active_step_id)
+        self.updated_at = utcnow()
+
+    def complete(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionChainStatus.COMPLETED
+        self.active_step_id = None
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+        self.error_payload = None
+
+    def fail(
+        self,
+        *,
+        message: str,
+        code: str = "execution_chain_failed",
+        details: dict[str, object] | None = None,
+    ) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionChainStatus.FAILED
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+        self.error_payload = OrchestrationErrorPayload(
+            message=message,
+            code=code,
+            details=details or {},
+        )
+
+    def cancel(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionChainStatus.CANCELLED
+        self.active_step_id = None
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+
+
+@dataclass(kw_only=True)
+class ExecutionStep(AggregateRoot[str]):
+    chain_id: str
+    turn_id: str
+    step_index: int
+    kind: ExecutionStepKind
+    status: ExecutionStepStatus = ExecutionStepStatus.CREATED
+    dispatch_task_id: str | None = None
+    owner: ExecutionOwnerReference | None = None
+    correlation_key: str | None = None
+    error_payload: OrchestrationErrorPayload | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise OrchestrationValidationError("Execution step id cannot be empty.")
+        if not self.chain_id.strip():
+            raise OrchestrationValidationError("Execution step chain_id cannot be empty.")
+        if not self.turn_id.strip():
+            raise OrchestrationValidationError("Execution step turn_id cannot be empty.")
+        if self.step_index < 0:
+            raise OrchestrationValidationError(
+                "Execution step step_index cannot be negative.",
+            )
+        if not isinstance(self.kind, ExecutionStepKind):
+            self.kind = ExecutionStepKind(str(self.kind))
+        if not isinstance(self.status, ExecutionStepStatus):
+            self.status = ExecutionStepStatus(str(self.status))
+        self.dispatch_task_id = _normalized_optional_text(self.dispatch_task_id)
+        self.correlation_key = _normalized_optional_text(self.correlation_key)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        step_id: str,
+        chain_id: str,
+        turn_id: str,
+        step_index: int,
+        kind: ExecutionStepKind,
+        correlation_key: str | None = None,
+    ) -> "ExecutionStep":
+        return cls(
+            id=step_id,
+            chain_id=chain_id,
+            turn_id=turn_id,
+            step_index=step_index,
+            kind=kind,
+            correlation_key=correlation_key,
+        )
+
+    def assign_dispatch_task(self, dispatch_task_id: str | None) -> None:
+        self.dispatch_task_id = _normalized_optional_text(dispatch_task_id)
+        self.updated_at = utcnow()
+
+    def link_owner(self, owner: ExecutionOwnerReference | None) -> None:
+        self.owner = owner
+        self.updated_at = utcnow()
+
+    def start(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepStatus.RUNNING
+        self.started_at = self.started_at or timestamp
+        self.updated_at = timestamp
+
+    def wait(self) -> None:
+        self.status = ExecutionStepStatus.WAITING
+        self.updated_at = utcnow()
+
+    def complete(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepStatus.COMPLETED
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+        self.error_payload = None
+
+    def fail(
+        self,
+        *,
+        message: str,
+        code: str = "execution_step_failed",
+        details: dict[str, object] | None = None,
+    ) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepStatus.FAILED
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+        self.error_payload = OrchestrationErrorPayload(
+            message=message,
+            code=code,
+            details=details or {},
+        )
+
+    def cancel(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepStatus.CANCELLED
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+
+
+@dataclass(kw_only=True)
+class ExecutionStepItem(AggregateRoot[str]):
+    step_id: str
+    chain_id: str
+    turn_id: str
+    item_index: int
+    kind: ExecutionStepItemKind
+    status: ExecutionStepItemStatus = ExecutionStepItemStatus.CREATED
+    owner: ExecutionOwnerReference | None = None
+    correlation_key: str | None = None
+    source_event_id: str | None = None
+    payload_ref: dict[str, object] | None = None
+    summary_payload: dict[str, object] | None = None
+    error_payload: OrchestrationErrorPayload | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    completed_at: datetime | None = None
+    updated_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise OrchestrationValidationError("Execution step item id cannot be empty.")
+        if not self.step_id.strip():
+            raise OrchestrationValidationError(
+                "Execution step item step_id cannot be empty.",
+            )
+        if not self.chain_id.strip():
+            raise OrchestrationValidationError(
+                "Execution step item chain_id cannot be empty.",
+            )
+        if not self.turn_id.strip():
+            raise OrchestrationValidationError(
+                "Execution step item turn_id cannot be empty.",
+            )
+        if self.item_index < 0:
+            raise OrchestrationValidationError(
+                "Execution step item item_index cannot be negative.",
+            )
+        if not isinstance(self.kind, ExecutionStepItemKind):
+            self.kind = ExecutionStepItemKind(str(self.kind))
+        if not isinstance(self.status, ExecutionStepItemStatus):
+            self.status = ExecutionStepItemStatus(str(self.status))
+        self.correlation_key = _normalized_optional_text(self.correlation_key)
+        self.source_event_id = _normalized_optional_text(self.source_event_id)
+        self.payload_ref = _normalized_payload(self.payload_ref)
+        self.summary_payload = _normalized_payload(self.summary_payload)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        item_id: str,
+        step_id: str,
+        chain_id: str,
+        turn_id: str,
+        item_index: int,
+        kind: ExecutionStepItemKind,
+        owner: ExecutionOwnerReference | None = None,
+        correlation_key: str | None = None,
+    ) -> "ExecutionStepItem":
+        return cls(
+            id=item_id,
+            step_id=step_id,
+            chain_id=chain_id,
+            turn_id=turn_id,
+            item_index=item_index,
+            kind=kind,
+            owner=owner,
+            correlation_key=correlation_key,
+        )
+
+    def link_owner(self, owner: ExecutionOwnerReference | None) -> None:
+        self.owner = owner
+        self.updated_at = utcnow()
+
+    def start(self) -> None:
+        self.status = ExecutionStepItemStatus.RUNNING
+        self.updated_at = utcnow()
+
+    def wait(self) -> None:
+        self.status = ExecutionStepItemStatus.WAITING
+        self.updated_at = utcnow()
+
+    def complete(self, *, summary_payload: dict[str, object] | None = None) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepItemStatus.COMPLETED
+        if summary_payload is not None:
+            self.summary_payload = dict(summary_payload)
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+        self.error_payload = None
+
+    def fail(
+        self,
+        *,
+        message: str,
+        code: str = "execution_step_item_failed",
+        details: dict[str, object] | None = None,
+    ) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepItemStatus.FAILED
+        self.completed_at = timestamp
+        self.updated_at = timestamp
+        self.error_payload = OrchestrationErrorPayload(
+            message=message,
+            code=code,
+            details=details or {},
+        )
+
+    def mark_late_observed(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepItemStatus.LATE_OBSERVED
+        self.completed_at = self.completed_at or timestamp
+        self.updated_at = timestamp
+
+    def mark_late_ignored(self) -> None:
+        timestamp = utcnow()
+        self.status = ExecutionStepItemStatus.LATE_IGNORED
+        self.completed_at = self.completed_at or timestamp
+        self.updated_at = timestamp
 
 
 @dataclass(kw_only=True)
@@ -83,6 +423,9 @@ class OrchestrationRun(AggregateRoot[str]):
     max_steps: int = 99
     pending_tool_run_ids: tuple[str, ...] = field(default_factory=tuple)
     waiting_reason: str | None = None
+    pending_approval_request_payload: dict[str, object] | None = None
+    last_approval_resolution_payload: dict[str, object] | None = None
+    recovery_contract_payload: dict[str, object] | None = None
     result_payload: dict[str, object] | None = None
     error: OrchestrationErrorPayload | None = None
     worker_id: str | None = None
@@ -117,7 +460,7 @@ class OrchestrationRun(AggregateRoot[str]):
         if self.lane_lock_key is not None:
             self.lane_lock_key = self.lane_lock_key.strip() or None
         if self.waiting_reason is not None:
-            self.waiting_reason = self.waiting_reason.strip() or None
+            self.waiting_reason = _waiting_reason(self.waiting_reason)
         if not isinstance(self.queue_policy, OrchestrationQueuePolicy):
             self.queue_policy = OrchestrationQueuePolicy(str(self.queue_policy))
         self.pending_tool_run_ids = tuple(
@@ -126,6 +469,15 @@ class OrchestrationRun(AggregateRoot[str]):
             if tool_run_id is not None and tool_run_id.strip()
         )
         self.metadata = dict(self.metadata)
+        self.pending_approval_request_payload = _optional_payload_dict(
+            self.pending_approval_request_payload,
+        )
+        self.last_approval_resolution_payload = _optional_payload_dict(
+            self.last_approval_resolution_payload,
+        )
+        self.recovery_contract_payload = _optional_payload_dict(
+            self.recovery_contract_payload,
+        )
         if self.result_payload is not None:
             self.result_payload = dict(self.result_payload)
 
@@ -164,6 +516,7 @@ class OrchestrationRun(AggregateRoot[str]):
                 payload={
                     "run_id": run.id,
                     "source": run.inbound_instruction.source,
+                    "session_key": run.session_key,
                     "status": run.status.value,
                     "stage": run.stage.value,
                     "current_step": run.current_step,
@@ -353,6 +706,58 @@ class OrchestrationRun(AggregateRoot[str]):
             ),
         )
 
+    def recover_worker_lease(
+        self,
+        *,
+        reason: str,
+        happened_at: datetime | None = None,
+    ) -> None:
+        if self.status is not OrchestrationRunStatus.RUNNING:
+            raise OrchestrationValidationError(
+                "Only running orchestration runs can recover a worker lease.",
+            )
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise OrchestrationValidationError(
+                "Orchestration run recovery reason cannot be empty.",
+            )
+        timestamp = happened_at or utcnow()
+        previous_worker_id = self.worker_id
+        previous_stage = self.stage
+        self.status = OrchestrationRunStatus.QUEUED
+        self.stage = OrchestrationRunStage.QUEUED
+        self.worker_id = None
+        self.lane_lock_key = None
+        self.waiting_reason = None
+        self.queued_at = timestamp
+        self.updated_at = timestamp
+        self.metadata["last_worker_lease_recovery"] = {
+            "reason": normalized_reason,
+            "previous_worker_id": previous_worker_id,
+            "previous_stage": previous_stage.value,
+            "recovered_at": timestamp.isoformat(),
+        }
+        self.record_event(
+            Event(
+                name=ORCHESTRATION_RUN_WORKER_LEASE_RECOVERED_EVENT,
+                payload={
+                    "run_id": self.id,
+                    "session_key": self.session_key,
+                    "active_session_id": self.active_session_id,
+                    "agent_id": self.agent_id,
+                    "status": self.status.value,
+                    "stage": self.stage.value,
+                    "current_step": self.current_step,
+                    "lane_key": self.lane_key,
+                    "priority": self.priority,
+                    "queue_policy": self.queue_policy.value,
+                    "previous_worker_id": previous_worker_id,
+                    "previous_stage": previous_stage.value,
+                    "reason": normalized_reason,
+                },
+            ),
+        )
+
     def advance(
         self,
         *,
@@ -489,11 +894,7 @@ class OrchestrationRun(AggregateRoot[str]):
         self.status = OrchestrationRunStatus.WAITING
         self.stage = OrchestrationRunStage.WAITING_ON_TOOL
         self.pending_tool_run_ids = normalized_tool_run_ids
-        self.waiting_reason = (
-            reason.strip()
-            if reason is not None and reason.strip()
-            else "waiting_on_tool"
-        )
+        self.waiting_reason = _waiting_reason(reason) or "waiting_on_tool"
         self.worker_id = None
         self.updated_at = timestamp
         self.record_event(
@@ -542,11 +943,7 @@ class OrchestrationRun(AggregateRoot[str]):
         self.status = OrchestrationRunStatus.WAITING
         self.stage = OrchestrationRunStage.WAITING_ON_TOOL
         self.pending_tool_run_ids = normalized_tool_run_ids
-        self.waiting_reason = (
-            reason.strip()
-            if reason is not None and reason.strip()
-            else "waiting_on_tool"
-        )
+        self.waiting_reason = _waiting_reason(reason) or "waiting_on_tool"
         self.worker_id = None
         self.updated_at = timestamp
         self.record_event(
@@ -568,10 +965,9 @@ class OrchestrationRun(AggregateRoot[str]):
         )
 
     def pending_approval_request(self) -> PendingApprovalRequest | None:
-        raw_request = self.metadata.get("pending_approval_request")
-        if not isinstance(raw_request, dict):
+        if self.pending_approval_request_payload is None:
             return None
-        return PendingApprovalRequest.from_payload(raw_request)
+        return PendingApprovalRequest.from_payload(self.pending_approval_request_payload)
 
     def wait_for_confirmation(
         self,
@@ -590,14 +986,10 @@ class OrchestrationRun(AggregateRoot[str]):
         self.status = OrchestrationRunStatus.WAITING
         self.stage = OrchestrationRunStage.WAITING_FOR_CONFIRMATION
         self.pending_tool_run_ids = ()
-        self.waiting_reason = (
-            reason.strip()
-            if reason is not None and reason.strip()
-            else "waiting_for_confirmation"
-        )
+        self.waiting_reason = _waiting_reason(reason) or "waiting_for_confirmation"
         self.worker_id = None
         self.updated_at = timestamp
-        self.metadata["pending_approval_request"] = request.to_payload()
+        self.pending_approval_request_payload = request.to_payload()
         self.record_event(
             Event(
                 name=ORCHESTRATION_RUN_WAITING_FOR_CONFIRMATION_EVENT,
@@ -647,8 +1039,8 @@ class OrchestrationRun(AggregateRoot[str]):
                 "Approval request id does not match the pending approval request.",
             )
         timestamp = happened_at or utcnow()
-        self.metadata.pop("pending_approval_request", None)
-        self.metadata["last_approval_resolution"] = ApprovalResolution(
+        self.pending_approval_request_payload = None
+        self.last_approval_resolution_payload = ApprovalResolution(
             request_id=normalized_request_id,
             decision=decision,
             resolved_at=timestamp,
@@ -828,8 +1220,11 @@ class OrchestrationRun(AggregateRoot[str]):
         self.lane_lock_key = None
         self.worker_id = None
         self.pending_tool_run_ids = ()
-        self.metadata.pop("pending_approval_request", None)
-        self.waiting_reason = reason.strip() if reason is not None and reason.strip() else None
+        self.pending_approval_request_payload = None
+        normalized_reason = _normalized_optional_text(reason)
+        self.waiting_reason = _waiting_reason(normalized_reason)
+        if normalized_reason is not None:
+            self.metadata["cancellation_reason"] = normalized_reason
         self.completed_at = utcnow()
         self.updated_at = self.completed_at
         self.record_event(
@@ -1108,133 +1503,6 @@ class OrchestrationIngressRequest(AggregateRoot[str]):
         raise OrchestrationValidationError(
             f"Unsupported orchestration ingress request kind '{self.kind.value}'.",
         )
-
-
-@dataclass(kw_only=True)
-class OrchestrationSchedulerSignal(AggregateRoot[str]):
-    signal_kind: OrchestrationSchedulerSignalKind
-    signal_payload: dict[str, object]
-    status: OrchestrationSchedulerSignalStatus = OrchestrationSchedulerSignalStatus.QUEUED
-    worker_id: str | None = None
-    error: OrchestrationErrorPayload | None = None
-    created_at: datetime = field(default_factory=utcnow)
-    updated_at: datetime = field(default_factory=utcnow)
-    claimed_at: datetime | None = None
-    completed_at: datetime | None = None
-
-    def __post_init__(self) -> None:
-        if not self.id.strip():
-            raise OrchestrationValidationError(
-                "Orchestration scheduler signal id cannot be empty.",
-            )
-        if not isinstance(self.signal_kind, OrchestrationSchedulerSignalKind):
-            self.signal_kind = OrchestrationSchedulerSignalKind(str(self.signal_kind))
-        if not isinstance(self.status, OrchestrationSchedulerSignalStatus):
-            self.status = OrchestrationSchedulerSignalStatus(str(self.status))
-        self.signal_payload = dict(self.signal_payload)
-        if self.worker_id is not None:
-            self.worker_id = self.worker_id.strip() or None
-
-    @classmethod
-    def queue(
-        cls,
-        *,
-        signal_id: str,
-        signal_kind: OrchestrationSchedulerSignalKind,
-        signal_payload: dict[str, object] | None = None,
-    ) -> "OrchestrationSchedulerSignal":
-        signal = cls(
-            id=signal_id,
-            signal_kind=signal_kind,
-            signal_payload=signal_payload or {},
-        )
-        signal.record_event(
-            Event(
-                name="orchestration.scheduler.signal.requested",
-                payload={
-                    "signal_id": signal.id,
-                    "signal_kind": signal.signal_kind.value,
-                    "signal_payload": dict(signal.signal_payload),
-                    "status": signal.status.value,
-                },
-            ),
-        )
-        return signal
-
-    def claim(self, *, worker_id: str, claimed_at: datetime | None = None) -> None:
-        normalized_worker_id = worker_id.strip()
-        if not normalized_worker_id:
-            raise OrchestrationValidationError(
-                "Orchestration scheduler signal worker_id cannot be empty.",
-            )
-        timestamp = claimed_at or utcnow()
-        self.status = OrchestrationSchedulerSignalStatus.PROCESSING
-        self.worker_id = normalized_worker_id
-        self.claimed_at = timestamp
-        self.updated_at = timestamp
-        self.record_event(
-            Event(
-                name="orchestration.scheduler.signal.claimed",
-                payload={
-                    "signal_id": self.id,
-                    "signal_kind": self.signal_kind.value,
-                    "signal_payload": dict(self.signal_payload),
-                    "status": self.status.value,
-                    "worker_id": self.worker_id,
-                },
-            ),
-        )
-
-    def complete(self, *, completed_at: datetime | None = None) -> None:
-        timestamp = completed_at or utcnow()
-        self.status = OrchestrationSchedulerSignalStatus.COMPLETED
-        self.error = None
-        self.completed_at = timestamp
-        self.updated_at = timestamp
-        self.record_event(
-            Event(
-                name="orchestration.scheduler.signal.completed",
-                payload={
-                    "signal_id": self.id,
-                    "signal_kind": self.signal_kind.value,
-                    "signal_payload": dict(self.signal_payload),
-                    "status": self.status.value,
-                },
-            ),
-        )
-
-    def fail(
-        self,
-        *,
-        message: str,
-        code: str = "scheduler_signal_failed",
-        details: dict[str, object] | None = None,
-        failed_at: datetime | None = None,
-    ) -> None:
-        timestamp = failed_at or utcnow()
-        self.status = OrchestrationSchedulerSignalStatus.FAILED
-        self.error = OrchestrationErrorPayload(
-            message=message,
-            code=code,
-            details=details or {},
-        )
-        self.completed_at = timestamp
-        self.updated_at = timestamp
-        self.record_event(
-            Event(
-                name="orchestration.scheduler.signal.failed",
-                payload={
-                    "signal_id": self.id,
-                    "signal_kind": self.signal_kind.value,
-                    "signal_payload": dict(self.signal_payload),
-                    "status": self.status.value,
-                    "code": code,
-                    "message": message,
-                    "details": dict(self.error.details),
-                },
-            ),
-        )
-
 
 @dataclass(kw_only=True)
 class OrchestrationExecutorLease(AggregateRoot[str]):

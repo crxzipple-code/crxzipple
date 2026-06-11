@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:
-    from crxzipple.modules.orchestration.application.engine import PromptSurfacePreview
+    from crxzipple.modules.orchestration.application.engine import RunPromptInputPreview
     from crxzipple.modules.orchestration.application.commands import (
         RequestCompactionInput,
         RequestDueHeartbeatsInput,
@@ -26,6 +26,13 @@ if TYPE_CHECKING:
         ToolExecutionDecision,
     )
     from crxzipple.modules.orchestration.domain import (
+        ExecutionChain,
+        ExecutionChainStatus,
+        ExecutionOwnerReference,
+        ExecutionStep,
+        ExecutionStepItem,
+        ExecutionStepItemStatus,
+        ExecutionStepStatus,
         OrchestrationExecutorLease,
         OrchestrationExecutorLeaseStatus,
         OrchestrationRun,
@@ -127,6 +134,59 @@ class OrchestrationRunQueryPort(OrchestrationRunLookupPort, Protocol):
     ) -> "list[OrchestrationRun]":
         ...
 
+    def get_active_execution_chain(
+        self,
+        turn_id: str,
+    ) -> "ExecutionChain | None":
+        ...
+
+    def list_execution_chains(
+        self,
+        turn_id: str,
+        *,
+        status: "ExecutionChainStatus | None" = None,
+    ) -> "list[ExecutionChain]":
+        ...
+
+    def get_execution_step(self, step_id: str) -> "ExecutionStep | None":
+        ...
+
+    def get_execution_step_by_correlation_key(
+        self,
+        correlation_key: str,
+    ) -> "ExecutionStep | None":
+        ...
+
+    def list_execution_steps(
+        self,
+        chain_id: str,
+        *,
+        status: "ExecutionStepStatus | None" = None,
+    ) -> "list[ExecutionStep]":
+        ...
+
+    def get_execution_step_item(
+        self,
+        item_id: str,
+    ) -> "ExecutionStepItem | None":
+        ...
+
+    def list_execution_step_items(
+        self,
+        step_id: str,
+        *,
+        status: "ExecutionStepItemStatus | None" = None,
+    ) -> "list[ExecutionStepItem]":
+        ...
+
+    def find_execution_step_items_by_owner(
+        self,
+        owner: "ExecutionOwnerReference",
+        *,
+        status: "ExecutionStepItemStatus | None" = None,
+    ) -> "list[ExecutionStepItem]":
+        ...
+
 
 class OrchestrationExecutorLeaseQueryPort(Protocol):
     def list_executor_leases(
@@ -138,7 +198,7 @@ class OrchestrationExecutorLeaseQueryPort(Protocol):
 
 
 class OrchestrationInspectionPort(Protocol):
-    def preview_prompt(self, run_id: str) -> "PromptSurfacePreview":
+    def preview_prompt(self, run_id: str) -> "RunPromptInputPreview":
         ...
 
     def resolve_tools(self, run: "OrchestrationRun") -> "ResolvedToolSet":

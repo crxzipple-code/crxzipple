@@ -355,16 +355,7 @@ class ToolResolver:
         context_attrs: dict[str, Any],
         resource_attrs: dict[str, Any],
     ) -> bool:
-        effect_ids = list(tool.required_effect_ids)
-        if tool.execution_policy.requires_confirmation:
-            effect_ids.append(self.default_confirmation_effect_id)
-        if not tool.required_effect_ids and tool.execution_policy.mutates_state:
-            effect_ids.append(self.default_mutation_effect_id)
-        if target.mode == ToolMode.BACKGROUND:
-            effect_ids.append(self.default_background_effect_id)
-        if not tool.required_effect_ids and target.environment is ToolEnvironment.REMOTE:
-            effect_ids.append(self.default_remote_ask_effect_id)
-        for effect_id in dict.fromkeys(effect_ids):
+        for effect_id in self._authorization_effect_ids(tool, target=target):
             if (
                 self._effect_access_override_decision(
                     run,
@@ -618,14 +609,15 @@ class ToolResolver:
         target: ToolExecutionTarget,
     ) -> tuple[str, ...]:
         effect_ids: list[str] = list(tool.required_effect_ids)
-        if tool.execution_policy.requires_confirmation:
-            effect_ids.append(self.default_confirmation_effect_id)
-        if tool.execution_policy.mutates_state:
-            effect_ids.append(self.default_mutation_effect_id)
-        if target.mode == ToolMode.BACKGROUND:
-            effect_ids.append(self.default_background_effect_id)
-        if not tool.required_effect_ids and target.environment is ToolEnvironment.REMOTE:
-            effect_ids.append(self.default_remote_ask_effect_id)
+        if not effect_ids:
+            if tool.execution_policy.requires_confirmation:
+                effect_ids.append(self.default_confirmation_effect_id)
+            if tool.execution_policy.mutates_state:
+                effect_ids.append(self.default_mutation_effect_id)
+            if target.mode == ToolMode.BACKGROUND:
+                effect_ids.append(self.default_background_effect_id)
+            if target.environment is ToolEnvironment.REMOTE:
+                effect_ids.append(self.default_remote_ask_effect_id)
         return tuple(dict.fromkeys(effect_id for effect_id in effect_ids if effect_id))
 
     @staticmethod

@@ -38,22 +38,10 @@ class OrchestrationIngressRequestKind(StrEnum):
     BOUND_TURN = "bound_turn"
 
 
-class OrchestrationSchedulerSignalStatus(StrEnum):
-    QUEUED = "queued"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
 class OrchestrationExecutorLeaseStatus(StrEnum):
     ONLINE = "online"
     DRAINING = "draining"
     OFFLINE = "offline"
-
-
-class OrchestrationSchedulerSignalKind(StrEnum):
-    TOOL_TERMINAL = "tool_terminal"
-    SESSIONS_SPAWN_FOLLOWUP = "sessions_spawn_followup"
 
 
 class OrchestrationRunStage(StrEnum):
@@ -70,6 +58,57 @@ class OrchestrationRunStage(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ExecutionChainStatus(StrEnum):
+    CREATED = "created"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ExecutionStepKind(StrEnum):
+    INTAKE = "intake"
+    PROMPT_RENDER = "prompt_render"
+    LLM = "llm"
+    TOOL_BATCH = "tool_batch"
+    APPROVAL = "approval"
+    TOOL_RESUME = "tool_resume"
+    FINAL_RESPONSE = "final_response"
+    ERROR = "error"
+    MAINTENANCE = "maintenance"
+
+
+class ExecutionStepStatus(StrEnum):
+    CREATED = "created"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ExecutionStepItemKind(StrEnum):
+    LLM_INVOCATION = "llm_invocation"
+    TOOL_CALL = "tool_call"
+    TOOL_RUN = "tool_run"
+    TOOL_RESULT = "tool_result"
+    APPROVAL_REQUEST = "approval_request"
+    SESSION_MESSAGE = "session_message"
+    CONTEXT_SNAPSHOT = "context_snapshot"
+
+
+class ExecutionStepItemStatus(StrEnum):
+    CREATED = "created"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    LATE_OBSERVED = "late_observed"
+    LATE_IGNORED = "late_ignored"
 
 
 class OrchestrationQueuePolicy(StrEnum):
@@ -90,6 +129,45 @@ class ApprovalDecision(StrEnum):
     ALLOW_FOR_SESSION = "allow_for_session"
     ALWAYS_FOR_AGENT = "always_for_agent"
     DENY = "deny"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOwnerReference(ValueObject):
+    owner_kind: str
+    owner_id: str
+
+    def __post_init__(self) -> None:
+        owner_kind = self.owner_kind.strip()
+        owner_id = self.owner_id.strip()
+        if not owner_kind:
+            raise OrchestrationValidationError(
+                "Execution owner reference owner_kind cannot be empty.",
+            )
+        if not owner_id:
+            raise OrchestrationValidationError(
+                "Execution owner reference owner_id cannot be empty.",
+            )
+        object.__setattr__(self, "owner_kind", owner_kind)
+        object.__setattr__(self, "owner_id", owner_id)
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "owner_kind": self.owner_kind,
+            "owner_id": self.owner_id,
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "ExecutionOwnerReference | None":
+        if not payload:
+            return None
+        owner_kind = payload.get("owner_kind")
+        owner_id = payload.get("owner_id")
+        if owner_kind is None or owner_id is None:
+            return None
+        return cls(owner_kind=str(owner_kind), owner_id=str(owner_id))
 
 
 @dataclass(frozen=True, slots=True)

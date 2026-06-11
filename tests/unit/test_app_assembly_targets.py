@@ -8,9 +8,9 @@ import pytest
 from crxzipple.app import AppKey
 from crxzipple.app.assembly.daemon import build_runtime_daemon_specs
 from crxzipple.app.assembly.runtime import runtime_plan
-from crxzipple.app.assembly.tool import (
+from tests.unit.browser_tool_package_support import (
     browser_function_catalog_candidates,
-    browser_source_records_from_system_config,
+    browser_source_records_from_package,
 )
 from crxzipple.app.assembly.targets import (
     ALL_TARGET_ENTRYPOINTS,
@@ -44,6 +44,7 @@ def test_entrypoint_metadata_covers_every_assembly_target() -> None:
         AssemblyTarget.TOOL_WORKER,
         AssemblyTarget.OPERATIONS_OBSERVER,
         AssemblyTarget.EVENT_RELAY_WORKER,
+        AssemblyTarget.EVENT_OUTBOX_PUBLISHER,
         AssemblyTarget.CHANNEL_RUNTIME,
     )
 
@@ -56,6 +57,7 @@ def test_known_daemon_services_map_to_runtime_targets() -> None:
         "worker:tool": AssemblyTarget.TOOL_WORKER,
         "worker:operations-observer": AssemblyTarget.OPERATIONS_OBSERVER,
         "worker:event-relay": AssemblyTarget.EVENT_RELAY_WORKER,
+        "worker:event-outbox": AssemblyTarget.EVENT_OUTBOX_PUBLISHER,
     }
     assert target_for_daemon_service("channel:web") is AssemblyTarget.CHANNEL_RUNTIME
     assert target_for_daemon_service("channel:lark") is AssemblyTarget.CHANNEL_RUNTIME
@@ -254,49 +256,80 @@ def test_browser_source_catalog_is_not_tied_to_profile_mcp_ports() -> None:
             tool_worker_max_in_flight=4,
         ),
     )
-    sources = browser_source_records_from_system_config(browser_system_config)
+    sources = browser_source_records_from_package()
 
     keys = {spec.key for spec in specs}
     assert "host:browser:high" in keys
     assert "mcp:browser:high" not in keys
-    assert [source.source_id for source in sources] == ["configured.browser"]
+    assert [source.source_id for source in sources] == ["bundled.local_package.browser"]
     assert not any(
         source.source_id.startswith("configured.mcp.browser_") for source in sources
     )
 
 
 def test_browser_tool_source_registers_single_profile_context_source() -> None:
-    sources = browser_source_records_from_system_config(
-        SimpleNamespace(
-            cdp_host="127.0.0.1",
-            cdp_port_range_start=18800,
-            profiles=(
-                SimpleNamespace(
-                    name="work",
-                    driver="managed",
-                    cdp_url=None,
-                    cdp_port=18800,
-                ),
-                SimpleNamespace(
-                    name="user",
-                    driver="existing-session",
-                    cdp_url="http://127.0.0.1:9222",
-                    cdp_port=None,
-                ),
-            ),
-        ),
-    )
+    sources = browser_source_records_from_package()
 
-    assert [source.source_id for source in sources] == ["configured.browser"]
+    assert [source.source_id for source in sources] == ["bundled.local_package.browser"]
     source = sources[0]
     assert source.display_name == "Browser"
-    assert source.config["provider"] == "crxzipple.browser"
-    assert source.config["profile_mode"] == "runtime_context"
-    assert source.config["default_profile_source"] == "browser_system_config"
-    assert source.config["function_prefix"] == "browser."
-    assert source.config["runtime_requirement"] == "browser-profile-runtime"
+    assert source.config["namespace"] == "browser"
+    assert source.config["package_kind"] == "local_package"
     assert source.runtime_requirements == ("browser-profile-runtime",)
     assert "browser_profile" not in source.config
+    prompt = source.config["prompt"]
+    ladder = prompt["evidence_path_ladder"]
+    assert [step["key"] for step in ladder] == [
+        "orient",
+        "runtime_and_code",
+        "network_truth",
+        "stateful_interaction",
+        "diagnose_blockers",
+    ]
+    assert "browser.script.find_request" in ladder[1]["tool_ids"]
+    assert "browser.network.replay_request" in ladder[2]["tool_ids"]
+    prompt_groups = source.config["prompt"]["groups"]
+    assert "Avoid repeated tab inventory" in prompt["summary"]
+    assert prompt_groups["navigation"]["default_tool_schema_ids"] == [
+        "browser.navigate",
+    ]
+    assert prompt_groups["navigation"]["default_tool_schema_max_count"] == 1
+    assert "not a repeated pre-flight check" in prompt_groups["navigation"]["summary"]
+    assert prompt_groups["observation"]["function_ids"] == ["browser.observe"]
+    assert prompt_groups["observation"]["default_tool_schema_ids"] == ["browser.observe"]
+    assert prompt_groups["observation"]["default_tool_schema_max_count"] == 1
+    assert prompt_groups["action_trace"]["function_ids"] == ["browser.action.trace"]
+    assert prompt_groups["forms_overlays"]["function_ids"] == [
+        "browser.form.inspect",
+        "browser.form.fill",
+        "browser.overlay.observe",
+        "browser.overlay.select",
+    ]
+    assert "browser.dom.inspect" in prompt_groups["dom_inspection"]["function_ids"]
+    assert "browser.network.inspect" in prompt_groups["network"]["function_ids"]
+    assert prompt_groups["network"]["default_tool_schema_max_count"] == 6
+    assert "browser.evaluate" not in prompt_groups["page_interaction"]["function_ids"]
+    assert "browser.code.search" in prompt_groups["code_insight"]["function_ids"]
+    assert "browser.script.inspect" in prompt_groups["code_insight"]["function_ids"]
+    assert "browser.evaluate" in prompt_groups["code_insight"]["function_ids"]
+    assert "browser.script.extract_request" in prompt_groups["code_insight"]["function_ids"]
+    assert (
+        "browser.script.extract_request"
+        in prompt_groups["code_insight"]["default_tool_schema_ids"]
+    )
+    assert "browser.runtime.probe_client" in prompt_groups["code_insight"]["function_ids"]
+    assert "browser.runtime.probe_client" in prompt_groups["code_insight"]["default_tool_schema_ids"]
+    assert "browser.runtime.call_client" in prompt_groups["code_insight"]["function_ids"]
+    assert "browser.runtime.call_client" in prompt_groups["code_insight"]["default_tool_schema_ids"]
+    assert "browser.code.search" in prompt_groups["code_insight"]["default_tool_schema_ids"]
+    assert "browser.script.inspect" in prompt_groups["code_insight"]["default_tool_schema_ids"]
+    assert "browser.evaluate" in prompt_groups["code_insight"]["default_tool_schema_ids"]
+    assert prompt_groups["code_insight"]["default_tool_schema_max_count"] == 8
+    assert all(
+        not function_id.startswith("configured.mcp.browser_")
+        for group in prompt_groups.values()
+        for function_id in group["function_ids"]
+    )
 
 
 def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None:
@@ -304,6 +337,13 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
     function_ids = [candidate.function_id for candidate in candidates]
 
     assert function_ids == [
+        "browser.observe",
+        "browser.form.inspect",
+        "browser.form.fill",
+        "browser.overlay.observe",
+        "browser.overlay.select",
+        "browser.action.trace",
+        "browser.native.run",
         "browser.snapshot",
         "browser.navigate",
         "browser.click",
@@ -341,6 +381,7 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
         "browser.context.heartbeat",
         "browser.context.release",
         "browser.context.reconcile",
+        "browser.network.inspect",
         "browser.network.start_capture",
         "browser.network.stop_capture",
         "browser.network.list_requests",
@@ -350,6 +391,14 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
         "browser.network.fetch_as_page",
         "browser.network.replay_request",
         "browser.network.clear_capture",
+        "browser.runtime.inspect",
+        "browser.script.list",
+        "browser.script.find_request",
+        "browser.code.search",
+        "browser.script.extract_request",
+        "browser.runtime.probe_client",
+        "browser.runtime.call_client",
+        "browser.script.inspect",
         "browser.tabs.list",
         "browser.tabs.select",
         "browser.tabs.close",
@@ -363,10 +412,9 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
     assert not any("browser_user" in function_id for function_id in function_ids)
     assert not any("browser_crxzipple" in function_id for function_id in function_ids)
     for candidate in candidates:
-        assert candidate.source_id == "configured.browser"
+        assert candidate.source_id == "bundled.local_package.browser"
         assert candidate.function_id.startswith("browser.")
         assert candidate.input_schema["properties"]["profile"]["type"] == "string"
-        assert candidate.metadata["runtime_requirement"] == "browser-profile-runtime"
         runtime_requirements = candidate.requirements.runtime_requirement_sets
         assert runtime_requirements == (("browser-profile-runtime",),)
         assert not any(
@@ -374,6 +422,16 @@ def test_browser_function_catalog_uses_profile_context_not_profile_ids() -> None
             for requirement_set in runtime_requirements
             for requirement in requirement_set
         )
+    call_client = next(
+        candidate
+        for candidate in candidates
+        if candidate.function_id == "browser.runtime.call_client"
+    )
+    call_policy = call_client.metadata["execution_policy"]
+    assert call_policy["mutates_state"] is False
+    assert call_policy["supports_parallel"] is False
+    assert call_policy["resource_scope"] == "browser.target"
+    assert call_policy["serial_group_key"] == "browser.target"
 
 
 def test_existing_session_daemon_spec_uses_attach_only_browser_host() -> None:
@@ -622,13 +680,7 @@ def test_runtime_plan_scopes_sidecar_services_to_worker_targets() -> None:
         AssemblyTarget.DAEMON_SUPERVISOR,
         AssemblyTarget.TEST,
     )
-    assert tasks_by_key["tool.register_browser_source_catalog"].targets == (
-        AssemblyTarget.API,
-        AssemblyTarget.CLI_ADMIN,
-        AssemblyTarget.ORCHESTRATION_EXECUTOR,
-        AssemblyTarget.TOOL_WORKER,
-        AssemblyTarget.TEST,
-    )
+    assert "tool.register_browser_source_catalog" not in tasks_by_key
 
 
 def test_worker_targets_do_not_load_unrelated_sidecar_surfaces() -> None:

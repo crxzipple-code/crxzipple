@@ -70,11 +70,11 @@ class RunRecoveryCoordinator:
     def handle_recovered_dispatch_task(
         self,
         *,
-        orchestration_run_id: str,
+        dispatch_task_id: str,
         reason: str,
     ) -> OrchestrationRun | None:
         return self.lease_manager.handle_recovered_dispatch_task(
-            orchestration_run_id=orchestration_run_id,
+            dispatch_task_id=dispatch_task_id,
             reason=reason,
         )
 

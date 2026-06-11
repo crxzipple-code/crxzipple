@@ -33,6 +33,7 @@ def _workbench_provider(container: AppContainer) -> WorkbenchReadModelProvider:
         artifact_query=container.require(AppKey.ARTIFACT_SERVICE),
         llm_query=container.require(AppKey.LLM_SERVICE),
         agent_query=container.require(AppKey.AGENT_SERVICE),
+        session_query=container.require(AppKey.SESSION_SERVICE),
     )
 
 
@@ -191,12 +192,14 @@ def list_workbench_run_steps(
 def get_trace_summary(
     trace_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
+    step_id: str | None = Query(default=None),
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> TraceSummaryResponse:
     aliases = _trace_aliases(container, trace_id)
     view = _trace_provider(container).get_trace(
         trace_id,
         aliases=aliases,
+        step_id=step_id,
         limit=limit,
     )
     return TraceSummaryResponse.from_view(view)
@@ -206,12 +209,14 @@ def get_trace_summary(
 def list_trace_events(
     trace_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
+    step_id: str | None = Query(default=None),
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> list[TraceEventResponse]:
     aliases = _trace_aliases(container, trace_id)
     views = _trace_provider(container).list_trace_events(
         trace_id,
         aliases=aliases,
+        step_id=step_id,
         limit=limit,
     )
     return [TraceEventResponse.from_view(view) for view in views]

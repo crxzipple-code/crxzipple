@@ -98,6 +98,7 @@ class InvokeLlmInput:
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = field(default_factory=dict)
+    request_metadata: dict[str, Any] = field(default_factory=dict)
     invocation_id: str | None = None
 
 
@@ -108,6 +109,7 @@ class StreamLlmInput:
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = field(default_factory=dict)
+    request_metadata: dict[str, Any] = field(default_factory=dict)
     invocation_id: str | None = None
 
 
@@ -438,6 +440,7 @@ class LlmApplicationService:
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
             request_overrides=data.overrides,
+            request_metadata=data.request_metadata,
         )
         invocation.start()
         invocation.record_event(
@@ -513,6 +516,7 @@ class LlmApplicationService:
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
             request_overrides=data.overrides,
+            request_metadata=data.request_metadata,
         )
         invocation.start()
 
@@ -551,6 +555,7 @@ class LlmApplicationService:
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
             request_overrides=data.overrides,
+            request_metadata=data.request_metadata,
         )
         invocation.start()
         invocation.record_event(
@@ -616,6 +621,7 @@ class LlmApplicationService:
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
             request_overrides=data.overrides,
+            request_metadata=data.request_metadata,
         )
         invocation.start()
         invocation.record_event(
@@ -750,6 +756,7 @@ class LlmApplicationService:
             tool_schemas=data.tool_schemas,
             response_format=data.response_format,
             request_overrides=data.overrides,
+            request_metadata=data.request_metadata,
         )
         invocation.start()
         invocation.record_event(
@@ -1328,6 +1335,7 @@ def _invocation_started_event_payload(
         "message_count": len(invocation.messages),
         "tool_schema_count": len(invocation.tool_schemas),
         "response_format_configured": invocation.response_format is not None,
+        "request_metadata": dict(invocation.request_metadata),
     }
 
 
@@ -1343,8 +1351,15 @@ def _invocation_succeeded_event_payload(
         streaming=streaming,
     )
     if invocation.result is not None:
+        response_text = invocation.result.text or ""
         payload["finish_reason"] = invocation.result.finish_reason
+        payload["text_present"] = bool(response_text.strip())
+        payload["text_chars"] = len(response_text)
         payload["tool_call_count"] = len(invocation.result.tool_calls)
+        if invocation.result.tool_calls:
+            payload["tool_call_names"] = [
+                tool_call.name for tool_call in invocation.result.tool_calls
+            ]
         if invocation.result.usage is not None:
             payload["usage"] = invocation.result.usage.to_payload()
     return payload
@@ -1387,6 +1402,7 @@ def _invocation_terminal_base_payload(
         "provider_request_id": invocation.provider_request_id,
         "duration_seconds": _invocation_duration_seconds(invocation),
         "streaming": streaming,
+        "request_metadata": dict(invocation.request_metadata),
     }
     if profile is not None:
         payload.update(

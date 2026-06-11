@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from typing import Annotated, Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
+from crxzipple.interfaces.runtime_container import AppContainer, AppKey
+from crxzipple.modules.orchestration.application import (
+    RequestCompactionInput,
+    RequestHeartbeatInput,
+    RequestMemoryFlushInput,
+    ResolveApprovalRequestInput,
+    SubmitBoundOrchestrationTurnInput,
+)
 from crxzipple.modules.orchestration.application.turn_submission import (
+    build_accept_run_input,
     build_submission_options,
+    prompt_bootstrap_metadata_for_content,
     resolve_profile,
     submit_turn,
 )
@@ -18,10 +28,6 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationValidationError,
 )
-from crxzipple.modules.orchestration.application import ResolveApprovalRequestInput
-from crxzipple.modules.orchestration.application import RequestCompactionInput
-from crxzipple.modules.orchestration.application import RequestHeartbeatInput
-from crxzipple.modules.orchestration.application import RequestMemoryFlushInput
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationApprovalControlPort,
     OrchestrationCancellationPort,
@@ -33,10 +39,11 @@ from crxzipple.modules.orchestration.application.ports import (
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
-    PromptSurfacePreviewDTO,
+    RunPromptInputPreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.http_models import OrchestrationRunResponse
 from crxzipple.modules.session.domain import DirectSessionScope
+from crxzipple.modules.session.domain.exceptions import SessionNotFoundError
 
 
 router = APIRouter()
@@ -46,18 +53,21 @@ class CreateTurnRequest(BaseModel):
     content: Any
     agent_id: str | None = None
     llm_id: str | None = None
+    session_key: str | None = None
+    new_session: bool = False
     channel: str = "crxzipple"
     chat_type: str = "direct"
     peer_id: str | None = None
     conversation_id: str | None = None
     thread_id: str | None = None
     account_id: str | None = None
-    main_key: str = "main"
+    main_key: str | None = None
     direct_scope: DirectSessionScope = DirectSessionScope.MAIN
     source: str = "http"
     queue_policy: OrchestrationQueuePolicy = OrchestrationQueuePolicy.JUMP_QUEUE
     priority: int = Field(default=100, ge=0)
     max_steps: int | None = Field(default=None, ge=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TurnResponse(BaseModel):
@@ -77,7 +87,7 @@ class TurnResponse(BaseModel):
         )
 
 
-class PromptSurfacePreviewMessageResponse(BaseModel):
+class RunPromptInputPreviewMessageResponse(BaseModel):
     role: str
     content: Any
     name: str | None = None
@@ -85,28 +95,33 @@ class PromptSurfacePreviewMessageResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class PromptSurfacePreviewToolSchemaResponse(BaseModel):
+class RunPromptInputPreviewToolSchemaResponse(BaseModel):
     name: str
     description: str = ""
     input_schema: dict[str, Any] = Field(default_factory=dict)
 
 
-class PromptSurfacePreviewResponse(BaseModel):
+class RunPromptInputPreviewResponse(BaseModel):
     run_id: str
     llm_id: str
     mode: str
-    messages: list[PromptSurfacePreviewMessageResponse] = Field(default_factory=list)
-    tool_schemas: list[PromptSurfacePreviewToolSchemaResponse] = Field(default_factory=list)
+    messages: list[RunPromptInputPreviewMessageResponse] = Field(default_factory=list)
+    tool_schemas: list[RunPromptInputPreviewToolSchemaResponse] = Field(default_factory=list)
     prompt_report: dict[str, Any] | None = None
+    context_render_snapshot_id: str | None = None
+    context_render: dict[str, Any] | None = None
+    context_render_metadata: dict[str, Any] = Field(default_factory=dict)
+    provider_attachments: dict[str, Any] = Field(default_factory=dict)
+    provider_request_options: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def from_dto(cls, dto: PromptSurfacePreviewDTO) -> "PromptSurfacePreviewResponse":
+    def from_dto(cls, dto: RunPromptInputPreviewDTO) -> "RunPromptInputPreviewResponse":
         return cls(
             run_id=dto.run_id,
             llm_id=dto.llm_id,
             mode=dto.mode,
             messages=[
-                PromptSurfacePreviewMessageResponse(
+                RunPromptInputPreviewMessageResponse(
                     role=item.role,
                     content=item.content,
                     name=item.name,
@@ -116,7 +131,7 @@ class PromptSurfacePreviewResponse(BaseModel):
                 for item in dto.messages
             ],
             tool_schemas=[
-                PromptSurfacePreviewToolSchemaResponse(
+                RunPromptInputPreviewToolSchemaResponse(
                     name=item.name,
                     description=item.description,
                     input_schema=dict(item.input_schema),
@@ -128,6 +143,15 @@ class PromptSurfacePreviewResponse(BaseModel):
                 if dto.prompt_report is not None
                 else None
             ),
+            context_render_snapshot_id=dto.context_render_snapshot_id,
+            context_render=(
+                dict(dto.context_render)
+                if dto.context_render is not None
+                else None
+            ),
+            context_render_metadata=dict(dto.context_render_metadata),
+            provider_attachments=dict(dto.provider_attachments),
+            provider_request_options=dict(dto.provider_request_options),
         )
 
 
@@ -198,6 +222,19 @@ def _executor_process_port(container: AppContainer) -> OrchestrationExecutorProc
     return container.require(AppKey.ORCHESTRATION_EXECUTOR_CONTROL_SERVICE)
 
 
+def _trimmed(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _main_key_for_payload(payload: CreateTurnRequest) -> str:
+    if payload.new_session:
+        return f"conversation:{uuid4().hex}"
+    return _trimmed(payload.main_key) or "main"
+
+
 @router.post(
     "/turns",
     response_model=TurnResponse,
@@ -207,9 +244,33 @@ def create_turn(
     payload: CreateTurnRequest,
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> TurnResponse:
+    session_key = _trimmed(payload.session_key)
+    if session_key is not None and payload.new_session:
+        raise HTTPException(
+            status_code=400,
+            detail="session_key and new_session cannot be used together.",
+        )
+    try:
+        target_session = (
+            container.require(AppKey.SESSION_SERVICE).get_session(session_key)
+            if session_key is not None
+            else None
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+    target_binding = (
+        target_session.runtime_binding() if target_session is not None else None
+    )
+    requested_agent_id = _trimmed(payload.agent_id)
+    target_agent_id = (
+        requested_agent_id
+        if requested_agent_id is not None
+        else target_binding.agent_id if target_binding is not None else None
+    )
     profile, error = resolve_profile(
         container.require(AppKey.AGENT_SERVICE),
-        agent_id=payload.agent_id,
+        agent_id=target_agent_id,
     )
     if profile is None:
         raise HTTPException(status_code=404, detail=error or "Agent profile was not found.")
@@ -223,7 +284,7 @@ def create_turn(
         conversation_id=payload.conversation_id,
         thread_id=payload.thread_id,
         account_id=payload.account_id,
-        main_key=payload.main_key,
+        main_key=_main_key_for_payload(payload),
         direct_scope=payload.direct_scope,
         source=payload.source,
         queue_policy=payload.queue_policy,
@@ -233,12 +294,47 @@ def create_turn(
 
     try:
         submission_service = _submission_port(container)
-        run = submit_turn(
-            submission_service,
-            content=payload.content,
-            options=options,
-            inline_worker_id=None,
+        submission_metadata = prompt_bootstrap_metadata_for_content(
+            payload.content,
+            metadata=payload.metadata,
         )
+        if target_session is None:
+            run = submit_turn(
+                submission_service,
+                content=payload.content,
+                options=options,
+                inline_worker_id=None,
+                metadata=submission_metadata,
+            )
+        else:
+            if (
+                target_binding is not None
+                and target_binding.agent_id is not None
+                and target_binding.agent_id != profile.id
+            ):
+                raise OrchestrationValidationError(
+                    "Submitted agent does not match the target session owner.",
+                )
+            run = submission_service.submit_bound_turn(
+                SubmitBoundOrchestrationTurnInput(
+                    accept_input=build_accept_run_input(
+                        source=options.source,
+                        content=payload.content,
+                        queue_policy=options.queue_policy,
+                        priority=options.priority,
+                        max_steps=options.max_steps,
+                        metadata=submission_metadata,
+                    ),
+                    agent_id=profile.id,
+                    session_key=target_session.id,
+                    active_session_id=target_session.active_session_id,
+                    requested_llm_id=options.llm_id,
+                    metadata=submission_metadata,
+                    enqueue_queue_policy=options.queue_policy,
+                    enqueue_priority=options.priority,
+                ),
+                inline_worker_id=None,
+            )
     except OrchestrationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -258,11 +354,11 @@ def get_turn(
     return _turn_response_from_run(run)
 
 
-@router.get("/turns/{run_id}/prompt-preview", response_model=PromptSurfacePreviewResponse)
+@router.get("/turns/{run_id}/prompt-preview", response_model=RunPromptInputPreviewResponse)
 def get_turn_prompt_preview(
     run_id: str,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> PromptSurfacePreviewResponse:
+) -> RunPromptInputPreviewResponse:
     inspection_service = _inspection_port(container)
     try:
         preview = inspection_service.preview_prompt(run_id)
@@ -270,8 +366,8 @@ def get_turn_prompt_preview(
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except OrchestrationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    return PromptSurfacePreviewResponse.from_dto(
-        PromptSurfacePreviewDTO.from_value(
+    return RunPromptInputPreviewResponse.from_dto(
+        RunPromptInputPreviewDTO.from_value(
             run_id=run_id,
             preview=preview,
         ),

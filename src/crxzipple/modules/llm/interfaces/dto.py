@@ -188,6 +188,7 @@ class LlmInvocationDTO:
     tool_schemas: tuple[ToolSchemaDTO, ...]
     response_format: dict[str, object] | None
     request_overrides: dict[str, object]
+    request_metadata: dict[str, object]
     status: str
     result: LlmResultDTO | None
     error: LlmErrorDTO | None
@@ -213,6 +214,7 @@ class LlmInvocationDTO:
                 else None
             ),
             request_overrides=dict(invocation.request_overrides),
+            request_metadata=dict(invocation.request_metadata),
             status=invocation.status.value,
             result=(
                 LlmResultDTO.from_value(invocation.result)

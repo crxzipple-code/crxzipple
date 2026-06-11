@@ -48,7 +48,6 @@ from crxzipple.app.assembly.tool import (
     TOOL_ORCHESTRATION_QUEUE_SERVICE_TARGETS,
     TOOL_QUEUE_SERVICE_TARGETS,
     tool_activation_tasks,
-    tool_browser_activation_tasks,
     tool_core_factories,
     tool_execution_factories,
     tool_queue_factories,
@@ -96,7 +95,6 @@ def runtime_integration_factories() -> tuple[ApplicationFactory, ...]:
 
     return (
         memory_context_factories()
-        + context_workspace_integration_factories()
         + tool_queue_factories(targets=TOOL_QUEUE_SERVICE_TARGETS)
         + tool_queue_factories(
             targets=TOOL_ORCHESTRATION_QUEUE_SERVICE_TARGETS,
@@ -104,6 +102,7 @@ def runtime_integration_factories() -> tuple[ApplicationFactory, ...]:
         )
         + tool_execution_factories()
         + orchestration_factories()
+        + context_workspace_integration_factories()
         + session_runtime_factories()
         + channel_runtime_factories()
         + operations_factories()
@@ -120,7 +119,6 @@ def runtime_activation_tasks() -> tuple[ActivationTask, ...]:
         + skills_activation_tasks()
         + daemon_activation_tasks()
         + tool_activation_tasks()
-        + tool_browser_activation_tasks()
         + channel_runtime_activation_tasks()
     )
 

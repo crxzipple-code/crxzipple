@@ -100,6 +100,9 @@ def import_models() -> None:
     from crxzipple.modules.context_workspace.infrastructure.persistence import (
         models as _context_workspace_models,
     )
+    from crxzipple.modules.events.infrastructure.persistence import (
+        models as _events_models,
+    )
     from crxzipple.modules.llm.infrastructure.persistence import models as _llm_models
     from crxzipple.modules.memory.infrastructure.persistence import (
         models as _memory_models,
@@ -126,6 +129,7 @@ def import_models() -> None:
         _dispatch_models,
         _authorization_models,
         _context_workspace_models,
+        _events_models,
         _llm_models,
         _memory_models,
         _orchestration_models,

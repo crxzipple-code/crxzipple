@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 
 from crxzipple.shared.domain.events import Event
@@ -14,6 +15,13 @@ EventKind: TypeAlias = Literal[
     "live",
 ]
 EventCursor: TypeAlias = str
+
+
+class EventOutboxStatus(StrEnum):
+    PENDING = "pending"
+    PUBLISHING = "publishing"
+    DELIVERED = "delivered"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)

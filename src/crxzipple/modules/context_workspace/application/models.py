@@ -84,7 +84,12 @@ class RenderContextPromptResult:
     prompt_body: str
     estimate: ContextEstimate
     included_node_ids: tuple[str, ...]
+    estimate_breakdown: JsonObject = field(default_factory=dict)
+    runtime_contract: JsonObject = field(default_factory=dict)
+    tree_schema_version: str = ""
+    root_node_ids: tuple[str, ...] = ()
     provider_attachments: JsonObject = field(default_factory=dict)
+    provider_attachment_report: JsonObject = field(default_factory=dict)
     mirrored_node_ids: tuple[str, ...] = ()
     tool_schema_mirror_available: bool = False
 

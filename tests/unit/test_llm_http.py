@@ -184,6 +184,11 @@ class LlmHttpTestCase(HttpModuleTestCase):
                                 },
                             },
                         ],
+                        "request_metadata": {
+                            "prompt_mode": "normal_turn",
+                            "context_render_snapshot_id": "ctxsnap_llm_http",
+                            "mirrored_tool_schema_count": 1,
+                        },
                     },
                 )
 
@@ -198,6 +203,42 @@ class LlmHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(list_response.status_code, 200)
                 self.assertEqual(len(list_response.json()), 1)
                 self.assertEqual(list_response.json()[0]["id"], payload["id"])
+
+                preview_response = self.client.get(
+                    f"/llms/calls/{payload['id']}/prompt-preview",
+                    params={"run_id": "run_llm_http"},
+                )
+                self.assertEqual(preview_response.status_code, 200)
+                preview_payload = preview_response.json()
+                self.assertEqual(preview_payload["run_id"], "run_llm_http")
+                self.assertEqual(preview_payload["invocation_id"], payload["id"])
+                self.assertEqual(preview_payload["llm_id"], "local-chat")
+                self.assertEqual(preview_payload["mode"], "normal_turn")
+                self.assertEqual(
+                    preview_payload["context_render_snapshot_id"],
+                    "ctxsnap_llm_http",
+                )
+                self.assertIsNone(preview_payload["prompt_report"])
+                self.assertIsNone(preview_payload["context_render"])
+                self.assertEqual(preview_payload["provider_attachments"], {})
+                self.assertEqual(
+                    preview_payload["messages"],
+                    payload["messages"],
+                )
+                self.assertEqual(
+                    preview_payload["tool_schemas"],
+                    payload["tool_schemas"],
+                )
+                self.assertEqual(
+                    preview_payload["provider_request_options"]["request_source"],
+                    "llm_invocation",
+                )
+                self.assertEqual(
+                    preview_payload["provider_request_options"]["request_metadata"][
+                        "context_render_snapshot_id"
+                    ],
+                    "ctxsnap_llm_http",
+                )
             finally:
                 if previous_token is None:
                     os.environ.pop("OPENAI_API_KEY", None)

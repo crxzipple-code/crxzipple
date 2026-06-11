@@ -117,6 +117,57 @@ class BrowserToolSourceMigrationTestCase(unittest.TestCase):
             engine.dispose()
             harness.close()
 
+    def test_contract_convergence_migration_deletes_configured_browser_source(
+        self,
+    ) -> None:
+        harness = SqliteTestHarness()
+        settings = replace(load_settings(), database_url=harness.database_url)
+        engine = build_engine(settings)
+        migration = _load_migration_0071()
+        try:
+            with engine.begin() as connection:
+                tables = _create_contract_convergence_fixture(connection)
+                context = MigrationContext.configure(connection)
+                migration.op = Operations(context)
+
+                migration.upgrade()
+                migration.upgrade()
+
+                self.assertEqual(
+                    _values(connection, tables["tool_sources"], "source_id"),
+                    {"bundled.local_package.browser", "configured.mcp.sample"},
+                )
+                self.assertEqual(
+                    _values(connection, tables["tool_functions"], "function_id"),
+                    {"browser.navigate", "mcp.sample.echo"},
+                )
+                self.assertEqual(
+                    _values(
+                        connection,
+                        tables["tool_source_discovery_runs"],
+                        "discovery_run_id",
+                    ),
+                    {"discovery-browser-new", "discovery-sample"},
+                )
+                self.assertEqual(
+                    _values(connection, tables["tool_provider_backends"], "backend_id"),
+                    {"backend-browser-new", "backend-sample"},
+                )
+                self.assertEqual(
+                    _values(connection, tables["context_node_states"], "node_id"),
+                    {
+                        "tools.bundle.bundled.local_package.browser",
+                        "tools.bundle.memory",
+                    },
+                )
+                self.assertEqual(
+                    _values(connection, tables["operations_projections"], "query_key"),
+                    {"browser-new", "tool-new", "unrelated-old-marker"},
+                )
+        finally:
+            engine.dispose()
+            harness.close()
+
 
 def _create_catalog_cleanup_fixture(connection) -> dict[str, Table]:  # noqa: ANN001
     metadata = MetaData()
@@ -398,6 +449,176 @@ def _create_manifest_retirement_fixture(connection) -> dict[str, Table]:  # noqa
     }
 
 
+def _create_contract_convergence_fixture(connection) -> dict[str, Table]:  # noqa: ANN001
+    metadata = MetaData()
+    tool_sources = Table(
+        "tool_sources",
+        metadata,
+        Column("source_id", String(100), primary_key=True),
+    )
+    tool_functions = Table(
+        "tool_functions",
+        metadata,
+        Column("function_id", String(100), primary_key=True),
+        Column("source_id", String(100), nullable=False),
+    )
+    discovery_runs = Table(
+        "tool_source_discovery_runs",
+        metadata,
+        Column("discovery_run_id", String(100), primary_key=True),
+        Column("source_id", String(100), nullable=False),
+    )
+    provider_backends = Table(
+        "tool_provider_backends",
+        metadata,
+        Column("backend_id", String(100), primary_key=True),
+        Column("source_id", String(100), nullable=False),
+    )
+    context_nodes = Table(
+        "context_node_states",
+        metadata,
+        Column("node_id", String(240), primary_key=True),
+        Column("owner_ref", JSON(), nullable=True),
+        Column("metadata", JSON(), nullable=True),
+    )
+    projections = Table(
+        "operations_projections",
+        metadata,
+        Column("module", String(80), primary_key=True),
+        Column("kind", String(80), primary_key=True),
+        Column("query_key", String(160), primary_key=True),
+        Column("payload", JSON(), nullable=False),
+    )
+    metadata.create_all(connection)
+    connection.execute(
+        tool_sources.insert(),
+        [
+            {"source_id": "configured.browser"},
+            {"source_id": "bundled.local_package.browser"},
+            {"source_id": "configured.mcp.sample"},
+        ],
+    )
+    connection.execute(
+        tool_functions.insert(),
+        [
+            {
+                "function_id": "browser.snapshot",
+                "source_id": "configured.browser",
+            },
+            {
+                "function_id": "browser.navigate",
+                "source_id": "bundled.local_package.browser",
+            },
+            {
+                "function_id": "mcp.sample.echo",
+                "source_id": "configured.mcp.sample",
+            },
+        ],
+    )
+    connection.execute(
+        discovery_runs.insert(),
+        [
+            {
+                "discovery_run_id": "discovery-browser-old",
+                "source_id": "configured.browser",
+            },
+            {
+                "discovery_run_id": "discovery-browser-new",
+                "source_id": "bundled.local_package.browser",
+            },
+            {
+                "discovery_run_id": "discovery-sample",
+                "source_id": "configured.mcp.sample",
+            },
+        ],
+    )
+    connection.execute(
+        provider_backends.insert(),
+        [
+            {
+                "backend_id": "backend-browser-old",
+                "source_id": "configured.browser",
+            },
+            {
+                "backend_id": "backend-browser-new",
+                "source_id": "bundled.local_package.browser",
+            },
+            {
+                "backend_id": "backend-sample",
+                "source_id": "configured.mcp.sample",
+            },
+        ],
+    )
+    connection.execute(
+        context_nodes.insert(),
+        [
+            {
+                "node_id": "tools.bundle.configured.browser",
+                "owner_ref": {"source_id": "configured.browser"},
+                "metadata": {},
+            },
+            {
+                "node_id": "tools.bundle.configured.browser.navigation",
+                "owner_ref": {},
+                "metadata": {},
+            },
+            {
+                "node_id": "tools.bundle.memory",
+                "owner_ref": {},
+                "metadata": {"source_id": "bundled.local_package.memory"},
+            },
+            {
+                "node_id": "tools.bundle.bundled.local_package.browser",
+                "owner_ref": {"source_id": "bundled.local_package.browser"},
+                "metadata": {},
+            },
+        ],
+    )
+    connection.execute(
+        projections.insert(),
+        [
+            {
+                "module": "tool",
+                "kind": "page",
+                "query_key": "tool-old",
+                "payload": {"source_id": "configured.browser"},
+            },
+            {
+                "module": "browser",
+                "kind": "page",
+                "query_key": "browser-old",
+                "payload": {"node_id": "tools.bundle.configured.browser"},
+            },
+            {
+                "module": "tool",
+                "kind": "page",
+                "query_key": "tool-new",
+                "payload": {"source_id": "bundled.local_package.browser"},
+            },
+            {
+                "module": "browser",
+                "kind": "page",
+                "query_key": "browser-new",
+                "payload": {"node_id": "tools.bundle.bundled.local_package.browser"},
+            },
+            {
+                "module": "llm",
+                "kind": "page",
+                "query_key": "unrelated-old-marker",
+                "payload": {"source_id": "configured.browser"},
+            },
+        ],
+    )
+    return {
+        "tool_sources": tool_sources,
+        "tool_functions": tool_functions,
+        "tool_source_discovery_runs": discovery_runs,
+        "tool_provider_backends": provider_backends,
+        "context_node_states": context_nodes,
+        "operations_projections": projections,
+    }
+
+
 def _values(connection, table: Table, column_name: str) -> set[str]:  # noqa: ANN001
     return set(connection.execute(select(table.c[column_name])).scalars())
 
@@ -429,6 +650,24 @@ def _load_migration_0062():
     )
     spec = importlib.util.spec_from_file_location(
         "migration_0062_drop_retired_browser_local_package_manifest",
+        migration_path,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    return migration
+
+
+def _load_migration_0071():
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "0071_delete_configured_browser_tool_source.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "migration_0071_delete_configured_browser_tool_source",
         migration_path,
     )
     assert spec is not None

@@ -5,7 +5,7 @@ import sqlite3
 from unittest.mock import patch
 
 from crxzipple.interfaces.runtime_container import AppKey
-from crxzipple.app.assembly.tool import browser_function_catalog_candidates
+from tests.unit.browser_tool_package_support import browser_function_catalog_candidates
 from crxzipple.modules.tool.domain import (
     ToolDefinitionOrigin,
     ToolEnvironment,
@@ -267,6 +267,9 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertEqual(tool.required_effect_ids, ("command_execution",))
         self.assertTrue(tool.execution_policy.mutates_state)
         self.assertIn("system-managed", tool.tags)
+        parameter_names = {param.name for param in tool.parameters}
+        self.assertIn("max_output_tokens", parameter_names)
+        self.assertIn("yield_time_ms", parameter_names)
 
     def test_get_tool_returns_background_process_tool_from_catalog(self) -> None:
         tool = self.tool_service.get_tool("process")
@@ -302,9 +305,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
 
         expected_ids = {
             candidate.function_id
-            for candidate in browser_function_catalog_candidates(
-                source_id="configured.browser",
-            )
+            for candidate in browser_function_catalog_candidates()
         }
         self.assertEqual({tool.id for tool in browser_tools}, expected_ids)
 
@@ -315,7 +316,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertNotIn("browser_network_inspect", enabled_ids)
 
         for tool in browser_tools:
-            self.assertEqual(tool.source_id, "configured.browser")
+            self.assertEqual(tool.source_id, "bundled.local_package.browser")
             self.assertEqual(tool.runtime_key, tool.id)
             self.assertEqual(tool.required_effect_ids, ("local_tool_access",))
             self.assertIn("browser", tool.tags)
@@ -355,7 +356,7 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertFalse(disabled.function.enabled)
         event_names = [
             event.event_name
-            for event in self.event_bus.published_events
+            for event in self.published_event_bus_events()
             if isinstance(event, Event) and bool(event.name)
         ][-2:]
         self.assertEqual(

@@ -15,12 +15,12 @@ class DispatchAggregateCollector(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolRunDispatchClaim:
+class ToolOrchestrationDispatchClaim:
     run_id: str
     claimed_at: datetime | None = None
 
 
-class ToolRunDispatchPort(Protocol):
+class ToolOrchestrationDispatchPort(Protocol):
     def enqueue(
         self,
         dispatch_tasks: DispatchTaskRepository,
@@ -36,7 +36,7 @@ class ToolRunDispatchPort(Protocol):
         *,
         worker_id: str,
         lease_seconds: int | None = None,
-    ) -> ToolRunDispatchClaim | None:
+    ) -> ToolOrchestrationDispatchClaim | None:
         ...
 
     def claim_queued(
@@ -47,7 +47,7 @@ class ToolRunDispatchPort(Protocol):
         run_id: str,
         worker_id: str,
         lease_seconds: int | None = None,
-    ) -> ToolRunDispatchClaim | None:
+    ) -> ToolOrchestrationDispatchClaim | None:
         ...
 
     def heartbeat(

@@ -24,6 +24,7 @@ from .ports import (
     BrowserSystemConfigStore,
 )
 from .network_capture import BrowserNetworkCaptureService
+from .observation import BrowserObservationService
 from .query import (
     BrowserProfileAllocationRuntimeRecord,
     BrowserProfilePoolRuntimeRecord,
@@ -88,6 +89,7 @@ __all__ = [
     "BrowserNetworkCaptureService",
     "BrowserNetworkCaptureStore",
     "BrowserNetworkRedactor",
+    "BrowserObservationService",
     "BrowserProfileResolver",
     "BrowserProfileSelectionOps",
     "BrowserProfileSelectionOpsFactory",

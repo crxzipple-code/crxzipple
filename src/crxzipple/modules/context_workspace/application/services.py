@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from html import escape
 from uuid import uuid4
 
+from crxzipple.modules.context_workspace.application import root_nodes
 from crxzipple.modules.context_workspace.application.models import (
     ContextActionInput,
     ContextActionResult,
@@ -18,10 +18,14 @@ from crxzipple.modules.context_workspace.application.ports import (
     ContextChildrenRequest,
     ContextOwnerRegistry,
 )
+from crxzipple.modules.context_workspace.application.rendering import (
+    ContextRenderPipeline,
+    aggregate_estimate,
+    render_snapshot_metadata_defaults,
+)
 from crxzipple.modules.context_workspace.domain import (
     ContextAction,
     ContextActionNotAllowedError,
-    ContextEstimate,
     ContextNode,
     ContextNodeNotFoundError,
     ContextNodeRepository,
@@ -36,6 +40,10 @@ from crxzipple.modules.context_workspace.domain import (
     ContextWorkspaceNotFoundError,
     ContextWorkspaceRepository,
 )
+
+
+_SCHEMA_ENABLED_SOURCE_KEY = "schema_enabled_source"
+_SCHEMA_ENABLED_SOURCE_ACTION = "context_tree_action"
 
 
 class ContextWorkspaceService:
@@ -106,41 +114,35 @@ class ContextWorkspaceService:
         )
 
     def _ensure_default_root_nodes(self, workspace: ContextWorkspace) -> None:
-        nodes = _children_from_seeds(
+        _ensure_default_root_nodes(
             workspace=workspace,
-            seeds=_default_root_node_seeds(
-                session_key=workspace.session_key,
-                agent_id=workspace.agent_id,
-                metadata=workspace.metadata,
-            ),
             node_repository=self._nodes,
         )
-        if nodes:
-            self._nodes.save_many(nodes)
 
     def _refresh_expanded_children(self, workspace: ContextWorkspace) -> None:
-        for node in self._nodes.list_for_workspace(workspace.id):
-            if node.state.collapsed and not _preloads_children(node):
-                continue
-            self._load_owner_children(workspace, node)
+        _refresh_owner_children(
+            workspace=workspace,
+            node_repository=self._nodes,
+            owner_registry=self._owner_registry,
+        )
+
+    def _prune_orphan_nodes(self, workspace: ContextWorkspace) -> None:
+        _prune_orphan_nodes(
+            workspace=workspace,
+            node_repository=self._nodes,
+        )
 
     def _load_owner_children(
         self,
         workspace: ContextWorkspace,
         node: ContextNode,
     ) -> None:
-        if self._owner_registry is None:
-            return
-        provider = self._owner_registry.get(node.owner)
-        if provider is None:
-            return
-        seeds = provider.children(ContextChildrenRequest(workspace=workspace, node=node))
-        children = _children_from_seeds(
+        _load_owner_children(
             workspace=workspace,
-            seeds=seeds,
+            node=node,
             node_repository=self._nodes,
+            owner_registry=self._owner_registry,
         )
-        self._nodes.save_many(children)
 
 
 class ContextTreeService:
@@ -157,14 +159,32 @@ class ContextTreeService:
         self._operations = operation_repository
         self._owner_registry = owner_registry
 
-    def list_tree(self, session_key: str) -> ContextTreeView:
+    def list_tree(self, session_key: str, *, refresh: bool = True) -> ContextTreeView:
         workspace = self._require_workspace(session_key)
+        _ensure_default_root_nodes(
+            workspace=workspace,
+            node_repository=self._nodes,
+        )
+        if refresh:
+            _refresh_owner_children(
+                workspace=workspace,
+                node_repository=self._nodes,
+                owner_registry=self._owner_registry,
+            )
         nodes = self._nodes.list_for_workspace(workspace.id)
         return ContextTreeView(
             workspace=workspace,
             nodes=nodes,
-            estimate=_aggregate_estimate(nodes),
+            estimate=aggregate_estimate(nodes),
         )
+
+    def get_node(self, session_key: str, node_id: str) -> ContextNode | None:
+        workspace = self._require_workspace(session_key)
+        _ensure_default_root_nodes(
+            workspace=workspace,
+            node_repository=self._nodes,
+        )
+        return self._nodes.get(workspace_id=workspace.id, node_id=node_id)
 
     def apply_action(self, data: ContextActionInput) -> ContextActionResult:
         workspace = self._require_workspace(data.session_key)
@@ -178,7 +198,8 @@ class ContextTreeService:
                 f"Context node '{data.node_id}' does not support action '{data.action.value}'.",
             )
         node.apply_state(_state_after_action(node.state, data.action))
-        if data.action in {ContextAction.EXPAND, ContextAction.READ_SKILL}:
+        _record_schema_enabled_action(node, data)
+        if data.action is ContextAction.EXPAND:
             self._load_owner_children(workspace, node)
         workspace.touch_revision()
         self._nodes.save(node)
@@ -210,6 +231,7 @@ class ContextTreeService:
             workspace=workspace,
             seeds=data.nodes,
             node_repository=self._nodes,
+            preserve_existing_state=False,
         )
         self._nodes.save_many(nodes)
         workspace.touch_revision()
@@ -248,18 +270,12 @@ class ContextTreeService:
         workspace: ContextWorkspace,
         node: ContextNode,
     ) -> None:
-        if self._owner_registry is None:
-            return
-        provider = self._owner_registry.get(node.owner)
-        if provider is None:
-            return
-        seeds = provider.children(ContextChildrenRequest(workspace=workspace, node=node))
-        children = _children_from_seeds(
+        _load_owner_children(
             workspace=workspace,
-            seeds=seeds,
+            node=node,
             node_repository=self._nodes,
+            owner_registry=self._owner_registry,
         )
-        self._nodes.save_many(children)
 
 
 class ContextRenderService:
@@ -269,36 +285,34 @@ class ContextRenderService:
         workspace_repository: ContextWorkspaceRepository,
         node_repository: ContextNodeRepository,
         snapshot_repository: ContextRenderSnapshotRepository,
+        owner_registry: ContextOwnerRegistry | None = None,
     ) -> None:
         self._workspaces = workspace_repository
         self._nodes = node_repository
         self._snapshots = snapshot_repository
+        self._owner_registry = owner_registry
+        self._pipeline = ContextRenderPipeline()
 
     def render_prompt_body(
         self,
         data: RenderContextPromptInput,
     ) -> RenderContextPromptResult:
         workspace = self._require_workspace(data.session_key)
-        nodes = self._nodes.list_for_workspace(workspace.id)
-        visible_nodes = tuple(node for node in nodes if node.state.prompt_visible)
-        estimate = _aggregate_estimate(visible_nodes)
-        prompt_body = _render_context_tree(workspace, visible_nodes)
-        (
-            provider_attachments,
-            mirrored_node_ids,
-            tool_schema_mirror_available,
-        ) = _render_provider_attachments(
-            visible_nodes,
-            base=data.provider_attachments,
-        )
-        return RenderContextPromptResult(
+        _ensure_default_root_nodes(
             workspace=workspace,
-            prompt_body=prompt_body,
-            estimate=estimate,
-            included_node_ids=tuple(node.id for node in visible_nodes),
-            provider_attachments=provider_attachments,
-            mirrored_node_ids=mirrored_node_ids,
-            tool_schema_mirror_available=tool_schema_mirror_available,
+            node_repository=self._nodes,
+        )
+        _refresh_owner_children(
+            workspace=workspace,
+            node_repository=self._nodes,
+            owner_registry=self._owner_registry,
+        )
+        nodes = self._nodes.list_for_workspace(workspace.id)
+        return self._pipeline.render_prompt_body(
+            workspace=workspace,
+            nodes=nodes,
+            provider_attachments=data.provider_attachments,
+            metadata=data.metadata,
         )
 
     def record_render_snapshot(
@@ -306,6 +320,10 @@ class ContextRenderService:
         data: RecordContextRenderSnapshotInput,
     ) -> ContextRenderSnapshot:
         workspace = self._require_workspace(data.session_key)
+        metadata = render_snapshot_metadata_defaults(
+            data.metadata,
+            nodes=self._nodes.list_for_workspace(workspace.id),
+        )
         snapshot = ContextRenderSnapshot(
             id=data.snapshot_id,
             workspace_id=workspace.id,
@@ -317,7 +335,7 @@ class ContextRenderService:
             estimate=data.estimate,
             included_node_ids=data.included_node_ids,
             mirrored_node_ids=data.mirrored_node_ids,
-            metadata=data.metadata,
+            metadata=metadata,
         )
         self._snapshots.add(snapshot)
         return snapshot
@@ -327,6 +345,14 @@ class ContextRenderService:
         if snapshot is None:
             raise ContextRenderSnapshotNotFoundError(
                 f"Context render snapshot for run '{run_id}' was not found.",
+            )
+        return snapshot
+
+    def get_snapshot(self, snapshot_id: str) -> ContextRenderSnapshot:
+        snapshot = self._snapshots.get(snapshot_id)
+        if snapshot is None:
+            raise ContextRenderSnapshotNotFoundError(
+                f"Context render snapshot '{snapshot_id}' was not found.",
             )
         return snapshot
 
@@ -350,130 +376,125 @@ class ContextRenderService:
         return workspace
 
 
-def _default_root_node_seeds(
-    *,
-    session_key: str,
-    agent_id: str,
-    metadata: dict[str, object] | None = None,
-) -> tuple[ContextNodeSeed, ...]:
-    common_actions = (
-        ContextAction.EXPAND,
-        ContextAction.COLLAPSE,
-        ContextAction.PIN,
-        ContextAction.UNPIN,
-        ContextAction.ESTIMATE,
-    )
-    return (
-        _agent_identity_node_seed(
-            agent_id=agent_id,
-            metadata=metadata,
-            actions=common_actions,
-        ),
-        _run_flow_node_seed(metadata),
-        _run_runtime_node_seed(
-            metadata,
-            actions=common_actions,
-        ),
-        ContextNodeSeed(
-            node_id="session.current",
-            owner="session",
-            kind="session",
-            title="Current Session",
-            summary=f"Active context handles for session '{session_key}'.",
-            state=ContextNodeState(collapsed=False, loaded=True),
-            actions=common_actions + (ContextAction.FOLD_SESSION_RANGE,),
-            owner_ref={"session_key": session_key},
-            estimate=ContextEstimate(text_chars=96, text_tokens=24),
-            display_order=20,
-        ),
-        ContextNodeSeed(
-            node_id="tools.available",
-            owner="tool",
-            kind="tool_group",
-            title="Available Tools",
-            summary="Authorized tool handles can be expanded and selectively mirrored as provider schemas.",
-            actions=common_actions,
-            owner_ref={"agent_id": agent_id, "session_key": session_key},
-            estimate=ContextEstimate(text_chars=120, text_tokens=30),
-            display_order=30,
-        ),
-        ContextNodeSeed(
-            node_id="skills.available",
-            owner="skills",
-            kind="skill_group",
-            title="Available Skills",
-            summary="Ready skill handles can be expanded when instructions are needed.",
-            actions=common_actions + (ContextAction.READ_SKILL,),
-            owner_ref={"agent_id": agent_id},
-            estimate=ContextEstimate(text_chars=96, text_tokens=24),
-            display_order=40,
-        ),
-        ContextNodeSeed(
-            node_id="memory.visible",
-            owner="memory",
-            kind="memory_scope_group",
-            title="Visible Memory",
-            summary="Memory scopes visible to the current agent and session.",
-            actions=common_actions + (ContextAction.RECALL_MEMORY,),
-            owner_ref={"agent_id": agent_id, "session_key": session_key},
-            estimate=ContextEstimate(text_chars=96, text_tokens=24),
-            display_order=50,
-        ),
-        ContextNodeSeed(
-            node_id="artifacts.session",
-            owner="artifacts",
-            kind="artifact_group",
-            title="Session Artifacts",
-            summary="Artifacts referenced by the session can be opened when needed.",
-            actions=common_actions + (ContextAction.OPEN_ARTIFACT,),
-            owner_ref={"session_key": session_key},
-            estimate=ContextEstimate(text_chars=96, text_tokens=24),
-            display_order=60,
-        ),
-        ContextNodeSeed(
-            node_id="workspace.bootstrap",
-            owner="workspace",
-            kind="workspace_group",
-            title="Workspace Bootstrap",
-            summary="Workspace instruction and bootstrap file handles.",
-            actions=common_actions,
-            owner_ref={"agent_id": agent_id, "session_key": session_key},
-            estimate=ContextEstimate(text_chars=96, text_tokens=24),
-            display_order=70,
-        ),
-    )
-
-
 def _preloads_children(node: ContextNode) -> bool:
     return node.owner == "tool" and node.id == "tools.available"
 
 
-def _agent_identity_node_seed(
+def _ensure_default_root_nodes(
     *,
-    agent_id: str,
-    metadata: dict[str, object] | None,
-    actions: tuple[ContextAction, ...],
-) -> ContextNodeSeed:
-    payload = _context_block_payload(
-        metadata,
-        key="agent_instruction_node",
-        default_summary=f"Runtime identity for agent '{agent_id}'.",
+    workspace: ContextWorkspace,
+    node_repository: ContextNodeRepository,
+) -> None:
+    nodes = _children_from_seeds(
+        workspace=workspace,
+        seeds=root_nodes.default_root_node_seeds(
+            session_key=workspace.session_key,
+            agent_id=workspace.agent_id,
+            metadata=workspace.metadata,
+        ),
+        node_repository=node_repository,
+        preserve_existing_dynamic_roots=True,
     )
-    content = payload["content"]
-    return ContextNodeSeed(
-        node_id="agent.identity",
-        owner="agent",
-        kind="agent_identity",
-        title="Agent Identity",
-        summary=payload["summary"],
-        content=content,
-        state=ContextNodeState(collapsed=False, loaded=True),
-        actions=actions,
-        owner_ref={"agent_id": agent_id},
-        estimate=_text_estimate(payload["summary"] + "\n" + content),
-        display_order=10,
-        metadata=payload["metadata"],
+    if nodes:
+        node_repository.save_many(nodes)
+
+
+_OWNER_CHILD_LOADING_ACTIONS = {
+    ContextAction.EXPAND,
+}
+
+
+def _can_load_owner_children(node: ContextNode) -> bool:
+    return _preloads_children(node) or any(
+        action in _OWNER_CHILD_LOADING_ACTIONS for action in node.actions
     )
+
+
+def _refresh_owner_children(
+    *,
+    workspace: ContextWorkspace,
+    node_repository: ContextNodeRepository,
+    owner_registry: ContextOwnerRegistry | None,
+) -> None:
+    for node in node_repository.list_for_workspace(workspace.id):
+        if node.state.collapsed and not _preloads_children(node):
+            continue
+        _load_owner_children(
+            workspace=workspace,
+            node=node,
+            node_repository=node_repository,
+            owner_registry=owner_registry,
+        )
+    _prune_orphan_nodes(
+        workspace=workspace,
+        node_repository=node_repository,
+    )
+
+
+def _load_owner_children(
+    *,
+    workspace: ContextWorkspace,
+    node: ContextNode,
+    node_repository: ContextNodeRepository,
+    owner_registry: ContextOwnerRegistry | None,
+) -> None:
+    latest_node = node_repository.get(workspace_id=workspace.id, node_id=node.id)
+    if latest_node is None:
+        return
+    node = latest_node
+    if not _can_load_owner_children(node):
+        return
+    if owner_registry is None:
+        return
+    provider = owner_registry.get(node.owner)
+    if provider is None:
+        return
+    seeds = provider.children(ContextChildrenRequest(workspace=workspace, node=node))
+    keep_node_ids = tuple(seed.node_id for seed in seeds)
+    stale_child_ids = tuple(
+        child.id
+        for child in node_repository.list_for_workspace(workspace.id)
+        if child.parent_id == node.id and child.id not in keep_node_ids
+    )
+    if stale_child_ids:
+        node_repository.delete_subtrees(
+            workspace_id=workspace.id,
+            root_node_ids=stale_child_ids,
+        )
+    children = _children_from_seeds(
+        workspace=workspace,
+        seeds=seeds,
+        node_repository=node_repository,
+    )
+    node_repository.save_many(children)
+    for child in children:
+        if child.state.collapsed and not _preloads_children(child):
+            continue
+        _load_owner_children(
+            workspace=workspace,
+            node=child,
+            node_repository=node_repository,
+            owner_registry=owner_registry,
+        )
+
+
+def _prune_orphan_nodes(
+    *,
+    workspace: ContextWorkspace,
+    node_repository: ContextNodeRepository,
+) -> None:
+    nodes = node_repository.list_for_workspace(workspace.id)
+    node_ids = {node.id for node in nodes}
+    orphan_ids = tuple(
+        node.id
+        for node in nodes
+        if node.parent_id is not None and node.parent_id not in node_ids
+    )
+    if orphan_ids:
+        node_repository.delete_subtrees(
+            workspace_id=workspace.id,
+            root_node_ids=orphan_ids,
+        )
 
 
 def _children_from_seeds(
@@ -481,181 +502,149 @@ def _children_from_seeds(
     workspace: ContextWorkspace,
     seeds: tuple[ContextNodeSeed, ...],
     node_repository: ContextNodeRepository,
+    preserve_existing_state: bool = True,
+    preserve_existing_dynamic_roots: bool = False,
 ) -> tuple[ContextNode, ...]:
     children: list[ContextNode] = []
     for seed in seeds:
-        node = ContextNode.from_seed(seed, workspace_id=workspace.id)
+        node = ContextNode.from_seed(
+            _seed_with_default_parent(seed),
+            workspace_id=workspace.id,
+        )
         existing = node_repository.get(
             workspace_id=workspace.id,
             node_id=node.id,
         )
         if existing is not None:
             node.created_at = existing.created_at
-            node.apply_state(existing.state)
+            if preserve_existing_state:
+                node.apply_state(_state_for_existing_seed(node, existing))
+                _preserve_existing_control_metadata(node, existing)
+            if preserve_existing_dynamic_roots:
+                _preserve_existing_dynamic_root_node(node, existing)
         children.append(node)
     return tuple(children)
 
 
-def _run_flow_node_seed(metadata: dict[str, object] | None) -> ContextNodeSeed:
-    payload = _run_flow_payload(metadata)
-    summary = payload["summary"]
+def _seed_with_default_parent(seed: ContextNodeSeed) -> ContextNodeSeed:
+    parent_id = seed.parent_id
+    if parent_id is None:
+        parent_id = root_nodes.default_parent_id_for_node_id(seed.node_id)
+    if parent_id == seed.parent_id:
+        return seed
     return ContextNodeSeed(
-        node_id="run.flow",
-        owner="orchestration",
-        kind="run_flow",
-        title=payload["title"],
-        summary=summary,
-        state=ContextNodeState(collapsed=False, loaded=True),
-        actions=(ContextAction.PIN, ContextAction.UNPIN, ContextAction.ESTIMATE),
-        owner_ref={"mode": payload["mode"]},
-        estimate=_text_estimate(summary),
-        display_order=15,
-        metadata=payload["metadata"],
+        node_id=seed.node_id,
+        parent_id=parent_id,
+        owner=seed.owner,
+        kind=seed.kind,
+        title=seed.title,
+        summary=seed.summary,
+        content=seed.content,
+        state=seed.state,
+        actions=seed.actions,
+        owner_ref=dict(seed.owner_ref),
+        estimate=seed.estimate,
+        revision=seed.revision,
+        freshness=seed.freshness,
+        display_order=seed.display_order,
+        metadata=dict(seed.metadata),
     )
 
 
-def _run_runtime_node_seed(
-    metadata: dict[str, object] | None,
-    *,
-    actions: tuple[ContextAction, ...],
-) -> ContextNodeSeed:
-    payload = _context_block_payload(
-        metadata,
-        key="runtime_context_node",
-        default_summary="Current run runtime bindings and provider context.",
-    )
-    content = payload["content"]
-    return ContextNodeSeed(
-        node_id="run.runtime",
-        owner="orchestration",
-        kind="run_runtime",
-        title="Run Runtime",
-        summary=payload["summary"],
-        content=content,
-        state=ContextNodeState(collapsed=False, loaded=True),
-        actions=actions,
-        owner_ref=dict(payload["metadata"]),
-        estimate=_text_estimate(payload["summary"] + "\n" + content),
-        display_order=16,
-        metadata=payload["metadata"],
-    )
+def _state_for_existing_seed(
+    node: ContextNode,
+    existing: ContextNode,
+) -> ContextNodeState:
+    if node.id in {"context.priority", "context.tree_usage", "session.messages.current"}:
+        if node.revision != existing.revision:
+            return node.state.with_updates(pinned=existing.state.pinned)
+        return existing.state
+    if node.owner == "session" and node.kind == "tool_interaction":
+        if node.revision != existing.revision:
+            return node.state.with_updates(
+                pinned=existing.state.pinned,
+                opened=existing.state.opened,
+            )
+        if _tool_interaction_owner_state_changed(node, existing):
+            return node.state.with_updates(pinned=existing.state.pinned)
+        return existing.state
+    if node.owner == "tool" and node.kind in {
+        "tool_bundle",
+        "tool_bundle_group",
+        "tool_function",
+        "tool_cli_source",
+    }:
+        if node.kind == "tool_function":
+            if _schema_enabled_was_set_by_action(existing):
+                if node.revision != existing.revision:
+                    return node.state.with_updates(
+                        pinned=existing.state.pinned,
+                        schema_enabled=existing.state.schema_enabled,
+                    )
+                return existing.state
+            if existing.state.schema_enabled != node.state.schema_enabled:
+                return node.state.with_updates(pinned=existing.state.pinned)
+        if node.revision != existing.revision:
+            return node.state.with_updates(pinned=existing.state.pinned)
+        return existing.state
+    if node.id == "tools.available" or node.id.endswith(".context_tree"):
+        return node.state.with_updates(pinned=existing.state.pinned)
+    return existing.state
 
 
-def _context_block_payload(
-    metadata: dict[str, object] | None,
-    *,
-    key: str,
-    default_summary: str,
-) -> dict[str, object]:
-    raw = (metadata or {}).get(key)
-    if not isinstance(raw, dict):
-        return {"summary": default_summary, "content": "", "metadata": {}}
-    content = _optional_text(raw.get("content")) or ""
-    summary = _optional_text(raw.get("summary")) or default_summary
-    raw_metadata = raw.get("metadata")
-    node_metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-    if bool(raw.get("truncated")):
-        node_metadata["truncated"] = True
-    return {
-        "summary": _truncate(summary, 1900),
-        "content": content,
-        "metadata": node_metadata,
-    }
+def _record_schema_enabled_action(
+    node: ContextNode,
+    data: ContextActionInput,
+) -> None:
+    if data.action not in {
+        ContextAction.ENABLE_TOOL_SCHEMA,
+        ContextAction.DISABLE_TOOL_SCHEMA,
+    }:
+        return
+    node.metadata[_SCHEMA_ENABLED_SOURCE_KEY] = _SCHEMA_ENABLED_SOURCE_ACTION
+    node.metadata["schema_enabled_action"] = data.action.value
+    if data.run_id is not None:
+        node.metadata["schema_enabled_run_id"] = data.run_id
 
 
-def _run_flow_payload(metadata: dict[str, object] | None) -> dict[str, object]:
-    raw = (metadata or {}).get("run_flow_node")
-    if isinstance(raw, dict):
-        mode = _optional_text(raw.get("mode")) or "normal_turn"
-        title = _optional_text(raw.get("title")) or _title_for_mode(mode)
-        summary = (
-            _truncate(_optional_text(raw.get("summary")) or _summary_for_mode(mode), 1900)
-        )
-        raw_metadata = raw.get("metadata")
-        node_metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-        node_metadata.setdefault("mode", mode)
-        return {
-            "mode": mode,
-            "title": title,
-            "summary": summary,
-            "metadata": node_metadata,
-        }
-    mode = _optional_text((metadata or {}).get("prompt_mode")) or "normal_turn"
-    return {
-        "mode": mode,
-        "title": _title_for_mode(mode),
-        "summary": _summary_for_mode(mode),
-        "metadata": {"mode": mode},
-    }
+def _preserve_existing_control_metadata(
+    node: ContextNode,
+    existing: ContextNode,
+) -> None:
+    for key in (
+        _SCHEMA_ENABLED_SOURCE_KEY,
+        "schema_enabled_action",
+        "schema_enabled_run_id",
+    ):
+        if key in existing.metadata:
+            node.metadata[key] = existing.metadata[key]
 
 
-def _title_for_mode(mode: str) -> str:
-    return {
-        "session_start": "Flow: Session Start",
-        "approval_resume": "Flow: Approval Resume",
-        "approval_denied": "Flow: Approval Denied",
-        "recovery_resume": "Flow: Recovery Resume",
-        "heartbeat": "Flow: Heartbeat",
-        "memory_flush": "Flow: Memory Flush",
-        "compaction": "Flow: Compaction",
-    }.get(mode, "Flow: Normal Turn")
+def _schema_enabled_was_set_by_action(node: ContextNode) -> bool:
+    return node.metadata.get(_SCHEMA_ENABLED_SOURCE_KEY) == _SCHEMA_ENABLED_SOURCE_ACTION
 
 
-def _summary_for_mode(mode: str) -> str:
-    if mode == "session_start":
-        return "Start a fresh active session using only visible transcript, context tree, and memory nodes."
-    if mode == "approval_resume":
-        return "Resume the interrupted task after an approval update without restarting from scratch."
-    if mode == "approval_denied":
-        return "Continue with available tools and access after the requested approval was denied."
-    if mode == "recovery_resume":
-        return "Resume paused work after background results became available."
-    if mode == "heartbeat":
-        return "Handle a lightweight heartbeat and avoid broad exploratory work unless there is clear unfinished work."
-    if mode == "memory_flush":
-        return "Capture durable memory only; do not answer the user conversation in this run."
-    if mode == "compaction":
-        return "Compact the session into a concise factual continuation summary."
-    return "Handle the latest user request using visible context tree nodes, transcript, and callable tool schemas."
-
-
-def _text_estimate(text: str) -> ContextEstimate:
-    normalized = text or ""
-    return ContextEstimate(
-        text_chars=len(normalized),
-        text_tokens=max((len(normalized) + 3) // 4, 1) if normalized else 0,
-    )
-
-
-def _optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
-def _truncate(value: str, limit: int) -> str:
-    text = value.strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(limit - 1, 0)].rstrip() + "..."
-
-
-def _aggregate_estimate(nodes: tuple[ContextNode, ...]) -> ContextEstimate:
-    total = ContextEstimate()
-    for node in nodes:
-        total = total.plus(node.estimate)
-    return total
+def _preserve_existing_dynamic_root_node(
+    node: ContextNode,
+    existing: ContextNode,
+) -> None:
+    if node.id != "work.plan":
+        return
+    node.summary = existing.summary
+    node.content = existing.content
+    node.owner_ref = dict(existing.owner_ref)
+    node.estimate = existing.estimate
+    node.revision = existing.revision
+    node.freshness = existing.freshness
+    node.metadata = dict(existing.metadata)
 
 
 def _state_after_action(
     state: ContextNodeState,
     action: ContextAction,
 ) -> ContextNodeState:
-    if action in {ContextAction.EXPAND, ContextAction.READ_SKILL}:
+    if action is ContextAction.EXPAND:
         return state.expand()
-    if action is ContextAction.OPEN_ARTIFACT:
-        return state.with_updates(loaded=True, opened=True)
     if action is ContextAction.COLLAPSE:
         return state.collapse()
     if action is ContextAction.PIN:
@@ -669,128 +658,34 @@ def _state_after_action(
     return state.with_updates(loaded=True)
 
 
-def _render_context_tree(
-    workspace: ContextWorkspace,
-    nodes: tuple[ContextNode, ...],
-) -> str:
-    lines = [
-        "<context_instructions>",
-        "  You are given a context tree.",
-        "  Collapsed nodes are available handles, not full content.",
-        (
-            "  Use context_tree.list, context_tree.expand, "
-            "context_tree.collapse, context_tree.pin, context_tree.unpin, "
-            "context_tree.estimate, context_tree.read_skill, "
-            "context_tree.recall_memory, context_tree.open_artifact, "
-            "context_tree.enable_tool_schema, and context_tree.disable_tool_schema "
-            "to inspect or adjust it."
-        ),
-        "</context_instructions>",
-        (
-            f'<context_tree session="{escape(workspace.session_key)}" '
-            f'revision="{workspace.active_revision}">'
-        ),
-    ]
-    for node in sorted(nodes, key=lambda item: (item.display_order, item.id)):
-        state = "collapsed" if node.state.collapsed else "expanded"
-        if node.state.opened:
-            state = "opened"
-        actions = " ".join(action.value for action in node.actions)
-        lines.append(
-            f'  <node id="{escape(node.id)}" kind="{escape(node.kind)}" '
-            f'owner="{escape(node.owner)}" state="{state}" actions="{escape(actions)}">',
-        )
-        lines.append(f"    <title>{escape(node.title)}</title>")
-        if node.summary:
-            lines.append(f"    <summary>{escape(node.summary)}</summary>")
-        if node.content and not node.state.collapsed:
-            lines.append(f"    <content>{escape(node.content)}</content>")
-        lines.append("  </node>")
-    lines.append("</context_tree>")
-    return "\n".join(lines)
+def _tool_interaction_owner_state_changed(
+    node: ContextNode,
+    existing: ContextNode,
+) -> bool:
+    for key in (
+        "frontier",
+        "consumed",
+        "collapsed_by_default",
+        "opened_by_default",
+    ):
+        if _metadata_bool(node.metadata.get(key)) != _metadata_bool(
+            existing.metadata.get(key),
+        ):
+            return True
+    for key in ("lifecycle_status", "content_digest"):
+        if str(node.metadata.get(key) or "") != str(existing.metadata.get(key) or ""):
+            return True
+    return False
 
 
-def _render_provider_attachments(
-    nodes: tuple[ContextNode, ...],
-    *,
-    base: dict[str, object],
-) -> tuple[dict[str, object], tuple[str, ...], bool]:
-    attachments = dict(base)
-    tool_schemas = list(_provider_tool_schemas(attachments.get("tool_schemas")))
-    artifact_candidates = list(
-        _provider_artifact_candidates(attachments.get("artifact_content_candidates")),
-    )
-    mirrored_node_ids: list[str] = []
-    tool_schema_mirror_available = False
-    existing_tool_names = {
-        schema.get("name")
-        for schema in tool_schemas
-        if isinstance(schema.get("name"), str)
-    }
-    for node in nodes:
-        if node.owner != "tool" or node.kind != "tool_function":
-            continue
-        if isinstance(node.metadata.get("provider_schema"), dict):
-            tool_schema_mirror_available = True
-        if not node.state.schema_enabled:
-            continue
-        schema = node.metadata.get("provider_schema")
-        if not isinstance(schema, dict):
-            continue
-        schema_name = schema.get("name")
-        if not isinstance(schema_name, str) or not schema_name.strip():
-            continue
-        if schema_name in existing_tool_names:
-            continue
-        tool_schemas.append(dict(schema))
-        existing_tool_names.add(schema_name)
-        mirrored_node_ids.append(node.id)
-    existing_artifact_node_ids = {
-        candidate.get("node_id")
-        for candidate in artifact_candidates
-        if isinstance(candidate.get("node_id"), str)
-    }
-    for node in nodes:
-        if node.owner != "artifacts":
-            continue
-        if node.kind not in {"artifact_image", "artifact_file"}:
-            continue
-        if not node.state.opened:
-            continue
-        artifact_id = node.owner_ref.get("artifact_id")
-        if not isinstance(artifact_id, str) or not artifact_id.strip():
-            continue
-        if node.id in existing_artifact_node_ids:
-            continue
-        artifact_candidates.append(
-            {
-                "node_id": node.id,
-                "artifact_id": artifact_id.strip(),
-                "kind": node.kind,
-                "mime_type": node.metadata.get("mime_type"),
-                "name": node.metadata.get("name") or node.title,
-                "preferred_variant": node.owner_ref.get("preferred_variant"),
-            },
-        )
-        existing_artifact_node_ids.add(node.id)
-        mirrored_node_ids.append(node.id)
-    if tool_schemas:
-        attachments["tool_schemas"] = tool_schemas
-    if artifact_candidates:
-        attachments["artifact_content_candidates"] = artifact_candidates
-    return attachments, tuple(mirrored_node_ids), tool_schema_mirror_available
-
-
-def _provider_tool_schemas(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(dict(item) for item in value if isinstance(item, dict))
-
-
-def _provider_artifact_candidates(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(dict(item) for item in value if isinstance(item, dict))
+def _metadata_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 __all__ = [

@@ -351,6 +351,7 @@ export const operationsOrchestrationPage: OperationsOrchestrationReadModel = {
   tabs: [
     { id: "overview", label: "Overview" },
     { id: "runs", label: "Runs", count: 73 },
+    { id: "execution_chains", label: "Execution", count: 3 },
     { id: "lane_locks", label: "Lane Locks", count: 3 },
     { id: "executors", label: "Executors", count: 4 },
     { id: "failures", label: "Failures", count: 2, tone: "danger" },
@@ -442,6 +443,29 @@ export const operationsOrchestrationPage: OperationsOrchestrationReadModel = {
     ],
     31,
     "/operations/orchestration?tab=runs",
+  ),
+  execution_chains: tableSection(
+    "execution_chains",
+    "Execution Chains",
+    [
+      ["run_id", "Run ID"],
+      ["chain_id", "Chain ID"],
+      ["chain_status", "Chain Status"],
+      ["active_step", "Active Step"],
+      ["last_step", "Last Step"],
+      ["steps", "Steps"],
+      ["items", "Items"],
+      ["dispatch_status", "Dispatch"],
+      ["updated_at", "Updated At"],
+      ["actions", "Actions"],
+    ],
+    [
+      { run_id: "run_8f3a7d1c", chain_id: "chain_8f3a7d1c", chain_status: "running", active_step: "2:tool_batch/waiting", last_step: "2:tool_batch/waiting", steps: "3", items: "5 / 1 active", dispatch_status: "claimed", updated_at: "14:32:10", actions: "Open / Trace" },
+      { run_id: "run_a12b9e4f", chain_id: "chain_a12b9e4f", chain_status: "waiting", active_step: "3:approval/waiting", last_step: "3:approval/waiting", steps: "4", items: "6 / 1 active", dispatch_status: "waiting", updated_at: "14:32:02", actions: "Open / Trace" },
+      { run_id: "run_6e7f5d9c", chain_id: "chain_6e7f5d9c", chain_status: "completed", active_step: "-", last_step: "4:final_response/completed", steps: "5", items: "8 / 0 active", dispatch_status: "completed", updated_at: "14:31:30", actions: "Open / Trace" },
+    ],
+    3,
+    "/operations/orchestration?tab=execution_chains",
   ),
   lane_locks: tableSection(
     "lane_locks",

@@ -1,6 +1,6 @@
 from crxzipple.modules.orchestration.application.ports.dispatch import (
-    RunDispatchClaim,
-    RunDispatchPort,
+    OrchestrationDispatchClaim,
+    OrchestrationDispatchPort,
 )
 from crxzipple.modules.orchestration.application.ports.database import (
     TransientDatabaseErrorClassifier,
@@ -84,8 +84,8 @@ __all__ = [
     "OrchestrationSchedulerRuntimePort",
     "OrchestrationSubmissionPort",
     "OrchestrationSessionPort",
-    "RunDispatchClaim",
-    "RunDispatchPort",
+    "OrchestrationDispatchClaim",
+    "OrchestrationDispatchPort",
     "ResolvedArtifactVariantPort",
     "SessionCatalogPort",
     "SessionCompactionStatePort",

@@ -14,8 +14,13 @@ class AggregateRoot(Entity[IdT], Generic[IdT]):
     def record_event(self, event: Event) -> None:
         self._events.append(event)
 
+    def pending_events(self) -> list[Event]:
+        return list(self._events)
+
+    def clear_events(self) -> None:
+        self._events.clear()
+
     def pull_events(self) -> list[Event]:
         events = list(self._events)
         self._events.clear()
         return events
-

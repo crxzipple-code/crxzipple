@@ -157,7 +157,7 @@ class AuthorizationTestCase(unittest.TestCase):
                     kind="tool",
                     id="browser.navigate",
                     attrs={
-                        "source_id": "configured.browser",
+                        "source_id": "bundled.local_package.browser",
                         "mutates_state": True,
                         "required_effect_ids": ["local_tool_access"],
                         "authorization_effect_ids": ["local_tool_access"],
@@ -192,7 +192,7 @@ class AuthorizationTestCase(unittest.TestCase):
             tool_id="browser.navigate",
             name="Browser Navigate",
             mutates_state=True,
-            source_id="configured.browser",
+            source_id="bundled.local_package.browser",
         )
         container.require(AppKey.AUTHORIZATION_SERVICE).upsert_policy(
             AuthorizationPolicy(
@@ -201,7 +201,7 @@ class AuthorizationTestCase(unittest.TestCase):
                 effect=AuthorizationEffect.DENY,
                 actions=("tool.run",),
                 resource_kind="tool",
-                resource_match={"source_id": "configured.browser"},
+                resource_match={"source_id": "bundled.local_package.browser"},
                 context_match={"browser_profile": "user"},
                 priority=1000,
                 source_kind="local_managed",

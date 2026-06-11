@@ -177,29 +177,6 @@ class OperationsObservationTestCase(unittest.TestCase):
             )
             self._record(
                 store,
-                cursor="7",
-                name="orchestration.scheduler.signal.requested",
-                payload={
-                    "signal_id": "tool-terminal:tool-1",
-                    "signal_kind": "tool_terminal",
-                    "status": "queued",
-                },
-                occurred_at=timestamp + timedelta(seconds=6),
-            )
-            self._record(
-                store,
-                cursor="8",
-                name="orchestration.scheduler.signal.claimed",
-                payload={
-                    "signal_id": "tool-terminal:tool-1",
-                    "signal_kind": "tool_terminal",
-                    "status": "processing",
-                    "worker_id": "scheduler-1",
-                },
-                occurred_at=timestamp + timedelta(seconds=7),
-            )
-            self._record(
-                store,
                 cursor="9",
                 name="orchestration.executor.lease.heartbeated",
                 payload={
@@ -219,7 +196,7 @@ class OperationsObservationTestCase(unittest.TestCase):
             assert observation is not None
             self.assertFalse(hasattr(store.snapshot(), "orchestration"))
             self.assertEqual(observation.last_cursor, "9")
-            self.assertEqual(observation.event_count, 9)
+            self.assertEqual(observation.event_count, 7)
             self.assertEqual(
                 observation.last_event_name,
                 "orchestration.executor.lease.heartbeated",
@@ -240,7 +217,7 @@ class OperationsObservationTestCase(unittest.TestCase):
             restored_observation = restored.get_module_observation("orchestration")
             self.assertIsNotNone(restored_observation)
             assert restored_observation is not None
-            self.assertEqual(restored_observation.event_count, 9)
+            self.assertEqual(restored_observation.event_count, 7)
             self.assertEqual(restored_observation.last_cursor, "9")
 
     def test_sqlalchemy_store_persists_observations_and_time_buckets(self) -> None:
@@ -333,7 +310,7 @@ class OperationsObservationTestCase(unittest.TestCase):
 
         self.assertIn("orchestration.run.accepted", names)
         self.assertIn("orchestration.ingress.claimed", names)
-        self.assertIn("orchestration.scheduler.signal.completed", names)
+        self.assertIn("dispatch.task.queued", names)
         self.assertIn("orchestration.executor.assignment.requested", names)
         self.assertIn("tool.run.created", names)
         self.assertIn("tool.assignment.created", names)
@@ -410,6 +387,57 @@ class OperationsObservationTestCase(unittest.TestCase):
 
         self.assertEqual(runtime.process_available_events(), 1)
         self.assertEqual(handled, ["new"])
+
+    def test_operations_observer_replays_records_after_persisted_cursor(self) -> None:
+        events = EventsApplicationService(InMemoryEventsBackend())
+        topic = named_event_topic("operations.cursor.replay.test")
+        events.publish(
+            Event(
+                name="operations.cursor.replay.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.cursor.replay.test", "value": "first"},
+            ),
+        )
+        first_runtime = OperationsObserverRuntimeService(events_service=events)
+        first_handled: list[str] = []
+        first_runtime.subscribe_topic(
+            topic,
+            subscription_id="operations.cursor.replay.test",
+            handler=lambda record: first_handled.append(
+                record.envelope.payload["value"],
+            ),
+        )
+
+        self.assertEqual(first_runtime.process_available_events(), 1)
+        self.assertEqual(first_handled, ["first"])
+
+        events.publish(
+            Event(
+                name="operations.cursor.replay.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.cursor.replay.test", "value": "second"},
+            ),
+        )
+        events.publish(
+            Event(
+                name="operations.cursor.replay.test",
+                topic=topic,
+                kind="fact",
+                payload={"event_name": "operations.cursor.replay.test", "value": "third"},
+            ),
+        )
+        restarted_runtime = OperationsObserverRuntimeService(events_service=events)
+        replayed: list[str] = []
+        restarted_runtime.subscribe_topic(
+            topic,
+            subscription_id="operations.cursor.replay.test",
+            handler=lambda record: replayed.append(record.envelope.payload["value"]),
+        )
+
+        self.assertEqual(restarted_runtime.process_available_events(), 2)
+        self.assertEqual(replayed, ["second", "third"])
 
     def test_operations_state_projection_maintenance_covers_all_modules(self) -> None:
         self.assertEqual(
@@ -699,7 +727,24 @@ class OperationsObservationTestCase(unittest.TestCase):
                         stage=OrchestrationRunStage.QUEUED,
                         lane_key="session:agent:assistant:main",
                         priority=4,
-                        metadata={"trace_id": "trace-owner-query"},
+                        metadata={
+                            "trace_id": "trace-owner-query",
+                            "repeated_probe_observation": {
+                                "repeated_count": 1,
+                                "repeated": [
+                                    {
+                                        "kind": "url",
+                                        "tool_id": "web.fetch_text",
+                                        "domain": "www.ceair.com",
+                                        "path": "/booking/04ffa1f.js",
+                                        "normalized_url": "www.ceair.com/booking/04ffa1f.js",
+                                        "count": 3,
+                                        "first_seen_step": 1,
+                                        "last_seen_step": 3,
+                                    },
+                                ],
+                            },
+                        },
                         created_at=timestamp,
                         updated_at=timestamp,
                         queued_at=timestamp,
@@ -751,6 +796,15 @@ class OperationsObservationTestCase(unittest.TestCase):
             scheduler_items["Observed Entities"],
             "1 total / 1 recent / last orchestration.run.queued",
         )
+        self.assertEqual(page.repeated_probes.total, 1)
+        repeated_row = page.repeated_probes.rows[0]
+        self.assertEqual(repeated_row.cells["run_id"], "run-owner-query")
+        self.assertEqual(repeated_row.cells["tool_id"], "web.fetch_text")
+        self.assertEqual(
+            repeated_row.cells["target"],
+            "www.ceair.com/booking/04ffa1f.js",
+        )
+        self.assertEqual(repeated_row.cells["count"], "3")
 
     def test_materializer_stores_paginated_tables_outside_page_projection(
         self,

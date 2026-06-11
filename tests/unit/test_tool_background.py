@@ -202,7 +202,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
 
         event_names = [
             event.event_name
-            for event in self.event_bus.published_events
+            for event in self.published_event_bus_events()
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.queued", event_names)
@@ -244,7 +244,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
 
         event_names = [
             event.event_name
-            for event in self.event_bus.published_events
+            for event in self.published_event_bus_events()
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.heartbeated", event_names)
@@ -671,8 +671,12 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(assigned.worker_id, "worker-cap-b")
 
     def test_background_async_run_heartbeats_while_sync_handler_blocks(self) -> None:
+        handler_entered = threading.Event()
+        release_handler = threading.Event()
+
         def blocking_echo(arguments: dict[str, object]) -> ToolRunResult:
-            time.sleep(0.2)
+            handler_entered.set()
+            release_handler.wait(timeout=2)
             return ToolRunResult.text(
                 str(arguments.get("message") or ""),
                 details={"message": arguments.get("message")},
@@ -737,8 +741,10 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
                 break
             time.sleep(0.01)
 
+        release_handler.set()
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
+        self.assertTrue(handler_entered.is_set())
         self.assertTrue(heartbeat_advanced)
 
         finished = self.tool_service.get_tool_run(queued_run.id)
@@ -954,6 +960,7 @@ class ToolBackgroundTestCase(ToolTestCaseBase):
         self.assertEqual(recovered[0].status, DispatchTaskStatus.QUEUED)
         self.assertIsNotNone(self.tool_runtime_event_service)
         assert self.tool_runtime_event_service is not None
+        self.publish_outbox_events()
         self.tool_runtime_event_service.process_available_events()
 
         persisted = self.tool_service.get_tool_run(queued_run.id)

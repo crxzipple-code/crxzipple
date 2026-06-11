@@ -53,6 +53,34 @@ class InMemoryContextNodeRepository:
         for node in nodes:
             self.save(node)
 
+    def delete_subtrees(
+        self,
+        *,
+        workspace_id: str,
+        root_node_ids: tuple[str, ...],
+    ) -> None:
+        root_ids = {
+            node_id.strip()
+            for node_id in root_node_ids
+            if isinstance(node_id, str) and node_id.strip()
+        }
+        if not root_ids:
+            return
+        node_ids = set(root_ids)
+        changed = True
+        while changed:
+            changed = False
+            for (item_workspace_id, item_node_id), item in self._items.items():
+                if item_workspace_id != workspace_id:
+                    continue
+                if item_node_id in node_ids:
+                    continue
+                if item.parent_id in node_ids:
+                    node_ids.add(item_node_id)
+                    changed = True
+        for node_id in node_ids:
+            self._items.pop((workspace_id, node_id), None)
+
     def get(self, *, workspace_id: str, node_id: str) -> ContextNode | None:
         return self._items.get((workspace_id, node_id))
 
@@ -103,10 +131,18 @@ class InMemoryContextRenderSnapshotRepository:
 
     def get_by_run(self, run_id: str) -> ContextRenderSnapshot | None:
         normalized = run_id.strip()
-        for item in self._items.values():
-            if item.run_id == normalized:
-                return item
-        return None
+        items = [
+            item
+            for item in self._items.values()
+            if item.run_id == normalized
+        ]
+        if not items:
+            return None
+        return sorted(
+            items,
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )[0]
 
     def list_recent(
         self,

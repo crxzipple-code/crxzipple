@@ -92,7 +92,7 @@ Today the module can actively manage internal process-backed worker daemons,
 channel runtimes, managed browser hosts, and standard MCP services.
 
 Browser MCP services are not part of the default browser runtime path. Browser
-tools use the single Tool Source `configured.browser` and resolve the browser
+tools use the single Tool Source `bundled.local_package.browser` and resolve the browser
 profile as runtime context; daemon only owns `host:browser:{profile}` lifecycle.
 
 Endpoint-only capabilities are still supported for attach-only cases.

@@ -90,7 +90,6 @@ from crxzipple.app.assembly.skills import (
 )
 from crxzipple.app.assembly.tool import (
     ToolExecutionServicesAssembly,
-    build_tool_execution_capability_bindings,
     build_tool_execution_services,
     tool_activation_tasks,
     tool_core_factories,
@@ -98,6 +97,7 @@ from crxzipple.app.assembly.tool import (
     tool_factories,
     tool_queue_factories,
 )
+from crxzipple.app.assembly.tool_packages import build_tool_execution_capability_bindings
 from crxzipple.app.assembly.unit_of_work import unit_of_work_factories
 from crxzipple.app.assembly.targets import (
     ALL_RUNTIME_TARGETS,
@@ -109,6 +109,7 @@ from crxzipple.app.assembly.targets import (
     DAEMON_SERVICE_TARGET_PREFIXES,
     DAEMON_SUPERVISOR_ENTRYPOINT,
     ENTRYPOINTS_BY_TARGET,
+    EVENT_OUTBOX_PUBLISHER_ENTRYPOINT,
     EVENT_RELAY_WORKER_ENTRYPOINT,
     OPERATIONS_OBSERVER_ENTRYPOINT,
     ORCHESTRATION_EXECUTOR_ENTRYPOINT,
@@ -139,6 +140,7 @@ __all__ = [
     "DATABASE_CLEANUP_ORDER",
     "ENTRYPOINTS_BY_TARGET",
     "EVENTS_CLEANUP_ORDER",
+    "EVENT_OUTBOX_PUBLISHER_ENTRYPOINT",
     "EVENT_RELAY_WORKER_ENTRYPOINT",
     "HTTP_CLIENTS_CLEANUP_ORDER",
     "ChannelInfrastructure",

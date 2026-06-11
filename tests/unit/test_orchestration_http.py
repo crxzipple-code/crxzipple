@@ -58,6 +58,9 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
                 max_steps=5,
                 pending_tool_run_ids=(),
                 waiting_reason=None,
+                pending_approval_request={"request_id": "approval-1"},
+                last_approval_resolution={"request_id": "approval-1", "decision": "allow_once"},
+                recovery_contract={"kind": "approval", "state": "resolved_allow_pending_replay"},
                 inbound_instruction=InboundInstructionDTO(
                     source="http",
                     content="hello",
@@ -80,6 +83,9 @@ class OrchestrationHttpTestCase(HttpModuleTestCase):
             self.assertEqual(payload["created_at"], "2026-04-18T07:00:00+00:00")
             self.assertEqual(payload["started_at"], "2026-04-18T07:00:03+00:00")
             self.assertEqual(payload["completed_at"], "2026-04-18T07:00:04+00:00")
+            self.assertEqual(payload["pending_approval_request"]["request_id"], "approval-1")
+            self.assertEqual(payload["last_approval_resolution"]["decision"], "allow_once")
+            self.assertEqual(payload["recovery_contract"]["kind"], "approval")
 
     def test_orchestration_request_due_heartbeats_endpoint_queues_idle_session(self) -> None:
             adapter = _SequentialTextAdapter("initial answer", "HEARTBEAT_OK")

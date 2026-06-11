@@ -129,7 +129,8 @@ Suggested fields:
 
 Notes:
 
-- `owner_kind` identifies the consuming subsystem, such as `orchestration_run`.
+- `owner_kind` identifies the consuming subsystem or work item kind, such as
+  `orchestration_step`.
 - `owner_id` is the foreign identifier inside that subsystem.
 - `payload_ref` is opaque to `dispatch`; it can be a run id, URI, or storage pointer.
 
@@ -286,7 +287,7 @@ That is acceptable only as a transition state.
 `orchestration` should speak to `dispatch` like this:
 
 - enqueue:
-  `dispatch.enqueue(owner_kind="orchestration_run", owner_id=run_id, lane_key=..., policy=...)`
+  `dispatch.enqueue(owner_kind="orchestration_step", owner_id=step_id, lane_key=..., policy=...)`
 - claim:
   `dispatch.claim_next(worker_id=...)`
 - wait:
@@ -295,6 +296,10 @@ That is acceptable only as a transition state.
   `dispatch.requeue(task_id=..., policy=resume_first)`
 - complete:
   `dispatch.complete(task_id=...)`
+
+Ingress and continuation tasks use their own owner kinds
+(`orchestration_ingress`, `orchestration_continuation`) instead of overloading
+run ownership.
 
 `dispatch` must not know:
 

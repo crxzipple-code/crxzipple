@@ -99,6 +99,15 @@ BrowserPageActionKind: TypeAlias = Literal[
     "network-fetch-as-page",
     "network-replay-request",
     "network-clear-capture",
+    "action-trace",
+    "runtime-inspect",
+    "script-list",
+    "script-find-request",
+    "code-search",
+    "script-inspect",
+    "script-extract-request",
+    "runtime-probe-client",
+    "runtime-call-client",
     "cdp-raw",
 ]
 BrowserNetworkCaptureStatus: TypeAlias = Literal["active", "stopped"]
@@ -228,6 +237,33 @@ def _normalize_text_tuple(values: tuple[str, ...] | list[str] | None) -> tuple[s
         normalized.append(text)
         seen.add(text)
     return tuple(normalized)
+
+
+def _normalize_numeric_mapping(value: Mapping[str, Any] | None) -> dict[str, float] | None:
+    if value is None:
+        return None
+    normalized: dict[str, float] = {}
+    for key, item in value.items():
+        normalized_key = str(key).strip()
+        if not normalized_key:
+            continue
+        try:
+            normalized[normalized_key] = float(item)
+        except (TypeError, ValueError) as exc:
+            raise BrowserValidationError(f"{normalized_key} must be numeric.") from exc
+    return normalized or None
+
+
+def _normalize_confidence(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise BrowserValidationError("stored ref confidence must be numeric.") from exc
+    if numeric < 0 or numeric > 1:
+        raise BrowserValidationError("stored ref confidence must be between 0 and 1.")
+    return numeric
 
 
 def _normalize_profile_name_tuple(values: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
@@ -711,6 +747,11 @@ class BrowserStoredRef:
     role: str | None = None
     text: str | None = None
     tag: str | None = None
+    frame_id: str | None = None
+    backend_node_id: int | None = None
+    bbox: Mapping[str, Any] | None = None
+    evidence: tuple[str, ...] = ()
+    confidence: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ref", _normalize_ref_id(self.ref))
@@ -718,8 +759,10 @@ class BrowserStoredRef:
         scope_selector = _normalize_optional_text(self.scope_selector)
         uid = _normalize_optional_text(self.uid)
         role = _normalize_optional_text(self.role)
-        if selector is None and uid is None and role is None:
-            raise BrowserValidationError("stored refs require selector, uid, or role.")
+        if selector is None and uid is None and role is None and self.backend_node_id is None:
+            raise BrowserValidationError(
+                "stored refs require selector, uid, role, or backend_node_id.",
+            )
         object.__setattr__(self, "selector", selector)
         object.__setattr__(self, "scope_selector", scope_selector)
         object.__setattr__(self, "uid", uid)
@@ -744,6 +787,19 @@ class BrowserStoredRef:
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "text", _normalize_optional_text(self.text))
         object.__setattr__(self, "tag", _normalize_optional_text(self.tag))
+        object.__setattr__(self, "frame_id", _normalize_optional_text(self.frame_id))
+        if self.backend_node_id is None:
+            object.__setattr__(self, "backend_node_id", None)
+        else:
+            backend_node_id = int(self.backend_node_id)
+            if backend_node_id < 1:
+                raise BrowserValidationError(
+                    "stored ref backend_node_id must be greater than or equal to 1.",
+                )
+            object.__setattr__(self, "backend_node_id", backend_node_id)
+        object.__setattr__(self, "bbox", _normalize_numeric_mapping(self.bbox))
+        object.__setattr__(self, "evidence", _normalize_text_tuple(self.evidence))
+        object.__setattr__(self, "confidence", _normalize_confidence(self.confidence))
 
 
 @dataclass(frozen=True, slots=True)

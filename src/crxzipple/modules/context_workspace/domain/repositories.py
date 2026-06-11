@@ -32,6 +32,13 @@ class ContextNodeRepository(Protocol):
 
     def save_many(self, nodes: tuple[ContextNode, ...]) -> None: ...
 
+    def delete_subtrees(
+        self,
+        *,
+        workspace_id: str,
+        root_node_ids: tuple[str, ...],
+    ) -> None: ...
+
     def get(self, *, workspace_id: str, node_id: str) -> ContextNode | None: ...
 
     def list_for_workspace(self, workspace_id: str) -> tuple[ContextNode, ...]: ...

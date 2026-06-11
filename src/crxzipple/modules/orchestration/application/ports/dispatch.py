@@ -15,17 +15,19 @@ class DispatchAggregateCollector(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class RunDispatchClaim:
+class OrchestrationDispatchClaim:
     run_id: str
     claimed_at: datetime | None = None
 
 
-class RunDispatchPort(Protocol):
+class OrchestrationDispatchPort(Protocol):
     def enqueue(
         self,
         dispatch_tasks: DispatchTaskRepository,
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> None:
         ...
 
@@ -35,9 +37,10 @@ class RunDispatchPort(Protocol):
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
         *,
+        dispatch_task_id: str,
         worker_id: str,
         lease_seconds: int | None = None,
-    ) -> RunDispatchClaim | None:
+    ) -> OrchestrationDispatchClaim | None:
         ...
 
     def heartbeat(
@@ -46,6 +49,7 @@ class RunDispatchPort(Protocol):
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
         *,
+        dispatch_task_id: str,
         worker_id: str,
         lease_seconds: int,
     ) -> None:
@@ -56,6 +60,8 @@ class RunDispatchPort(Protocol):
         dispatch_tasks: DispatchTaskRepository,
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> None:
         ...
 
@@ -64,6 +70,8 @@ class RunDispatchPort(Protocol):
         dispatch_tasks: DispatchTaskRepository,
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> None:
         ...
 
@@ -72,6 +80,8 @@ class RunDispatchPort(Protocol):
         dispatch_tasks: DispatchTaskRepository,
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> None:
         ...
 
@@ -80,8 +90,10 @@ class RunDispatchPort(Protocol):
         dispatch_tasks: DispatchTaskRepository,
         collector: DispatchAggregateCollector,
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> None:
         ...
 
-    def recover_abandoned_run_ids(self, *, reason: str) -> list[str]:
+    def recover_abandoned_dispatch_task_ids(self, *, reason: str) -> list[str]:
         ...

@@ -31,9 +31,10 @@ class OrchestrationEngineLlmInvoker:
         messages: tuple,
         tool_schemas: tuple,
         require_tool_call: bool = False,
+        request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
     ):
-        overrides = self._request_overrides(
+        overrides = self.request_overrides(
             llm_id=llm_id,
             tool_schemas=tool_schemas,
             require_tool_call=require_tool_call,
@@ -48,6 +49,7 @@ class OrchestrationEngineLlmInvoker:
                             messages=messages,
                             tool_schemas=tool_schemas,
                             overrides=overrides,
+                            request_metadata=dict(request_metadata or {}),
                         ),
                     )
                 except LlmAdapterNotConfiguredError:
@@ -57,6 +59,7 @@ class OrchestrationEngineLlmInvoker:
                             messages=messages,
                             tool_schemas=tool_schemas,
                             overrides=overrides,
+                            request_metadata=dict(request_metadata or {}),
                         ),
                     )
 
@@ -100,9 +103,10 @@ class OrchestrationEngineLlmInvoker:
         messages: tuple,
         tool_schemas: tuple,
         require_tool_call: bool = False,
+        request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
     ):
-        overrides = self._request_overrides(
+        overrides = self.request_overrides(
             llm_id=llm_id,
             tool_schemas=tool_schemas,
             require_tool_call=require_tool_call,
@@ -117,6 +121,7 @@ class OrchestrationEngineLlmInvoker:
                             messages=messages,
                             tool_schemas=tool_schemas,
                             overrides=overrides,
+                            request_metadata=dict(request_metadata or {}),
                         ),
                     )
                 except LlmAdapterNotConfiguredError:
@@ -126,6 +131,7 @@ class OrchestrationEngineLlmInvoker:
                             messages=messages,
                             tool_schemas=tool_schemas,
                             overrides=overrides,
+                            request_metadata=dict(request_metadata or {}),
                         ),
                     )
 
@@ -163,6 +169,7 @@ class OrchestrationEngineLlmInvoker:
                             messages=messages,
                             tool_schemas=tool_schemas,
                             overrides=overrides,
+                            request_metadata=dict(request_metadata or {}),
                         ),
                     )
 
@@ -175,7 +182,7 @@ class OrchestrationEngineLlmInvoker:
                     invocation_id,
                 )
 
-    def _request_overrides(
+    def request_overrides(
         self,
         *,
         llm_id: str,

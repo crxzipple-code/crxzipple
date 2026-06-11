@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from crxzipple.modules.tool.application.service_support import (
     ToolServiceBase,
     ToolServiceDependencies,
@@ -40,6 +42,9 @@ class ToolCatalogService(ToolServiceBase):
             raise ToolNotFoundError(f"Tool '{tool_id}' was not found.")
         return tool
 
+    def get_tools(self, tool_ids: Iterable[str]) -> dict[str, Tool]:
+        return self.resolve_tools(tool_ids)
+
     def resolved_tool_map(self) -> dict[str, Tool]:
         return self._catalog_tool_map()
 
@@ -51,14 +56,46 @@ class ToolCatalogService(ToolServiceBase):
             return catalog_tool
         return None
 
+    def resolve_tools(self, tool_ids: Iterable[str]) -> dict[str, Tool]:
+        requested_ids = tuple(
+            dict.fromkeys(
+                str(tool_id).strip()
+                for tool_id in tool_ids
+                if str(tool_id).strip()
+            ),
+        )
+        if not requested_ids:
+            return {}
+        with self.uow_factory() as uow:
+            functions_by_id = uow.tool_functions.list_by_ids(requested_ids)
+            source_ids = tuple(
+                dict.fromkeys(
+                    function.source_id
+                    for function in functions_by_id.values()
+                    if function.source_id
+                ),
+            )
+            sources = uow.tool_sources.list_by_ids(source_ids)
+        resolved: dict[str, Tool] = {}
+        for tool_id in requested_ids:
+            function = functions_by_id.get(tool_id)
+            if function is None:
+                continue
+            source = sources.get(function.source_id)
+            if (
+                source is None
+                or source.status is not ToolSourceStatus.ACTIVE
+                or function.status is not ToolFunctionStatus.ACTIVE
+            ):
+                continue
+            resolved[function.function_id] = build_tool_from_function(function)
+        return resolved
+
     def _catalog_tool_map(self) -> dict[str, Tool]:
         with self.uow_factory() as uow:
             functions = uow.tool_functions.list(status=ToolFunctionStatus.ACTIVE)
             source_ids = tuple(dict.fromkeys(function.source_id for function in functions))
-            sources = {
-                source_id: uow.tool_sources.get(source_id)
-                for source_id in source_ids
-            }
+            sources = uow.tool_sources.list_by_ids(source_ids)
         resolved: dict[str, Tool] = {}
         for function in functions:
             source = sources.get(function.source_id)

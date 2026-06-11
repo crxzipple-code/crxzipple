@@ -24,6 +24,7 @@ from crxzipple.modules.events.application.routing import (
     EventRoutingResult,
 )
 from crxzipple.modules.events.application.services import EventsApplicationService
+from crxzipple.modules.events.application.outbox import EventOutboxPublishResult
 from crxzipple.modules.events.application.read_models import (
     EventTraceReadModelProvider,
     TraceEventView,
@@ -33,6 +34,7 @@ from crxzipple.modules.events.application.read_models import (
 __all__ = [
     "EventContractDurability",
     "EventContractRegistry",
+    "EventOutboxPublishResult",
     "EventPublisherPort",
     "EventRouteContract",
     "EventRouteContractMatch",

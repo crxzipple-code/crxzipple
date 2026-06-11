@@ -1,6 +1,9 @@
 kind: openapi
 namespace: open_meteo_geocoding
 description: Open-Meteo geocoding search and location lookup APIs.
+prompt:
+  title: Open-Meteo Geocoding
+  summary: Resolve place names and location coordinates for weather and map lookup tasks.
 capabilities:
   - bounded_network.http
 spec: openapi.json

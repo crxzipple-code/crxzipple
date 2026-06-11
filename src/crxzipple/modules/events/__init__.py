@@ -1,6 +1,7 @@
 from crxzipple.modules.events.application import (
     EventContractDurability,
     EventContractRegistry,
+    EventOutboxPublishResult,
     EventPublisherPort,
     EventReadPort,
     EventRouteContract,
@@ -42,6 +43,7 @@ __all__ = [
     "EventCursor",
     "Event",
     "EventKind",
+    "EventOutboxPublishResult",
     "EventSelector",
     "EventPublisherPort",
     "EventReadPort",

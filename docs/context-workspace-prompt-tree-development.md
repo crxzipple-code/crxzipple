@@ -2,6 +2,23 @@
 
 本文是 [context-workspace-prompt-tree-design.md](context-workspace-prompt-tree-design.md) 的施工文档。设计文档说明目标和边界；本文说明模块如何落地、怎么拆任务、怎么迁移现有 prompt 代码、怎么验收。
 
+> 2026-06-01 更新：session history 压缩和 skill 深入阅读边界已进一步收敛到
+> [reports/context-workspace-session-segment-compaction-plan-20260601.md](reports/context-workspace-session-segment-compaction-plan-20260601.md)。
+> 后续不应把 Context Tree 发展成特殊资源工具系统；Skill 只在树上披露 `skill.md`
+> 介绍和结构，深入阅读由模型调用普通 workspace/browser/skill 等工具完成。Session
+> history 压缩应以 `SessionInstance` 轮转为主边界，而不是长期依赖 archived
+> messages 投影。2026-06-01 之后的当前术语以
+> [session-semantics-design.md](session-semantics-design.md) 为准：`SessionInstance`
+> 是 `SessionSegment`，Context Workspace 节点使用 `session.segment.*`。
+
+> 2026-06-05 更新：Prompt Engineering 总叙述已文件化为 runtime contract，并作为
+> `runtime.contract` 默认根节点进入每次 Context Workspace render。Agent home 多文件由
+> Agent owner adapter 挂载；workspace resource 降级为 session 显式绑定工作目录后的
+> 可选文件句柄，不再作为通用 project instruction 总纲。Tool prompt surface 采用 source-first bundle/group：显式 `prompt.groups`
+> 优先，没有显式 group 时由 Tool owner 自动生成 source-level group。`ContextRenderSnapshot`
+> metadata 和 LLM invocation `request_metadata` 需要记录 `runtime_contract_version`、
+> `runtime_contract_hash`、`context_render_snapshot_id` 和 mirrored tool schema count。
+
 ## 施工目标
 
 新增 `context_workspace` module，把当前散落在 orchestration prompt 里的上下文交付逻辑收成一棵真实 Context Tree。
@@ -20,7 +37,7 @@ Context Tree 作为 Prompt Body 交给 LLM
 provider adapter 从树节点镜像 tools / images / files 等特化附件
 ```
 
-本轮不接受把旧 `PromptSurfaceBuilder` 外面包一层 facade 的最小迁移。需要分阶段替换旧装配点，最终让 orchestration 不再直接拼 tool、skill、memory、workspace、session bulk 文本。
+本轮不接受把旧 `RunPromptInputBuilder` 外面包一层 facade 的最小迁移。需要分阶段替换旧装配点，最终让 orchestration 不再直接拼 tool、skill、memory、workspace、session segment 文本。
 
 ## 旧基线
 
@@ -31,6 +48,10 @@ provider adapter 从树节点镜像 tools / images / files 等特化附件
 - flow prompt：session_start、approval、heartbeat、compaction、memory_flush
 - active session transcript：只取 active session 未 archived 消息
 - workspace bootstrap：`AGENT(S).md`、`SOUL.md`、`TOOLS.md`、`IDENTITY.md`、`USER.md`、`BOOTSTRAP.md`
+- 2026-06-06 后的当前形态：通用 prompt 不再引入 project instruction 层；
+  `workspace.resources` 只负责 session 绑定工作目录下的可选文件句柄
+  (`AGENTS.md`、`BOOTSTRAP.md`、`TOOLS.md`)；agent home 文件 (`AGENT.md`、
+  `SOUL.md`、`USER.md`、`IDENTITY.md`) 由 Agent owner adapter 独立挂树。
 - memory recall：仅 `SESSION_START` 自动 recall
 - skills catalog：ready skills compact catalog
 - available tools 文本：按 tool id 前缀硬编码 family
@@ -41,7 +62,7 @@ provider adapter 从树节点镜像 tools / images / files 等特化附件
 
 - 可见能力和注入内容没有统一树状态。
 - 展开、折叠、pin、启用 schema、回看历史图片等操作无统一协议。
-- session bulk 和 compaction 是隐式机制。
+- session segment 和 compaction 是隐式机制。
 - tool family 和 session tool guidance 有人工联想/手写说明。
 - 估算只在 prompt 末端，不能按节点展示。
 - 人类无法直观看到 agent 当前上下文工作台。
@@ -181,12 +202,8 @@ expand
 collapse
 pin
 unpin
-recall_memory
-read_skill
-open_artifact
 enable_tool_schema
 disable_tool_schema
-fold_session_range
 estimate
 ```
 
@@ -262,10 +279,6 @@ class ContextRenderSnapshot(AggregateRoot[str]):
 - `unpin_node(...)`
 - `enable_tool_schema(...)`
 - `disable_tool_schema(...)`
-- `open_artifact(...)`
-- `read_skill(...)`
-- `recall_memory(...)`
-- `fold_session_range(...)`
 
 所有操作：
 
@@ -368,7 +381,9 @@ Skill adapter 通过 Skills owner catalog 和 readiness service 产出节点。
 - unsupported surface。
 - authorization missing effects。
 
-默认只显示 summary/catalog node。`read_skill` 后挂载 SKILL.md 或具体文件节点。
+默认只显示 summary/catalog node 和 `skill_read` handle。深入阅读 SKILL.md
+或 skill 包内文件时，模型应调用 skills owner 提供的普通读取工具；Context Tree
+不再提供 `read_skill` 这类 owner-specific 资源代理动作。
 
 ### Memory
 
@@ -418,7 +433,7 @@ Workspace adapter 初期可以兼容现有 bootstrap 文件：
 - `USER.md`
 - `BOOTSTRAP.md`
 
-但长期应改成 workspace root node、bootstrap group node、file handle node。完整文件读取应走 expand/open，而不是 `PromptSurfaceBuilder` 直接扫文件。
+但长期应改成 workspace root node、bootstrap group node、file handle node。完整文件读取应走 expand/open，而不是 orchestration 输入收集器直接扫文件。
 
 ## Storage
 
@@ -503,12 +518,14 @@ context_tree.collapse
 context_tree.pin
 context_tree.unpin
 context_tree.estimate
-context_tree.read_skill
-context_tree.recall_memory
-context_tree.open_artifact
 context_tree.enable_tool_schema
 context_tree.disable_tool_schema
 ```
+
+2026-06-01 收口：`context_tree` 不再暴露 owner-specific 资源读取工具。
+读取 skill、memory、artifact/workspace 资源必须走对应 owner 工具，例如
+`skill_read`、`memory_search`、`memory_read`、workspace/browser 工具。Context Tree
+只负责索引、展开/折叠、pin/unpin、估算和 tool schema mirror。
 
 这些工具必须拿到 execution context：
 
@@ -550,29 +567,28 @@ CLI 用于调试和测试，不作为 agent 默认入口。
 
 ## Tree Rendering
 
-Render 输出是 prompt body，必须是树结构。
-
-建议根部包含少量固定说明：
-
-```xml
-<context_instructions>
-  You are given a context tree.
-  Nodes may be collapsed or expanded.
-  Use context_tree tools to expand, collapse, recall, read, pin, open artifacts,
-  or enable tool schemas when needed.
-  Collapsed nodes are available handles, not full content.
-  Do not assume unavailable nodes exist.
-</context_instructions>
-```
-
-主体：
+Render 输出是 prompt body，必须是树结构。当前实现采用 schema v2：
+`context.instructions`、`execution.current`、`session.current` 和能力/resource roots
+都是真实节点；不要再插入 render-only `<context_instructions>` 文本块。
 
 ```xml
-<context_tree session="..." revision="...">
+<context_tree session="..." revision="..." schema_version="2026-06-07.context_tree.v2">
+  <node id="context.instructions" kind="context_instructions" state="expanded">
+    <node id="runtime.contract" kind="runtime_contract" state="expanded" />
+    <node id="agent.home" kind="agent_home" state="expanded" />
+    <node id="context.priority" kind="priority_guide" state="expanded" />
+    <node id="context.tree_usage" kind="tree_usage_guide" state="expanded" />
+  </node>
+  <node id="execution.current" kind="execution_context" state="expanded">
+    <node id="run.flow" kind="run_flow" state="expanded" />
+    <node id="run.runtime" kind="run_runtime" state="expanded" />
+    <node id="work.plan" kind="working_plan" state="expanded" />
+    <node id="execution.continuation" kind="continuation_state" state="expanded" />
+  </node>
   <node id="session.current" kind="session" state="expanded">
     <summary>Current active session.</summary>
   </node>
-  <node id="tools.browser" kind="tool_group" state="collapsed" actions="expand enable_tool_schema">
+  <node id="tools.bundle.bundled.local_package.browser" kind="tool_bundle" state="collapsed" actions="expand enable_tool_schema">
     <summary>Browser automation capabilities are available.</summary>
   </node>
 </context_tree>
@@ -609,12 +625,12 @@ class ProviderAttachmentBundle:
 
 ### 当前保留
 
-`PromptAssembler` 已退场，当前保留 `PromptSurfaceBuilder` 作为 Context Workspace
-渲染前的 surface 输入收集器。
+`PromptAssembler` 已退场，当前保留 `RunPromptInputCollector` 作为 Context Workspace
+渲染前的 run/profile/session/tool 输入收集器。
 
 ### 迁移目标
 
-`PromptSurfaceBuilder` 只负责：
+`RunPromptInputCollector` 只负责：
 
 - 确认 run/session/agent 基本有效。
 - 解析 LLM profile 和 provider capability。
@@ -624,7 +640,7 @@ class ProviderAttachmentBundle:
   生成 `tools.available` 节点。
 - 生成 flow hint 供 Context Workspace 写入 `run.flow` node。
 
-它不再渲染最终 prompt body，不再注入 tool/skill/memory/workspace/session bulk/flow 文本，
+它不再渲染最终 prompt body，不再注入 tool/skill/memory/workspace/session segment/flow 文本，
 也不直接调用 LLM。
 
 ### 要迁出的旧逻辑
@@ -677,7 +693,7 @@ Operations 仍通过 `/operations/context_workspace` 的统一 operations projec
 - `ContextWorkspaceOperationsReadModelProvider` 物化 workspaces、visible nodes、render snapshots、diagnostics 四个表格区。
 - `context_workspace` 已加入 `OPERATIONS_PROJECTION_MODULES`，由 operations-observer 物化到 `/operations/context_workspace`。
 - `frontend/src/pages/operations/modules/ContextWorkspaceOperationsPage.vue` 已接入统一 Operations 导航，消费 `/operations/context_workspace` projection。
-- Workbench inspector 已新增 Context tab，读取 `/context-workspaces/by-session/{session_key}/tree` 和 `/context-workspaces/runs/{run_id}/render-snapshot`，支持节点 expand/collapse/pin/schema toggle 并展示 render snapshot 摘要。
+- Workbench inspector 已新增 Context tab，读取 `/context-workspaces/by-session/{session_key}/tree`、`/turns/{run_id}/prompt-preview` 和历史 `/context-workspaces/runs/{run_id}/render-snapshot`，支持节点 expand/collapse/pin/schema toggle，并展示 live prompt preview 与 recorded render snapshot 摘要。
 - 运维表格默认不展开 node `content`，只暴露节点身份、owner/kind/state 与估算体积，避免把 prompt 正文泄漏成主表数据。
 
 ### Workbench
@@ -686,8 +702,9 @@ Workbench 可以展示当前 session 的 Context Tree：
 
 - 左侧树。
 - 中间节点详情。
-- 右侧 estimate / render snapshot。
+- 右侧 estimate / live prompt preview / recorded render snapshot。
 - 支持人类手动 pin/collapse/disable schema。
+- live prompt preview 是当前树重新渲染的 transient record（`ctxpreview_*`），用于回答“现在会交给 LLM 什么”；recorded render snapshot 是真实 run 当时保存的不可变事实（`ctxsnap_*`），用于回答“那次实际交给 LLM 什么”。Workbench 不应把 `ctxpreview_*` 当成持久化 snapshot 再请求 `/context-workspaces/render-snapshots/{id}`。
 
 ### Settings
 
@@ -812,10 +829,10 @@ tests/integration/test_context_workspace_prompt_render.py
 - 已接入第一版 provider attachment mirror：render 时会把 `schema_enabled` 的 tool nodes 镜像成 `provider_attachments.tool_schemas`，并记录 `mirrored_node_ids`，`disable_tool_schema` 后不会出现在 mirror bundle。
 - Owner provider refresh 会保留已有 child node state，避免重新 ensure/refresh 时把 `schema_enabled=false`、pin/collapse 等用户/agent 操作冲回默认值。
 - 已接入真实 orchestration run 的 Context render snapshot：真实 advance 会 ensure session workspace 并保存 tree snapshot；`preview_prompt` 不落快照。
-- 真实 LLM 调用的 tool schema surface 只从 Context Tree mirror 读取：`tools.available` 会根据当前授权后的 prompt surface 预加载 tool function nodes，provider 只接收 `schema_enabled` 的 tool nodes；mirror 不可用时不再回退到 PromptSurfaceBuilder 初始 schema。
+- 真实 LLM 调用的 tool schema surface 只从 Context Tree mirror 读取：`tools.available` 会根据当前授权后的 prompt inputs 预加载 tool function nodes，provider 只接收 `schema_enabled` 的 tool nodes；mirror 不可用时不再回退到输入收集阶段的初始 schema。
 - 已接入 Memory / Artifact / Workspace owner adapters；Memory recall、artifact open、workspace bootstrap file expand 都走 Context Tree。
 - Memory scope nodes 已带 governance metadata，Workbench Context 面板可按 private/shared/project/team/system 筛选。
-- 已替换 PromptSurfaceBuilder 的主体 blocks；真实 provider prompt 由 Context Workspace render snapshot + transcript + provider attachment mirror 组成。
+- 已替换旧 prompt builder 的主体 blocks；真实 provider prompt 由 Context Workspace render snapshot + transcript + provider attachment mirror 组成。
 - 已接入 Operations `context_workspace` read model/projection 和 Workbench Context inspector。
 - 旧 `PromptAssembler`、`memory_context.py`、`flow_prompts.py`、`workspace_context.py` 相关主路径已退场。
 
@@ -831,6 +848,27 @@ PYTHONPATH=src python -m crxzipple.main context --help
 npm run typecheck
 npm run build
 ```
+
+### 当前施工状态（2026-05-31）
+
+Session history delivery 已进一步从 direct transcript replay 收归 Context Tree：
+
+- normal turn 的 provider messages 只保留当前 inbound user message 和当前 run 内 tool loop 工作窗口；历史 user/assistant/tool 不再作为整段 active transcript 直接铺给 provider。
+- provider-native 当前 run 工作窗口由 `build_current_run_prompt_window()` 生成；memory flush 维护面由 `build_memory_flush_prompt_transcript()` 生成，旧泛名 transcript builder 已退出调用点。
+- 当前 active segment 以 `session.segment.current` 投影，并通过
+  `session.messages.current` 稳定暴露当前 active segment 的全部可见消息；当前 active
+  segment 不再使用 recent / older 分页，避免工具结果插入后造成上下文窗口漂移。
+- 历史 segment 以 `session.segment.compacted.*` 和 `session.segment.closed.*`
+  投影，默认只作为 handle / summary 出现；agent 或用户执行 expand 后，历史 segment
+  range 才会在下一轮 Context Workspace render 中进入 XML prompt 正文。
+- assistant function_call + matching tool result 会合并为 `tool_interaction` node，XML 中保留 tool name、call id、status、arguments、error 和 result 摘要。
+- 当前 inbound message 在 tree 中只显示 `Delivered as provider user message for this turn.` handle，避免 provider user message 和 tree prompt body 重复正文。
+- 历史 image/file ref 只以 `[image:name]` / `[file:name]` 句柄进入 session history prompt，不重新嵌入 artifact id、inline bytes 或原始文件正文。
+- render snapshot metadata 记录 `history_delivery=context_tree`、direct transcript 数量、tree session message 数量、tool interaction 数量、folded history 数量、current inbound message id、current inbound node id 和 session message node refs。
+- opened artifact mirror 已按 LLM capability 和预算收口：vision model 可得到 image block，非 vision / 超预算 artifact 得到明确文本说明，text-like file 会转为可读文本块。
+
+本阶段的详细施工清单见
+[reports/context-workspace-session-history-delivery-upgrade-plan-20260531.md](reports/context-workspace-session-history-delivery-upgrade-plan-20260531.md)。
 
 ### CW-0：准备
 
@@ -861,7 +899,9 @@ npm run build
 - [x] 产出 current instance、recent window、folded history、compaction summary 节点。
 - [x] 支持 expand recent message range 为 message nodes。
 - [x] 支持 older chunks。
-- [x] 支持 exact ranges / archived folded ranges：`session.history.folded` 可展开为 archived range，range 再精确展开消息节点。
+- [x] 支持 exact ranges / archived folded ranges：历史 segment 节点使用
+  `session.segment.compacted.*` / `session.segment.closed.*`，可展开为 range，
+  range 再精确展开消息节点。
 - [x] 保存 render snapshot。
 
 验收：
@@ -872,7 +912,8 @@ npm run build
 ### CW-3：Tree Render
 
 - [x] 实现第一版 XML-like prompt body renderer。
-- [x] 实现第一版 context instructions。
+- [x] 实现第一版 context instructions；2026-06-07 后由真实
+  `context.instructions` section 和 guide nodes 承载。
 - [x] 实现 estimate aggregation。
 - [x] 实现 render snapshot repository。
 - [x] 在真实 orchestration advance 中引入 tree render，作为主 prompt body 注入并记录 snapshot。
@@ -901,23 +942,23 @@ npm run build
 ### CW-5：Skill Nodes
 
 - [x] Skills adapter 产出 resolved/available skill nodes。
-- [x] 展开 skill node 可通过 Skills application 读取 SKILL.md。
-- [x] Skill content 挂为 child node。
-- [x] `read_skill` action 语义化为一等 action，并通过 `context_tree.read_skill` 暴露。
+- [x] 展开 skill node 只披露 `skill_read` 入口 handle，不把 SKILL.md 正文直接塞进树。
+- [x] Skill 深入阅读改由普通 `skill_read` 工具完成。
+- [x] 退役 `context_tree.read_skill` 特殊资源动作。
 - [x] 删除/停用 skills catalog prompt block 主路径；技能目录只保留为 context tree metadata 和 resolution event。
 
 验收：
 
 - not ready skill 不出现在 Agent view。
-- read_skill 后 content node 有 estimate。
+- agent 需要完整 SKILL.md 时调用 `skill_read`，工具结果进入 session。
 
 ### CW-6：Memory Nodes
 
 - [x] Memory adapter 产出当前可见 readable layer scope nodes。
-- [x] `recall_memory` action 通过 `context_tree.recall_memory` 暴露。
-- [x] recall result 挂到对应 memory node 下。
+- [x] 退役 `context_tree.recall_memory` 特殊资源动作。
+- [x] Memory 检索改由普通 `memory_search` / `memory_read` 工具完成。
 - [x] private/shared/project/team/system 的治理视图与 UI 筛选：Memory scope nodes 携带 governance metadata，Workbench Context 面板可按记忆层筛选。
-- [x] 删除/停用 `recall_prompt_memories` 主路径；memory 内容只通过 `memory.visible` 和 `context_tree.recall_memory` 主动披露。
+- [x] 删除/停用 `recall_prompt_memories` 主路径；memory 内容只通过 `memory.visible` handle 和 memory owner 工具主动披露。
 
 验收：
 
@@ -927,10 +968,10 @@ npm run build
 ### CW-7：Artifact / Workspace Nodes
 
 - [x] Artifact adapter 支持从 session `image_ref/file_ref` 发现 image/file handle，并保留 caption/preview/original/download 元数据。
-- [x] `context_tree.open_artifact` 支持把 artifact node 解析到 owner artifact variant。
-- [x] Provider attachment mirror 支持已打开 artifact 的 image/file content blocks。
+- [x] 退役 `context_tree.open_artifact` 特殊资源动作。
+- [x] Provider attachment mirror 支持 pinned/opened artifact 的 image/file content blocks；agent 侧使用普通树 pin 控制镜像。
 - [x] Workspace adapter 接管 bootstrap files 的树节点展开。
-- [x] 停用 `load_workspace_context_files` 主路径，PromptSurfaceBuilder 不再直接注入 workspace 文件内容。
+- [x] 停用 `load_workspace_context_files` 主路径，RunPromptInputCollector 不再直接注入 workspace 文件内容。
 
 验收：
 
@@ -938,24 +979,26 @@ npm run build
 - provider 不支持 vision 时保留 caption/placeholder。
 - 大文件按节点 estimate 和预算降级。
 
-### CW-8：PromptSurfaceBuilder 收口
+### CW-8：RunPromptInputCollector 收口
 
 - [x] 真实 advance prompt 插入 `<context_tree>` system message，并记录 snapshot id。
-- [x] PromptSurfaceBuilder 不再把 agent/runtime 作为独立 system message 注入 LLM；它只生成树节点块给 Context Workspace。
+- [x] RunPromptInputCollector 不再把 agent/runtime 作为独立 system message 注入 LLM；它只生成树节点输入给 Context Workspace。
 - [x] `agent_instruction` 转为 `agent.identity` node 正文。
 - [x] `runtime_context` 转为 `run.runtime` node 正文。
 - [x] 移除 workspace bootstrap block 拼装主路径，workspace 文件只通过 context tree 展开。
-- [x] 移除 skills catalog block 拼装主路径，技能内容改为 `skills.available` / `context_tree.read_skill` 渐进披露。
+- [x] 移除 skills catalog block 拼装主路径，技能目录由 `skills.available` 节点披露，完整内容由 `skill_read` 工具读取。
 - [x] 移除 session tools guidance block 主路径，session 工具说明回到 tool function description/schema 与 `tools.available` 节点。
 - [x] 移除 available tools inventory block 主路径，工具清单不再作为手写 system prompt。
 - [x] 移除 recalled memory block 主路径，自动 recall 不再直接注入 system prompt。
 - [x] Flow prompts 转为 `run.flow` node，由 orchestration 提供 mode/hint，context tree 负责渲染。
-- [x] PromptSurfaceBuilder 退化为 run/profile/session/tool surface 输入收集器；真实 provider prompt 由 context render snapshot + transcript + attachment bundle 组成。
+- [x] RunPromptInputCollector 退化为 run/profile/session/tool 输入收集器；真实 provider prompt 由 context render snapshot + transcript + attachment bundle 组成。
+- [x] RunPromptInputCollector 不再保留人工关键词意图判断；
+  tool schema 是否进入 provider payload 只由 surface policy 与 Context Tree mirror 决定。
 - [x] prompt report payload 改为 `context_blocks` / `context_budget` / `context`。
 - [x] 删除旧 prompt block 主路径：available tools、session tools、skills catalog、recalled memory、flow prompts、workspace bootstrap。
 - [x] orchestration run metadata 写入 `context_render_snapshot_id`，prompt report 内外部命名收成 context。
 - [x] prompt report 写入 context render snapshot id、tree estimate、included/mirrored node ids；`estimated_total_tokens` 优先使用 render estimate。
-- [x] prompt report 拆出 `ContextRenderReport` 值对象，减少 PromptSurfaceBuilder 与 render snapshot 字段耦合。
+- [x] prompt report 拆出 `ContextRenderReport` 值对象，减少输入收集器与 render snapshot 字段耦合。
 - [x] prompt preview/debug surface 也走 Context Workspace render 和 provider mirror；预览只产出 transient render record，不写正式 `context_render_snapshots`。
 - [x] Context Workspace render/preview 缺失时 engine 明确失败，不静默生成无 context tree 的 provider prompt。
 
@@ -992,6 +1035,25 @@ npm run build
 - [x] 更新 tests/unit/README.md。
 - [x] 更新 operations/ui contracts。
 - [x] 跑验证套件。
+
+### CW-11：Tool Bundle Prompt 分组
+
+- [x] `tools.available` 不再按关键词、`capability_ids` 或 `source_kind` 猜语义分组。
+- [x] Tool Source 成为稳定 prompt bundle 边界：一个 local package / OpenAPI source / MCP source 默认对应一个 bundle。
+- [x] Bundle 的 LLM-facing 标题和摘要来自 Tool Source `prompt` metadata；工程来源只作为 metadata 保留。
+- [x] `ToolSourceQueryService.list_prompt_bundles(function_ids)` 聚合 active source 与 active/enabled function，Context Workspace 只消费已授权的 function id 输入。
+- [x] `ToolContextNodeProvider` 生成 `tool_bundle` 节点；展开 bundle 后才披露 `tool_function` 叶子。
+- [x] Source 可通过 `prompt.groups.<group>.function_ids` 声明 `tool_bundle_group` 二级目录；未分组 function 保持在 bundle 默认区。
+- [x] Browser `bundled.local_package.browser` source 已声明真实 prompt groups：Navigation & Tabs、Page Interaction、DOM Inspection、Network Capture & Replay、Storage & Workers、Context Leases、Environment Controls、Diagnostics & Tracing。
+- [x] CLI source 仍作为 command execution guide，不自动转成可信 provider tool schema。
+- [x] bundled tool manifests 已补齐 `prompt.title` / `prompt.summary`。
+- [x] 超大 source 的二级目录只来自 source 显式声明，不做系统关键词兜底。
+
+验收：
+
+- Agent 首屏看到的是能力包，而不是 100+ 个 function 平铺。
+- Prompt tree 不出现 `OpenAPI` / `MCP` / `Local Package` 这类来源词作为注意力目录。
+- Provider tool schema mirror 仍只来自展开后且 schema-enabled 的 `tool_function` 节点。
 
 ## Validation Commands
 
@@ -1031,7 +1093,7 @@ python -m crxzipple.main daemon status
 
 1. Session reset 默认是否清空 context workspace？
    已按默认不清空落地：reset 后旧 instance 的消息会作为
-   `session.history.folded` 下的 folded ranges 披露；显式清空策略后续再单独设计。
+   compacted/closed segment ranges 披露；显式清空策略后续再单独设计。
 
 2. `pin` 是否跨 session？
    已按不跨 session 落地：pin/unpin 是 workspace-local node state，同一 node id
@@ -1060,6 +1122,6 @@ python -m crxzipple.main daemon status
 - 每个 run 有 render snapshot。
 - Tool schemas/images/files 是从 tree nodes 镜像到 provider payload。
 - 不可见资源不会进入 Agent view。
-- Session bulk、history、artifact 回看不再靠隐式 prompt 拼接。
-- PromptSurfaceBuilder 不再直接拼 tool/skill/memory/workspace/session bulk/flow 文本。
+- Session segment、history、artifact 回看不再靠隐式 prompt 拼接。
+- RunPromptInputCollector 不再直接拼 tool/skill/memory/workspace/session segment/flow 文本。
 - 没有为了旧 prompt block 保留的大段兼容 shim。

@@ -36,6 +36,7 @@ DEFAULT_DAEMON_SERVICE_SETS: tuple[DaemonServiceSetSpec, ...] = (
         service_keys=(
             "worker:orchestration-scheduler",
             "worker:orchestration",
+            "worker:event-outbox",
             "worker:event-relay",
             "worker:operations-observer",
             "worker:tool-scheduler",

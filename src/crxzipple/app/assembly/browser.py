@@ -13,6 +13,7 @@ from crxzipple.modules.browser.application.events import browser_event_from_payl
 from crxzipple.modules.browser.application import (
     BrowserExecutionCoordinatorService,
     BrowserNetworkCaptureService,
+    BrowserObservationService,
     BrowserProfileAdminService,
     BrowserProfileAllocatorService,
     BrowserProfilePoolService,
@@ -111,6 +112,7 @@ class BrowserInfrastructure:
     profile_resolver: DefaultBrowserProfileResolver
     capabilities_resolver: DefaultBrowserCapabilitiesResolver
     tool_application_service: BrowserToolApplicationService
+    observation_service: BrowserObservationService
     facade: BrowserInterfaceFacade
     result_serializer: BrowserResultSerializer
     cleanup_callbacks: tuple[Callable[[], None], ...] = field(default_factory=tuple)
@@ -132,6 +134,7 @@ def browser_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.BROWSER_PROFILE_ALLOCATOR_SERVICE,
                 AppKey.BROWSER_QUERY_SERVICE,
                 AppKey.BROWSER_TOOL_APPLICATION_SERVICE,
+                AppKey.BROWSER_OBSERVATION_SERVICE,
                 AppKey.BROWSER_FACADE,
                 AppKey.BROWSER_RESULT_SERIALIZER,
             ),
@@ -168,6 +171,7 @@ def _build_browser_infrastructure(ctx) -> BrowserInfrastructure:
         AppKey.BROWSER_PROFILE_ALLOCATOR_SERVICE: infrastructure.profile_allocator_service,
         AppKey.BROWSER_QUERY_SERVICE: infrastructure.profile_query_service,
         AppKey.BROWSER_TOOL_APPLICATION_SERVICE: infrastructure.tool_application_service,
+        AppKey.BROWSER_OBSERVATION_SERVICE: infrastructure.observation_service,
         AppKey.BROWSER_FACADE: infrastructure.facade,
         AppKey.BROWSER_RESULT_SERIALIZER: infrastructure.result_serializer,
     }
@@ -333,6 +337,9 @@ def build_browser_infrastructure(
         execution_coordinator=coordinator,
         runtime_state_store=runtime_state_store,
     )
+    observation_service = BrowserObservationService(
+        tool_application_service=tool_application_service,
+    )
     return BrowserInfrastructure(
         system_config=resolved_system_config,
         system_config_store=system_config_store,
@@ -354,6 +361,7 @@ def build_browser_infrastructure(
         profile_resolver=profile_resolver,
         capabilities_resolver=capabilities_resolver,
         tool_application_service=tool_application_service,
+        observation_service=observation_service,
         facade=BrowserInterfaceFacade(
             control_command_assembler=control_command_assembler,
             page_action_assembler=page_action_assembler,

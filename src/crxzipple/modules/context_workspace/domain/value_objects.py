@@ -19,12 +19,9 @@ class ContextAction(StrEnum):
     COLLAPSE = "collapse"
     PIN = "pin"
     UNPIN = "unpin"
-    RECALL_MEMORY = "recall_memory"
-    READ_SKILL = "read_skill"
-    OPEN_ARTIFACT = "open_artifact"
+    UPSERT = "upsert"
     ENABLE_TOOL_SCHEMA = "enable_tool_schema"
     DISABLE_TOOL_SCHEMA = "disable_tool_schema"
-    FOLD_SESSION_RANGE = "fold_session_range"
     ESTIMATE = "estimate"
 
 

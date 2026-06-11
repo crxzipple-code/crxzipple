@@ -32,7 +32,13 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 import { dataMode } from "@/shared/api/client";
 import { formatBytes, formatDuration, formatLocalTime, formatNumber } from "@/shared/i18n/formatters";
 import { useI18n } from "@/shared/i18n";
+import {
+  promptPreviewContentText,
+  stringifyPromptPreviewJson,
+  type RunPromptInputPreview,
+} from "@/shared/runtime/promptPreview";
 import type {
+  TraceContext,
   TurnStepView,
   UiKeyValueSection,
   UiLinkedEntity,
@@ -46,6 +52,7 @@ import UiButton from "@/shared/ui/UiButton.vue";
 import UiCard from "@/shared/ui/UiCard.vue";
 import MarkdownView from "@/shared/ui/MarkdownView.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
+import XmlSourceViewer from "@/shared/ui/XmlSourceViewer.vue";
 import {
   getSkillDraft,
   type SkillDraftApiPayload,
@@ -58,8 +65,11 @@ import {
   listWorkbenchModels,
   listWorkbenchTools,
   loadWorkbenchContextRenderSnapshot,
+  loadWorkbenchContextRenderSnapshotById,
   loadWorkbenchContextTree,
   loadWorkbenchData,
+  loadWorkbenchInvocationPromptPreview,
+  loadWorkbenchPromptPreview,
   openEventStream,
   resolveWorkbenchApproval,
   uploadWorkbenchArtifact,
@@ -93,7 +103,6 @@ const composerInput = ref<HTMLInputElement | null>(null);
 const attachmentInput = ref<HTMLInputElement | null>(null);
 const composerContent = ref("");
 const composerMode = ref<"continue" | "new">("continue");
-const draftSessionKey = ref<string | null>(null);
 const selectedAgentId = ref<string | null>(null);
 const selectedModelId = ref<string | null>(null);
 const agentsLoading = ref(false);
@@ -113,12 +122,16 @@ const toolsError = ref<string | null>(null);
 const workbenchTools = ref<WorkbenchToolSummary[]>([]);
 const contextTree = ref<WorkbenchContextTree | null>(null);
 const contextRenderSnapshot = ref<WorkbenchContextRenderSnapshot | null>(null);
+const contextPromptPreview = ref<RunPromptInputPreview | null>(null);
 const contextTreeLoading = ref(false);
 const contextTreeError = ref<string | null>(null);
 const contextActionBusy = ref<string | null>(null);
+const contextActualRequestTab = ref<ContextActualRequestTabId>("xml");
 const contextMemoryLayerFilter = ref<ContextMemoryLayerFilter>("all");
 const contextXmlDisplayFoldedNodeIds = ref<Set<string>>(new Set());
 const contextXmlContextMenu = ref<ContextXmlContextMenuState | null>(null);
+const selectedContextXmlNodeId = ref<string | null>(null);
+const selectedContextRangeId = ref<string | null>(null);
 const attachmentBusy = ref(false);
 const attachmentError = ref<string | null>(null);
 const pendingRunId = ref<string | null>(null);
@@ -135,6 +148,7 @@ const posterPreviewUrl = "/workbench-poster-preview.png";
 
 const stepIcons: Record<TurnStepView["type"], Component> = {
   user_input: User,
+  agent_progress: MessageSquarePlus,
   agent_thinking: Sparkles,
   llm: Brain,
   tool_call: Wrench,
@@ -168,12 +182,40 @@ interface SkillApprovalDraftState {
 
 type InspectorTabId = "overview" | "step" | "debug" | "context" | "memory" | "agent";
 type ContextMemoryLayerFilter = "all" | "private" | "shared" | "project" | "team" | "system";
+type ContextActualRequestTabId = "xml" | "messages" | "tool_schemas" | "options" | "attachments";
+type ContextRouteDiagnosticTone = "success" | "warning" | "danger" | "info";
+interface ContextRouteGroupRow {
+  id: string;
+  group: string;
+  source: string;
+  functions: string;
+  defaultSchemas: string;
+  visibility: string;
+  tone: ContextRouteDiagnosticTone;
+}
+interface ContextRouteSchemaRow {
+  id: string;
+  schema: string;
+  status: string;
+  reason: string;
+  priority: string;
+  tone: ContextRouteDiagnosticTone;
+}
 
 const workbenchThreads = computed(() => home.value?.threads ?? []);
 const activeThread = computed(() => workbenchThreads.value.find((thread) => thread.id === activeThreadId.value));
 const threadFilters = computed(() => home.value?.filters ?? []);
 const filteredWorkbenchThreads = computed(() => workbenchThreads.value.filter((thread) => threadMatchesFilter(thread, activeThreadFilterId.value)));
-const isNewSessionDraft = computed(() => composerMode.value === "new" && draftSessionKey.value !== null);
+const isNewSessionDraft = computed(() => composerMode.value === "new" || isDraftRunView(run.value));
+const activeRunThread = computed(() => {
+  const currentRun = run.value;
+  if (!currentRun || isNewSessionDraft.value) return null;
+  const currentSessionKey = currentRun.session_key?.trim();
+  return workbenchThreads.value.find((thread) => (
+    thread.run_id === currentRun.run_id
+    || (Boolean(currentSessionKey) && thread.session_key === currentSessionKey)
+  )) ?? null;
+});
 const displayedTurns = computed(() => isNewSessionDraft.value ? [] : [...(run.value?.turns ?? [])].reverse());
 const activeSteps = computed(() => isNewSessionDraft.value ? [] : runSteps.value.filter((step) => step.turn_id === activeTurnId.value));
 const runningStep = computed(() => activeSteps.value.find((step) => step.status === "running"));
@@ -250,6 +292,10 @@ const selectedStep = computed(() => {
     ?? steps[0]
     ?? null;
 });
+const selectedStepLlmInvocationId = computed(() => {
+  const value = selectedStep.value?.trace.llm_invocation_id;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+});
 const selectedStepEntities = computed(() => selectedStep.value?.linked_entities ?? []);
 const selectedStepActions = computed(() => selectedStep.value?.actions ?? []);
 const enabledAgents = computed(() => workbenchAgents.value.filter((agent) => agent.enabled));
@@ -277,10 +323,11 @@ const stepStats = computed(() => {
 });
 const activeTurnSummary = computed(() => displayedTurns.value.find((turn) => turn.turn_id === activeTurnId.value) ?? null);
 const contextSessionKey = computed(() => {
-  if (isNewSessionDraft.value) return draftSessionKey.value;
+  if (isNewSessionDraft.value) return null;
   return run.value?.session_key ?? null;
 });
 const contextNodeRows = computed(() => flattenContextNodes(contextTree.value?.nodes ?? []));
+const contextNodeRowsById = computed(() => new Map(contextNodeRows.value.map((node) => [node.id, node])));
 const filteredContextNodeRows = computed(() => (
   reflowContextNodeRows(filterContextNodeRows(contextNodeRows.value, contextMemoryLayerFilter.value))
 ));
@@ -318,18 +365,622 @@ const contextEstimateRows = computed(() => {
     { label: t("workbench.context.attachments"), value: formatNumber(estimate.provider_attachment_count) },
   ];
 });
+const contextPreviewRenderReport = computed<Record<string, unknown>>(() => (
+  isRecord(contextPromptPreview.value?.context_render)
+    ? contextPromptPreview.value.context_render
+    : {}
+));
+const contextPreviewRenderEstimate = computed<Record<string, unknown>>(() => {
+  const estimate = contextPreviewRenderReport.value.estimate;
+  return isRecord(estimate) ? estimate : {};
+});
+const contextPreviewIncludedNodeIds = computed(() => (
+  stringArrayValue(contextPreviewRenderReport.value.included_node_ids)
+));
+const contextPreviewMirroredNodeIds = computed(() => (
+  stringArrayValue(contextPreviewRenderReport.value.mirrored_node_ids)
+));
+const contextPreviewPromptBody = computed(() => {
+  const messages = contextPromptPreview.value?.messages ?? [];
+  for (const message of messages) {
+    if (message.metadata?.prompt_block_kind !== "context_workspace") continue;
+    const text = promptPreviewContentText(message.content).trim();
+    if (text) return text;
+  }
+  return "";
+});
+const contextRequestCardTitle = computed(() => (
+  contextRenderSnapshot.value
+    ? t("workbench.context.actualPromptSnapshot")
+    : t("workbench.context.livePromptPreview")
+));
+const contextRequestCardSubtitle = computed(() => (
+  contextRenderSnapshot.value
+    ? t("workbench.context.actualPromptSnapshotSubtitle")
+    : t("workbench.context.livePromptPreviewSubtitle")
+));
 const contextSnapshotRows = computed(() => {
   const snapshot = contextRenderSnapshot.value;
-  if (!snapshot) return [];
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const estimate = snapshot?.estimate ?? contextPreviewRenderEstimate.value;
+  const metadata = snapshot?.metadata ?? preview?.context_render_metadata ?? {};
+  const budgetMetadata = { ...requestMetadata, ...metadata };
+  const renderedTokens = (
+    metadataOptionalNumber(budgetMetadata.rendered_prompt_estimated_tokens)
+    ?? promptEstimateTokenTotal(estimate)
+  );
+  const includedCount = snapshot?.included_node_ids.length ?? contextPreviewIncludedNodeIds.value.length;
+  const mirroredCount = snapshot?.mirrored_node_ids.length ?? contextPreviewMirroredNodeIds.value.length;
   return [
-    { label: t("trace.id.run"), value: compactIdentifier(snapshot.run_id) },
-    { label: t("workbench.context.revision"), value: String(snapshot.tree_revision) },
-    { label: t("workbench.context.includedNodes"), value: formatNumber(snapshot.included_node_ids.length) },
-    { label: t("workbench.context.mirroredNodes"), value: formatNumber(snapshot.mirrored_node_ids.length) },
-    { label: t("common.tokens"), value: formatNumber(snapshot.estimate.text_tokens + snapshot.estimate.tool_schema_tokens + snapshot.estimate.file_tokens) },
-    { label: t("table.createdAt"), value: formatLocalTime(snapshot.created_at) },
+    { label: t("trace.id.run"), value: compactIdentifier(snapshot?.run_id ?? run.value?.run_id ?? "") },
+    { label: t("workbench.context.revision"), value: snapshot ? String(snapshot.tree_revision) : String(contextTree.value?.workspace.active_revision ?? "-") },
+    { label: t("workbench.context.runtimeContractVersion"), value: textValue(requestMetadata.runtime_contract_version) },
+    { label: t("workbench.context.runtimeContractHash"), value: compactIdentifier(textValue(requestMetadata.runtime_contract_hash, "")) },
+    { label: t("workbench.context.includedNodes"), value: formatNumber(includedCount) },
+    { label: t("workbench.context.mirroredNodes"), value: formatNumber(mirroredCount) },
+    { label: t("workbench.context.renderedPromptTokens"), value: formatNumber(renderedTokens) },
+    { label: t("workbench.context.providerPromptTokens"), value: formatOptionalNumber(budgetMetadata.estimated_provider_prompt_tokens) },
+    { label: t("workbench.context.directTranscriptTokens"), value: formatOptionalNumber(budgetMetadata.direct_transcript_estimated_tokens) },
+    { label: t("workbench.context.schemaMirrorTokens"), value: formatOptionalNumber(budgetMetadata.mirrored_tool_schema_estimated_tokens) },
+    { label: t("workbench.context.schemaMirrorBudget"), value: schemaMirrorBudgetValue(budgetMetadata) },
+    { label: t("workbench.context.schemaMirrorSkipped"), value: formatOptionalNumber(budgetMetadata.tool_schema_mirror_skipped_count) },
+    { label: t("table.createdAt"), value: snapshot ? formatLocalTime(snapshot.created_at) : "-" },
   ];
 });
+const contextSnapshotIncludedNodeIds = computed(() => (
+  new Set(contextRenderSnapshot.value?.included_node_ids ?? contextPreviewIncludedNodeIds.value)
+));
+const contextHasRenderInclusion = computed(() => (
+  contextRenderSnapshot.value !== null || Object.keys(contextPreviewRenderReport.value).length > 0
+));
+const contextSnapshotRiskRows = computed<Array<{
+  label: string;
+  value: string;
+  tone: "success" | "warning" | "danger";
+  detail: string;
+}>>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  if (!metadata || Object.keys(metadata).length === 0) return [];
+  const warnings = metadataNumber(metadata.session_range_warning_count);
+  const blocked = metadataNumber(metadata.session_range_blocked_count);
+  const limited = metadataNumber(metadata.session_range_limited_count);
+  const budgetStatus = titleize(metadata.session_budget_status, "Ok");
+  const budgetTone = blocked > 0 ? "danger" : warnings > 0 || limited > 0 ? "warning" : "success";
+  return [
+    {
+      label: t("workbench.context.sessionBudgetStatus"),
+      value: budgetStatus,
+      tone: budgetTone,
+      detail: t("workbench.context.sessionBudgetHelp"),
+    },
+    {
+      label: t("workbench.context.rangeWarnings"),
+      value: formatNumber(warnings),
+      tone: warnings > 0 ? "warning" : "success",
+      detail: t("workbench.context.rangeWarningsHelp"),
+    },
+    {
+      label: t("workbench.context.rangeBlocked"),
+      value: formatNumber(blocked),
+      tone: blocked > 0 ? "danger" : "success",
+      detail: t("workbench.context.rangeBlockedHelp"),
+    },
+    {
+      label: t("workbench.context.rangeLimited"),
+      value: formatNumber(limited),
+      tone: limited > 0 ? "warning" : "success",
+      detail: t("workbench.context.rangeLimitedHelp"),
+    },
+  ];
+});
+const contextRouteDiagnosticRows = computed<Array<{
+  label: string;
+  value: string;
+  tone: ContextRouteDiagnosticTone;
+  detail: string;
+}>>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const promptInput = snapshot ? snapshotRunPromptInputMetadata(snapshot) : previewRunPromptInputMetadata(preview);
+  const messageCount = (
+    metadataOptionalNumber(promptInput.message_count)
+    ?? contextActualRequestMessages.value.length
+  );
+  const schemaCount = (
+    metadataOptionalNumber(promptInput.tool_schema_count)
+    ?? contextActualRequestToolSchemas.value.length
+  );
+  const mirroredCount = (
+    metadataOptionalNumber(metadata.mirrored_tool_schema_count)
+    ?? schemaCount
+  );
+  const maxMirrorCount = metadataOptionalNumber(metadata.tool_schema_mirror_max_count);
+  const skippedCount = metadataNumber(metadata.tool_schema_mirror_skipped_count);
+  const budgetStatus = textValue(metadata.tool_schema_mirror_budget_status, "ok");
+  const budgetTone: ContextRouteDiagnosticTone = (
+    skippedCount > 0 || budgetStatus !== "ok"
+      ? "warning"
+      : "success"
+  );
+  const browserGroups = browserGroupRefsValue(metadata.tool_schema_mirror_default_group_refs);
+  const skippedSummary = skippedSchemaSummary(metadata, skippedCount);
+  const capabilityVisibility = capabilityVisibilityValue(metadata);
+  const toolResultCompaction = toolResultTruncationSummary(contextActualRequestMessages.value);
+  const browserAffordance = browserInvestigationAffordanceSummary(metadata);
+  const workPlanUpdates = workPlanUpdateSummary(metadata);
+  const finalEvidence = finalResponseEvidenceSummary(metadata);
+  return [
+    {
+      label: t("workbench.context.routeProviderShape"),
+      value: `${formatNumber(messageCount)} ${t("workbench.context.routeMessagesShort")} · ${formatNumber(schemaCount)} ${t("workbench.context.routeSchemasShort")}`,
+      tone: schemaCount > 0 ? "success" : "warning",
+      detail: t("workbench.context.routeProviderShapeHelp"),
+    },
+    {
+      label: t("workbench.context.routePlanUpdates"),
+      value: workPlanUpdates.value,
+      tone: workPlanUpdates.tone,
+      detail: workPlanUpdates.detail,
+    },
+    {
+      label: t("workbench.context.routeBrowserGroups"),
+      value: browserGroups || t("text.none"),
+      tone: browserGroups ? "success" : "warning",
+      detail: schemaReasonSummary(metadata),
+    },
+    {
+      label: t("workbench.context.routeBrowserAffordance"),
+      value: browserAffordance.value,
+      tone: browserAffordance.tone,
+      detail: browserAffordance.detail,
+    },
+    {
+      label: t("workbench.context.routeFinalEvidence"),
+      value: finalEvidence.value,
+      tone: finalEvidence.tone,
+      detail: finalEvidence.detail,
+    },
+    {
+      label: t("workbench.context.routeSchemaMirror"),
+      value: `${formatNumber(mirroredCount)}/${maxMirrorCount === null ? "-" : formatNumber(maxMirrorCount)} · ${formatNumber(skippedCount)} ${t("workbench.context.routeSkippedShort")}`,
+      tone: budgetTone,
+      detail: schemaMirrorBudgetValue(metadata),
+    },
+    {
+      label: t("workbench.context.routeCapabilityVisibility"),
+      value: capabilityVisibility,
+      tone: metadataNumber(metadata.tool_schema_mirror_available_count) > 0 ? "info" : "warning",
+      detail: t("workbench.context.routeCapabilityVisibilityHelp"),
+    },
+    {
+      label: t("workbench.context.routeBudgetSplit"),
+      value: routeBudgetSplitValue(metadata),
+      tone: metadataNumber(metadata.estimated_provider_prompt_tokens) > 0 ? "info" : "warning",
+      detail: t("workbench.context.routeBudgetSplitHelp"),
+    },
+    {
+      label: t("workbench.context.routeSkipped"),
+      value: skippedSummary,
+      tone: skippedCount > 0 ? "warning" : "success",
+      detail: skippedCount > 0 ? skippedSummary : t("workbench.context.routeSkippedNone"),
+    },
+    {
+      label: t("workbench.context.routeToolResultTruncation"),
+      value: toolResultCompaction.value,
+      tone: toolResultCompaction.compactedCount > 0 ? "info" : "success",
+      detail: t("workbench.context.routeToolResultTruncationHelp"),
+    },
+  ];
+});
+const contextRouteGroupRows = computed<ContextRouteGroupRow[]>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const groups = Array.isArray(metadata.tool_schema_mirror_groups)
+    ? metadata.tool_schema_mirror_groups.filter(isRecord)
+    : [];
+  return groups.map((group, index) => {
+    const title = textValue(group.title ?? group.group_key ?? group.node_id, "-");
+    const groupKey = textValue(group.group_key, "");
+    const sourceId = textValue(group.source_id, "");
+    const state = textValue(group.state, "-");
+    const visibility = textValue(group.visibility, state);
+    const defaultGroup = group.default_group === true;
+    const defaultSchemaCount = (
+      metadataOptionalNumber(group.default_schema_count)
+      ?? (Array.isArray(group.default_schema_ids) ? group.default_schema_ids.length : 0)
+    );
+    return {
+      id: textValue(group.node_id, `${sourceId}:${groupKey}:${index}`),
+      group: groupKey ? `${title} · ${groupKey}` : title,
+      source: sourceId ? compactIdentifier(sourceId) : textValue(group.kind, "-"),
+      functions: formatOptionalNumber(group.function_count, "0"),
+      defaultSchemas: defaultGroup
+        ? `${formatNumber(defaultSchemaCount)} · ${t("workbench.context.routeDefaultShort")}`
+        : formatNumber(defaultSchemaCount),
+      visibility: titleize(visibility, "-"),
+      tone: defaultGroup ? "info" : state === "collapsed" ? "warning" : "success",
+    };
+  });
+});
+const contextRouteSchemaRows = computed<ContextRouteSchemaRow[]>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const mirrored = Array.isArray(metadata.tool_schema_mirror_default_mirrored)
+    ? metadata.tool_schema_mirror_default_mirrored.filter(isRecord)
+    : [];
+  const skipped = Array.isArray(metadata.tool_schema_mirror_skipped)
+    ? metadata.tool_schema_mirror_skipped.filter(isRecord)
+    : [];
+  const rows: ContextRouteSchemaRow[] = [];
+  for (const item of mirrored) {
+    const schema = textValue(item.name ?? item.schema_name ?? item.node_id, "");
+    if (!schema) continue;
+    rows.push({
+      id: `mirrored:${textValue(item.node_id, schema)}`,
+      schema,
+      status: t("workbench.context.routeMirrored"),
+      reason: textValue(item.bootstrap_reason, t("text.none")),
+      priority: formatOptionalNumber(item.priority, "-"),
+      tone: "success",
+    });
+  }
+  for (const item of skipped) {
+    const schema = textValue(item.name ?? item.schema_name ?? item.node_id, "");
+    if (!schema) continue;
+    rows.push({
+      id: `skipped:${textValue(item.node_id, schema)}:${textValue(item.reason, "")}`,
+      schema,
+      status: t("workbench.context.routeSkippedShort"),
+      reason: textValue(item.reason ?? item.bootstrap_reason, t("text.none")),
+      priority: formatOptionalNumber(item.priority, "-"),
+      tone: "warning",
+    });
+  }
+  return rows.slice(0, 32);
+});
+const contextSessionSegmentRows = computed<ContextSessionSegmentMapRow[]>(() => {
+  const rows = contextNodeRows.value;
+  const nodesById = new Map(rows.map((node) => [node.id, node]));
+  const includedNodeIds = contextSnapshotIncludedNodeIds.value;
+  const hasSnapshot = contextHasRenderInclusion.value;
+  return rows
+    .filter((node) => node.owner === "session" && node.kind === "session_segment")
+    .map((node) => {
+      const descendants = rows.filter((candidate) => contextNodeHasAncestor(candidate, node.id, nodesById));
+      const includedCount = [node, ...descendants].filter((candidate) => includedNodeIds.has(candidate.id)).length;
+      const rangeNodes = descendants.filter((candidate) => candidate.kind === "session_message_range");
+      const noticeNodes = descendants.filter((candidate) => candidate.kind === "session_range_notice");
+      const messageNodes = descendants.filter((candidate) => candidate.kind === "session_message");
+      const toolInteractionNodes = descendants.filter((candidate) => candidate.kind === "tool_interaction");
+      const warnings = rangeNodes.filter((candidate) => candidate.metadata.range_budget_status === "split_required").length;
+      const blocked = [
+        ...rangeNodes.filter((candidate) => candidate.metadata.range_budget_status === "blocked"),
+        ...noticeNodes.filter((candidate) => candidate.metadata.range_budget_status === "blocked"),
+      ].length;
+      const limited = noticeNodes.filter((candidate) => candidate.metadata.notice_kind === "range_limit").length;
+      const riskTone = blocked > 0 ? "danger" : warnings > 0 || limited > 0 ? "warning" : "success";
+      const action = contextNodeToggleAction(node);
+      const rawNodeCount = messageNodes.length + toolInteractionNodes.length;
+      const estimatedRangeTokens = rangeNodes.reduce(
+        (total, candidate) => total + metadataNumber(candidate.metadata.estimated_expanded_text_tokens),
+        0,
+      );
+      return {
+        id: node.id,
+        node,
+        title: node.title,
+        summary: node.summary,
+        kind: contextSegmentKindLabel(node),
+        state: node.state.collapsed ? t("workbench.context.state.collapsed") : t("workbench.context.state.expanded"),
+        messageCount: formatOptionalNumber(
+          metadataOptionalNumber(node.owner_ref.message_count)
+          ?? metadataOptionalNumber(node.metadata.message_count),
+        ),
+        rangeCount: formatNumber(rangeNodes.length),
+        rawNodeCount: formatNumber(rawNodeCount),
+        estimatedTokens: formatNumber(estimatedRangeTokens || node.estimate.text_tokens),
+        includedLabel: hasSnapshot ? `${formatNumber(includedCount)}/${formatNumber(descendants.length + 1)}` : "-",
+        risk: contextSegmentRiskLabel(warnings, blocked, limited),
+        riskTone,
+        action,
+      };
+    });
+});
+const contextSessionRangeRows = computed<ContextSessionRangeMapRow[]>(() => {
+  const rows = contextNodeRows.value;
+  const nodesById = new Map(rows.map((node) => [node.id, node]));
+  const includedNodeIds = contextSnapshotIncludedNodeIds.value;
+  const hasSnapshot = contextHasRenderInclusion.value;
+  return rows
+    .filter((node) => (
+      node.owner === "session"
+      && (node.kind === "session_message_range" || node.kind === "session_range_notice")
+    ))
+    .map((node) => {
+      const descendants = rows.filter((candidate) => contextNodeHasAncestor(candidate, node.id, nodesById));
+      const includedCount = [node, ...descendants].filter((candidate) => includedNodeIds.has(candidate.id)).length;
+      const segment = contextNodeClosestAncestorByKind(node, nodesById, "session_segment");
+      const status = contextRangeStatus(node);
+      const action = contextNodeToggleAction(node);
+      const estimatedTokens = (
+        metadataOptionalNumber(node.metadata.estimated_expanded_text_tokens)
+        ?? node.estimate.text_tokens
+      );
+      const estimatedChars = (
+        metadataOptionalNumber(node.metadata.estimated_expanded_text_chars)
+        ?? node.estimate.text_chars
+      );
+      return {
+        id: node.id,
+        node,
+        title: node.title,
+        summary: node.summary,
+        segmentTitle: segment?.title ?? "-",
+        sequence: contextRangeSequenceLabel(node),
+        messageCount: formatOptionalNumber(
+          metadataOptionalNumber(node.owner_ref.message_count)
+          ?? metadataOptionalNumber(node.metadata.message_count)
+          ?? metadataOptionalNumber(node.metadata.omitted_message_count),
+        ),
+        estimatedTokens: formatNumber(estimatedTokens),
+        includedLabel: hasSnapshot ? `${formatNumber(includedCount)}/${formatNumber(descendants.length + 1)}` : "-",
+        status: status.label,
+        statusTone: status.tone,
+        reason: status.reason,
+        action,
+        details: [
+          { label: t("workbench.context.nodeId"), value: node.id },
+          { label: t("workbench.context.segment"), value: segment?.title ?? "-" },
+          { label: t("workbench.context.sequence"), value: contextRangeSequenceLabel(node) },
+          { label: t("workbench.context.messages"), value: formatOptionalNumber(node.owner_ref.message_count ?? node.metadata.message_count ?? node.metadata.omitted_message_count) },
+          { label: t("workbench.context.estimatedTokens"), value: formatNumber(estimatedTokens) },
+          { label: t("workbench.context.estimatedChars"), value: formatNumber(estimatedChars) },
+          { label: t("workbench.context.rangeSoftLimit"), value: formatOptionalNumber(node.metadata.range_budget_soft_limit) },
+          { label: t("workbench.context.promptInclusion"), value: hasSnapshot ? `${formatNumber(includedCount)}/${formatNumber(descendants.length + 1)}` : "-" },
+          { label: t("workbench.context.reason"), value: status.reason },
+          { label: t("workbench.context.visibility"), value: textValue(node.owner_ref.message_visibility ?? node.metadata.message_visibility) },
+        ],
+      };
+    });
+});
+const selectedContextRangeRow = computed(() => (
+  contextSessionRangeRows.value.find((row) => row.id === selectedContextRangeId.value)
+  ?? contextSessionRangeRows.value[0]
+  ?? null
+));
+const contextSnapshotDiagnosticRows = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const promptInput = snapshot ? snapshotRunPromptInputMetadata(snapshot) : previewRunPromptInputMetadata(preview);
+  return [
+    {
+      label: t("table.invocationId"),
+      value: compactIdentifier(textValue(contextPromptPreview.value?.provider_request_options?.invocation_id, "")),
+    },
+    {
+      label: t("workbench.context.requestMetadataSnapshot"),
+      value: compactIdentifier(textValue(requestMetadata.context_render_snapshot_id, snapshot?.id ?? "")),
+    },
+    {
+      label: t("workbench.context.treeSchemaVersion"),
+      value: textValue(requestMetadata.tree_schema_version ?? metadata.tree_schema_version),
+    },
+    {
+      label: t("workbench.context.rootNodes"),
+      value: textValue(metadata.root_node_ids),
+    },
+    {
+      label: t("workbench.context.topRenderedNodes"),
+      value: topRenderedNodesValue(metadata),
+    },
+    {
+      label: t("workbench.context.requestMetadataHistory"),
+      value: titleize(requestMetadata.context_history_delivery, "-"),
+    },
+    {
+      label: t("workbench.context.runtimeContractVersion"),
+      value: textValue(requestMetadata.runtime_contract_version),
+    },
+    {
+      label: t("workbench.context.runtimeContractHash"),
+      value: compactIdentifier(textValue(requestMetadata.runtime_contract_hash, "")),
+    },
+    {
+      label: t("workbench.context.requestMetadataMirroredSchemas"),
+      value: formatOptionalNumber(requestMetadata.mirrored_tool_schema_count),
+    },
+    {
+      label: t("workbench.context.requestMetadataMirroredNodes"),
+      value: formatOptionalNumber(requestMetadata.mirrored_node_count),
+    },
+    {
+      label: t("workbench.context.historyDelivery"),
+      value: titleize(metadata.history_delivery, "-"),
+    },
+    {
+      label: t("workbench.context.directTranscriptMessages"),
+      value: formatOptionalNumber(metadata.direct_transcript_message_count),
+    },
+    {
+      label: t("workbench.context.directTranscriptRoles"),
+      value: textValue(metadata.direct_transcript_roles),
+    },
+    {
+      label: t("workbench.context.treeSessionMessages"),
+      value: formatOptionalNumber(metadata.tree_session_message_count),
+    },
+    {
+      label: t("workbench.context.toolInteractions"),
+      value: formatOptionalNumber(metadata.tree_tool_interaction_count),
+    },
+    {
+      label: t("workbench.context.foldedHistory"),
+      value: formatOptionalNumber(metadata.folded_history_node_count),
+    },
+    {
+      label: t("workbench.context.sessionTokens"),
+      value: formatOptionalNumber(metadata.session_estimated_text_tokens),
+    },
+    {
+      label: t("workbench.context.sessionBudgetStatus"),
+      value: titleize(metadata.session_budget_status, "-"),
+    },
+    {
+      label: t("workbench.context.rangeWarnings"),
+      value: formatOptionalNumber(metadata.session_range_warning_count),
+    },
+    {
+      label: t("workbench.context.rangeBlocked"),
+      value: formatOptionalNumber(metadata.session_range_blocked_count),
+    },
+    {
+      label: t("workbench.context.rangeLimited"),
+      value: formatOptionalNumber(metadata.session_range_limited_count),
+    },
+    {
+      label: t("workbench.context.artifactBlocks"),
+      value: formatOptionalNumber(metadata.artifact_content_block_count),
+    },
+    {
+      label: t("workbench.context.providerMessages"),
+      value: formatOptionalNumber(promptInput.message_count),
+    },
+    {
+      label: t("workbench.context.providerToolSchemas"),
+      value: formatOptionalNumber(promptInput.tool_schema_count),
+    },
+    {
+      label: t("workbench.context.llm"),
+      value: textValue(promptInput.llm_id),
+    },
+    {
+      label: t("workbench.context.llmCapabilities"),
+      value: textValue(promptInput.llm_capabilities, t("text.none")),
+    },
+    {
+      label: t("workbench.context.currentInbound"),
+      value: compactIdentifier(textValue(metadata.current_inbound_message_id, "")),
+    },
+  ];
+});
+const contextSnapshotPromptCharCount = computed(() => (
+  contextActualRequestXmlSource.value.length
+));
+const contextActualRequestXmlSource = computed(() => (
+  contextRenderSnapshot.value?.prompt_body ?? contextPreviewPromptBody.value
+));
+const contextActualRequestProviderAttachments = computed<Record<string, unknown>>(() => (
+  firstNonEmptyRecord(
+    contextPromptPreview.value?.provider_attachments,
+    contextRenderSnapshot.value?.provider_attachments,
+  )
+));
+const contextActualRequestProviderOptions = computed<Record<string, unknown>>(() => (
+  contextPromptPreview.value?.provider_request_options ?? {}
+));
+const contextActualRequestMessages = computed<unknown[]>(() => (
+  contextPromptPreview.value?.messages ?? []
+));
+const contextActualRequestToolSchemas = computed<unknown[]>(() => {
+  const previewSchemas = contextPromptPreview.value?.tool_schemas ?? [];
+  if (previewSchemas.length > 0) return previewSchemas;
+  const attachmentSchemas = contextActualRequestProviderAttachments.value.tool_schemas;
+  return Array.isArray(attachmentSchemas) ? attachmentSchemas : [];
+});
+const contextActualRequestTabs = computed<Array<{ id: ContextActualRequestTabId; label: string; count: string }>>(() => [
+  {
+    id: "xml",
+    label: t("workbench.context.requestTab.xml"),
+    count: formatNumber(contextActualRequestXmlSource.value.length),
+  },
+  {
+    id: "messages",
+    label: t("workbench.context.requestTab.messages"),
+    count: formatNumber(contextActualRequestMessages.value.length),
+  },
+  {
+    id: "tool_schemas",
+    label: t("workbench.context.requestTab.toolSchemas"),
+    count: formatNumber(contextActualRequestToolSchemas.value.length),
+  },
+  {
+    id: "options",
+    label: t("workbench.context.requestTab.options"),
+    count: formatNumber(Object.keys(contextActualRequestProviderOptions.value).length),
+  },
+  {
+    id: "attachments",
+    label: t("workbench.context.requestTab.attachments"),
+    count: formatNumber(Object.keys(contextActualRequestProviderAttachments.value).length),
+  },
+]);
+const contextActualRequestJson = computed(() => {
+  if (contextActualRequestTab.value === "messages") {
+    return stringifyPromptPreviewJson(contextActualRequestMessages.value);
+  }
+  if (contextActualRequestTab.value === "tool_schemas") {
+    return stringifyPromptPreviewJson(contextActualRequestToolSchemas.value);
+  }
+  if (contextActualRequestTab.value === "options") {
+    return stringifyPromptPreviewJson(contextActualRequestProviderOptions.value);
+  }
+  return stringifyPromptPreviewJson(contextActualRequestProviderAttachments.value);
+});
+const selectedContextNode = computed(() => {
+  const nodeId = selectedContextXmlNodeId.value;
+  return nodeId ? contextNodeRowsById.value.get(nodeId) ?? null : null;
+});
+const selectedContextNodeRefRows = computed<ContextNodeRefRow[]>(() => {
+  const node = selectedContextNode.value;
+  if (!node) return [];
+  return [
+    { id: "node_id", label: t("workbench.context.nodeId"), value: node.id },
+    { id: "owner", label: t("common.owner"), value: node.owner },
+    { id: "kind", label: t("table.kind"), value: node.kind },
+    { id: "state", label: t("common.status"), value: contextNodeXmlState(node) },
+    ...contextNodeRefRowsFromRecord(node.owner_ref),
+  ].filter((row) => row.value.trim() && row.value !== "-");
+});
+const selectedContextNodeReadHintRows = computed<ContextNodeReadHintRow[]>(() => {
+  const node = selectedContextNode.value;
+  const rawHints = node?.metadata.read_hints;
+  if (!Array.isArray(rawHints)) return [];
+  return rawHints
+    .filter(isRecord)
+    .map((hint, index) => {
+      const owner = textValue(hint.owner, "-");
+      const ref = textValue(hint.ref, "-");
+      return {
+        id: `${index}:${owner}:${ref}`,
+        label: textValue(hint.label, t("workbench.context.ownerReadHint")),
+        owner,
+        ref,
+        access: contextReadHintAccessText(hint),
+        arguments: contextReadHintArgumentsText(hint),
+      };
+    });
+});
+const selectedContextNodeHasRefs = computed(() => (
+  selectedContextNodeRefRows.value.length > 0
+  || selectedContextNodeReadHintRows.value.length > 0
+));
 
 const draftRunId = "__workbench_draft__";
 let refreshSerial = 0;
@@ -417,7 +1068,6 @@ async function refreshWorkbench() {
     void loadSkillApprovalDrafts(loaded.steps);
     if (!loaded.run) {
       composerMode.value = "new";
-      ensureDraftSessionKey();
     }
     syncComposerRuntimeSelection(loaded.run);
     if (loaded.run?.run_id === pendingRunId.value) {
@@ -449,21 +1099,55 @@ async function refreshContextTree() {
   if (dataMode !== "api" || !sessionKey || isNewSessionDraft.value) {
     contextTree.value = null;
     contextRenderSnapshot.value = null;
+    contextPromptPreview.value = null;
     contextTreeError.value = null;
     return;
   }
   contextTreeLoading.value = true;
   contextTreeError.value = null;
   try {
-    const [tree, snapshot] = await Promise.all([
-      loadWorkbenchContextTree(sessionKey),
-      run.value?.run_id ? loadWorkbenchContextRenderSnapshot(run.value.run_id) : Promise.resolve(null),
-    ]);
+    const runId = run.value?.run_id ?? null;
+    const invocationId = selectedStepLlmInvocationId.value;
+    const treePromise = loadWorkbenchContextTree(sessionKey);
+    const previewPromise = runId && invocationId
+      ? loadWorkbenchInvocationPromptPreview(invocationId, runId)
+      : runId
+        ? loadWorkbenchPromptPreview(runId)
+        : Promise.resolve(null);
+    const tree = await treePromise;
+    if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
+      return;
+    }
     contextTree.value = tree;
+
+    let preview = await previewPromise;
+    if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
+      return;
+    }
+    if (runId && invocationId && !preview) {
+      preview = await loadWorkbenchPromptPreview(runId);
+    }
+    if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
+      return;
+    }
+    const snapshotId = typeof preview?.context_render_snapshot_id === "string"
+      ? preview.context_render_snapshot_id.trim()
+      : "";
+    const snapshotPromise = snapshotId.startsWith("ctxsnap_")
+      ? loadWorkbenchContextRenderSnapshotById(snapshotId)
+      : !snapshotId && runId
+        ? loadWorkbenchContextRenderSnapshot(runId)
+        : Promise.resolve(null);
+    const snapshot = await snapshotPromise;
+    if (contextSessionKey.value !== sessionKey || run.value?.run_id !== runId) {
+      return;
+    }
     contextRenderSnapshot.value = snapshot;
+    contextPromptPreview.value = preview;
   } catch (error) {
     contextTree.value = null;
     contextRenderSnapshot.value = null;
+    contextPromptPreview.value = null;
     contextTreeError.value = commandErrorMessage(error);
   } finally {
     contextTreeLoading.value = false;
@@ -521,16 +1205,16 @@ async function submitComposer() {
   commandError.value = null;
   try {
     const response = await createWorkbenchTurn(buildCreateTurnPayload(buildComposerContent(content), currentRun));
+    const responseSessionKey = response.run.session_key?.trim() || null;
     pendingRunId.value = response.run.id;
-    pendingSessionKey.value = response.run.session_key;
+    pendingSessionKey.value = responseSessionKey;
     activeTurnId.value = response.run.id;
-    activeThreadId.value = response.run.session_key;
+    activeThreadId.value = responseSessionKey;
     runSteps.value = [];
     liveStream.value = null;
     composerContent.value = "";
     attachedArtifacts.value = [];
     composerMode.value = "continue";
-    draftSessionKey.value = null;
     await router.push(`/workbench/runs/${encodeURIComponent(response.run.id)}`);
     await refreshWorkbench();
   } catch (error) {
@@ -667,7 +1351,6 @@ function handleModelSelection(event: Event) {
 
 function switchComposerToDraft() {
   composerMode.value = "new";
-  draftSessionKey.value = createDraftSessionKey();
   pendingRunId.value = null;
   pendingSessionKey.value = null;
   activeThreadId.value = null;
@@ -678,7 +1361,6 @@ function switchComposerToDraft() {
 
 function startNewTask() {
   composerMode.value = "new";
-  draftSessionKey.value = createDraftSessionKey();
   pendingRunId.value = null;
   pendingSessionKey.value = null;
   composerContent.value = "";
@@ -697,7 +1379,6 @@ function startNewTask() {
 
 function discardDraftSession() {
   composerMode.value = "continue";
-  draftSessionKey.value = null;
   pendingRunId.value = null;
   pendingSessionKey.value = null;
   commandError.value = null;
@@ -727,7 +1408,6 @@ function buildCreateTurnPayload(content: string | WorkbenchContentBlock[], curre
     channel: "crxzipple",
     chat_type: "direct",
     direct_scope: "main",
-    main_key: "main",
   };
   if (agentId) {
     payload.agent_id = agentId;
@@ -738,16 +1418,16 @@ function buildCreateTurnPayload(content: string | WorkbenchContentBlock[], curre
     payload.llm_id = currentRun.model.id;
   }
   if (composerMode.value === "new") {
-    payload.main_key = ensureDraftSessionKey();
+    payload.new_session = true;
     return payload;
   }
   if (!currentRun) {
     return payload;
   }
-  return {
-    ...payload,
-    ...sessionRouteFromKey(currentRun.session_key, agentId),
-  };
+  if (currentRun.session_key) {
+    payload.session_key = currentRun.session_key;
+  }
+  return payload;
 }
 
 function buildComposerContent(text: string): string | WorkbenchContentBlock[] {
@@ -781,19 +1461,7 @@ function buildComposerContent(text: string): string | WorkbenchContentBlock[] {
   return blocks;
 }
 
-function createDraftSessionKey() {
-  return `workbench-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function ensureDraftSessionKey() {
-  if (draftSessionKey.value === null) {
-    draftSessionKey.value = createDraftSessionKey();
-  }
-  return draftSessionKey.value;
-}
-
 function createDraftWorkbenchRun(): WorkbenchRunView {
-  const sessionKey = ensureDraftSessionKey();
   const agent = selectedAgent.value ?? enabledAgents.value[0] ?? null;
   const agentId = selectedAgentId.value ?? agent?.id ?? "unknown";
   const agentName = agent?.name || agentId;
@@ -801,7 +1469,7 @@ function createDraftWorkbenchRun(): WorkbenchRunView {
   const model = enabledModels.value.find((item) => item.id === modelId) ?? null;
   return {
     run_id: draftRunId,
-    session_key: sessionKey,
+    session_key: "",
     title: t("workbench.newSessionTitle"),
     status: "accepted",
     agent: { id: agentId, name: agentName },
@@ -823,7 +1491,6 @@ function createDraftWorkbenchRun(): WorkbenchRunView {
     inspector: null,
     trace: {
       trace_id: draftRunId,
-      session_key: sessionKey,
       run_id: draftRunId,
     },
   };
@@ -836,55 +1503,6 @@ function isDraftRunView(value: WorkbenchRunView | null): boolean {
 function realRunAgentId(value: WorkbenchRunView | null): string | null {
   if (!value || isDraftRunView(value) || value.agent.id === "unknown") return null;
   return value.agent.id;
-}
-
-function sessionRouteFromKey(sessionKey: string, agentId: string | undefined): Partial<CreateTurnPayload> {
-  if (!agentId) return {};
-  const prefix = `agent:${agentId}:`;
-  if (!sessionKey.startsWith(prefix)) return {};
-
-  const { base, threadId } = splitThreadSuffix(sessionKey.slice(prefix.length));
-  const route: Partial<CreateTurnPayload> = {};
-  if (threadId) {
-    route.thread_id = threadId;
-  }
-
-  const parts = base.split(":").filter(Boolean);
-  if (parts[0] === "dm" && parts[1]) {
-    return { ...route, chat_type: "direct", direct_scope: "per_peer", peer_id: parts.slice(1).join(":") };
-  }
-  if (parts.length >= 3 && parts[1] === "dm") {
-    return { ...route, chat_type: "direct", direct_scope: "per_channel_peer", channel: parts[0], peer_id: parts.slice(2).join(":") };
-  }
-  if (parts.length >= 4 && parts[2] === "dm") {
-    return {
-      ...route,
-      chat_type: "direct",
-      direct_scope: "per_account_channel_peer",
-      channel: parts[0],
-      account_id: parts[1],
-      peer_id: parts.slice(3).join(":"),
-    };
-  }
-  if (parts.length >= 3 && (parts[1] === "channel" || parts[1] === "group")) {
-    return {
-      ...route,
-      chat_type: parts[1],
-      channel: parts[0],
-      conversation_id: parts.slice(2).join(":"),
-    };
-  }
-  return { ...route, chat_type: "direct", direct_scope: "main", main_key: base || "main" };
-}
-
-function splitThreadSuffix(value: string) {
-  const marker = ":thread:";
-  const index = value.indexOf(marker);
-  if (index === -1) return { base: value, threadId: null as string | null };
-  return {
-    base: value.slice(0, index),
-    threadId: value.slice(index + marker.length) || null,
-  };
 }
 
 function collectLinkedAssets(steps: TurnStepView[], traceId: string | null): LinkedWorkbenchAsset[] {
@@ -903,20 +1521,21 @@ function collectLinkedAssets(steps: TurnStepView[], traceId: string | null): Lin
     add(linkedAssetFromEntity(entity, route));
   }
   for (const step of steps) {
+    const stepTraceRoute = traceRoute(step.trace) ?? route;
     for (const entity of step.linked_entities ?? []) {
-      add(linkedAssetFromEntity(entity, route));
+      add(linkedAssetFromEntity(entity, stepTraceRoute));
     }
     if (step.trace.tool_run_id) {
-      add({ id: step.trace.tool_run_id, label: t("workbench.asset.toolRun"), labelKey: "workbench.asset.toolRun", icon: Wrench });
+      add({ id: step.trace.tool_run_id, label: t("workbench.asset.toolRun"), labelKey: "workbench.asset.toolRun", icon: Wrench, route: stepTraceRoute });
     }
     if (step.trace.llm_invocation_id) {
-      add({ id: step.trace.llm_invocation_id, label: t("workbench.asset.llmInvocation"), labelKey: "workbench.asset.llmInvocation", icon: Brain });
+      add({ id: step.trace.llm_invocation_id, label: t("workbench.asset.llmInvocation"), labelKey: "workbench.asset.llmInvocation", icon: Brain, route: stepTraceRoute });
     }
     if (step.trace.artifact_id) {
-      add({ id: step.trace.artifact_id, label: t("workbench.asset.artifact"), labelKey: "workbench.asset.artifact", icon: FileImage });
+      add({ id: step.trace.artifact_id, label: t("workbench.asset.artifact"), labelKey: "workbench.asset.artifact", icon: FileImage, route: stepTraceRoute });
     }
     for (const artifact of step.artifacts) {
-      add({ id: artifact.artifact_id, label: t("workbench.asset.artifact"), labelKey: "workbench.asset.artifact", icon: FileImage });
+      add({ id: artifact.artifact_id, label: t("workbench.asset.artifact"), labelKey: "workbench.asset.artifact", icon: FileImage, route: stepTraceRoute });
     }
   }
 
@@ -1083,6 +1702,12 @@ watch(activeTimelineSteps, (steps) => {
   }
 });
 
+watch(selectedStepLlmInvocationId, () => {
+  if (activeInspectorTab.value === "context") {
+    void refreshContextTree();
+  }
+});
+
 watch(threadFilters, (filters) => {
   if (!filters.some((filter) => filter.id === activeThreadFilterId.value)) {
     activeThreadFilterId.value = "all";
@@ -1209,6 +1834,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function firstNonEmptyRecord(
+  primary: Record<string, unknown> | null | undefined,
+  fallback: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  if (primary && Object.keys(primary).length > 0) return primary;
+  if (fallback && Object.keys(fallback).length > 0) return fallback;
+  return {};
+}
+
+function stringArrayValue(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
 function toneForStatus(status: string): "neutral" | "info" | "success" | "warning" | "danger" {
   if (status === "success" || status === "completed" || status === "connected") return "success";
   if (status === "running" || status === "connecting") return "info";
@@ -1223,6 +1862,7 @@ function stepVisualTone(step: TurnStepView) {
     return "warning";
   }
   if (step.type === "user_input") return "user";
+  if (step.type === "agent_progress") return "llm";
   if (step.type === "llm" || step.type === "agent_thinking") return "llm";
   if (step.type === "tool_call") return "tool-call";
   if (step.type === "tool_result") return "tool-result";
@@ -1288,6 +1928,7 @@ function stepTitle(step: TurnStepView) {
   if (byId) return byId;
   const byType: Partial<Record<TurnStepView["type"], string>> = {
     user_input: t("workbench.step.userInput.title"),
+    agent_progress: t("workbench.step.agentProgress.title"),
     agent_thinking: t("workbench.step.llm.title"),
     llm: t("workbench.step.llm.title"),
     tool_call: t("workbench.badge.toolCall"),
@@ -1404,6 +2045,55 @@ interface ContextXmlContextMenuState {
   node: WorkbenchContextNodeRow;
   title: string;
   actions: Array<{ id: string; label: string }>;
+}
+
+interface ContextSessionSegmentMapRow {
+  id: string;
+  node: WorkbenchContextNodeRow;
+  title: string;
+  summary: string;
+  kind: string;
+  state: string;
+  messageCount: string;
+  rangeCount: string;
+  rawNodeCount: string;
+  estimatedTokens: string;
+  includedLabel: string;
+  risk: string;
+  riskTone: "success" | "warning" | "danger";
+  action: { id: string; label: string } | null;
+}
+
+interface ContextSessionRangeMapRow {
+  id: string;
+  node: WorkbenchContextNodeRow;
+  title: string;
+  summary: string;
+  segmentTitle: string;
+  sequence: string;
+  messageCount: string;
+  estimatedTokens: string;
+  includedLabel: string;
+  status: string;
+  statusTone: "success" | "warning" | "danger";
+  reason: string;
+  action: { id: string; label: string } | null;
+  details: Array<{ label: string; value: string }>;
+}
+
+interface ContextNodeRefRow {
+  id: string;
+  label: string;
+  value: string;
+}
+
+interface ContextNodeReadHintRow {
+  id: string;
+  label: string;
+  owner: string;
+  ref: string;
+  access: string;
+  arguments: string;
 }
 
 function flattenContextNodes(nodes: WorkbenchContextNode[]): WorkbenchContextNodeRow[] {
@@ -1610,6 +2300,149 @@ function contextNodeXmlActions(node: WorkbenchContextNode) {
   return node.actions.join(" ");
 }
 
+function contextNodeRefRowsFromRecord(record: Record<string, unknown>) {
+  return Object.entries(record)
+    .filter(([, value]) => contextNodeRefValueText(value) !== "-")
+    .slice(0, 14)
+    .map(([key, value]) => ({
+      id: `owner_ref:${key}`,
+      label: contextNodeRefKeyLabel(key),
+      value: contextNodeRefValueText(value),
+    }));
+}
+
+function contextNodeRefKeyLabel(key: string) {
+  if (key === "id") return "ID";
+  return titleize(key, key);
+}
+
+function contextNodeRefValueText(value: unknown) {
+  if (isRecord(value) || Array.isArray(value)) {
+    return contextCompactJson(value, 260);
+  }
+  return textValue(value);
+}
+
+function contextCompactJson(value: unknown, maxLength = 180) {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return "-";
+    return text.length > maxLength ? `${text.slice(0, Math.max(maxLength - 3, 1))}...` : text;
+  }
+  let text = "";
+  try {
+    text = JSON.stringify(value);
+  } catch {
+    text = String(value ?? "");
+  }
+  if (!text.trim()) return "-";
+  return text.length > maxLength ? `${text.slice(0, Math.max(maxLength - 3, 1))}...` : text;
+}
+
+function contextReadHintAccessText(hint: Record<string, unknown>) {
+  const parts = [
+    hint.tool ? `tool:${textValue(hint.tool, "")}` : "",
+    hint.http ? `http:${textValue(hint.http, "")}` : "",
+    hint.cli ? `cli:${textValue(hint.cli, "")}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.map((part) => contextCompactJson(part, 220)).join(" · ") : "-";
+}
+
+function contextReadHintArgumentsText(hint: Record<string, unknown>) {
+  if (!("arguments" in hint)) return "-";
+  return contextCompactJson(hint.arguments, 220);
+}
+
+function contextNodeHasAncestor(
+  node: WorkbenchContextNode,
+  ancestorId: string,
+  nodesById: Map<string, Pick<WorkbenchContextNode, "parent_id">>,
+) {
+  let parentId = node.parent_id;
+  while (parentId) {
+    if (parentId === ancestorId) return true;
+    parentId = nodesById.get(parentId)?.parent_id ?? null;
+  }
+  return false;
+}
+
+function contextNodeClosestAncestorByKind<T extends WorkbenchContextNode>(
+  node: WorkbenchContextNode,
+  nodesById: Map<string, T>,
+  kind: string,
+): T | null {
+  let parentId = node.parent_id;
+  while (parentId) {
+    const parent = nodesById.get(parentId);
+    if (!parent) return null;
+    if (parent.kind === kind) return parent;
+    parentId = parent.parent_id;
+  }
+  return null;
+}
+
+function contextSegmentKindLabel(node: WorkbenchContextNode) {
+  const kind = textValue(node.owner_ref.segment_kind ?? node.metadata.segment_kind, "");
+  if (kind === "current") return t("workbench.context.segment.current");
+  if (kind === "compacted") return t("workbench.context.segment.compacted");
+  if (kind === "closed") return t("workbench.context.segment.closed");
+  return kind || "-";
+}
+
+function contextSegmentRiskLabel(warnings: number, blocked: number, limited: number) {
+  if (blocked > 0) {
+    return t("workbench.context.segment.riskBlocked", { count: formatNumber(blocked) });
+  }
+  if (warnings > 0) {
+    return t("workbench.context.segment.riskWarning", { count: formatNumber(warnings) });
+  }
+  if (limited > 0) {
+    return t("workbench.context.segment.riskLimited", { count: formatNumber(limited) });
+  }
+  return t("workbench.context.segment.riskOk");
+}
+
+function contextRangeSequenceLabel(node: WorkbenchContextNode) {
+  const from = textValue(node.owner_ref.from_sequence_no, "");
+  const to = textValue(node.owner_ref.to_sequence_no, "");
+  if (from && to) return `${from}-${to}`;
+  return "-";
+}
+
+function contextRangeStatus(node: WorkbenchContextNode): {
+  label: string;
+  tone: "success" | "warning" | "danger";
+  reason: string;
+} {
+  const reasonCode = textValue(node.metadata.range_reason_code, "within_budget");
+  if (reasonCode === "over_budget") {
+    return {
+      label: t("workbench.context.range.status.blocked"),
+      tone: "danger",
+      reason: t("workbench.context.range.reasonCode.overBudget"),
+    };
+  }
+  if (reasonCode === "split_required") {
+    return {
+      label: t("workbench.context.range.status.split"),
+      tone: "warning",
+      reason: t("workbench.context.range.reasonCode.splitRequired"),
+    };
+  }
+  if (reasonCode === "range_page_limit") {
+    return {
+      label: t("workbench.context.range.status.hidden"),
+      tone: "warning",
+      reason: t("workbench.context.range.reasonCode.rangePageLimit"),
+    };
+  }
+  return {
+    label: t("workbench.context.range.status.ok"),
+    tone: "success",
+    reason: t("workbench.context.range.reasonCode.withinBudget"),
+  };
+}
+
 function contextNodeActions(node: WorkbenchContextNode) {
   const actions: Array<{ id: string; label: string }> = [];
   if (node.actions.includes(node.state.pinned ? "unpin" : "pin")) {
@@ -1651,7 +2484,19 @@ function contextXmlLineClasses(line: NumberedContextXmlLine) {
     "context-xml-line-row--close": line.kind === "close",
     "context-xml-line-row--folded": line.kind === "folded",
     "context-xml-line-row--menu": contextXmlLineActions(line).length > 0,
+    "context-xml-line-row--selected": contextXmlLineIsSelected(line),
+    "context-xml-line-row--selected-descendant": contextXmlLineIsSelectedDescendant(line),
   };
+}
+
+function contextXmlLineIsSelected(line: NumberedContextXmlLine) {
+  return selectedContextXmlNodeId.value === line.node.id;
+}
+
+function contextXmlLineIsSelectedDescendant(line: NumberedContextXmlLine) {
+  const selectedId = selectedContextXmlNodeId.value;
+  if (!selectedId || selectedId === line.node.id) return false;
+  return contextNodeHasAncestor(line.node, selectedId, contextNodeRowsById.value);
 }
 
 function contextXmlBusinessActionBusyKey(node: WorkbenchContextNode, actionId: string) {
@@ -1676,6 +2521,26 @@ function openContextXmlContextMenu(event: MouseEvent, line: NumberedContextXmlLi
     y: Math.min(event.clientY, window.innerHeight - menuHeight - margin),
     node: line.node,
     title: line.node.title,
+    actions,
+  };
+}
+
+function openContextNodeActionMenu(event: MouseEvent, node: WorkbenchContextNodeRow) {
+  const actions = contextNodeBusinessActions(node);
+  if (!actions.length) {
+    contextXmlContextMenu.value = null;
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const menuWidth = 220;
+  const menuHeight = 34 + actions.length * 30;
+  const margin = 8;
+  contextXmlContextMenu.value = {
+    x: Math.min(event.clientX, window.innerWidth - menuWidth - margin),
+    y: Math.min(event.clientY, window.innerHeight - menuHeight - margin),
+    node,
+    title: node.title,
     actions,
   };
 }
@@ -1730,6 +2595,31 @@ function runContextXmlBusinessAction(node: WorkbenchContextNode, actionId: strin
   void runContextNodeAction(node, actionId);
 }
 
+function focusContextXmlNode(nodeId: string) {
+  selectedContextXmlNodeId.value = nodeId;
+  void nextTick(() => {
+    const row = Array.from(document.querySelectorAll<HTMLElement>(".context-xml-line-row"))
+      .find((element) => element.dataset.contextNodeId === nodeId);
+    row?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function selectContextSessionSegment(row: ContextSessionSegmentMapRow) {
+  focusContextXmlNode(row.id);
+}
+
+function selectContextSessionRange(row: ContextSessionRangeMapRow) {
+  selectedContextRangeId.value = row.id;
+  focusContextXmlNode(row.id);
+}
+
+function selectContextXmlLine(line: NumberedContextXmlLine) {
+  focusContextXmlNode(line.node.id);
+  if (line.node.owner === "session" && (line.node.kind === "session_message_range" || line.node.kind === "session_range_notice")) {
+    selectedContextRangeId.value = line.node.id;
+  }
+}
+
 function contextNodeToggleAction(node: WorkbenchContextNode) {
   const action = node.state.collapsed ? "expand" : "collapse";
   if (!node.actions.includes(action)) return null;
@@ -1769,7 +2659,13 @@ function inspectorSectionsFor(tab: Exclude<InspectorTabId, "step">): UiKeyValueS
 }
 
 function linkedEntityRoute(entity: UiLinkedEntity) {
-  return entity.route ?? (entity.trace?.trace_id ? `/trace/${encodeURIComponent(entity.trace.trace_id)}` : null);
+  return entity.route ?? traceRoute(entity.trace);
+}
+
+function traceRoute(trace: TraceContext | null | undefined) {
+  if (!trace?.trace_id) return null;
+  const route = `/trace/${encodeURIComponent(trace.trace_id)}`;
+  return trace.step_id ? `${route}?step_id=${encodeURIComponent(trace.step_id)}` : route;
 }
 
 function linkedEntityLabel(entity: UiLinkedEntity) {
@@ -1932,6 +2828,322 @@ function textValue(value: unknown, fallback = "-"): string {
   }
 }
 
+function formatOptionalNumber(value: unknown, fallback = "-"): string {
+  if (typeof value === "number" && Number.isFinite(value)) return formatNumber(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return formatNumber(parsed);
+  }
+  return fallback;
+}
+
+function metadataOptionalNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function metadataNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function metadataStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => textValue(item, ""))
+      .filter(Boolean);
+  }
+  const text = textValue(value, "");
+  return text ? [text] : [];
+}
+
+function promptEstimateTokenTotal(
+  estimate: {
+    text_tokens?: unknown;
+    tool_schema_tokens?: unknown;
+    file_tokens?: unknown;
+  } | null | undefined,
+): number {
+  if (!estimate) return 0;
+  return metadataNumber(estimate.text_tokens) + metadataNumber(estimate.tool_schema_tokens) + metadataNumber(estimate.file_tokens);
+}
+
+function schemaMirrorBudgetValue(metadata: Record<string, unknown>): string {
+  const status = titleize(metadata.tool_schema_mirror_budget_status, "Ok");
+  const mirrored = formatOptionalNumber(metadata.mirrored_tool_schema_count, "0");
+  const maxCount = formatOptionalNumber(metadata.tool_schema_mirror_max_count);
+  const tokens = formatOptionalNumber(metadata.mirrored_tool_schema_estimated_tokens, "0");
+  const maxTokens = formatOptionalNumber(metadata.tool_schema_mirror_max_estimated_tokens);
+  return `${status} · ${mirrored}/${maxCount} · ${tokens}/${maxTokens}`;
+}
+
+function browserGroupRefsValue(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  const labels = value
+    .filter(isRecord)
+    .filter((row) => textValue(row.source_id, "").includes("browser"))
+    .map((row) => {
+      const source = compactIdentifier(textValue(row.source_id, ""));
+      const group = textValue(row.group_key, "");
+      const reason = textValue(row.reason, "");
+      return [source, group, reason].filter(Boolean).join(" / ");
+    })
+    .filter(Boolean);
+  return labels.slice(0, 3).join(" · ");
+}
+
+function schemaReasonSummary(metadata: Record<string, unknown>): string {
+  const reasons = isRecord(metadata.tool_schema_mirror_default_schema_reasons)
+    ? metadata.tool_schema_mirror_default_schema_reasons
+    : {};
+  const mirrored = Array.isArray(metadata.tool_schema_mirror_default_mirrored)
+    ? metadata.tool_schema_mirror_default_mirrored.filter(isRecord)
+    : [];
+  const names = mirrored
+    .map((item) => textValue(item.name, ""))
+    .filter(Boolean)
+    .slice(0, 4);
+  if (names.length) {
+    return names
+      .map((name) => {
+        const reason = textValue(reasons[name], "");
+        return reason ? `${name} (${reason})` : name;
+      })
+      .join(" · ");
+  }
+  return t("workbench.context.routeBrowserGroupsHelp");
+}
+
+function browserInvestigationAffordanceSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const status = textValue(metadata.browser_investigation_affordance_status, "");
+  const routeBias = textValue(metadata.browser_investigation_route_bias, "");
+  const present = metadataStringList(metadata.browser_investigation_present_paths);
+  const missing = metadataStringList(metadata.browser_investigation_missing_paths);
+  const schemaCount = metadataStringList(metadata.browser_investigation_schema_names).length;
+  const tone: ContextRouteDiagnosticTone = status === "ok"
+    ? "success"
+    : status === "dom_form_only" || status === "missing_browser_tools"
+      ? "danger"
+      : "warning";
+  const value = [status ? titleize(status) : "", routeBias && routeBias !== status ? titleize(routeBias) : ""]
+    .filter(Boolean)
+    .join(" · ");
+  const detail = [
+    `${t("workbench.context.routePresentPathsShort")} ${present.length ? present.join(", ") : "-"}`,
+    `${t("workbench.context.routeMissingPathsShort")} ${missing.length ? missing.join(", ") : "-"}`,
+    `${t("workbench.context.routeSchemasVisibleShort")} ${formatNumber(schemaCount)}`,
+  ].join(" · ");
+  return {
+    value: value || t("text.none"),
+    tone,
+    detail: value ? detail : t("workbench.context.routeBrowserAffordanceHelp"),
+  };
+}
+
+function workPlanUpdateSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const count = metadataNumber(metadata.work_plan_update_count);
+  const phase = textValue(metadata.work_plan_phase, "");
+  const status = textValue(metadata.work_plan_status, "");
+  const reason = textValue(metadata.work_plan_update_reason, "");
+  const tone: ContextRouteDiagnosticTone = count > 6
+    ? "warning"
+    : count > 0
+      ? "info"
+      : "success";
+  const detail = [
+    status ? `${t("workbench.context.routePlanStatusShort")} ${titleize(status)}` : "",
+    reason ? `${t("workbench.context.routePlanReasonShort")} ${titleize(reason)}` : "",
+    metadata.work_plan_phase_changed === true
+      ? t("workbench.context.routePlanPhaseChanged")
+      : "",
+  ].filter(Boolean).join(" · ");
+  return {
+    value: phase ? `${formatNumber(count)} · ${phase}` : formatNumber(count),
+    tone,
+    detail: detail || t("workbench.context.routePlanUpdatesHelp"),
+  };
+}
+
+function finalResponseEvidenceSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const required = metadata.final_response_requires_evidence_path === true;
+  const browserPaths = metadataStringList(metadata.browser_verified_evidence_paths);
+  const verifiedPaths = metadataStringList(metadata.verified_evidence_paths);
+  const paths = browserPaths.length ? browserPaths : verifiedPaths;
+  if (!required) {
+    return {
+      value: t("workbench.context.routeFinalEvidenceNotRequired"),
+      tone: "info",
+      detail: t("workbench.context.routeFinalEvidenceHelp"),
+    };
+  }
+  return {
+    value: paths.length
+      ? `${t("workbench.context.routeFinalEvidenceRequired")} · ${paths.join(", ")}`
+      : t("workbench.context.routeFinalEvidenceRequired"),
+    tone: paths.length ? "success" : "warning",
+    detail: t("workbench.context.routeFinalEvidenceRequiredHelp"),
+  };
+}
+
+function skippedSchemaSummary(
+  metadata: Record<string, unknown>,
+  skippedCount: number,
+): string {
+  if (skippedCount <= 0) return t("workbench.context.routeSkippedNone");
+  const byReason = isRecord(metadata.tool_schema_mirror_skipped_by_reason)
+    ? metadata.tool_schema_mirror_skipped_by_reason
+    : {};
+  const reasonLabels = Object.entries(byReason)
+    .slice(0, 3)
+    .map(([reason, count]) => `${titleize(reason, reason)} ${formatOptionalNumber(count, "0")}`);
+  if (reasonLabels.length) return reasonLabels.join(" · ");
+  const skipped = Array.isArray(metadata.tool_schema_mirror_skipped)
+    ? metadata.tool_schema_mirror_skipped.filter(isRecord)
+    : [];
+  const skippedNames = skipped
+    .map((item) => textValue(item.name ?? item.tool_name ?? item.node_id, ""))
+    .filter(Boolean)
+    .slice(0, 3);
+  if (skippedNames.length) return skippedNames.join(" · ");
+  return `${formatNumber(skippedCount)} ${t("workbench.context.routeSkippedShort")}`;
+}
+
+function routeBudgetSplitValue(metadata: Record<string, unknown>): string {
+  const direct = formatOptionalNumber(metadata.direct_transcript_estimated_tokens, "0");
+  const tree = formatOptionalNumber(metadata.rendered_prompt_estimated_tokens, "0");
+  const schemas = formatOptionalNumber(metadata.mirrored_tool_schema_estimated_tokens, "0");
+  return `${t("workbench.context.routeDirectShort")} ${direct} · ${t("workbench.context.routeTreeShort")} ${tree} · ${t("workbench.context.routeSchemasShort")} ${schemas}`;
+}
+
+function capabilityVisibilityValue(metadata: Record<string, unknown>): string {
+  const available = formatOptionalNumber(metadata.tool_schema_mirror_available_count, "0");
+  const enabled = formatOptionalNumber(metadata.tool_schema_mirror_enabled_candidate_count, "0");
+  const defaultMirrored = formatOptionalNumber(metadata.tool_schema_mirror_default_mirrored_count, "0");
+  const defaultRequested = formatOptionalNumber(metadata.tool_schema_mirror_default_requested_count, "0");
+  const duplicate = formatOptionalNumber(metadata.tool_schema_mirror_duplicate_count, "0");
+  return `${t("workbench.context.routeAvailableShort")} ${available} · ${t("workbench.context.routeEnabledShort")} ${enabled} · ${t("workbench.context.routeDefaultShort")} ${defaultMirrored}/${defaultRequested} · ${t("workbench.context.routeDuplicateShort")} ${duplicate}`;
+}
+
+function toolResultTruncationSummary(messages: unknown[]): { value: string; compactedCount: number } {
+  let compactedCount = 0;
+  let omittedChars = 0;
+  let omittedCount = 0;
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const role = textValue(message.role, "");
+    if (role && role !== "tool") continue;
+    const text = promptPreviewContentText(message.content);
+    if (!text.includes("omitted_from_provider_transcript")) continue;
+    compactedCount += 1;
+    omittedChars += sumLineNumbers(text, /omitted_chars:\s*(\d+)/g);
+    omittedCount += sumLineNumbers(text, /omitted_count:\s*(\d+)/g);
+  }
+  if (compactedCount <= 0) {
+    return {
+      value: t("workbench.context.routeToolResultTruncationNone"),
+      compactedCount,
+    };
+  }
+  const parts = [`${formatNumber(compactedCount)} ${t("workbench.context.routeCompactedShort")}`];
+  if (omittedChars > 0) {
+    parts.push(`${formatNumber(omittedChars)} ${t("workbench.context.routeOmittedCharsShort")}`);
+  }
+  if (omittedCount > 0) {
+    parts.push(`${formatNumber(omittedCount)} ${t("workbench.context.routeSkippedShort")}`);
+  }
+  return {
+    value: parts.join(" · "),
+    compactedCount,
+  };
+}
+
+function sumLineNumbers(text: string, pattern: RegExp): number {
+  return Array.from(text.matchAll(pattern))
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite)
+    .reduce((total, value) => total + value, 0);
+}
+
+function topRenderedNodesValue(metadata: Record<string, unknown>): string {
+  const rows = Array.isArray(metadata.top_rendered_nodes)
+    ? metadata.top_rendered_nodes
+    : [];
+  const labels = rows
+    .filter(isRecord)
+    .slice(0, 3)
+    .map((row) => {
+      const nodeId = compactIdentifier(textValue(row.node_id, ""));
+      const tokens = formatOptionalNumber(row.text_tokens, "0");
+      return `${nodeId} ${tokens}`;
+    })
+    .filter((value) => value.trim());
+  return labels.length ? labels.join(" · ") : "-";
+}
+
+function snapshotRunPromptInputMetadata(snapshot: WorkbenchContextRenderSnapshot): Record<string, unknown> {
+  const value = snapshot.provider_attachments.prompt_input;
+  return isRecord(value) ? value : {};
+}
+
+function snapshotRuntimeContractMetadata(snapshot: WorkbenchContextRenderSnapshot): Record<string, unknown> {
+  const value = snapshot.metadata.runtime_contract;
+  return isRecord(value) ? value : {};
+}
+
+function snapshotLlmRequestMetadata(snapshot: WorkbenchContextRenderSnapshot): Record<string, unknown> {
+  const contract = snapshotRuntimeContractMetadata(snapshot);
+  return {
+    prompt_input: snapshot.provider_attachments.prompt_input,
+    tree_schema_version: snapshot.metadata.tree_schema_version,
+    context_render_snapshot_id: snapshot.id,
+    context_history_delivery: snapshot.metadata.history_delivery,
+    mirrored_tool_schema_count: snapshot.metadata.mirrored_tool_schema_count,
+    mirrored_node_count: snapshot.metadata.mirrored_node_count,
+    runtime_contract: contract,
+    runtime_contract_version: snapshot.metadata.runtime_contract_version ?? contract.contract_version,
+    runtime_contract_hash: snapshot.metadata.runtime_contract_hash ?? contract.content_hash,
+  };
+}
+
+function previewRunPromptInputMetadata(preview: RunPromptInputPreview | null): Record<string, unknown> {
+  const value = preview?.provider_attachments.prompt_input;
+  return isRecord(value) ? value : {};
+}
+
+function previewLlmRequestMetadata(preview: RunPromptInputPreview | null): Record<string, unknown> {
+  const metadata = preview?.context_render_metadata ?? {};
+  const requestMetadata = isRecord(preview?.provider_request_options.request_metadata)
+    ? preview.provider_request_options.request_metadata
+    : {};
+  const contract = isRecord(metadata.runtime_contract) ? metadata.runtime_contract : {};
+  return {
+    prompt_input: preview?.provider_attachments.prompt_input,
+    tree_schema_version: metadata.tree_schema_version,
+    context_render_snapshot_id: preview?.context_render_snapshot_id,
+    context_history_delivery: metadata.history_delivery,
+    mirrored_tool_schema_count: metadata.mirrored_tool_schema_count,
+    mirrored_node_count: metadata.mirrored_node_count,
+    runtime_contract: contract,
+    runtime_contract_version: metadata.runtime_contract_version ?? contract.contract_version,
+    runtime_contract_hash: metadata.runtime_contract_hash ?? contract.content_hash,
+    ...requestMetadata,
+  };
+}
+
 function titleize(value: unknown, fallback = "-"): string {
   const text = textValue(value, fallback);
   if (text === "-") return text;
@@ -1964,7 +3176,6 @@ function threadMatchesFilter(thread: WorkbenchThreadSummary, filterId: string) {
 
 function selectThread(thread: WorkbenchThreadSummary) {
   composerMode.value = "continue";
-  draftSessionKey.value = null;
   pendingRunId.value = null;
   pendingSessionKey.value = null;
   commandError.value = null;
@@ -2030,7 +3241,11 @@ function handleTurnsWheel(event: WheelEvent) {
 </script>
 
 <template>
-  <div v-if="run" class="workbench-page page-grid">
+  <div
+    v-if="run"
+    class="workbench-page page-grid"
+    :class="{ 'workbench-page--context': activeInspectorTab === 'context' }"
+  >
     <aside class="threads-panel">
       <div class="panel-header">
         <h1>{{ t("workbench.threads") }}</h1>
@@ -2076,7 +3291,7 @@ function handleTurnsWheel(event: WheelEvent) {
           <small>
             <span class="thread-card__activity">
               <MessageSquarePlus :size="13" />
-              <span>{{ draftSessionKey }}</span>
+              <span>{{ t("workbench.newSessionStatus") }}</span>
             </span>
           </small>
         </button>
@@ -2148,7 +3363,7 @@ function handleTurnsWheel(event: WheelEvent) {
         </div>
         <div class="run-card__body">
           <div class="run-card__title">
-            <h2>{{ isNewSessionDraft ? t("workbench.newSessionTitle") : activeThread ? threadTitle(activeThread) : runTitle(run) }}</h2>
+            <h2>{{ isNewSessionDraft ? t("workbench.newSessionTitle") : activeRunThread ? threadTitle(activeRunThread) : runTitle(run) }}</h2>
             <UiBadge :tone="isNewSessionDraft ? 'info' : toneForStatus(run.status)">
               {{ isNewSessionDraft ? t("workbench.newSessionDraft") : t(`status.${run.status}`) }}
               <Loader2 v-if="!isNewSessionDraft && run.status === 'running'" class="motion-spin" :size="12" />
@@ -2207,7 +3422,7 @@ function handleTurnsWheel(event: WheelEvent) {
           <div v-if="isNewSessionDraft" class="draft-session-strip">
             <MessageSquarePlus :size="16" />
             <strong>{{ t("workbench.newSessionDraft") }}</strong>
-            <span>{{ draftSessionKey }}</span>
+            <span>{{ t("workbench.newSessionStatus") }}</span>
           </div>
           <div v-else ref="turnsRow" class="turns-row" @wheel="handleTurnsWheel">
             <strong>{{ t("workbench.turns") }}</strong>
@@ -2396,7 +3611,7 @@ function handleTurnsWheel(event: WheelEvent) {
                           <dd>{{ row.value }}</dd>
                         </div>
                       </dl>
-                      <RouterLink :to="`/trace/${step.trace.trace_id}`">
+                      <RouterLink :to="traceRoute(step.trace) ?? '/trace'">
                         <PanelRightOpen :size="14" />
                         {{ t("common.viewTrace") }}
                       </RouterLink>
@@ -2419,7 +3634,7 @@ function handleTurnsWheel(event: WheelEvent) {
                         <PanelRightOpen :size="14" />
                         {{ t("common.viewImage") }}
                       </a>
-                      <RouterLink class="step-action-button" :to="`/trace/${step.trace.trace_id}`">
+                      <RouterLink class="step-action-button" :to="traceRoute(step.trace) ?? '/trace'">
                         <Loader2 :size="14" />
                         {{ t("common.viewTrace") }}
                       </RouterLink>
@@ -2427,7 +3642,7 @@ function handleTurnsWheel(event: WheelEvent) {
                     <RouterLink
                       v-else-if="step.type === 'final_response'"
                       class="step-action-button"
-                      :to="`/trace/${step.trace.trace_id}`"
+                      :to="traceRoute(step.trace) ?? '/trace'"
                     >
                       {{ t("common.viewDetails") }}
                     </RouterLink>
@@ -2460,13 +3675,13 @@ function handleTurnsWheel(event: WheelEvent) {
           <span>· {{ isNewSessionDraft ? t("workbench.newSessionStatus") : t("workbench.statusRunning", { duration: formatDuration(run.duration_ms) }) }}</span>
         </div>
         <div class="status-strip__meta">
-          <span v-if="isNewSessionDraft">{{ draftSessionKey }}</span>
+          <span v-if="isNewSessionDraft">{{ t("workbench.newSessionStatus") }}</span>
           <template v-else>
             <span v-if="showRunEta">{{ t("workbench.eta", { duration: formatDuration(run.status_strip?.eta_ms) }) }}</span>
             <span>{{ t("workbench.queueWait", { duration: formatDuration(run.status_strip?.queue_wait_ms) }) }}</span>
           </template>
         </div>
-        <RouterLink v-if="!isNewSessionDraft" class="status-strip__action" :to="`/trace/${run.trace.trace_id}`">
+        <RouterLink v-if="!isNewSessionDraft" class="status-strip__action" :to="traceRoute(run.trace) ?? '/trace'">
           <PanelRightOpen :size="15" />
           {{ t("common.viewTrace") }}
         </RouterLink>
@@ -2729,7 +3944,7 @@ function handleTurnsWheel(event: WheelEvent) {
               <ExternalLink :size="14" />
             </button>
           </template>
-          <RouterLink v-else-if="!isNewSessionDraft" :to="`/trace/${run.trace.trace_id}`">
+          <RouterLink v-else-if="!isNewSessionDraft" :to="traceRoute(run.trace) ?? '/trace'">
             <ShieldCheck :size="17" />
             <span>
               <strong>{{ t("workbench.quick.viewTrace") }}</strong>
@@ -2786,7 +4001,7 @@ function handleTurnsWheel(event: WheelEvent) {
             v-for="artifact in selectedStep.artifacts"
             :key="artifact.artifact_id"
             class="asset-link"
-            :to="`/trace/${selectedStep.trace.trace_id}`"
+            :to="traceRoute(selectedStep.trace) ?? '/trace'"
           >
             <FileImage :size="16" />
             <strong>{{ artifact.name }}</strong>
@@ -2968,30 +4183,268 @@ function handleTurnsWheel(event: WheelEvent) {
           </p>
         </UiCard>
 
-        <UiCard v-if="contextTree" class="inspector-section context-tree-card">
-          <h2>{{ t("workbench.context.estimate") }}</h2>
-          <dl>
-            <div v-for="row in contextEstimateRows" :key="row.label">
-              <dt>{{ row.label }}</dt>
-              <dd>{{ row.value }}</dd>
-            </div>
-          </dl>
-        </UiCard>
-
-        <UiCard v-if="contextRenderSnapshot" class="inspector-section context-tree-card">
-          <h2>{{ t("workbench.context.renderSnapshot") }}</h2>
-          <dl>
+        <UiCard v-if="contextRenderSnapshot || contextPromptPreview" class="inspector-section context-tree-card context-snapshot-card context-snapshot-card--primary">
+          <div class="context-tree-card__heading context-tree-card__heading--stacked">
+            <h2>{{ contextRequestCardTitle }}</h2>
+            <p>{{ contextRequestCardSubtitle }}</p>
+          </div>
+          <dl v-if="contextSnapshotRows.length" class="context-tree-summary context-snapshot-summary">
             <div v-for="row in contextSnapshotRows" :key="row.label">
               <dt>{{ row.label }}</dt>
-              <dd>{{ row.value }}</dd>
+              <dd :title="row.value">{{ row.value }}</dd>
             </div>
           </dl>
-          <pre class="context-snapshot-preview">{{ contextRenderSnapshot.prompt_body.slice(0, 1800) }}</pre>
+          <div v-if="contextSnapshotRiskRows.length" class="context-snapshot-risk-strip" :aria-label="t('workbench.context.sessionBudgetStatus')">
+            <div
+              v-for="row in contextSnapshotRiskRows"
+              :key="row.label"
+              class="context-snapshot-risk"
+              :class="`context-snapshot-risk--${row.tone}`"
+              :title="row.detail"
+            >
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
+          </div>
+          <div v-if="contextRouteDiagnosticRows.length" class="context-route-diagnostics" :aria-label="t('workbench.context.routeDiagnostics')">
+            <div
+              v-for="row in contextRouteDiagnosticRows"
+              :key="row.label"
+              class="context-route-diagnostic"
+              :class="`context-route-diagnostic--${row.tone}`"
+              :title="row.detail"
+            >
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
+          </div>
+          <div v-if="contextRouteGroupRows.length" class="context-route-groups" role="table" :aria-label="t('workbench.context.routeGroups')">
+            <div class="context-route-groups__head" role="row">
+              <span role="columnheader">{{ t("workbench.context.routeGroup") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeSource") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeFunctions") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeDefaultSchemas") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeVisibility") }}</span>
+            </div>
+            <div
+              v-for="row in contextRouteGroupRows"
+              :key="row.id"
+              class="context-route-groups__row"
+              :class="`context-route-groups__row--${row.tone}`"
+              role="row"
+            >
+              <span role="cell" :title="row.group">{{ row.group }}</span>
+              <span role="cell" :title="row.source">{{ row.source }}</span>
+              <span role="cell">{{ row.functions }}</span>
+              <span role="cell">{{ row.defaultSchemas }}</span>
+              <span role="cell">{{ row.visibility }}</span>
+            </div>
+          </div>
+          <div v-if="contextRouteSchemaRows.length" class="context-route-schemas" role="table" :aria-label="t('workbench.context.routeSchemas')">
+            <div class="context-route-schemas__head" role="row">
+              <span role="columnheader">{{ t("workbench.context.routeSchema") }}</span>
+              <span role="columnheader">{{ t("common.status") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeReason") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routePriority") }}</span>
+            </div>
+            <div
+              v-for="row in contextRouteSchemaRows"
+              :key="row.id"
+              class="context-route-schemas__row"
+              :class="`context-route-schemas__row--${row.tone}`"
+              role="row"
+            >
+              <span role="cell" :title="row.schema">{{ row.schema }}</span>
+              <span role="cell">{{ row.status }}</span>
+              <span role="cell" :title="row.reason">{{ row.reason }}</span>
+              <span role="cell">{{ row.priority }}</span>
+            </div>
+          </div>
+          <div class="context-request-tabs" role="tablist" :aria-label="contextRequestCardTitle">
+            <button
+              v-for="tab in contextActualRequestTabs"
+              :key="tab.id"
+              type="button"
+              role="tab"
+              :aria-selected="contextActualRequestTab === tab.id"
+              :class="{ active: contextActualRequestTab === tab.id }"
+              @click="contextActualRequestTab = tab.id"
+            >
+              <span>{{ tab.label }}</span>
+              <small>{{ tab.count }}</small>
+            </button>
+          </div>
+          <div class="context-request-panel">
+            <template v-if="contextActualRequestTab === 'xml'">
+              <div class="context-snapshot-preview-head">
+                <span>{{ t("workbench.context.promptXml") }}</span>
+                <small>{{ t("workbench.context.promptChars", { count: formatNumber(contextSnapshotPromptCharCount) }) }}</small>
+              </div>
+              <XmlSourceViewer
+                v-if="contextActualRequestXmlSource"
+                class="context-snapshot-preview"
+                :source="contextActualRequestXmlSource"
+                max-height="min(50vh, 620px)"
+              />
+              <p v-else class="asset-empty context-request-empty">{{ t("workbench.context.requestEmpty") }}</p>
+            </template>
+            <pre v-else class="context-request-json">{{ contextActualRequestJson }}</pre>
+          </div>
+          <div v-if="contextSnapshotDiagnosticRows.length" class="context-snapshot-diagnostics" :aria-label="t('workbench.context.renderDiagnostics')">
+            <div
+              v-for="row in contextSnapshotDiagnosticRows"
+              :key="row.label"
+              class="context-snapshot-diagnostic"
+            >
+              <span>{{ row.label }}</span>
+              <strong :title="row.value">{{ row.value }}</strong>
+            </div>
+          </div>
         </UiCard>
 
-        <UiCard v-if="contextTree" class="inspector-section context-tree-card">
+        <UiCard v-if="contextSessionSegmentRows.length" class="inspector-section context-tree-card context-segment-map-card">
           <div class="context-tree-card__heading context-tree-card__heading--stacked">
-            <h2>{{ t("workbench.context.nodes") }}</h2>
+            <h2>{{ t("workbench.context.sessionSegmentMap") }}</h2>
+            <p>{{ t("workbench.context.sessionSegmentMapSubtitle") }}</p>
+          </div>
+          <div class="context-segment-map" role="table" :aria-label="t('workbench.context.sessionSegmentMap')">
+            <div class="context-segment-map__head" role="row">
+              <span role="columnheader">{{ t("workbench.context.segment") }}</span>
+              <span role="columnheader">{{ t("common.status") }}</span>
+              <span role="columnheader">{{ t("workbench.context.messages") }}</span>
+              <span role="columnheader">{{ t("workbench.context.ranges") }}</span>
+              <span role="columnheader">{{ t("common.tokens") }}</span>
+              <span role="columnheader">{{ t("workbench.context.promptInclusion") }}</span>
+              <span role="columnheader">{{ t("workbench.context.risk") }}</span>
+              <span role="columnheader">{{ t("common.actions") }}</span>
+            </div>
+            <div
+              v-for="row in contextSessionSegmentRows"
+              :key="row.id"
+              class="context-segment-map__row"
+              :class="[
+                `context-segment-map__row--${row.riskTone}`,
+                { 'context-segment-map__row--selected': selectedContextXmlNodeId === row.id },
+              ]"
+              role="row"
+              tabindex="0"
+              @click="selectContextSessionSegment(row)"
+              @keydown.enter.prevent="selectContextSessionSegment(row)"
+              @contextmenu="openContextNodeActionMenu($event, row.node)"
+            >
+              <div class="context-segment-map__main" role="cell">
+                <strong :title="row.title">{{ row.title }}</strong>
+                <small :title="row.summary">{{ row.kind }}</small>
+              </div>
+              <span role="cell">{{ row.state }}</span>
+              <span role="cell">{{ row.messageCount }}</span>
+              <span role="cell">{{ row.rangeCount }} / {{ row.rawNodeCount }}</span>
+              <span role="cell">{{ row.estimatedTokens }}</span>
+              <span role="cell">{{ row.includedLabel }}</span>
+              <span class="context-segment-map__risk" role="cell">{{ row.risk }}</span>
+              <div class="context-map-actions" role="cell">
+                <button
+                  v-if="contextNodeBusinessActions(row.node).length"
+                  type="button"
+                  class="context-map-actions__button"
+                  :title="t('common.more')"
+                  :aria-label="t('common.more')"
+                  :disabled="contextActionBusy !== null"
+                  @click.stop="openContextNodeActionMenu($event, row.node)"
+                >
+                  <Loader2
+                    v-if="contextActionBusy !== null && contextActionBusy.startsWith(`${row.node.id}:`)"
+                    class="motion-spin"
+                    :size="13"
+                  />
+                  <MoreVertical v-else :size="14" />
+                </button>
+                <span v-else class="context-segment-map__empty-action">-</span>
+              </div>
+            </div>
+          </div>
+        </UiCard>
+
+        <UiCard v-if="contextSessionRangeRows.length" class="inspector-section context-tree-card context-range-map-card">
+          <div class="context-tree-card__heading context-tree-card__heading--stacked">
+            <h2>{{ t("workbench.context.rangeDetails") }}</h2>
+            <p>{{ t("workbench.context.rangeDetailsSubtitle") }}</p>
+          </div>
+          <div class="context-range-layout">
+            <div class="context-range-map" role="table" :aria-label="t('workbench.context.rangeDetails')">
+              <div class="context-range-map__head" role="row">
+                <span role="columnheader">{{ t("workbench.context.ranges") }}</span>
+                <span role="columnheader">{{ t("workbench.context.sequence") }}</span>
+                <span role="columnheader">{{ t("workbench.context.messages") }}</span>
+                <span role="columnheader">{{ t("common.tokens") }}</span>
+                <span role="columnheader">{{ t("workbench.context.promptInclusion") }}</span>
+                <span role="columnheader">{{ t("common.status") }}</span>
+                <span role="columnheader">{{ t("common.actions") }}</span>
+              </div>
+              <div
+              v-for="row in contextSessionRangeRows"
+              :key="row.id"
+              class="context-range-map__row"
+              :class="[
+                  `context-range-map__row--${row.statusTone}`,
+                  { 'context-range-map__row--selected': selectedContextRangeRow?.id === row.id },
+                ]"
+                role="row"
+                tabindex="0"
+                @click="selectContextSessionRange(row)"
+                @keydown.enter.prevent="selectContextSessionRange(row)"
+                @contextmenu="openContextNodeActionMenu($event, row.node)"
+              >
+                <div class="context-range-map__main" role="cell">
+                  <strong :title="row.title">{{ row.title }}</strong>
+                  <small :title="row.segmentTitle">{{ row.segmentTitle }}</small>
+                </div>
+                <span role="cell">{{ row.sequence }}</span>
+                <span role="cell">{{ row.messageCount }}</span>
+                <span role="cell">{{ row.estimatedTokens }}</span>
+                <span role="cell">{{ row.includedLabel }}</span>
+                <span class="context-range-map__status" role="cell">{{ row.status }}</span>
+                <div class="context-map-actions" role="cell">
+                  <button
+                    v-if="contextNodeBusinessActions(row.node).length"
+                    type="button"
+                    class="context-map-actions__button"
+                    :title="t('common.more')"
+                    :aria-label="t('common.more')"
+                    :disabled="contextActionBusy !== null"
+                    @click.stop="openContextNodeActionMenu($event, row.node)"
+                  >
+                    <Loader2
+                      v-if="contextActionBusy !== null && contextActionBusy.startsWith(`${row.node.id}:`)"
+                      class="motion-spin"
+                      :size="13"
+                    />
+                    <MoreVertical v-else :size="14" />
+                  </button>
+                  <span v-else class="context-segment-map__empty-action">-</span>
+                </div>
+              </div>
+            </div>
+            <div v-if="selectedContextRangeRow" class="context-range-detail">
+              <div class="context-range-detail__head">
+                <strong :title="selectedContextRangeRow.title">{{ selectedContextRangeRow.title }}</strong>
+                <UiBadge :tone="selectedContextRangeRow.statusTone">{{ selectedContextRangeRow.status }}</UiBadge>
+              </div>
+              <p :title="selectedContextRangeRow.reason">{{ selectedContextRangeRow.reason }}</p>
+              <dl>
+                <div v-for="item in selectedContextRangeRow.details" :key="item.label">
+                  <dt>{{ item.label }}</dt>
+                  <dd :title="item.value">{{ item.value }}</dd>
+                </div>
+              </dl>
+            </div>
+          </div>
+        </UiCard>
+
+        <UiCard v-if="contextTree" class="inspector-section context-tree-card context-tree-card--primary">
+          <div class="context-tree-card__heading context-tree-card__heading--stacked">
+            <h2>{{ t("workbench.context.liveTreeControls") }}</h2>
+            <p>{{ t("workbench.context.liveTreeControlsSubtitle") }}</p>
             <div class="context-memory-filters" :aria-label="t('workbench.context.memory.filterLabel')">
               <button
                 v-for="option in contextMemoryLayerOptions"
@@ -3003,6 +4456,38 @@ function handleTurnsWheel(event: WheelEvent) {
                 <span>{{ option.label }}</span>
                 <small>{{ option.count }}</small>
               </button>
+            </div>
+          </div>
+          <div v-if="selectedContextNode && selectedContextNodeHasRefs" class="context-node-ref-panel">
+            <div class="context-node-ref-panel__head">
+              <span>{{ t("workbench.context.selectedNodeRefs") }}</span>
+              <strong :title="selectedContextNode.title">{{ selectedContextNode.title }}</strong>
+            </div>
+            <div v-if="selectedContextNodeRefRows.length" class="context-node-ref-grid">
+              <div
+                v-for="row in selectedContextNodeRefRows"
+                :key="row.id"
+                class="context-node-ref-item"
+              >
+                <span>{{ row.label }}</span>
+                <code :title="row.value">{{ row.value }}</code>
+              </div>
+            </div>
+            <div v-if="selectedContextNodeReadHintRows.length" class="context-node-read-hints">
+              <div class="context-node-read-hints__head">
+                <span>{{ t("workbench.context.ownerReadHints") }}</span>
+                <small>{{ selectedContextNodeReadHintRows.length }}</small>
+              </div>
+              <div
+                v-for="hint in selectedContextNodeReadHintRows"
+                :key="hint.id"
+                class="context-node-read-hint"
+              >
+                <strong :title="hint.label">{{ hint.label }}</strong>
+                <span :title="hint.owner">{{ hint.owner }}</span>
+                <code :title="hint.access">{{ hint.access }}</code>
+                <code :title="hint.arguments">{{ hint.arguments }}</code>
+              </div>
             </div>
           </div>
           <div v-if="!contextXmlLines.length" class="asset-empty">{{ t("workbench.context.emptyNodes") }}</div>
@@ -3024,8 +4509,10 @@ function handleTurnsWheel(event: WheelEvent) {
               :class="contextXmlLineClasses(line)"
               :style="contextXmlLineStyle(line)"
               role="treeitem"
+              :data-context-node-id="line.node.id"
               :aria-level="line.depth + 1"
               :aria-expanded="contextXmlLineCanFold(line) ? !line.displayFolded : undefined"
+              @click="selectContextXmlLine(line)"
               @contextmenu="openContextXmlContextMenu($event, line)"
             >
               <span class="context-xml-line-number">{{ line.lineNumber }}</span>
@@ -3035,7 +4522,7 @@ function handleTurnsWheel(event: WheelEvent) {
                   type="button"
                   class="context-xml-display-toggle"
                   :aria-label="line.displayFolded ? t('workbench.context.action.expand') : t('workbench.context.action.collapse')"
-                  @click="toggleContextXmlDisplayFold(line.node.id)"
+                  @click.stop="toggleContextXmlDisplayFold(line.node.id)"
                 >
                   <svg
                     class="context-xml-fold-triangle"
@@ -3100,6 +4587,17 @@ function handleTurnsWheel(event: WheelEvent) {
             </div>
           </div>
         </UiCard>
+
+        <UiCard v-if="contextTree" class="inspector-section context-tree-card">
+          <h2>{{ t("workbench.context.estimate") }}</h2>
+          <dl>
+            <div v-for="row in contextEstimateRows" :key="row.label">
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            </div>
+          </dl>
+        </UiCard>
+
       </template>
 
       <template v-else-if="activeInspectorTab === 'memory'">
@@ -3126,8 +4624,8 @@ function handleTurnsWheel(event: WheelEvent) {
           <dl>
             <div>
               <dt>{{ t("trace.id.session") }}</dt>
-              <dd :title="(isNewSessionDraft ? draftSessionKey : run.session_key) ?? '-'">
-                {{ compactIdentifier(isNewSessionDraft ? draftSessionKey : run.session_key) }}
+              <dd :title="isNewSessionDraft ? t('workbench.newSessionStatus') : run.session_key">
+                {{ isNewSessionDraft ? t("workbench.newSessionStatus") : compactIdentifier(run.session_key) }}
               </dd>
             </div>
             <div>
@@ -3205,12 +4703,16 @@ function handleTurnsWheel(event: WheelEvent) {
 <style scoped>
 .workbench-page {
   display: grid;
-  grid-template-columns: 300px minmax(430px, 1fr) clamp(440px, 34vw, 620px);
+  grid-template-columns: 300px minmax(420px, 1fr) clamp(520px, 39vw, 760px);
   height: calc(100dvh - var(--shell-topbar-height));
   overflow: hidden;
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--surface-active) 18%, transparent), transparent 34%),
     var(--surface-page);
+}
+
+.workbench-page--context {
+  grid-template-columns: 300px minmax(400px, 0.95fr) clamp(580px, 42vw, 820px);
 }
 
 .workbench-page,
@@ -3561,6 +5063,7 @@ function handleTurnsWheel(event: WheelEvent) {
 }
 
 .connection-strip {
+  gap: 12px;
   overflow: hidden;
   min-height: 40px;
   background: color-mix(in srgb, var(--color-success) 12%, var(--surface-panel));
@@ -3572,6 +5075,7 @@ function handleTurnsWheel(event: WheelEvent) {
 }
 
 .connection-strip span:first-child {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4883,6 +6387,13 @@ dd {
   margin: 0;
 }
 
+.context-tree-card__heading p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .context-tree-card__heading button {
   display: inline-flex;
   align-items: center;
@@ -4938,28 +6449,751 @@ dd {
 }
 
 .context-tree-summary {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.context-snapshot-preview {
-  max-height: 180px;
+.context-tree-card--primary {
+  min-height: min(64vh, 720px);
+}
+
+.context-node-ref-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-node-ref-panel__head,
+.context-node-read-hints__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-node-ref-panel__head span,
+.context-node-read-hints__head span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.context-node-ref-panel__head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-node-read-hints__head small {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.context-node-ref-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.context-node-ref-item {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 74%, transparent);
+  border-radius: var(--radius-1);
+  background: color-mix(in srgb, var(--surface-raised) 36%, transparent);
+}
+
+.context-node-ref-item span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-node-ref-item code {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-node-read-hints {
+  display: grid;
+  gap: 5px;
+}
+
+.context-node-read-hint {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.95fr) 72px minmax(180px, 1.2fr) minmax(120px, 0.75fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 66%, transparent);
+  border-radius: var(--radius-1);
+  background: color-mix(in srgb, var(--color-accent) 5%, transparent);
+}
+
+.context-node-read-hint strong,
+.context-node-read-hint span,
+.context-node-read-hint code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-node-read-hint strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.context-node-read-hint span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.context-node-read-hint code {
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.context-snapshot-card--primary {
+  min-height: min(54vh, 660px);
+}
+
+.context-snapshot-summary {
+  margin-top: 2px;
+}
+
+.context-snapshot-risk-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.context-snapshot-risk {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-snapshot-risk span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-snapshot-risk strong {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-snapshot-risk--success {
+  border-color: color-mix(in srgb, var(--color-success) 38%, var(--border-subtle));
+}
+
+.context-snapshot-risk--success strong {
+  color: var(--color-success);
+}
+
+.context-snapshot-risk--warning {
+  border-color: color-mix(in srgb, var(--color-warning) 44%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--surface-inset));
+}
+
+.context-snapshot-risk--warning strong {
+  color: var(--color-warning);
+}
+
+.context-snapshot-risk--danger {
+  border-color: color-mix(in srgb, var(--color-danger) 48%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-danger) 8%, var(--surface-inset));
+}
+
+.context-snapshot-risk--danger strong {
+  color: var(--color-danger);
+}
+
+.context-route-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 6px;
+}
+
+.context-route-diagnostic {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-route-diagnostic--success {
+  border-color: color-mix(in srgb, var(--color-success) 28%, var(--border-subtle));
+}
+
+.context-route-diagnostic--warning {
+  border-color: color-mix(in srgb, var(--color-warning) 34%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-warning) 6%, var(--surface-inset));
+}
+
+.context-route-diagnostic--danger {
+  border-color: color-mix(in srgb, var(--color-danger) 36%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-danger) 6%, var(--surface-inset));
+}
+
+.context-route-diagnostic--info {
+  border-color: color-mix(in srgb, var(--color-accent) 30%, var(--border-subtle));
+}
+
+.context-route-diagnostic span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-route-diagnostic strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-route-groups {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-route-groups__head,
+.context-route-groups__row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.45fr) minmax(98px, 0.95fr) minmax(48px, 0.4fr) minmax(84px, 0.75fr) minmax(84px, 0.75fr);
+  min-width: 0;
+}
+
+.context-route-groups__head {
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.context-route-groups__row {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.context-route-groups__row + .context-route-groups__row {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+}
+
+.context-route-groups__row--info {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.context-route-groups__row--warning {
+  background: color-mix(in srgb, var(--color-warning) 6%, transparent);
+}
+
+.context-route-groups__row--success {
+  background: color-mix(in srgb, var(--color-success) 4%, transparent);
+}
+
+.context-route-groups span {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-route-schemas {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-route-schemas__head,
+.context-route-schemas__row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.2fr) minmax(66px, 0.45fr) minmax(120px, 1fr) minmax(48px, 0.35fr);
+  min-width: 0;
+}
+
+.context-route-schemas__head {
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.context-route-schemas__row {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.context-route-schemas__row + .context-route-schemas__row {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+}
+
+.context-route-schemas__row--success {
+  background: color-mix(in srgb, var(--color-success) 4%, transparent);
+}
+
+.context-route-schemas__row--warning {
+  background: color-mix(in srgb, var(--color-warning) 6%, transparent);
+}
+
+.context-route-schemas span {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-request-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.context-request-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.context-request-tabs button.active {
+  border-color: color-mix(in srgb, var(--color-accent) 58%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--surface-inset));
+  color: var(--color-accent);
+}
+
+.context-request-tabs span,
+.context-request-tabs small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-request-tabs small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.context-request-panel {
+  display: grid;
+  min-height: 280px;
+  min-width: 0;
+}
+
+.context-request-json {
+  min-height: 280px;
+  max-height: min(50vh, 620px);
   margin: 0;
   overflow: auto;
-  padding: 9px;
+  padding: 10px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-2);
   background: var(--surface-inset);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.context-request-empty {
+  min-height: 240px;
+}
+
+.context-segment-map {
+  display: grid;
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-segment-map__head,
+.context-segment-map__row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.6fr) 70px 58px 66px 68px 70px minmax(88px, 1fr) 42px;
+  align-items: center;
+  min-width: 700px;
+}
+
+.context-segment-map__head {
+  min-height: 30px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.context-segment-map__row {
+  min-height: 42px;
+  padding: 0 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.context-segment-map__row:last-child {
+  border-bottom: 0;
+}
+
+.context-segment-map__row:hover,
+.context-segment-map__row--selected {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.context-segment-map__row--warning {
+  box-shadow: inset 3px 0 0 var(--color-warning);
+}
+
+.context-segment-map__row--danger {
+  box-shadow: inset 3px 0 0 var(--color-danger);
+}
+
+.context-segment-map__row--success {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-success) 62%, transparent);
+}
+
+.context-segment-map__main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.context-segment-map__main strong,
+.context-segment-map__main small,
+.context-segment-map__row > span,
+.context-segment-map__row > div:not(.context-segment-map__main) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-segment-map__main strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.context-segment-map__main small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.context-segment-map__risk {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.context-map-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.context-map-actions__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-1);
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.context-map-actions__button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-accent) 44%, transparent);
+  color: var(--color-accent);
+}
+
+.context-map-actions__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.context-segment-map__empty-action {
+  color: var(--text-muted);
+}
+
+.context-range-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(220px, 0.7fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-range-map {
+  display: grid;
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-range-map__head,
+.context-range-map__row {
+  display: grid;
+  grid-template-columns: minmax(146px, 1.45fr) 60px 56px 66px 70px 76px 42px;
+  align-items: center;
+  min-width: 590px;
+}
+
+.context-range-map__head {
+  min-height: 30px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.context-range-map__row {
+  min-height: 42px;
+  padding: 0 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.context-range-map__row:last-child {
+  border-bottom: 0;
+}
+
+.context-range-map__row:hover,
+.context-range-map__row--selected {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.context-range-map__row--warning {
+  box-shadow: inset 3px 0 0 var(--color-warning);
+}
+
+.context-range-map__row--danger {
+  box-shadow: inset 3px 0 0 var(--color-danger);
+}
+
+.context-range-map__row--success {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-success) 62%, transparent);
+}
+
+.context-range-map__main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.context-range-map__main strong,
+.context-range-map__main small,
+.context-range-map__row > span,
+.context-range-map__row > div:not(.context-range-map__main) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-range-map__main strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.context-range-map__main small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.context-range-map__status {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.context-range-detail {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-range-detail__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-range-detail__head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-range-detail p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.context-range-detail dl {
+  gap: 6px;
+}
+
+.context-range-detail dl div {
+  grid-template-columns: minmax(88px, 0.52fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.context-range-detail dt,
+.context-range-detail dd {
+  font-size: 11px;
+}
+
+.context-snapshot-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.context-snapshot-diagnostic {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-snapshot-diagnostic span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.context-snapshot-diagnostic strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-snapshot-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.context-snapshot-preview-head span {
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+
+.context-snapshot-preview {
+  min-height: 280px;
 }
 
 .context-xml-viewer {
   --xml-indent: 18px;
   display: grid;
-  max-height: min(62vh, 680px);
+  min-height: 420px;
+  max-height: min(72vh, 760px);
   overflow: auto;
   padding: 6px 0;
   border: 1px solid var(--border-subtle);
@@ -5020,6 +7254,19 @@ dd {
 
 .context-xml-line-row:hover {
   background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.context-xml-line-row--selected {
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+.context-xml-line-row--selected-descendant {
+  background: color-mix(in srgb, var(--color-accent) 5%, transparent);
+}
+
+.context-xml-line-row--selected .context-xml-line-number {
+  color: var(--color-accent);
 }
 
 .context-xml-line-row--menu {

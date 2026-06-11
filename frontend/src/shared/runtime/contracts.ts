@@ -455,6 +455,7 @@ export interface OperationsOrchestrationReadModel extends OperationsPageBase {
   stuck_runs: UiTableSection;
   policy_limits: UiKeyValueSection;
   run_queue: UiTableSection;
+  execution_chains: UiTableSection;
   lane_locks: UiTableSection;
   executor_overview: UiTableSection;
   ingress_queue: UiTableSection;

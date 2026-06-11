@@ -145,6 +145,11 @@ class BrowserStateTestCase(unittest.TestCase):
                     snapshot_format="interactive",
                     frame_path=(),
                     label="Submit",
+                    frame_id="frame-main",
+                    backend_node_id=42,
+                    bbox={"x": 12, "y": 34, "width": 100, "height": 24},
+                    evidence=("native-control", "hit-test"),
+                    confidence=0.91,
                 ),
                 BrowserStoredRef(
                     ref="r2",
@@ -169,3 +174,11 @@ class BrowserStateTestCase(unittest.TestCase):
 
             self.assertEqual(loaded, refs)
             self.assertEqual(loaded[0].scope_selector, "#panel-a")
+            self.assertEqual(loaded[0].frame_id, "frame-main")
+            self.assertEqual(loaded[0].backend_node_id, 42)
+            self.assertEqual(
+                loaded[0].bbox,
+                {"x": 12.0, "y": 34.0, "width": 100.0, "height": 24.0},
+            )
+            self.assertEqual(loaded[0].evidence, ("native-control", "hit-test"))
+            self.assertEqual(loaded[0].confidence, 0.91)

@@ -102,7 +102,18 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             )
             list_result = self.runner.invoke(
                 app,
-                ["orchestration", "list", "--status", "queued"],
+                ["orchestration", "list", "--status", "queued", "--limit", "1"],
+                env=self.env,
+            )
+            baseline_result = self.runner.invoke(
+                app,
+                [
+                    "orchestration",
+                    "baseline",
+                    intake_payload["id"],
+                    "--task-label",
+                    "cli baseline smoke",
+                ],
                 env=self.env,
             )
 
@@ -113,6 +124,15 @@ class OrchestrationCliTestCase(CliModuleTestCase):
                 [item["id"] for item in json.loads(list_result.stdout)],
                 [intake_payload["id"]],
             )
+            self.assertEqual(baseline_result.exit_code, 0)
+            baseline_payload = json.loads(baseline_result.stdout)
+            self.assertEqual(baseline_payload["task"], "cli baseline smoke")
+            self.assertEqual(baseline_payload["run_id"], intake_payload["id"])
+            self.assertEqual(baseline_payload["status"], "queued")
+            self.assertEqual(baseline_payload["orchestration_steps"], 2)
+            self.assertEqual(baseline_payload["llm_calls"], 0)
+            self.assertEqual(baseline_payload["tool_calls"], 0)
+            self.assertEqual(baseline_payload["completed_cancelled_failed"], "non_terminal")
 
     def test_orchestration_executor_and_scheduler_commands_drive_run_lifecycle(self) -> None:
             llm_result = self.runner.invoke(
@@ -652,7 +672,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             self.assertEqual(result.exit_code, 0)
             self.assertIn("assign-next-assignment", result.stdout)
             self.assertIn("process-next-request", result.stdout)
-            self.assertIn("process-next-signal", result.stdout)
+            self.assertIn("process-next-continuation", result.stdout)
             self.assertIn("run-scheduler", result.stdout)
             self.assertIn("resume", result.stdout)
             self.assertNotIn("claim-next", result.stdout)
@@ -689,7 +709,7 @@ class OrchestrationCliTestCase(CliModuleTestCase):
             self.assertNotIn("fail\n", result.stdout)
             self.assertNotIn("wait-tool", result.stdout)
             self.assertNotIn("process-next-request", result.stdout)
-            self.assertNotIn("process-next-signal", result.stdout)
+            self.assertNotIn("process-next-continuation", result.stdout)
             self.assertNotIn("run-scheduler", result.stdout)
             self.assertNotIn("resume", result.stdout)
 

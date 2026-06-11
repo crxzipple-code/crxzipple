@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    PromptSurfacePreview,
+    RunPromptInputPreview,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedToolSet,
@@ -27,7 +27,7 @@ class OrchestrationInspectionService:
     engine: OrchestrationEngine | None
     get_run: Callable[[str], OrchestrationRun]
 
-    def preview_prompt(self, run_id: str) -> PromptSurfacePreview:
+    def preview_prompt(self, run_id: str) -> RunPromptInputPreview:
         engine = self._require_engine(
             "Prompt surface preview requires an orchestration engine.",
         )
@@ -59,7 +59,7 @@ class OrchestrationInspectionService:
         engine = self._require_engine(
             "Memory flush transcript configuration requires an orchestration engine.",
         )
-        engine.prompt_surface.memory_flush_transcript_max_chars = max_chars
+        engine.prompt_inputs.memory_flush_transcript_max_chars = max_chars
 
     def _require_engine(self, message: str) -> OrchestrationEngine:
         if self.engine is None:

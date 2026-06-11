@@ -1,5 +1,8 @@
 kind: local_package
 namespace: debug
+prompt:
+  title: Debug Utilities
+  summary: Local diagnostic tools for echo, timing, and runtime verification.
 capabilities:
   - bounded_network.http
 local_tools:

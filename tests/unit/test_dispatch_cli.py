@@ -18,7 +18,7 @@ class DispatchCliTestCase(CliModuleTestCase):
                 [
                     "dispatch",
                     "create",
-                    "orchestration_run",
+                    "orchestration_step",
                     "run-cli-1",
                     "--task-id",
                     "dispatch-cli-1",
@@ -55,7 +55,7 @@ class DispatchCliTestCase(CliModuleTestCase):
                     "dispatch",
                     "claim-next",
                     "--owner-kind",
-                    "orchestration_run",
+                    "orchestration_step",
                     "--worker-id",
                     "cli-worker",
                     "--lease-seconds",
@@ -131,7 +131,7 @@ class DispatchCliTestCase(CliModuleTestCase):
                     "--status",
                     "queued",
                     "--owner-kind",
-                    "orchestration_run",
+                    "orchestration_step",
                 ],
                 env=self.env,
             )
@@ -165,7 +165,7 @@ class DispatchCliTestCase(CliModuleTestCase):
             second = dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="dispatch-cli-orch",
-                    owner_kind="orchestration_run",
+                    owner_kind="orchestration_step",
                     owner_id="orch-run-cli",
                 ),
             )
@@ -177,7 +177,7 @@ class DispatchCliTestCase(CliModuleTestCase):
                 lease_seconds=5,
             )
             dispatch_service.claim_next_queued_task(
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 worker_id="orch-worker",
                 lease_seconds=5,
             )

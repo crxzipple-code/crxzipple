@@ -49,7 +49,12 @@ from tests.unit.support import (
     openapi_fixture_path,
 )
 from tests.unit.orchestration_test_support import (
+    _enable_tool_schema_call,
+    _expand_tool_bundle_call,
+    _has_tool_call_message,
+    _has_tool_message,
     assign_next_orchestration_assignment,
+    execution_tool_run_ids_for_run,
     process_next_orchestration_assignment,
 )
 from tests.unit.tool_catalog_seed import seed_catalog_tool
@@ -136,12 +141,38 @@ class _FakeInlineToolAdapter:
 
 
 class _FakeEffectApprovalAdapter:
+    def __init__(self) -> None:
+        self._expanded = False
+        self._schema_enabled = False
+        self._echo_requested = False
+
     def invoke(self, _profile, request):  # noqa: ANN001
-        tool_messages = [
-            message for message in request.messages if message.role is LlmMessageRole.TOOL
-        ]
-        echo_messages = [message for message in tool_messages if message.name == "echo"]
-        if not tool_messages:
+        if not self._expanded:
+            self._expanded = True
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if not self._schema_enabled:
+            self._schema_enabled = True
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _enable_tool_schema_call(
+                            call_id="call-enable-echo",
+                            tool_id="echo",
+                        ),
+                    ),
+                ),
+            )
+        if not self._echo_requested:
+            self._echo_requested = True
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -153,7 +184,7 @@ class _FakeEffectApprovalAdapter:
                     ),
                 ),
             )
-        if not echo_messages:
+        if not _has_tool_message(request, "echo"):
             raise AssertionError("approval replay should provide an echo tool result")
         return LlmAdapterResponse(result=LlmResult(text="approval flow complete"))
 
@@ -306,6 +337,7 @@ __all__ = [
     "AgentProfileSettings",
     "AppKey",
     "assign_next_orchestration_assignment",
+    "execution_tool_run_ids_for_run",
     "FakeCdpServer",
     "FakePlaywrightCdpSessionPool",
     "HttpModuleTestCase",

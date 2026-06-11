@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -184,8 +185,8 @@ def snapshot_handler(container):  # noqa: ANN001, ANN201
     return create_browser_snapshot_handler(_tool_deps(container))
 
 
-def page_action_handler(container):  # noqa: ANN001, ANN201
-    return create_browser_page_action_handler(_tool_deps(container))
+def page_action_handler(container, *, tool_id="browser.action"):  # noqa: ANN001, ANN201
+    return create_browser_page_action_handler(_tool_deps(container), tool_id=tool_id)
 
 
 def network_handler(container, *, tool_id="browser.network"):  # noqa: ANN001, ANN201
@@ -1065,10 +1066,13 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         with self.assertRaises(BrowserValidationError) as exc_info:
             asyncio.run(handler({"kind": "wait", "profile": "ghost"}))
 
-        self.assertEqual(
-            str(exc_info.exception),
-            "Browser profile 'ghost' is not configured.",
+        message = str(exc_info.exception)
+        self.assertIn("Browser profile 'ghost' is not configured.", message)
+        self.assertIn(
+            "omit the profile argument to use the configured browser default profile 'crxzipple'",
+            message,
         )
+        self.assertIn("Configured profiles: crxzipple.", message)
 
     def test_browser_tool_result_metadata_includes_runtime_generation(self) -> None:
         class _Store:
@@ -2195,6 +2199,21 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
 
         cases = [
             (
+                "browser.network.inspect",
+                {
+                    "target_id": "tab-1",
+                    "limit": 25,
+                    "include_navigation": False,
+                    "include_cdp_tree": True,
+                },
+                "network-inspect",
+                {
+                    "limit": 25,
+                    "include_navigation": False,
+                    "include_cdp_tree": True,
+                },
+            ),
+            (
                 "browser.network.start_capture",
                 {"target_id": "tab-1", "capture_id": "cap-1", "max_requests": 250, "include_headers": True},
                 "network-start-capture",
@@ -2310,6 +2329,348 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         with self.assertRaises(BrowserValidationError):
             asyncio.run(handler({"kind": "cdp-raw", "method": "Network.enable"}))
 
+    def test_browser_investigation_fixture_supports_runtime_script_network_route(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(  # noqa: ANN201
+                self,
+                *,
+                profile_name,
+                kind,
+                target_id=None,
+                ref=None,
+                selector=None,
+                payload=None,
+                timeout_ms=None,
+            ):
+                del profile_name, ref, selector, timeout_ms
+                calls.append({"kind": kind, "target_id": target_id, "payload": dict(payload or {})})
+                if kind == "runtime-inspect":
+                    result = {
+                        "kind": "runtime-inspect",
+                        "url": "https://airline.example.test/home",
+                        "title": "Fixture Airline",
+                        "page_state": {
+                            "ready_state": "complete",
+                            "visibility_state": "visible",
+                            "focused": True,
+                            "online": True,
+                        },
+                        "frameworks": {"detected": ["nuxt"]},
+                        "runtime_globals": ["$nuxt"],
+                        "globals": [
+                            {
+                                "name": "$nuxt",
+                                "exists": True,
+                                "type": "object",
+                                "constructor_name": "Vue",
+                                "keys": ["$http", "$route"],
+                            },
+                        ],
+                        "route_hints": [
+                            {
+                                "source": "$nuxt.$route",
+                                "path": "/zh/cny/home",
+                            },
+                        ],
+                    }
+                elif kind == "script-find-request":
+                    result = {
+                        "kind": "script-find-request",
+                        "request": {
+                            "url": "/portal/v3/shopping/briefInfo",
+                            "path": "/portal/v3/shopping/briefInfo",
+                            "method": "POST",
+                        },
+                        "match_count": 1,
+                        "candidate_count": 1,
+                        "api_client_path": "$nuxt.$http.shopping.getShopping",
+                        "candidates": [
+                            {
+                                "script": {
+                                    "script_id": "script-shopping",
+                                    "url": "https://airline.example.test/_nuxt/shopping.js",
+                                },
+                                "score": 980,
+                                "source_chars": 4096,
+                                "matches": [
+                                    {
+                                        "field": "source",
+                                        "term": "briefInfo",
+                                        "line_number": 42,
+                                        "column": 19,
+                                        "snippet": (
+                                            "getShopping(payload) { "
+                                            "return post('/portal/v3/shopping/briefInfo', payload) }"
+                                        ),
+                                    },
+                                ],
+                            },
+                        ],
+                    }
+                else:
+                    raise AssertionError(f"unexpected page action kind: {kind}")
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": kind},
+                        "value": {"result": result},
+                    },
+                    runtime_metadata={},
+                )
+
+            def execute_control(self, **kwargs):  # noqa: ANN003, ANN201
+                raise AssertionError(f"unexpected control call: {kwargs}")
+
+        class _NetworkApplication(_ToolApplication):
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                kind = kwargs["kind"]
+                payload = dict(kwargs.get("payload") or {})
+                if kind != "network-replay-request":
+                    return super().execute_page_action(**kwargs)
+                calls.append(
+                    {
+                        "kind": kind,
+                        "target_id": kwargs.get("target_id"),
+                        "payload": payload,
+                    },
+                )
+                result = {
+                    "kind": "network-replay-request",
+                    "url": "https://airline.example.test/portal/v3/shopping/briefInfo",
+                    "status": 200,
+                    "mime_type": "application/json",
+                    "source_capture_id": payload.get("capture_id"),
+                    "source_request_id": payload.get("request_id"),
+                    "replay_suitability": {
+                        "level": "safe_with_overrides",
+                        "gates": {
+                            "mutating_method": {
+                                "required": True,
+                                "method": "POST",
+                                "allowed": True,
+                            },
+                            "captured_body": {"available": True},
+                        },
+                    },
+                    "request_diff": {
+                        "changed_fields": ["json.depCityCode", "json.arrCityCode", "json.depDate"],
+                        "body_source": "override_json",
+                        "source": {"body": {"state": "captured"}},
+                    },
+                    "response_summary": {
+                        "ok": True,
+                        "status": 200,
+                        "mime_type": "application/json",
+                        "size_bytes": 126,
+                        "truncated": False,
+                    },
+                    "body": json.dumps(
+                        {
+                            "data": {
+                                "flightItems": [
+                                    {
+                                        "flightInfos": [
+                                            {
+                                                "flightNo": "MU5815",
+                                                "flightSort": {
+                                                    "price": 700,
+                                                    "priceWithTax": 750,
+                                                },
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    ),
+                    "size_bytes": 126,
+                    "truncated": False,
+                }
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": kind},
+                        "value": {"result": result},
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_NetworkApplication(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+
+        runtime_handler = page_action_handler(container, tool_id="browser.runtime.inspect")
+        script_handler = page_action_handler(container, tool_id="browser.script.find_request")
+        replay_handler = network_handler(container, tool_id="browser.network.replay_request")
+        assert runtime_handler is not None
+        assert script_handler is not None
+        assert replay_handler is not None
+
+        runtime_result = asyncio.run(
+            runtime_handler(
+                {
+                    "kind": "runtime-inspect",
+                    "target_id": "tab-flight",
+                    "global_names": ["$nuxt"],
+                },
+            ),
+        )
+        script_result = asyncio.run(
+            script_handler(
+                {
+                    "kind": "script-find-request",
+                    "target_id": "tab-flight",
+                    "path": "/portal/v3/shopping/briefInfo",
+                    "method": "POST",
+                    "search_terms": ["briefInfo", "getShopping"],
+                },
+            ),
+        )
+        replay_result = asyncio.run(
+            replay_handler(
+                {
+                    "target_id": "tab-flight",
+                    "capture_id": "cap-flight",
+                    "request_id": "req-brief-info",
+                    "allow_mutating": True,
+                    "json": {
+                        "depCityCode": "KMG",
+                        "arrCityCode": "BJS",
+                        "depDate": "2026-06-05",
+                    },
+                },
+            ),
+        )
+
+        self.assertEqual(
+            [item["kind"] for item in calls],
+            ["runtime-inspect", "script-find-request", "network-replay-request"],
+        )
+        self.assertLessEqual(len(calls), 3)
+        runtime_text = "\n".join(
+            block["text"] for block in runtime_result.content if block.get("type") == "text"
+        )
+        script_text = "\n".join(
+            block["text"] for block in script_result.content if block.get("type") == "text"
+        )
+        replay_text = "\n".join(
+            block["text"] for block in replay_result.content if block.get("type") == "text"
+        )
+        self.assertIn("$nuxt", runtime_text)
+        self.assertIn("Framework signals: nuxt", runtime_text)
+        self.assertIn("Evidence path: runtime_and_code", runtime_text)
+        self.assertEqual(
+            runtime_result.metadata["browser_evidence"]["evidence_path_key"],
+            "runtime_and_code",
+        )
+        self.assertEqual(runtime_result.metadata["browser_evidence"]["runtime_globals"], ["$nuxt"])
+        self.assertIn("/portal/v3/shopping/briefInfo", script_text)
+        self.assertIn("getShopping(payload)", script_text)
+        self.assertIn("Evidence path: runtime_and_code", script_text)
+        self.assertEqual(
+            script_result.metadata["browser_evidence"]["evidence_path_key"],
+            "runtime_and_code",
+        )
+        self.assertEqual(
+            script_result.metadata["browser_evidence"]["api_client_path"],
+            "$nuxt.$http.shopping.getShopping",
+        )
+        self.assertIn("Replay suitability", replay_text)
+        self.assertIn("MU5815", replay_text)
+        self.assertIn("Evidence path: network_truth", replay_text)
+        self.assertEqual(
+            replay_result.metadata["browser_evidence"]["evidence_path_key"],
+            "network_truth",
+        )
+        self.assertEqual(
+            replay_result.metadata["browser_evidence"]["source_request_id"],
+            "req-brief-info",
+        )
+        self.assertEqual(
+            replay_result.metadata["browser_evidence"]["request_diff_changed_fields"],
+            ["json.depCityCode", "json.arrCityCode", "json.depDate"],
+        )
+
+    def test_browser_network_inspect_uses_compact_sanitized_summary(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "network-inspect"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "network-inspect"},
+                        "value": {
+                            "result": {
+                                "kind": "network-inspect",
+                                "url": "https://example.com/app?token=secret",
+                                "performance": {
+                                    "entries": [
+                                        {
+                                            "name": "https://api.example.com/v1/search?token=secret",
+                                            "entry_type": "resource",
+                                            "duration": 42,
+                                        },
+                                    ],
+                                },
+                                "cdp": {
+                                    "metrics": {"metrics": [{"name": "TaskDuration"}]},
+                                    "resource_tree": {
+                                        "frame_count": 1,
+                                        "resource_count": 2,
+                                        "types": {"Image": 1, "Script": 1},
+                                        "resources": [
+                                            {
+                                                "url": "https://api.example.com/v1/search?token=secret",
+                                                "type": "Script",
+                                            },
+                                            {
+                                                "url": "data:image/png;base64,[omitted 2488 chars]",
+                                                "type": "Image",
+                                            },
+                                        ],
+                                        "truncated": True,
+                                        "raw_omitted": True,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = network_handler(container, tool_id="browser.network.inspect")
+        assert handler is not None
+
+        result = asyncio.run(handler({"target_id": "tab-1"}))
+
+        summary = result.content[0]["text"]
+        self.assertIn("Network inspection:", summary)
+        self.assertIn("api.example.com/v1/search", summary)
+        self.assertIn("data:image/png;base64,[omitted 2488 chars]", summary)
+        self.assertNotIn("[omitted 20 chars]", summary)
+        self.assertNotIn("token=secret", summary)
+        self.assertEqual(
+            result.details["value"]["result"]["performance"]["entries"][0]["name"],
+            "https://api.example.com/v1/search?token=secret",
+        )
+
     def test_browser_network_list_requests_uses_compact_top_level_summary(self) -> None:
         class _Store:
             def load(self):  # noqa: ANN201
@@ -2371,6 +2732,127 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
             "detail-only",
         )
 
+    def test_browser_network_start_capture_surfaces_capture_id_next_step(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "network-start-capture"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "network-start-capture"},
+                        "value": {
+                            "result": {
+                                "kind": "network-start-capture",
+                                "capture": {
+                                    "capture_id": "cap-generated",
+                                    "target_id": "tab-1",
+                                    "status": "active",
+                                },
+                                "request_count": 0,
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = network_handler(container, tool_id="browser.network.start_capture")
+        assert handler is not None
+
+        result = asyncio.run(handler({"target_id": "tab-1"}))
+
+        summary = result.content[0]["text"]
+        self.assertIn("Network capture started:", summary)
+        self.assertIn("- Capture: cap-generated", summary)
+        self.assertIn("- Use capture_id: cap-generated", summary)
+        self.assertIn("trigger the page action or runtime probe", summary)
+        self.assertIn("browser.network.list_requests", summary)
+
+    def test_browser_code_search_omits_large_snippets_from_top_level_content(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "code-search"
+                long_snippet = "1: " + ("const x = 'flight';" * 140)
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "code-search"},
+                        "value": {
+                            "result": {
+                                "kind": "code-search",
+                                "query": "flight",
+                                "match_count": 3,
+                                "matched_scripts": 1,
+                                "matches": [
+                                    {
+                                        "script_id": "script-big",
+                                        "url": "https://example.test/app.js",
+                                        "source_chars": 2_000_000,
+                                        "matches": [
+                                            {
+                                                "field": "source",
+                                                "line_number": 1,
+                                                "column": 9,
+                                                "snippet": long_snippet,
+                                            },
+                                            {
+                                                "field": "source",
+                                                "line_number": 1,
+                                                "column": 40,
+                                                "snippet": long_snippet,
+                                            },
+                                            {
+                                                "field": "source",
+                                                "line_number": 1,
+                                                "column": 80,
+                                                "snippet": long_snippet,
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container, tool_id="browser.code.search")
+        assert handler is not None
+
+        result = asyncio.run(handler({"kind": "code-search", "query": "flight"}))
+
+        summary = result.content[0]["text"]
+        self.assertIn("Browser code search:", summary)
+        self.assertIn("script-big", summary)
+        self.assertIn("script_id=script-big", summary)
+        self.assertIn("line 1, column 9", summary)
+        self.assertIn("browser.evaluate", summary)
+        self.assertIn("stop broad searching", summary)
+        self.assertIn("more matches in details", summary)
+        self.assertLess(len(summary), 1200)
+        self.assertNotIn("const x = 'flight';" * 20, summary)
+        self.assertIn(
+            "const x = 'flight';" * 20,
+            result.details["value"]["result"]["matches"][0]["matches"][0]["snippet"],
+        )
+
     def test_browser_network_response_body_omits_large_body_from_top_level_content(self) -> None:
         large_body = "{\"items\":[" + ",".join('"detail-only"' for _ in range(300)) + "]}"
 
@@ -2416,6 +2898,493 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
         self.assertNotIn("detail-only", summary)
         self.assertNotIn("token=secret", summary)
         self.assertEqual(result.details["value"]["result"]["body"], large_body)
+
+    def test_browser_network_fetch_large_body_is_written_as_artifact(self) -> None:
+        large_body = "{\"items\":[" + ",".join('"detail-only"' for _ in range(300)) + "]}"
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "network-fetch-as-page"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "network-fetch-as-page"},
+                        "value": {
+                            "result": {
+                                "kind": "network-fetch-as-page",
+                                "url": "https://api.example.com/v1/search?token=secret",
+                                "status": 200,
+                                "mime_type": "application/json",
+                                "size_bytes": len(large_body),
+                                "body": large_body,
+                                "body_preview": "{\"items\":",
+                                "body_omitted": False,
+                                "response_summary": {
+                                    "ok": True,
+                                    "status": 200,
+                                    "mime_type": "application/json",
+                                    "size_bytes": len(large_body),
+                                },
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_service = ArtifactApplicationService(
+                FilesystemArtifactStore(temp_dir),
+            )
+            container = SimpleNamespace(
+                browser_tool_application=_ToolApplication(),
+                browser_system_config_store=_Store(),
+                artifact_service=artifact_service,
+                settings=SimpleNamespace(browser_enabled=True),
+            )
+            handler = network_handler(container, tool_id="browser.network.fetch_as_page")
+            assert handler is not None
+
+            result = asyncio.run(handler({"url": "/v1/search"}))
+
+            summary = result.content[0]["text"]
+            self.assertIn("Network response body:", summary)
+            self.assertNotIn("detail-only", summary)
+            file_block = result.content[1]
+            self.assertEqual(file_block["type"], "file_ref")
+            artifact = artifact_service.get_artifact(file_block["artifact_id"])
+            self.assertEqual(artifact.mime_type, "application/json")
+            self.assertTrue(artifact.name.endswith(".json"))
+            binary = artifact_service.resolve_variant(artifact.id)
+            self.assertIn("detail-only", binary.path.read_text(encoding="utf-8"))
+            result_payload = result.details["value"]["result"]
+            self.assertNotIn("body", result_payload)
+            self.assertTrue(result_payload["body_removed_from_details"])
+            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact.id])
+            self.assertEqual(result.metadata["artifact_ids"], [artifact.id])
+
+    def test_browser_script_inspect_large_preview_is_written_as_artifact(self) -> None:
+        large_preview = "\n".join(f"{line}: const value_{line} = 'detail-only';" for line in range(1, 260))
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "script-inspect"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "script-inspect"},
+                        "value": {
+                            "result": {
+                                "kind": "script-inspect",
+                                "script_id": "script-1",
+                                "script": {
+                                    "script_id": "script-1",
+                                    "url": "https://example.com/assets/app.js",
+                                },
+                                "source_chars": len(large_preview),
+                                "start_line": 1,
+                                "end_line": 259,
+                                "source_preview": large_preview,
+                                "truncated": True,
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_service = ArtifactApplicationService(
+                FilesystemArtifactStore(temp_dir),
+            )
+            container = SimpleNamespace(
+                browser_tool_application=_ToolApplication(),
+                browser_system_config_store=_Store(),
+                artifact_service=artifact_service,
+                settings=SimpleNamespace(browser_enabled=True),
+            )
+            handler = page_action_handler(container)
+            assert handler is not None
+
+            result = asyncio.run(handler({"kind": "script-inspect", "script_id": "script-1"}))
+
+            summary = result.content[0]["text"]
+            self.assertIn("Browser script inspect:", summary)
+            self.assertIn("Source preview: omitted from top-level content", summary)
+            self.assertNotIn("detail-only", summary)
+            file_block = result.content[1]
+            self.assertEqual(file_block["type"], "file_ref")
+            artifact = artifact_service.get_artifact(file_block["artifact_id"])
+            self.assertEqual(artifact.mime_type, "application/javascript")
+            binary = artifact_service.resolve_variant(artifact.id)
+            self.assertIn("detail-only", binary.path.read_text(encoding="utf-8"))
+            result_payload = result.details["value"]["result"]
+            self.assertNotIn("source_preview", result_payload)
+            self.assertTrue(result_payload["source_preview_removed_from_details"])
+            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact.id])
+            self.assertEqual(result.metadata["artifact_ids"], [artifact.id])
+
+    def test_browser_script_extract_request_formats_endpoint_candidates(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "script-extract-request"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "script-extract-request"},
+                        "value": {
+                            "result": {
+                                "kind": "script-extract-request",
+                                "script_id": "script-1",
+                                "script": {
+                                    "script_id": "script-1",
+                                    "url": "https://example.com/assets/app.js",
+                                },
+                                "source_chars": 2048,
+                                "start_line": 12,
+                                "end_line": 12,
+                                "start_column": 120,
+                                "end_column": 960,
+                                "focus_terms": ["getShopping"],
+                                "candidate_count": 1,
+                                "candidates": [
+                                    {
+                                        "endpoint": "/portal/v3/shopping/briefInfo",
+                                        "endpoint_kind": "absolute_path",
+                                        "line_number": 12,
+                                        "column": 320,
+                                        "method_candidates": ["POST"],
+                                        "client_method_candidates": ["http.post"],
+                                        "payload_key_candidates": ["depCityCode", "arrCityCode"],
+                                        "confidence": "high",
+                                        "evidence_preview": "return http.post('/portal/v3/shopping/briefInfo', {depCityCode: payload.depCityCode});",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            artifact_service=None,
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container)
+        assert handler is not None
+
+        result = asyncio.run(handler({"kind": "script-extract-request", "script_id": "script-1"}))
+
+        summary = result.content[0]["text"]
+        self.assertIn("Browser script request extract:", summary)
+        self.assertIn("/portal/v3/shopping/briefInfo", summary)
+        self.assertIn("Method hints: POST", summary)
+        self.assertIn("Payload keys: depCityCode, arrCityCode", summary)
+        self.assertIn("one JSON object argument", summary)
+
+    def test_browser_runtime_probe_client_formats_client_method(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "runtime-probe-client"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "runtime-probe-client"},
+                        "value": {
+                            "result": {
+                                "kind": "runtime-probe-client",
+                                "ok": True,
+                                "object_path": "$nuxt.$http.shopping",
+                                "method_name": "getShopping",
+                                "object": {
+                                    "path": "$nuxt.$http.shopping",
+                                    "exists": True,
+                                    "type": "object",
+                                    "constructor_name": "Object",
+                                    "keys": ["getShopping", "getFareDetail"],
+                                    "key_count": 2,
+                                    "methods": [
+                                        {
+                                            "name": "getShopping",
+                                            "path": "$nuxt.$http.shopping.getShopping",
+                                            "arity": 1,
+                                        },
+                                    ],
+                                },
+                                "method": {
+                                    "path": "$nuxt.$http.shopping.getShopping",
+                                    "exists": True,
+                                    "type": "function",
+                                    "constructor_name": "Function",
+                                    "callable": True,
+                                    "function_name": "getShopping",
+                                    "arity": 1,
+                                    "endpoint_hint": "/portal/v3/shopping/briefInfo",
+                                    "payload_key_candidates": [
+                                        "depCityCode",
+                                        "arrCityCode",
+                                        "depDate",
+                                    ],
+                                    "source_preview": "function getShopping(payload) { return post('/portal/v3/shopping/briefInfo', payload); }",
+                                },
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            artifact_service=None,
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "runtime-probe-client",
+                    "object_path": "$nuxt.$http.shopping",
+                    "method_name": "getShopping",
+                }
+            )
+        )
+
+        summary = result.content[0]["text"]
+        self.assertIn("Browser runtime client probe:", summary)
+        self.assertIn("Object path: $nuxt.$http.shopping", summary)
+        self.assertIn("Methods: getShopping(1)", summary)
+        self.assertIn("Function: callable, arity=1", summary)
+        self.assertIn("Endpoint hint: /portal/v3/shopping/briefInfo", summary)
+        self.assertIn("Payload key candidates: depCityCode, arrCityCode, depDate", summary)
+        self.assertIn("browser.runtime.call_client", summary)
+        self.assertIn("Suggested argument keys: depCityCode, arrCityCode, depDate", summary)
+        self.assertIn("primary flight-shopping list method", summary)
+        self.assertIn("depCityCode, arrCityCode, depDate, routeType", summary)
+        self.assertIn("before sibling methods such as getShoppingAll", summary)
+
+    def test_browser_runtime_call_client_formats_structured_result(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "runtime-call-client"
+                assert kwargs["payload"]["object_path"] == "$nuxt.$http.shopping"
+                assert kwargs["payload"]["method_name"] == "getShopping"
+                assert kwargs["payload"]["arguments"] == [
+                    {"depCityCode": "KMG", "arrCityCode": "BJS"}
+                ]
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "runtime-call-client"},
+                        "value": {
+                            "result": {
+                                "kind": "runtime-call-client",
+                                "ok": True,
+                                "object_path": "$nuxt.$http.shopping",
+                                "method_name": "getShopping",
+                                "argument_count": 1,
+                                "result_ref": "call-1",
+                                "result_type": "object",
+                                "result_overview": {
+                                    "type": "object",
+                                    "key_count": 2,
+                                    "keys": ["resultCode", "data"],
+                                },
+                                "result_insight": {
+                                    "kind": "travel_shopping",
+                                    "result_code": "S200",
+                                    "result_message": "请求成功。",
+                                    "currency_code": "CNY",
+                                    "total_flight_items": 38,
+                                    "summarized_trip_count": 36,
+                                    "unique_trip_count": 35,
+                                    "top_trips_policy": (
+                                        "deduplicated_by_flight_route_time_price"
+                                    ),
+                                    "numeric_unit_policy": "preserve_api_values",
+                                    "top_trips": [
+                                        {
+                                            "route": {
+                                                "dep_code": "KMG",
+                                                "dep_name": "长水国际机场",
+                                                "dep_date": "2026-06-10",
+                                                "dep_time": "11:55",
+                                                "arr_code": "PKX",
+                                                "arr_name": "大兴国际机场",
+                                                "arr_date": "2026-06-10",
+                                                "arr_time": "17:00",
+                                            },
+                                            "flights": ["KN8258"],
+                                            "segments": [
+                                                {
+                                                    "flight": "KN8258",
+                                                    "dep_code": "KMG",
+                                                    "arr_code": "PKX",
+                                                }
+                                            ],
+                                            "sort_price": 640,
+                                            "sort_price_with_tax": 840,
+                                            "cheapest_cabin": {
+                                                "cabinLevelName": "经济舱",
+                                                "lprice": "640",
+                                                "taxPrice": "200.0",
+                                                "totalPrice": "840.0",
+                                            },
+                                        }
+                                    ],
+                                },
+                                "result_json_chars": 240,
+                                "result_truncated": True,
+                                "result_preview": '{"resultCode":"S200","data":{"flightItems":[...]}}',
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            artifact_service=None,
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "runtime-call-client",
+                    "object_path": "$nuxt.$http.shopping",
+                    "method_name": "getShopping",
+                    "arguments": [{"depCityCode": "KMG", "arrCityCode": "BJS"}],
+                }
+            )
+        )
+
+        summary = result.content[0]["text"]
+        self.assertIn("Browser runtime client call:", summary)
+        self.assertIn("Target: $nuxt.$http.shopping.getShopping", summary)
+        self.assertIn("Status: completed", summary)
+        self.assertIn("Result insight: travel shopping data detected", summary)
+        self.assertIn("unique_trips=35", summary)
+        self.assertIn("Top unique trips", summary)
+        self.assertIn("KN8258", summary)
+        self.assertIn("price=640", summary)
+        self.assertIn("total=840", summary)
+        self.assertIn("preserve API numeric values as returned", summary)
+        self.assertIn("answer from the result insight", summary)
+
+    def test_browser_runtime_call_client_guides_empty_travel_payload_retry(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _ToolApplication:
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                assert kwargs["kind"] == "runtime-call-client"
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "command": {"kind": "runtime-call-client"},
+                        "value": {
+                            "result": {
+                                "kind": "runtime-call-client",
+                                "ok": True,
+                                "object_path": "$nuxt.$http.shopping",
+                                "method_name": "getShopping",
+                                "argument_count": 1,
+                                "arguments": [
+                                    {
+                                        "depCityCode": "KMG",
+                                        "arrCityCode": "BJS",
+                                        "depDate": "2026-06-10",
+                                    },
+                                ],
+                                "argument_key_candidates": [
+                                    "depCityCode",
+                                    "arrCityCode",
+                                    "depDate",
+                                ],
+                                "result_type": "object",
+                                "result_overview": {
+                                    "type": "object",
+                                    "key_count": 3,
+                                    "keys": ["resultCode", "resultMsg", "data"],
+                                },
+                                "result_json_chars": 160,
+                                "result_truncated": False,
+                                "result": {
+                                    "resultCode": "232007",
+                                    "resultMsg": "暂未搜索到您所查询的航班信息",
+                                    "data": None,
+                                },
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        container = SimpleNamespace(
+            browser_tool_application=_ToolApplication(),
+            browser_system_config_store=_Store(),
+            artifact_service=None,
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "runtime-call-client",
+                    "object_path": "$nuxt.$http.shopping",
+                    "method_name": "getShopping",
+                    "arguments": [
+                        {
+                            "depCityCode": "KMG",
+                            "arrCityCode": "BJS",
+                            "depDate": "2026-06-10",
+                        }
+                    ],
+                }
+            )
+        )
+
+        summary = result.content[0]["text"]
+        self.assertIn("Argument keys: depCityCode, arrCityCode, depDate", summary)
+        self.assertIn("Result diagnosis: client returned empty data", summary)
+        self.assertIn("routeType, currencyCode, cabinRank, taxFeeFlag, lowestControl", summary)
+        self.assertIn("Suggested retry argument JSON", summary)
+        self.assertIn('"routeType": "OW"', summary)
+        self.assertIn('"currencyCode": "CNY"', summary)
+        self.assertIn('"cabinRank": "F,J,Y"', summary)
+        self.assertIn('"taxFeeFlag": true', summary)
+        self.assertIn('"lowestControl": "1"', summary)
+        self.assertIn("flat one-object payload", summary)
+        self.assertIn("retry browser.runtime.call_client", summary)
 
     def test_browser_action_handler_promotes_evaluate_fn_alias(self) -> None:
         captured_request = None
@@ -2514,8 +3483,77 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
                     "type": "text",
                     "text": 'Evaluate result:\n```json\n{\n  "count": 12,\n  "title": "frog 图片 - Google Search"\n}\n```',
                 },
+                {
+                    "type": "text",
+                    "text": (
+                        "Evidence path: stateful_interaction (Act With Evidence): "
+                        "browser.action.trace, browser.form.inspect, "
+                        "browser.overlay.observe, browser.dom.clickability"
+                    ),
+                },
             ],
         )
+
+    def test_browser_action_handler_surfaces_evaluate_envelope_result_in_content(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return {
+                    "ok": True,
+                    "message": "Executed evaluate via cdp-backed-playwright.",
+                    "command": {
+                        "kind": "evaluate",
+                    },
+                    "value": {
+                        "action_envelope": {
+                            "kind": "evaluate",
+                            "tool_ok": True,
+                            "page_effect_ok": False,
+                            "page_effect_status": "no_observable_change",
+                            "before": {"url": "https://example.test"},
+                            "after": {"url": "https://example.test"},
+                            "changes": {},
+                            "result": {
+                                "nuxt": True,
+                                "shopping_keys": ["getShopping", "getFareDetail"],
+                            },
+                            "next_action": "use-action-trace-or-observe",
+                            "errors": [],
+                        },
+                    },
+                }
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "evaluate",
+                    "script": "() => ({ nuxt: true })",
+                },
+            ),
+        )
+
+        text = result.blocks[0]["text"]
+        self.assertIn("Browser evaluate completed.", text)
+        self.assertIn("Evaluate result:", text)
+        self.assertIn('"getShopping"', text)
+        self.assertIn('"nuxt": true', text)
 
     def test_browser_snapshot_handler_promotes_mode_compact_and_depth(self) -> None:
         captured_request = None
@@ -3086,3 +4124,105 @@ class BrowserToolHttpTestCase(HttpModuleTestCase):
                     },
                 },
             )
+
+    def test_browser_action_handler_persists_action_trace_json_artifact(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                self.request = request
+                return {
+                    "ok": True,
+                    "value": {
+                        "engine": "cdp-backed-playwright",
+                        "result": {
+                            "kind": "action-trace",
+                            "trace_id": "trace/action:1",
+                            "profile_name": "crxzipple",
+                            "target_id": "tab-1",
+                            "action": {"kind": "click", "ok": True},
+                            "diff": {"snapshot_changed": True},
+                            "before": {
+                                "frame_count": 1,
+                                "value": {
+                                    "snapshot": "BEFORE_SECRET_SNAPSHOT" * 200,
+                                    "refs": [{"ref": "r1"}],
+                                },
+                            },
+                            "after": {
+                                "frame_count": 1,
+                                "value": {
+                                    "snapshot": "AFTER_SECRET_SNAPSHOT" * 200,
+                                    "refs": [{"ref": "r2"}, {"ref": "r3"}],
+                                },
+                            },
+                            "network": {"request_count": 0, "requests": []},
+                            "storage": {
+                                "changed": True,
+                                "local": {
+                                    "added_keys": ["flight_search"],
+                                    "removed_keys": [],
+                                    "count_delta": 1,
+                                },
+                                "session": {
+                                    "added_keys": [],
+                                    "removed_keys": [],
+                                    "count_delta": 0,
+                                },
+                            },
+                            "lifecycle": {
+                                "changed": False,
+                                "changed_fields": {},
+                            },
+                            "recommendation": {
+                                "next_action": "continue-from-after-snapshot",
+                            },
+                        },
+                    },
+                }
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return dict(result)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_service = ArtifactApplicationService(
+                FilesystemArtifactStore(temp_dir),
+            )
+            container = SimpleNamespace(
+                browser_facade=_Facade(),
+                browser_result_serializer=_Serializer(),
+                browser_system_config_store=_Store(),
+                artifact_service=artifact_service,
+                settings=SimpleNamespace(browser_enabled=True),
+            )
+            handler = page_action_handler(container)
+            self.assertIsNotNone(handler)
+            assert handler is not None
+
+            result = asyncio.run(handler({"kind": "action-trace", "action": "click"}))
+
+            self.assertEqual(result.content[0]["type"], "text")
+            self.assertIn("Before snapshot: ", result.content[0]["text"])
+            self.assertIn("After snapshot: ", result.content[0]["text"])
+            self.assertIn("chars omitted from text result", result.content[0]["text"])
+            self.assertNotIn("BEFORE_SECRET_SNAPSHOT", result.content[0]["text"])
+            self.assertNotIn("AFTER_SECRET_SNAPSHOT", result.content[0]["text"])
+            trace_block = result.content[1]
+            self.assertEqual(trace_block["type"], "file_ref")
+            artifact_id = trace_block["artifact_id"]
+            artifact = artifact_service.get_artifact(artifact_id)
+            self.assertEqual(artifact.mime_type, "application/json")
+            self.assertEqual(artifact.name, "trace-action-1.json")
+            self.assertEqual(artifact.metadata["attachment_kind"], "action-trace")
+            self.assertEqual(artifact.metadata["trace_id"], "trace/action:1")
+            binary = artifact_service.resolve_variant(artifact_id)
+            payload = json.loads(binary.path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["kind"], "action-trace")
+            self.assertEqual(payload["trace_id"], "trace/action:1")
+            self.assertEqual(payload["storage"]["local"]["added_keys"], ["flight_search"])
+            self.assertEqual(result.metadata["browser_artifact_ids"], [artifact_id])
+            self.assertEqual(result.metadata["artifact_ids"], [artifact_id])

@@ -1856,6 +1856,7 @@ class OrchestrationOperationsResponse(BaseModel):
     stuck_runs: OperationsTableSectionResponse
     policy_limits: OperationsKeyValueSectionResponse
     run_queue: OperationsTableSectionResponse
+    execution_chains: OperationsTableSectionResponse
     lane_locks: OperationsTableSectionResponse
     executor_overview: OperationsTableSectionResponse
     ingress_queue: OperationsTableSectionResponse
@@ -1888,6 +1889,9 @@ class OrchestrationOperationsResponse(BaseModel):
                 view.policy_limits
             ),
             run_queue=OperationsTableSectionResponse.from_value(view.run_queue),
+            execution_chains=OperationsTableSectionResponse.from_value(
+                view.execution_chains,
+            ),
             lane_locks=OperationsTableSectionResponse.from_value(view.lane_locks),
             executor_overview=OperationsTableSectionResponse.from_value(
                 view.executor_overview,

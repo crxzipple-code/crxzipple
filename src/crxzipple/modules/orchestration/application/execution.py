@@ -20,6 +20,9 @@ from crxzipple.modules.orchestration.application.engine import (
 from crxzipple.modules.orchestration.application.maintenance import (
     OrchestrationMaintenanceService,
 )
+from crxzipple.modules.orchestration.application.event_contracts import (
+    ORCHESTRATION_LLM_STEP_COMPLETED_EVENT,
+)
 from crxzipple.modules.orchestration.application.ports import EventPublishManyPort
 from crxzipple.modules.orchestration.domain import (
     OrchestrationRun,
@@ -30,6 +33,7 @@ from crxzipple.shared.orchestration_observation import (
     ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
 )
 from crxzipple.shared.domain.events import Event
+from crxzipple.shared.domain.events import named_event_topic
 from crxzipple.shared.runtime_metrics import (
     RuntimeMetricsRegistry,
     get_runtime_metrics_registry,
@@ -322,6 +326,11 @@ class RunExecutionService:
         ):
             return current_run
         self.clear_prompt_flow_hint(run_id)
+        self._publish_llm_step_completed_event(
+            current_run,
+            outcome,
+            run_id=run_id,
+        )
 
         if outcome.pending_tool_run_ids:
             self.advance_assignment(
@@ -329,14 +338,8 @@ class RunExecutionService:
                     run_id=run_id,
                     worker_id=worker_id,
                     stage=OrchestrationRunStage.TOOL,
-                    metadata={
-                        "llm_invocation_id": outcome.llm_invocation_id,
-                        "tool_call_names": list(outcome.tool_call_names),
-                        "pending_background_tools": [
-                            dict(item) for item in outcome.pending_background_tools
-                        ],
-                        **self._prompt_metadata_from_outcome(outcome),
-                    },
+                    metadata=self._prompt_metadata_from_outcome(outcome),
+                    execution_payload=self._execution_payload_from_outcome(outcome),
                 ),
             )
             return self.wait_assignment_on_tool(
@@ -356,6 +359,7 @@ class RunExecutionService:
                     request=outcome.pending_approval_request,
                     llm_invocation_id=outcome.llm_invocation_id,
                     metadata=self._prompt_metadata_from_outcome(outcome),
+                    execution_payload=self._execution_payload_from_outcome(outcome),
                     reason="approval_requested",
                 ),
             )
@@ -366,18 +370,15 @@ class RunExecutionService:
                     run_id=run_id,
                     worker_id=worker_id,
                     stage=OrchestrationRunStage.TOOL,
-                    metadata={
-                        "llm_invocation_id": outcome.llm_invocation_id,
-                        "tool_call_names": list(outcome.tool_call_names),
-                        **self._prompt_metadata_from_outcome(outcome),
-                    },
+                    metadata=self._prompt_metadata_from_outcome(outcome),
+                    execution_payload=self._execution_payload_from_outcome(outcome),
                 ),
             )
             return None
 
         if (
             self.maintenance_service.is_memory_flush_run(run)
-            and not outcome.inline_tool_run_ids
+            and not outcome.completed_inline_tool_run_ids
         ):
             return self.fail_assignment(
                 FailAssignmentInput(
@@ -400,6 +401,65 @@ class RunExecutionService:
                 worker_id=worker_id,
                 result_payload=self._result_payload_from_outcome(outcome),
                 metadata=self._prompt_metadata_from_outcome(outcome),
+                execution_payload=self._execution_payload_from_outcome(outcome),
+            ),
+        )
+
+    def _publish_llm_step_completed_event(
+        self,
+        run: OrchestrationRun,
+        outcome: EngineAdvanceOutcome,
+        *,
+        run_id: str,
+    ) -> None:
+        if self.events_service is None:
+            return
+        response_text = outcome.response_text or ""
+        payload: dict[str, object] = {
+            "event_name": ORCHESTRATION_LLM_STEP_COMPLETED_EVENT,
+            "run_id": run_id,
+            "session_key": run.session_key,
+            "active_session_id": run.active_session_id,
+            "status": run.status.value,
+            "stage": run.stage.value,
+            "current_step": run.current_step,
+            "llm_invocation_id": outcome.llm_invocation_id,
+            "text_present": bool(response_text.strip()),
+            "text_chars": len(response_text),
+        }
+        if outcome.assistant_message_ids:
+            payload["assistant_message_ids"] = list(outcome.assistant_message_ids)
+        if outcome.assistant_progress_message_ids:
+            payload["assistant_progress_message_ids"] = list(
+                outcome.assistant_progress_message_ids,
+            )
+        if outcome.tool_call_message_ids:
+            payload["tool_call_message_ids"] = list(outcome.tool_call_message_ids)
+        if outcome.tool_result_message_ids:
+            payload["tool_result_message_ids"] = list(outcome.tool_result_message_ids)
+        if outcome.tool_call_names:
+            payload["tool_call_names"] = list(outcome.tool_call_names)
+        trace: dict[str, object] = {
+            "run_id": run_id,
+            "llm_invocation_id": outcome.llm_invocation_id,
+        }
+        trace_id = run.metadata.get("trace_id")
+        if isinstance(trace_id, str) and trace_id.strip():
+            trace["trace_id"] = trace_id.strip()
+        if run.session_key:
+            trace["session_key"] = run.session_key
+        if run.active_session_id:
+            trace["active_session_id"] = run.active_session_id
+        self.events_service.publish_many(
+            (
+                Event(
+                    name=ORCHESTRATION_LLM_STEP_COMPLETED_EVENT,
+                    topic=named_event_topic(ORCHESTRATION_LLM_STEP_COMPLETED_EVENT),
+                    kind="fact",
+                    ordering_key=run_id,
+                    payload=payload,
+                    trace=trace,
+                ),
             ),
         )
 
@@ -465,7 +525,6 @@ class RunExecutionService:
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "llm_id": outcome.llm_id,
-            "llm_invocation_id": outcome.llm_invocation_id,
         }
         if outcome.response_text is not None:
             payload["output_text"] = outcome.response_text
@@ -476,12 +535,38 @@ class RunExecutionService:
             payload["assistant_message_id"] = outcome.assistant_message_ids[-1]
         if outcome.tool_result_message_ids:
             payload["tool_result_message_ids"] = list(outcome.tool_result_message_ids)
-        if outcome.inline_tool_run_ids:
-            payload["inline_tool_run_ids"] = list(outcome.inline_tool_run_ids)
         if outcome.yield_requested:
             payload["yield_requested"] = True
             if outcome.yield_reason is not None:
                 payload["yield_reason"] = outcome.yield_reason
+        return payload
+
+    @staticmethod
+    def _execution_payload_from_outcome(
+        outcome: EngineAdvanceOutcome,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "llm_invocation_id": outcome.llm_invocation_id,
+        }
+        if outcome.tool_call_names:
+            payload["tool_call_names"] = list(outcome.tool_call_names)
+            if outcome.assistant_progress_message_ids:
+                payload["assistant_progress_message_ids"] = list(
+                    outcome.assistant_progress_message_ids,
+                )
+            if outcome.tool_call_message_ids:
+                payload["tool_call_message_ids"] = list(
+                    outcome.tool_call_message_ids,
+                )
+            if outcome.response_text is not None and outcome.response_text.strip():
+                payload["assistant_progress_text"] = outcome.response_text
+        if outcome.tool_run_links:
+            payload["tool_run_links"] = [dict(item) for item in outcome.tool_run_links]
+        transcript_consumption = _transcript_consumption_from_request_metadata(
+            outcome.llm_request_metadata,
+        )
+        if transcript_consumption:
+            payload["llm_transcript_consumption"] = transcript_consumption
         return payload
 
     @staticmethod
@@ -512,6 +597,24 @@ class RunExecutionService:
         if run.status is not OrchestrationRunStatus.RUNNING:
             return True
         return run.worker_id != worker_id
+
+
+def _transcript_consumption_from_request_metadata(
+    request_metadata: dict[str, object],
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key in (
+        "direct_transcript_message_refs",
+        "direct_transcript_sequence_range",
+        "direct_transcript_session_message_count",
+        "direct_tool_protocol_refs",
+        "direct_tool_protocol_call_ids",
+        "current_inbound_ref",
+    ):
+        value = request_metadata.get(key)
+        if value not in (None, "", {}, []):
+            payload[key] = value
+    return payload
 
 
 def _exception_code(exc: Exception, *, default: str) -> str:

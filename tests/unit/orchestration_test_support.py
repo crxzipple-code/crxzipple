@@ -92,9 +92,14 @@ from crxzipple.modules.tool.domain import (
     ToolKind,
     ToolMode,
     ToolParameter,
+    ToolRunResult,
     ToolRunStatus,
 )
-from tests.unit.support import SqliteTestHarness
+from tests.unit.support import (
+    SqliteTestHarness,
+    publish_outbox_events,
+    published_event_bus_events,
+)
 from tests.unit.skill_test_support import write_skill_package as _write_skill_package
 from tests.unit.tool_catalog_seed import seed_catalog_tool
 
@@ -184,18 +189,69 @@ class _ToolCallAdapter:
         )
 
 
+def _has_tool_message(request: LlmAdapterRequest, name: str) -> bool:
+    return any(
+        message.role is LlmMessageRole.TOOL and message.name == name
+        for message in request.messages
+    )
+
+
+def _has_tool_call_message(request: LlmAdapterRequest, name: str) -> bool:
+    return any(
+        message.role is LlmMessageRole.ASSISTANT
+        and isinstance(message.content, dict)
+        and message.content.get("type") == "function_call"
+        and message.content.get("name") == name
+        for message in request.messages
+    )
+
+
+def _expand_tool_bundle_call(*, call_id: str, source_id: str) -> ToolCallIntent:
+    return ToolCallIntent(
+        id=call_id,
+        name="context_tree.expand",
+        arguments={"node_id": f"tools.bundle.{source_id}"},
+    )
+
+
+def _enable_tool_schema_call(*, call_id: str, tool_id: str) -> ToolCallIntent:
+    return ToolCallIntent(
+        id=call_id,
+        name="context_tree.enable_tool_schema",
+        arguments={"node_id": f"tools.tool.{tool_id}"},
+    )
+
+
 class _InlineToolLoopAdapter:
     def __init__(self) -> None:
         self.requests: list[LlmAdapterRequest] = []
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        if not tool_messages:
+        request_index = len(self.requests) - 1
+        if request_index == 0:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if request_index == 1:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _enable_tool_schema_call(
+                            call_id="call-enable-echo",
+                            tool_id="echo",
+                        ),
+                    ),
+                ),
+            )
+        if request_index == 2:
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -216,6 +272,19 @@ class _BackgroundToolAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-background",
+                            source_id="test.local_package.background_echo",
+                        ),
+                    ),
+                ),
+            )
+        if _has_tool_call_message(request, "background_echo"):
+            return LlmAdapterResponse(result=LlmResult(text="background already requested"))
         return LlmAdapterResponse(
             result=LlmResult(
                 tool_calls=(
@@ -235,12 +304,18 @@ class _BackgroundResumeAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-background",
+                            source_id="test.local_package.background_echo",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_call_message(request, "background_echo"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -261,12 +336,18 @@ class _BackgroundApprovalAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-background-approval",
+                            source_id="test.local_package.background_echo",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_call_message(request, "background_echo"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -289,17 +370,18 @@ class _EffectApprovalAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        echo_messages = [
-            message
-            for message in tool_messages
-            if message.name == "echo"
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_call_message(request, "echo"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -311,7 +393,7 @@ class _EffectApprovalAdapter:
                     ),
                 ),
             )
-        if not echo_messages:
+        if not _has_tool_message(request, "echo"):
             raise AssertionError("approval replay should provide an echo tool result")
         return LlmAdapterResponse(result=LlmResult(text="approval flow complete"))
 
@@ -322,12 +404,18 @@ class _MultiToolApprovalAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_call_message(request, "echo"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -353,17 +441,18 @@ class _EffectApprovalOrVisibleAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        echo_messages = [
-            message
-            for message in tool_messages
-            if message.name == "echo"
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_call_message(request, "echo"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -375,7 +464,7 @@ class _EffectApprovalOrVisibleAdapter:
                     ),
                 ),
             )
-        if not echo_messages:
+        if not _has_tool_message(request, "echo"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -405,6 +494,17 @@ class _EffectDeniedFallbackAdapter:
             return LlmAdapterResponse(
                 result=LlmResult(text="fallback after denial"),
             )
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
         return LlmAdapterResponse(
             result=LlmResult(
                 tool_calls=(
@@ -424,17 +524,23 @@ class _SkillReadingAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        skill_messages = [
-            message
-            for message in tool_messages
-            if message.name == "skill_read"
-        ]
-        if not skill_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-expand-skills",
+                            name="context_tree.expand",
+                            arguments={"node_id": "skills.available"},
+                        ),
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-skill-tools",
+                            source_id="bundled.local_package.skills",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_message(request, "skill_read"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -455,12 +561,27 @@ class _SkillReadAndEchoAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-expand-skills",
+                            name="context_tree.expand",
+                            arguments={"node_id": "skills.available"},
+                        ),
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-skill-tools",
+                            source_id="bundled.local_package.skills",
+                        ),
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_message(request, "skill_read"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -486,12 +607,23 @@ class _MultiSkillReadAdapter:
 
     def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
         self.requests.append(request)
-        tool_messages = [
-            message
-            for message in request.messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        if not tool_messages:
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-expand-skills",
+                            name="context_tree.expand",
+                            arguments={"node_id": "skills.available"},
+                        ),
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-skill-tools",
+                            source_id="bundled.local_package.skills",
+                        ),
+                    ),
+                ),
+            )
+        if not _has_tool_message(request, "skill_read"):
             return LlmAdapterResponse(
                 result=LlmResult(
                     tool_calls=(
@@ -541,6 +673,17 @@ class _MemorySearchAndReadAdapter:
             for message in tool_messages
             if message.name == "memory_read"
         ]
+        if not _has_tool_message(request, "context_tree.expand"):
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-memory-tools",
+                            source_id="bundled.local_package.memory",
+                        ),
+                    ),
+                ),
+            )
         if not search_messages:
             return LlmAdapterResponse(
                 result=LlmResult(
@@ -658,6 +801,20 @@ def process_next_orchestration_assignment(
     )
 
 
+def execution_tool_run_ids_for_run(container, run_id: str) -> list[str]:
+    query = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE)
+    tool_run_ids: list[str] = []
+    for chain in query.list_execution_chains(run_id):
+        for step in query.list_execution_steps(chain.id):
+            for item in query.list_execution_step_items(step.id):
+                owner = item.owner
+                if owner is None or owner.owner_kind != "tool_run":
+                    continue
+                if owner.owner_id not in tool_run_ids:
+                    tool_run_ids.append(owner.owner_id)
+    return tool_run_ids
+
+
 
 class OrchestrationTestCaseBase(unittest.TestCase):
     default_llm_credential_binding_id = "openai-api-key"
@@ -773,6 +930,12 @@ class OrchestrationTestCaseBase(unittest.TestCase):
 
     def seed_tool(self, **kwargs):
         return seed_catalog_tool(self.container, **kwargs)
+
+    def publish_outbox_events(self) -> int:
+        return publish_outbox_events(self.container)
+
+    def published_event_bus_events(self) -> tuple[object, ...]:
+        return published_event_bus_events(self.container)
 
     def tearDown(self) -> None:
         self._system_skills_patcher.stop()

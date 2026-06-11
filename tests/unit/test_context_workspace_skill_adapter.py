@@ -31,7 +31,7 @@ def test_skill_adapter_expands_available_ready_skill_nodes() -> None:
             agent_id="assistant",
             metadata={
                 "workspace_dir": "/workspace",
-                "prompt_surface": "interactive",
+                "prompt_input": "interactive",
                 "available_skill_names": ["skill-a"],
             },
         ),
@@ -86,8 +86,11 @@ def test_skill_adapter_expands_skill_instructions_node() -> None:
     ]
 
     assert [node.kind for node in children] == ["skill_instructions"]
-    assert "# skill-a" in children[0].summary
-    assert skill_service.read_calls == [("skill-a", None, "interactive")]
+    assert "available through the skill_read tool" in children[0].summary
+    assert "skill='skill-a'" in children[0].summary
+    assert children[0].metadata["content_available_via"] == "skill_read"
+    assert children[0].owner_ref["requested_path"].endswith("/SKILL.md")
+    assert skill_service.read_calls == []
 
 
 def _context_services(skill_service: "_FakeSkillService"):

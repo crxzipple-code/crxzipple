@@ -67,6 +67,23 @@ port。`ServiceGraph` 这类模块内部 composer 可以存在，但不能作为
 
 新增跨模块能力时优先加 application port 或 query service，不要跨模块 import 对方 domain entity 然后直接改状态。
 
+### Prompt Engineering / Context Workspace 约束
+
+- `modules/context_workspace` 拥有 Context Tree、runtime contract 节点、节点状态、render snapshot 和 provider attachment mirror。
+- Runtime 总叙述的真相源是
+  `src/crxzipple/modules/context_workspace/application/prompts/runtime_contract.md`；
+  不要把它复制进 Agent profile、LLM adapter fallback 或 orchestration prompt 字符串。
+- Agent home 文件 (`AGENT.md`、`USER.md`、`SOUL.md`、`IDENTITY.md`) 由 Agent owner adapter
+  作为 `agent.home.*` 节点挂树；`workspace.resources` 只处理 session 显式绑定工作目录
+  后的可选文件句柄，例如 `AGENTS.md`、`BOOTSTRAP.md`、`TOOLS.md`，不要把 coding project
+  instruction 模型当成 CRXZipple 通用二级总纲。
+- Tool prompt surface 采用 source-first bundle/group。显式 `prompt.groups` 优先；没有显式
+  group 时，Tool owner 自动生成 source-level group。不要恢复 keyword family/router 或
+  把一堆 tool function 直接塞到 `tools.available` 根节点。
+- `ContextRenderSnapshot.metadata` 和 LLM `request_metadata` 必须能说明
+  `context_render_snapshot_id`、`runtime_contract_version`、`runtime_contract_hash` 和
+  mirrored tool schema count。不要把这类观测事实塞进 provider overrides。
+
 ## 4. Operations 运维面约束
 
 这是近期最重要的架构决策：

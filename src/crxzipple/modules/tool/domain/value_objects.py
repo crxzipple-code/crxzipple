@@ -251,12 +251,25 @@ class ToolParameter(ValueObject):
     data_type: str
     description: str = ""
     required: bool = True
+    json_schema: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ToolValidationError("Tool parameter name cannot be empty.")
         if not self.data_type.strip():
             raise ToolValidationError("Tool parameter data type cannot be empty.")
+        if self.json_schema is None:
+            return
+        if not isinstance(self.json_schema, dict):
+            raise ToolValidationError("Tool parameter json_schema must be a mapping.")
+        object.__setattr__(self, "json_schema", dict(self.json_schema))
+
+
+def _normalize_optional_policy_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,10 +277,23 @@ class ToolExecutionPolicy(ValueObject):
     timeout_seconds: int = 30
     requires_confirmation: bool = False
     mutates_state: bool = False
+    supports_parallel: bool = True
+    resource_scope: str | None = None
+    serial_group_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
             raise ToolValidationError("Tool timeout_seconds must be greater than zero.")
+        object.__setattr__(
+            self,
+            "resource_scope",
+            _normalize_optional_policy_text(self.resource_scope),
+        )
+        object.__setattr__(
+            self,
+            "serial_group_key",
+            _normalize_optional_policy_text(self.serial_group_key),
+        )
 
 
 @dataclass(frozen=True, slots=True)

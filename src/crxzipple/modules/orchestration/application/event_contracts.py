@@ -22,6 +22,10 @@ from crxzipple.shared import (
 )
 from crxzipple.shared.domain.events import named_event_topic
 
+ORCHESTRATION_ORPHAN_TOOL_RESULT_OBSERVED_EVENT = (
+    "orchestration.execution.orphan_tool_result_observed"
+)
+ORCHESTRATION_LLM_STEP_COMPLETED_EVENT = "orchestration.execution.llm_step_completed"
 
 _OPERATION_DISPLAY_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("level", "Operational severity level for display.", "string"),
@@ -47,13 +51,6 @@ _INGRESS_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
     "orchestration.ingress.failed",
 )
 
-_SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
-    "orchestration.scheduler.signal.requested",
-    "orchestration.scheduler.signal.claimed",
-    "orchestration.scheduler.signal.completed",
-    "orchestration.scheduler.signal.failed",
-)
-
 _EXECUTOR_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
     "orchestration.executor.assignment.requested",
     "orchestration.executor.lease.registered",
@@ -61,6 +58,11 @@ _EXECUTOR_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
     "orchestration.executor.lease.assignment_claimed",
     "orchestration.executor.lease.assignment_released",
     "orchestration.executor.lease.offline",
+)
+
+_EXECUTION_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
+    ORCHESTRATION_LLM_STEP_COMPLETED_EVENT,
+    ORCHESTRATION_ORPHAN_TOOL_RESULT_OBSERVED_EVENT,
 )
 
 _RUN_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
@@ -98,19 +100,6 @@ _INGRESS_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
     *_OPERATION_DISPLAY_FIELDS,
 )
 
-_SCHEDULER_SIGNAL_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
-    EventDefinitionField("event_name", "Stable orchestration scheduler signal event name.", "string", True),
-    EventDefinitionField("signal_id", "Scheduler signal identifier.", "string", True),
-    EventDefinitionField("signal_kind", "Scheduler signal kind.", "string", True),
-    EventDefinitionField("signal_payload", "Signal payload used by the scheduler.", "object"),
-    EventDefinitionField("status", "Scheduler signal status.", "string", True),
-    EventDefinitionField("worker_id", "Scheduler worker processing the signal.", "string"),
-    EventDefinitionField("code", "Failure code for failed scheduler signals.", "string"),
-    EventDefinitionField("message", "Failure message for failed scheduler signals.", "string"),
-    EventDefinitionField("details", "Failure details for failed scheduler signals.", "object"),
-    *_OPERATION_DISPLAY_FIELDS,
-)
-
 _EXECUTOR_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("event_name", "Stable orchestration executor event name.", "string", True),
     EventDefinitionField("run_id", "Assigned orchestration run identifier.", "string"),
@@ -126,6 +115,42 @@ _EXECUTOR_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
     *_OPERATION_DISPLAY_FIELDS,
 )
 
+_EXECUTION_OPERATIONAL_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("event_name", "Stable orchestration execution event name.", "string", True),
+    EventDefinitionField("status", "Observed execution consistency status.", "string", True),
+    EventDefinitionField("tool_run_id", "Terminal tool run identifier.", "string", True),
+    EventDefinitionField("run_id", "Owning orchestration run id from tool metadata, when available.", "string"),
+    EventDefinitionField("orchestration_run_id", "Owning orchestration run id from tool metadata, when available.", "string"),
+    EventDefinitionField("tool_status", "Terminal tool lifecycle status.", "string"),
+    EventDefinitionField("tool_id", "Tool identifier.", "string"),
+    EventDefinitionField("function_id", "Tool function identifier.", "string"),
+    EventDefinitionField("source_id", "Tool source identifier.", "string"),
+    EventDefinitionField("mode", "Tool execution mode.", "string"),
+    EventDefinitionField("strategy", "Tool execution strategy.", "string"),
+    EventDefinitionField("environment", "Tool execution environment.", "string"),
+    EventDefinitionField("reason", "Reason the terminal result could not be merged into the execution chain.", "string", True),
+    EventDefinitionField("error_message", "Terminal tool error message when available.", "string"),
+    *_OPERATION_DISPLAY_FIELDS,
+)
+
+_LLM_STEP_COMPLETED_FIELDS: tuple[EventDefinitionField, ...] = (
+    EventDefinitionField("event_name", "Stable orchestration execution event name.", "string", True),
+    EventDefinitionField("run_id", "Owning orchestration run identifier.", "string", True),
+    EventDefinitionField("session_key", "Resolved session key for the run.", "string"),
+    EventDefinitionField("active_session_id", "Active session instance identifier.", "string"),
+    EventDefinitionField("status", "Current run status before reduction.", "string", True),
+    EventDefinitionField("stage", "Current orchestration stage before reduction.", "string", True),
+    EventDefinitionField("current_step", "Current step counter for the run.", "integer", True),
+    EventDefinitionField("llm_invocation_id", "LLM invocation completed for this execution step.", "string", True),
+    EventDefinitionField("assistant_message_ids", "Assistant session message ids recorded for this invocation.", "array"),
+    EventDefinitionField("assistant_progress_message_ids", "Assistant progress text session message ids.", "array"),
+    EventDefinitionField("tool_call_message_ids", "Assistant function_call session message ids.", "array"),
+    EventDefinitionField("tool_result_message_ids", "Tool result session message ids recorded during this outcome.", "array"),
+    EventDefinitionField("tool_call_names", "Tool call names requested by the model.", "array"),
+    EventDefinitionField("text_present", "Whether the LLM result included assistant text.", "boolean"),
+    EventDefinitionField("text_chars", "Character count of the LLM result text.", "integer"),
+)
+
 _ORCHESTRATION_OPERATIONAL_EVENT_DESCRIPTIONS: dict[str, str] = {
     "orchestration.run.accepted": "Run intake accepted an orchestration run.",
     "orchestration.run.routed": "Run routing selected agent, lane, and priority metadata.",
@@ -135,16 +160,18 @@ _ORCHESTRATION_OPERATIONAL_EVENT_DESCRIPTIONS: dict[str, str] = {
     "orchestration.ingress.claimed": "Scheduler worker claimed an ingress request.",
     "orchestration.ingress.completed": "Scheduler ingress request completed successfully.",
     "orchestration.ingress.failed": "Scheduler ingress request failed.",
-    "orchestration.scheduler.signal.requested": "Scheduler signal was queued.",
-    "orchestration.scheduler.signal.claimed": "Scheduler worker claimed a signal.",
-    "orchestration.scheduler.signal.completed": "Scheduler signal completed successfully.",
-    "orchestration.scheduler.signal.failed": "Scheduler signal failed.",
     "orchestration.executor.assignment.requested": "Scheduler requested executor processing for a run.",
     "orchestration.executor.lease.registered": "Executor registered or refreshed its capacity lease.",
     "orchestration.executor.lease.heartbeated": "Executor lease heartbeat refreshed capacity and activity.",
     "orchestration.executor.lease.assignment_claimed": "Executor lease claimed assignment capacity.",
     "orchestration.executor.lease.assignment_released": "Executor lease released assignment capacity.",
     "orchestration.executor.lease.offline": "Executor lease was marked offline.",
+    ORCHESTRATION_LLM_STEP_COMPLETED_EVENT: (
+        "LLM execution outcome was reduced into assistant progress and tool-call session facts."
+    ),
+    ORCHESTRATION_ORPHAN_TOOL_RESULT_OBSERVED_EVENT: (
+        "Terminal orchestration-owned tool run could not be matched to an execution step item."
+    ),
 }
 
 
@@ -228,7 +255,7 @@ def orchestration_event_topic_contracts() -> tuple[EventTopicContract, ...]:
                 "and diagnostics."
             ),
             kinds=("observe",),
-            producers=("PromptSurfaceBuilder._publish_llm_resolution_event",),
+            producers=("RunPromptInputCollector._publish_llm_resolution_event",),
             consumers=("operations observer", "diagnostics"),
             ordering="run_id",
             notes=(
@@ -295,17 +322,6 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
     definitions.extend(
         _direct_operational_definition(
             event_name=event_name,
-            producers=("OrchestrationSchedulerSignal", "RunSchedulerSignalCoordinator"),
-            fields=_SCHEDULER_SIGNAL_OPERATIONAL_FIELDS,
-            notes=(
-                "Scheduler signal facts wake and coordinate orchestration-owned run work.",
-            ),
-        )
-        for event_name in _SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES
-    )
-    definitions.extend(
-        _direct_operational_definition(
-            event_name=event_name,
             producers=("OrchestrationSchedulerService", "OrchestrationExecutorLease"),
             fields=_EXECUTOR_OPERATIONAL_FIELDS,
             notes=(
@@ -313,6 +329,28 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
             ),
         )
         for event_name in _EXECUTOR_OPERATIONAL_EVENT_NAMES
+    )
+    definitions.append(
+        _direct_operational_definition(
+            event_name=ORCHESTRATION_LLM_STEP_COMPLETED_EVENT,
+            producers=("RunExecutionService._publish_llm_step_completed_event",),
+            fields=_LLM_STEP_COMPLETED_FIELDS,
+            notes=(
+                "Diagnostic execution fact for Trace and Operations.",
+                "Payload contains ids only, not full assistant progress text.",
+            ),
+        )
+    )
+    definitions.append(
+        _direct_operational_definition(
+            event_name=ORCHESTRATION_ORPHAN_TOOL_RESULT_OBSERVED_EVENT,
+            producers=("OrchestrationToolResumeCoordinator",),
+            fields=_EXECUTION_OPERATIONAL_FIELDS,
+            notes=(
+                "This fact is emitted only for orchestration-owned tool runs whose terminal result cannot be merged into the execution chain.",
+                "Consumers should treat it as an execution-chain consistency warning, not as tool ownership.",
+            ),
+        )
     )
     definitions.append(
         EventDefinition(
@@ -380,7 +418,7 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
             event_name="orchestration.llm_resolved",
             description="Prompt assembly LLM routing decision observed for operations.",
             topics=(named_event_topic("orchestration.llm_resolved"),),
-            producers=("PromptSurfaceBuilder._publish_llm_resolution_event",),
+            producers=("RunPromptInputCollector._publish_llm_resolution_event",),
             consumers=("operations observer", "diagnostics"),
             fields=(
                 EventDefinitionField("event_name", "Stable event name.", "string", True),
@@ -535,21 +573,21 @@ def orchestration_event_surfaces() -> tuple[EventSurface, ...]:
             owner="orchestration",
             description=(
                 "Direct orchestration-owned operational facts for scheduler "
-                "intake, signals, executor assignment, and executor lease state."
+                "intake, executor assignment, and executor lease state."
             ),
             definition_ids=(
                 *_RUN_OPERATIONAL_EVENT_NAMES,
                 *_INGRESS_OPERATIONAL_EVENT_NAMES,
-                *_SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES,
                 *_EXECUTOR_OPERATIONAL_EVENT_NAMES,
+                *_EXECUTION_OPERATIONAL_EVENT_NAMES,
             ),
             topics=tuple(
                 named_event_topic(event_name)
                 for event_name in (
                     *_RUN_OPERATIONAL_EVENT_NAMES,
                     *_INGRESS_OPERATIONAL_EVENT_NAMES,
-                    *_SCHEDULER_SIGNAL_OPERATIONAL_EVENT_NAMES,
                     *_EXECUTOR_OPERATIONAL_EVENT_NAMES,
+                    *_EXECUTION_OPERATIONAL_EVENT_NAMES,
                 )
             ),
             consumers=("operations observer", "trace read model", "diagnostics"),

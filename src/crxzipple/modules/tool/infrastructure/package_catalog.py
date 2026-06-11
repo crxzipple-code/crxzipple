@@ -246,6 +246,8 @@ def _source_config(plan: ToolPackagePlan) -> dict[str, Any]:
         "manifest_path": plan.manifest_path,
         "capability_ids": list(plan.capability_ids),
     }
+    if plan.prompt:
+        payload["prompt"] = _stable_payload(plan.prompt)
     if plan.local_handlers:
         payload["local_tools"] = [
             {

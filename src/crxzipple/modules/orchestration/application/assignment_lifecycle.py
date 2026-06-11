@@ -41,7 +41,7 @@ class RunAssignmentLifecycleService:
     get_run: Callable[[str], OrchestrationRun]
     progress_coordinator: Callable[[], "RunProgressCoordinator"]
     wait_coordinator: Callable[[], "RunWaitCoordinator"]
-    queue_child_completion_signal: Callable[[OrchestrationRun], None]
+    queue_child_completion_continuation: Callable[[OrchestrationRun], None]
 
     def process_next_assigned_assignment(
         self,
@@ -121,7 +121,7 @@ class RunAssignmentLifecycleService:
     def complete_assignment(self, data: CompleteAssignmentInput) -> OrchestrationRun:
         completed = self.progress_coordinator().complete_assignment(data)
         self.lease_manager.release_executor_assignment(worker_id=data.worker_id)
-        self.queue_child_completion_signal(completed)
+        self.queue_child_completion_continuation(completed)
         return completed
 
     def fail_assignment(self, data: FailAssignmentInput) -> OrchestrationRun:

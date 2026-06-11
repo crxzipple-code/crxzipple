@@ -32,7 +32,10 @@ def _build_session_services(ctx):
             profile = agent_service.get_profile(agent_id)
         except AgentNotFoundError:
             return None
-        return profile.runtime_preferences.resolved_home_dir
+        return (
+            profile.runtime_preferences.workspace
+            or profile.runtime_preferences.workdir
+        )
 
     service = SessionApplicationService(
         ctx.require(AppKey.UNIT_OF_WORK_FACTORY),

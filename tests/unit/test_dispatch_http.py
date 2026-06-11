@@ -9,7 +9,7 @@ class DispatchHttpTestCase(HttpModuleTestCase):
                 "/dispatch/tasks",
                 json={
                     "task_id": "dispatch-http-1",
-                    "owner_kind": "orchestration_run",
+                    "owner_kind": "orchestration_step",
                     "owner_id": "run-http-1",
                     "lane_key": "bulk:http",
                     "metadata": {"source": "http"},
@@ -29,7 +29,7 @@ class DispatchHttpTestCase(HttpModuleTestCase):
             claim_response = self.client.post(
                 "/dispatch/tasks/claim-next",
                 json={
-                    "owner_kind": "orchestration_run",
+                    "owner_kind": "orchestration_step",
                     "worker_id": "http-worker",
                     "lease_seconds": 30,
                 },
@@ -75,7 +75,7 @@ class DispatchHttpTestCase(HttpModuleTestCase):
             get_response = self.client.get("/dispatch/tasks/dispatch-http-1")
             list_response = self.client.get(
                 "/dispatch/tasks",
-                params={"owner_kind": "orchestration_run", "status": "queued"},
+                params={"owner_kind": "orchestration_step", "status": "queued"},
             )
             self.assertEqual(get_response.status_code, 200)
             self.assertEqual(get_response.json()["id"], "dispatch-http-1")
@@ -99,7 +99,7 @@ class DispatchHttpTestCase(HttpModuleTestCase):
                 "/dispatch/tasks",
                 json={
                     "task_id": "dispatch-http-orch",
-                    "owner_kind": "orchestration_run",
+                    "owner_kind": "orchestration_step",
                     "owner_id": "orch-run-http",
                 },
             )
@@ -114,7 +114,7 @@ class DispatchHttpTestCase(HttpModuleTestCase):
             self.client.post(
                 "/dispatch/tasks/claim-next",
                 json={
-                    "owner_kind": "orchestration_run",
+                    "owner_kind": "orchestration_step",
                     "worker_id": "orch-worker",
                     "lease_seconds": 5,
                 },

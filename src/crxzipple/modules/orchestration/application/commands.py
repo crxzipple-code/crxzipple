@@ -25,6 +25,7 @@ class AdvanceAssignmentInput:
     stage: OrchestrationRunStage
     step_increment: int = 0
     metadata: dict[str, object] = field(default_factory=dict)
+    execution_payload: dict[str, object] = field(default_factory=dict)
     now: datetime | None = None
 
 
@@ -44,6 +45,7 @@ class WaitForConfirmationInput:
     request: PendingApprovalRequest
     llm_invocation_id: str
     metadata: dict[str, object] = field(default_factory=dict)
+    execution_payload: dict[str, object] = field(default_factory=dict)
     reason: str | None = None
     now: datetime | None = None
 
@@ -66,6 +68,7 @@ class CompleteAssignmentInput:
     worker_id: str
     result_payload: dict[str, object] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
+    execution_payload: dict[str, object] = field(default_factory=dict)
     now: datetime | None = None
 
 

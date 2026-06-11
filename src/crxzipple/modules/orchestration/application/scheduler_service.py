@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Callable
 from crxzipple.core.logger import get_logger
 from crxzipple.modules.dispatch.application import dispatch_wakeup_topic
 from crxzipple.modules.events.domain import EventTopicWatch
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+)
 from crxzipple.modules.orchestration.application.ingress_processing import (
     fail_assignment_input_from_ingress_error,
     process_ingress_request,
@@ -20,8 +25,6 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationExecutorLease,
     OrchestrationIngressRequest,
     OrchestrationRun,
-    OrchestrationSchedulerSignal,
-    OrchestrationSchedulerSignalKind,
 )
 from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationValidationError,
@@ -48,31 +51,28 @@ if TYPE_CHECKING:
     from crxzipple.modules.orchestration.application.coordinators.ingress import (
         RunIngressCoordinator,
     )
-    from crxzipple.modules.orchestration.application.coordinators.scheduler_signals import (
-        RunSchedulerSignalCoordinator,
+    from crxzipple.modules.orchestration.application.coordinators.continuation_tasks import (
+        RunContinuationCoordinator,
     )
+from crxzipple.modules.orchestration.application.coordinators.continuation_tasks import (
+    OrchestrationContinuationKind,
+    OrchestrationContinuationTask,
+)
 
 logger = get_logger(__name__)
 
 ORCHESTRATION_INGRESS_REQUESTED_EVENT = "orchestration.ingress.requested"
-ORCHESTRATION_SCHEDULER_SIGNAL_REQUESTED_EVENT = (
-    "orchestration.scheduler.signal.requested"
-)
 
 
 def orchestration_ingress_requested_topic() -> str:
     return named_event_topic(ORCHESTRATION_INGRESS_REQUESTED_EVENT)
 
 
-def orchestration_scheduler_signal_requested_topic() -> str:
-    return named_event_topic(ORCHESTRATION_SCHEDULER_SIGNAL_REQUESTED_EVENT)
-
-
 @dataclass(slots=True)
 class OrchestrationSchedulerService:
     ingress_coordinator: "RunIngressCoordinator"
     intake_port: "OrchestrationSchedulerIntakePort"
-    scheduler_signal_coordinator: "RunSchedulerSignalCoordinator"
+    continuation_coordinator: "RunContinuationCoordinator"
     get_run_fn: Callable[[str], OrchestrationRun]
     assign_next_assignment_fn: Callable[[], OrchestrationRun | None]
     recover_abandoned_runs_fn: Callable[[], list[OrchestrationRun]]
@@ -99,17 +99,11 @@ class OrchestrationSchedulerService:
         *,
         inline_worker_id: str | None = None,
     ) -> OrchestrationRun:
-        run = self.ingress_coordinator.submit_turn(
-            data,
-            claimed_worker_id=inline_worker_id,
-        )
+        run = self.ingress_coordinator.submit_turn(data)
         if inline_worker_id is None:
             return run
-        request = self.ingress_coordinator.get_request_for_run(run.id)
-        if request is None:
-            return self.get_run_fn(run.id)
-        processed = self._process_request(
-            request,
+        processed = self.process_run_request(
+            run_id=run.id,
             worker_id=inline_worker_id,
         )
         return processed or self.get_run_fn(run.id)
@@ -120,17 +114,11 @@ class OrchestrationSchedulerService:
         *,
         inline_worker_id: str | None = None,
     ) -> OrchestrationRun:
-        run = self.ingress_coordinator.submit_bound_turn(
-            data,
-            claimed_worker_id=inline_worker_id,
-        )
+        run = self.ingress_coordinator.submit_bound_turn(data)
         if inline_worker_id is None:
             return run
-        request = self.ingress_coordinator.get_request_for_run(run.id)
-        if request is None:
-            return self.get_run_fn(run.id)
-        processed = self._process_request(
-            request,
+        processed = self.process_run_request(
+            run_id=run.id,
             worker_id=inline_worker_id,
         )
         return processed or self.get_run_fn(run.id)
@@ -141,7 +129,7 @@ class OrchestrationSchedulerService:
         worker_id: str,
     ) -> OrchestrationRun | None:
         return self._process_request(
-            self.ingress_coordinator.claim_next_request(worker_id=worker_id),
+            self.ingress_coordinator.claim_next_dispatch_request(worker_id=worker_id),
             worker_id=worker_id,
         )
 
@@ -149,14 +137,14 @@ class OrchestrationSchedulerService:
         self,
         *,
         worker_id: str,
-    ) -> tuple[OrchestrationRun | None, OrchestrationSchedulerSignal | None]:
+    ) -> tuple[OrchestrationRun | None, OrchestrationContinuationTask | None]:
         run = self.process_next_request(worker_id=worker_id)
         if run is not None:
             return run, None
         self.process_runtime_events()
-        signal = self.process_next_signal(worker_id=worker_id)
-        if signal is not None:
-            return None, signal
+        continuation = self.process_next_continuation(worker_id=worker_id)
+        if continuation is not None:
+            return None, continuation
         return self.assign_next_assignment(), None
 
     def process_runtime_events(self, *, limit_per_subscription: int = 100) -> int:
@@ -169,7 +157,13 @@ class OrchestrationSchedulerService:
     def build_wait_watches(self) -> tuple[EventTopicWatch, ...]:
         if self.events_service is None:
             return ()
-        wakeup_topic = dispatch_wakeup_topic("orchestration_run")
+        run_wakeup_topic = dispatch_wakeup_topic(ORCHESTRATION_STEP_DISPATCH_OWNER_KIND)
+        ingress_wakeup_topic = dispatch_wakeup_topic(
+            ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+        )
+        continuation_wakeup_topic = dispatch_wakeup_topic(
+            ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND,
+        )
         watches = [
             EventTopicWatch(
                 topic=orchestration_ingress_requested_topic(),
@@ -178,15 +172,21 @@ class OrchestrationSchedulerService:
                 ),
             ),
             EventTopicWatch(
-                topic=orchestration_scheduler_signal_requested_topic(),
+                topic=ingress_wakeup_topic,
                 after_cursor=self.events_service.snapshot_event_topic(
-                    orchestration_scheduler_signal_requested_topic(),
+                    ingress_wakeup_topic,
                 ),
             ),
             EventTopicWatch(
-                topic=wakeup_topic,
+                topic=run_wakeup_topic,
                 after_cursor=self.events_service.snapshot_event_topic(
-                    wakeup_topic,
+                    run_wakeup_topic,
+                ),
+            ),
+            EventTopicWatch(
+                topic=continuation_wakeup_topic,
+                after_cursor=self.events_service.snapshot_event_topic(
+                    continuation_wakeup_topic,
                 ),
             ),
         ]
@@ -260,11 +260,11 @@ class OrchestrationSchedulerService:
         )
 
         while not stopper.is_set():
-            run, signal = await asyncio.to_thread(
+            run, continuation = await asyncio.to_thread(
                 self.process_next_available,
                 worker_id=worker_id,
             )
-            if run is None and signal is None:
+            if run is None and continuation is None:
                 idle_cycles += 1
                 if max_idle_cycles is not None and idle_cycles >= max_idle_cycles:
                     logger.info(
@@ -290,9 +290,9 @@ class OrchestrationSchedulerService:
             }
             if run is not None:
                 extra["run_id"] = run.id
-            if signal is not None:
-                extra["signal_id"] = signal.id
-                extra["signal_kind"] = signal.signal_kind.value
+            if continuation is not None:
+                extra["continuation_id"] = continuation.id
+                extra["continuation_kind"] = continuation.continuation_kind.value
             logger.info(
                 "orchestration scheduler processed work item",
                 extra=extra,
@@ -316,38 +316,38 @@ class OrchestrationSchedulerService:
         worker_id: str,
     ) -> OrchestrationRun | None:
         return self._process_request(
-            self.ingress_coordinator.claim_request_for_run(
+            self.ingress_coordinator.claim_dispatch_request_for_run(
                 run_id=run_id,
                 worker_id=worker_id,
             ),
             worker_id=worker_id,
         )
 
-    def queue_tool_terminal_signal(
+    def queue_tool_terminal_continuation(
         self,
         *,
         tool_run_id: str,
-    ) -> OrchestrationSchedulerSignal:
-        return self.scheduler_signal_coordinator.queue_tool_terminal_signal(
+    ) -> OrchestrationContinuationTask:
+        return self.continuation_coordinator.queue_tool_terminal_continuation(
             tool_run_id=tool_run_id,
         )
 
-    def queue_sessions_spawn_followup_signal(
+    def queue_sessions_spawn_followup_continuation(
         self,
         *,
         child_run_id: str,
-    ) -> OrchestrationSchedulerSignal:
-        return self.scheduler_signal_coordinator.queue_sessions_spawn_followup_signal(
+    ) -> OrchestrationContinuationTask:
+        return self.continuation_coordinator.queue_sessions_spawn_followup_continuation(
             child_run_id=child_run_id,
         )
 
-    def process_next_signal(
+    def process_next_continuation(
         self,
         *,
         worker_id: str,
-    ) -> OrchestrationSchedulerSignal | None:
-        return self._process_signal(
-            self.scheduler_signal_coordinator.claim_next_signal(
+    ) -> OrchestrationContinuationTask | None:
+        return self._process_continuation(
+            self.continuation_coordinator.claim_next_continuation(
                 worker_id=worker_id,
             ),
         )
@@ -367,11 +367,11 @@ class OrchestrationSchedulerService:
     def handle_recovered_dispatch_task(
         self,
         *,
-        orchestration_run_id: str,
+        dispatch_task_id: str,
         reason: str,
     ) -> OrchestrationRun | None:
         return self.handle_recovered_dispatch_task_fn(
-            orchestration_run_id=orchestration_run_id,
+            dispatch_task_id=dispatch_task_id,
             reason=reason,
         )
 
@@ -440,45 +440,45 @@ class OrchestrationSchedulerService:
             ),
         )
 
-    def _process_signal(
+    def _process_continuation(
         self,
-        signal: OrchestrationSchedulerSignal | None,
-    ) -> OrchestrationSchedulerSignal | None:
-        if signal is None:
+        continuation: OrchestrationContinuationTask | None,
+    ) -> OrchestrationContinuationTask | None:
+        if continuation is None:
             return None
         try:
-            if signal.signal_kind is OrchestrationSchedulerSignalKind.TOOL_TERMINAL:
-                tool_run_id = str(signal.signal_payload.get("tool_run_id", "")).strip()
+            if continuation.continuation_kind is OrchestrationContinuationKind.TOOL_TERMINAL:
+                tool_run_id = str(continuation.payload.get("tool_run_id", "")).strip()
                 if tool_run_id:
                     self.handle_terminal_tool_run(tool_run_id)
-            elif signal.signal_kind is OrchestrationSchedulerSignalKind.SESSIONS_SPAWN_FOLLOWUP:
-                child_run_id = str(signal.signal_payload.get("child_run_id", "")).strip()
+            elif continuation.continuation_kind is OrchestrationContinuationKind.SESSIONS_SPAWN_FOLLOWUP:
+                child_run_id = str(continuation.payload.get("child_run_id", "")).strip()
                 if child_run_id:
                     self.process_sessions_spawn_followup(child_run_id)
-            return self.scheduler_signal_coordinator.complete_signal(signal.id)
+            return self.continuation_coordinator.complete_continuation(continuation.id)
         except Exception as exc:
             logger.exception(
-                "orchestration scheduler signal processing failed",
+                "orchestration continuation processing failed",
                 extra={
-                    "signal_id": signal.id,
-                    "signal_kind": signal.signal_kind.value,
+                    "continuation_id": continuation.id,
+                    "continuation_kind": continuation.continuation_kind.value,
                 },
             )
-            return self.scheduler_signal_coordinator.fail_signal(
-                signal.id,
+            return self.continuation_coordinator.fail_continuation(
+                continuation.id,
                 message=str(exc) or type(exc).__name__,
-                code="scheduler_signal_failed",
+                code="orchestration_continuation_failed",
                 details={
-                    "signal_kind": signal.signal_kind.value,
+                    "continuation_kind": continuation.continuation_kind.value,
                 },
             )
         finally:
-            if signal is not None and signal.status is not None:
+            if continuation is not None and continuation.status is not None:
                 logger.debug(
-                    "orchestration scheduler finished signal processing attempt",
+                    "orchestration scheduler finished continuation processing attempt",
                     extra={
-                        "signal_id": signal.id,
-                        "signal_kind": signal.signal_kind.value,
+                        "continuation_id": continuation.id,
+                        "continuation_kind": continuation.continuation_kind.value,
                     },
                 )
 

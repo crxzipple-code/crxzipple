@@ -140,6 +140,7 @@ class PromptReport:
     transcript_message_count: int
     transcript_chars: int
     transcript_estimated_tokens: int
+    transcript_tool_result_stats: dict[str, object] = field(default_factory=dict)
     context_render: ContextRenderReport | None = None
 
     def to_payload(self) -> dict[str, object]:
@@ -165,6 +166,7 @@ class PromptReport:
                 "message_count": self.transcript_message_count,
                 "chars": self.transcript_chars,
                 "estimated_tokens": self.transcript_estimated_tokens,
+                "tool_result_stats": dict(self.transcript_tool_result_stats),
             },
             "estimated_total_tokens": (
                 context_estimated_tokens + self.transcript_estimated_tokens

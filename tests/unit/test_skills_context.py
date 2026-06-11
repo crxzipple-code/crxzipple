@@ -372,6 +372,17 @@ class SkillsContextTestCase(unittest.TestCase):
                 "# Web Only\n",
                 encoding="utf-8",
             )
+            chat_skill_root = system_root / "chat-skill"
+            chat_skill_root.mkdir(parents=True)
+            (chat_skill_root / "SKILL.md").write_text(
+                "---\n"
+                "name: chat-skill\n"
+                "description: Available on the interactive chat surface.\n"
+                "surfaces: [chat]\n"
+                "---\n"
+                "# Chat Skill\n",
+                encoding="utf-8",
+            )
             manager = SkillManager(
                 repository=FilesystemSkillRepository(
                     global_root=root / "global",
@@ -384,8 +395,8 @@ class SkillsContextTestCase(unittest.TestCase):
                 ["web-only"],
             )
             self.assertEqual(
-                manager.list_available(workspace_dir=None, surface="interactive"),
-                (),
+                [skill.name for skill in manager.list_available(workspace_dir=None, surface="interactive")],
+                ["chat-skill"],
             )
             with self.assertRaises(SkillNotFoundError):
                 manager.read(
@@ -394,6 +405,15 @@ class SkillsContextTestCase(unittest.TestCase):
                     path=None,
                     surface="interactive",
                 )
+            self.assertEqual(
+                manager.read(
+                    workspace_dir=None,
+                    skill_name="chat-skill",
+                    path=None,
+                    surface="interactive",
+                ).package.name,
+                "chat-skill",
+            )
 
     def test_prompt_resolver_blocks_unsupported_platform(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

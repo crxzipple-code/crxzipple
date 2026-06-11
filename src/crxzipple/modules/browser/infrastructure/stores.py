@@ -292,6 +292,11 @@ class InMemoryBrowserRefStore(BrowserRefStore):
                 role=item.role,
                 text=item.text,
                 tag=item.tag,
+                frame_id=item.frame_id,
+                backend_node_id=item.backend_node_id,
+                bbox=dict(item.bbox) if item.bbox is not None else None,
+                evidence=item.evidence,
+                confidence=item.confidence,
             )
             for item in refs
         )
@@ -319,6 +324,11 @@ class InMemoryBrowserRefStore(BrowserRefStore):
                 role=item.role,
                 text=item.text,
                 tag=item.tag,
+                frame_id=item.frame_id,
+                backend_node_id=item.backend_node_id,
+                bbox=dict(item.bbox) if item.bbox is not None else None,
+                evidence=item.evidence,
+                confidence=item.confidence,
             )
             for item in refs
         )
@@ -481,6 +491,27 @@ class FileBackedBrowserRefStore(BrowserRefStore):
                         if item.get("tag") is not None
                         else None
                     ),
+                    frame_id=(
+                        str(item["frame_id"])
+                        if item.get("frame_id") is not None
+                        else None
+                    ),
+                    backend_node_id=(
+                        int(item["backend_node_id"])
+                        if item.get("backend_node_id") is not None
+                        else None
+                    ),
+                    bbox=(
+                        dict(item["bbox"])
+                        if isinstance(item.get("bbox"), dict)
+                        else None
+                    ),
+                    evidence=tuple(item.get("evidence") or ()),
+                    confidence=(
+                        float(item["confidence"])
+                        if item.get("confidence") is not None
+                        else None
+                    ),
                 )
             )
         return tuple(resolved)
@@ -498,19 +529,24 @@ class FileBackedBrowserRefStore(BrowserRefStore):
             "profile_name": profile_name.strip().lower(),
             "target_id": target_id.strip(),
             "refs": [
-                    {
-                        "ref": item.ref,
-                        "selector": item.selector,
-                        "scope_selector": item.scope_selector,
-                        "uid": item.uid,
-                        "nth": item.nth,
-                        "generation": item.generation,
-                        "snapshot_format": item.snapshot_format,
-                        "frame_path": list(item.frame_path),
-                        "label": item.label,
-                        "role": item.role,
+                {
+                    "ref": item.ref,
+                    "selector": item.selector,
+                    "scope_selector": item.scope_selector,
+                    "uid": item.uid,
+                    "nth": item.nth,
+                    "generation": item.generation,
+                    "snapshot_format": item.snapshot_format,
+                    "frame_path": list(item.frame_path),
+                    "label": item.label,
+                    "role": item.role,
                     "text": item.text,
                     "tag": item.tag,
+                    "frame_id": item.frame_id,
+                    "backend_node_id": item.backend_node_id,
+                    "bbox": dict(item.bbox) if item.bbox is not None else None,
+                    "evidence": list(item.evidence),
+                    "confidence": item.confidence,
                 }
                 for item in refs
             ],

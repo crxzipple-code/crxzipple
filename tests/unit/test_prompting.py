@@ -7,10 +7,17 @@ from crxzipple.modules.orchestration.application.prompting import (
     PromptBlockPolicy,
     PromptMode,
     apply_system_prompt_budget,
+    build_agent_instruction_block,
     estimate_text_tokens,
+)
+from crxzipple.modules.context_workspace.application.runtime_contract import (
+    load_runtime_contract,
 )
 from crxzipple.modules.orchestration.application.flow_context import (
     build_flow_context_payload,
+)
+from crxzipple.modules.orchestration.application.prompting.runtime_context import (
+    build_runtime_context_message,
 )
 
 
@@ -76,6 +83,53 @@ class PromptBudgetTestCase(unittest.TestCase):
 
 
 class PromptInstructionTestCase(unittest.TestCase):
+    def test_agent_instruction_preserves_profile_prompt_without_static_contract(self) -> None:
+        block = build_agent_instruction_block("Be precise.")
+
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertEqual(block.kind, "agent_instruction")
+        self.assertEqual(block.content, "Be precise.")
+
+    def test_runtime_contract_asset_carries_engineering_runtime_contract(self) -> None:
+        contract = load_runtime_contract()
+
+        self.assertEqual(contract.version, "2026-06-10")
+        self.assertIn("rg --files", contract.content)
+        self.assertIn("exec", contract.content)
+        self.assertIn("process", contract.content)
+        self.assertIn("public search or remote fetch tools", contract.content)
+        self.assertIn("browser/runtime observation", contract.content)
+        self.assertIn("Do not substitute search snippets", contract.content)
+
+    def test_runtime_context_includes_environment_and_command_tool_facts(self) -> None:
+        message = build_runtime_context_message(
+            agent_id="assistant",
+            llm_id="llm.default",
+            home_dir="/agents/assistant",
+            workspace_dir="/workspace/project",
+            available_tool_ids=("exec", "process", "brave_search.web_search"),
+        )
+
+        self.assertIn("# Runtime Context", message)
+        self.assertIn("- Agent: assistant", message)
+        self.assertIn("- Model: llm.default", message)
+        self.assertIn("- Timezone:", message)
+        self.assertIn("- Agent home: /agents/assistant", message)
+        self.assertIn("- Workspace: /workspace/project", message)
+        self.assertIn(
+            "- Local command runtime: exec, process available via Context Tree schema enablement",
+            message,
+        )
+        self.assertIn(
+            "- Network access: unknown unless an enabled tool verifies it",
+            message,
+        )
+        self.assertIn(
+            "- Long-running local services: use daemon-managed services when available",
+            message,
+        )
+
     def test_approval_resume_flow_context_explains_once_scope_expiry(self) -> None:
         payload = build_flow_context_payload(
             mode=PromptMode.APPROVAL_RESUME,

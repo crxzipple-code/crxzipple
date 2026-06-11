@@ -3,7 +3,7 @@
 `modules/browser` owns browser profile identity, CDP attachment, tab lifecycle,
 and page action execution. It does not own Tool source discovery or tool run
 lifecycle. The default browser tool path is the single Tool Source
-`configured.browser`; profile is runtime context, not a separate source.
+`bundled.local_package.browser`; profile is runtime context, not a separate source.
 
 ## Current Shape
 
@@ -23,7 +23,7 @@ lifecycle. The default browser tool path is the single Tool Source
   browser process; `CdpControlEngine` only attaches to an already ready CDP
   endpoint and never starts or kills browser processes.
 - Browser MCP is not part of the default browser runtime path. Any future
-  experimental MCP source must stay separate from `configured.browser`.
+  experimental MCP source must stay separate from `bundled.local_package.browser`.
 
 ## Core Model
 
@@ -85,6 +85,6 @@ All page-scoped CDP access goes through `BrowserCdpSessionBroker`.
 - CDP target/browser connection failures are converted to short,
   display-safe `BrowserValidationError` messages with a recoverable next
   action.
-- `cdp-raw` is not part of the normal `configured.browser` function catalog;
+- `cdp-raw` is not part of the normal `bundled.local_package.browser` function catalog;
   ordinary agents and public Browser HTTP/CLI actions receive stable browser
   functions instead of arbitrary CDP.

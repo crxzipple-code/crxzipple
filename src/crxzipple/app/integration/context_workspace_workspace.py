@@ -1,4 +1,4 @@
-"""Workspace bootstrap context tree adapter."""
+"""Task workspace resource context tree adapter."""
 
 from __future__ import annotations
 
@@ -22,13 +22,13 @@ class WorkspaceContextNodeProvider:
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
-        if request.node.id != "workspace.bootstrap":
+        if request.node.id != "workspace.resources":
             return ()
         workspace_dir = _optional_text(request.workspace.metadata.get("workspace_dir"))
         root = _workspace_root(workspace_dir)
         if root is None:
             return ()
-        files = _load_bootstrap_files(root)
+        files = _load_resource_instruction_files(root)
         return tuple(
             _workspace_file_node_seed(
                 file,
@@ -40,7 +40,7 @@ class WorkspaceContextNodeProvider:
 
 
 @dataclass(frozen=True, slots=True)
-class _WorkspaceBootstrapFile:
+class _WorkspaceResourceFile:
     path: str
     content: str
     truncated: bool
@@ -48,12 +48,8 @@ class _WorkspaceBootstrapFile:
 
 _BOOTSTRAP_FILENAMES = (
     "AGENTS.md",
-    "AGENT.md",
-    "SOUL.md",
-    "TOOLS.md",
-    "IDENTITY.md",
-    "USER.md",
     "BOOTSTRAP.md",
+    "TOOLS.md",
 )
 _MAX_FILE_BYTES = 2_000_000
 _MAX_FILE_CHARS = 20_000
@@ -65,8 +61,8 @@ _FILE_ACTIONS = (
 )
 
 
-def _load_bootstrap_files(root: Path) -> tuple[_WorkspaceBootstrapFile, ...]:
-    files: list[_WorkspaceBootstrapFile] = []
+def _load_resource_instruction_files(root: Path) -> tuple[_WorkspaceResourceFile, ...]:
+    files: list[_WorkspaceResourceFile] = []
     remaining_chars = _TOTAL_CHAR_BUDGET
     for name in _BOOTSTRAP_FILENAMES:
         if remaining_chars <= 0:
@@ -94,7 +90,7 @@ def _load_bootstrap_files(root: Path) -> tuple[_WorkspaceBootstrapFile, ...]:
         content = content[:limit]
         remaining_chars -= len(content)
         files.append(
-            _WorkspaceBootstrapFile(
+            _WorkspaceResourceFile(
                 path=candidate.relative_to(root).as_posix(),
                 content=content,
                 truncated=truncated,
@@ -104,7 +100,7 @@ def _load_bootstrap_files(root: Path) -> tuple[_WorkspaceBootstrapFile, ...]:
 
 
 def _workspace_file_node_seed(
-    file: _WorkspaceBootstrapFile,
+    file: _WorkspaceResourceFile,
     *,
     parent_id: str,
     display_order: int,
@@ -127,7 +123,7 @@ def _workspace_file_node_seed(
             "path": file.path,
             "content_chars": len(content),
             "truncated": file.truncated,
-            "source": "workspace.bootstrap",
+            "source": "workspace.resources",
         },
     )
 

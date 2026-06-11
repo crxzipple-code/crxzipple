@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from crxzipple.modules.llm.domain import LlmInvocation, LlmInvocationStatus, LlmProfile
+from crxzipple.modules.orchestration.domain import ExecutionOwnerReference
 from crxzipple.modules.operations.application.observation import (
     OperationsObservedEvent,
     observed_event_from_record,
@@ -270,7 +271,7 @@ class LlmOperationsReadModelProvider:
         events_by_invocation = _events_by_invocation(
             (*observed_events, *resolver_events),
         )
-        run_contexts = _invocation_run_contexts(self.run_query)
+        run_contexts = _invocation_run_contexts(self.run_query, invocations)
         resolver_events_by_run_id = _resolver_events_by_run_id(resolver_events)
         runtime_snapshot = _runtime_snapshot(self.runtime_metrics)
         active_invocations = [
@@ -996,6 +997,8 @@ def _streaming_requests_section(
                     "provider_model": _provider_model_label(profile),
                     "status": _stream_status_label(invocation, events=events, now=now),
                     "run_id": run_context.get("run_id", "-"),
+                    "chain_id": run_context.get("chain_id", "-"),
+                    "step_id": run_context.get("step_id", "-"),
                     "trace": run_context.get("trace_id", "-"),
                     "duration": _duration_or_age_label(invocation, now=now),
                     "tokens": str(_invocation_token_total(invocation)),
@@ -1017,6 +1020,8 @@ def _streaming_requests_section(
             ("provider_model", "Provider / Model"),
             ("status", "Status"),
             ("run_id", "Run ID"),
+            ("chain_id", "Chain ID"),
+            ("step_id", "Step ID"),
             ("trace", "Trace"),
             ("duration", "Duration"),
             ("tokens", "Tokens"),
@@ -1056,12 +1061,30 @@ def _recent_invocations_section(
                     "provider": profile.provider.value if profile is not None else "-",
                     "status": _status_label(invocation.status.value),
                     "run_id": run_context.get("run_id", "-"),
+                    "chain_id": run_context.get("chain_id", "-"),
+                    "step_id": run_context.get("step_id", "-"),
                     "trace": run_context.get("trace_id", "-"),
                     "duration": _duration_label(invocation),
                     "streaming": _stream_status_label(invocation, events=events, now=datetime.now(timezone.utc))
                     if invocation.id in streaming_ids
                     else "No",
                     "tokens": str(_invocation_token_total(invocation)),
+                    "provider_prompt_tokens": _metadata_int_label(
+                        invocation,
+                        "estimated_provider_prompt_tokens",
+                    ),
+                    "direct_messages": _metadata_int_label(
+                        invocation,
+                        "direct_transcript_session_message_count",
+                    ),
+                    "direct_tokens": _metadata_int_label(
+                        invocation,
+                        "direct_transcript_estimated_tokens",
+                    ),
+                    "tool_protocol": str(_direct_tool_protocol_count(invocation)),
+                    "response_text": _response_text_label(invocation),
+                    "tool_calls": _result_tool_calls_label(invocation),
+                    "progress": run_context.get("assistant_progress_message_count", "-"),
                     "finish_reason": (
                         invocation.result.finish_reason
                         if invocation.result is not None
@@ -1087,10 +1110,19 @@ def _recent_invocations_section(
             ("provider", "Provider"),
             ("status", "Status"),
             ("run_id", "Run ID"),
+            ("chain_id", "Chain ID"),
+            ("step_id", "Step ID"),
             ("trace", "Trace"),
             ("duration", "Duration"),
             ("streaming", "Streaming"),
             ("tokens", "Tokens"),
+            ("provider_prompt_tokens", "Provider Prompt"),
+            ("direct_messages", "Direct Msgs"),
+            ("direct_tokens", "Direct Tokens"),
+            ("tool_protocol", "Tool Protocol"),
+            ("response_text", "Text"),
+            ("tool_calls", "Tool Calls"),
+            ("progress", "Progress"),
             ("finish_reason", "Finish Reason"),
             ("error_code", "Error Code"),
             ("actions", "Actions"),
@@ -1126,6 +1158,8 @@ def _failed_invocations_section(
                     "provider_model": _provider_model_label(profile),
                     "status": _status_label(invocation.status.value),
                     "run_id": run_context.get("run_id", "-"),
+                    "chain_id": run_context.get("chain_id", "-"),
+                    "step_id": run_context.get("step_id", "-"),
                     "trace": run_context.get("trace_id", "-"),
                     "duration": _duration_label(invocation),
                     "streaming": _stream_status_label(invocation, events=events, now=datetime.now(timezone.utc))
@@ -1149,6 +1183,8 @@ def _failed_invocations_section(
             ("provider_model", "Provider / Model"),
             ("status", "Status"),
             ("run_id", "Run ID"),
+            ("chain_id", "Chain ID"),
+            ("step_id", "Step ID"),
             ("trace", "Trace"),
             ("duration", "Duration"),
             ("streaming", "Streaming"),
@@ -1443,7 +1479,10 @@ def _context_pressure_section(
         profile = profiles_by_id.get(invocation.llm_id)
         if profile is None or not profile.context_window_tokens:
             continue
-        input_tokens = _invocation_input_tokens(invocation)
+        input_tokens = _invocation_input_tokens(invocation) or _metadata_int(
+            invocation,
+            "estimated_provider_prompt_tokens",
+        )
         if input_tokens <= 0:
             continue
         ratio = input_tokens / profile.context_window_tokens
@@ -1635,12 +1674,25 @@ def _invocation_details(
                     OperationsKeyValueItemModel("Provider", profile.provider.value if profile is not None else "-"),
                     OperationsKeyValueItemModel("Model", profile.model_name if profile is not None else "-"),
                     OperationsKeyValueItemModel("Run ID", run_context.get("run_id", "-")),
+                    OperationsKeyValueItemModel("Chain ID", run_context.get("chain_id", "-")),
+                    OperationsKeyValueItemModel("Step ID", run_context.get("step_id", "-")),
+                    OperationsKeyValueItemModel("Step Kind", run_context.get("step_kind", "-")),
                     OperationsKeyValueItemModel("Trace", run_context.get("trace_id", "-")),
                     OperationsKeyValueItemModel("Turn ID", run_context.get("turn_id", "-")),
                     OperationsKeyValueItemModel("Started At", _datetime_label(invocation.started_at)),
                     OperationsKeyValueItemModel("Completed At", _datetime_label(invocation.completed_at)),
                     OperationsKeyValueItemModel("Duration", _duration_label(invocation)),
                     OperationsKeyValueItemModel("Tokens", str(_invocation_token_total(invocation))),
+                    OperationsKeyValueItemModel("Response Text", _response_text_label(invocation)),
+                    OperationsKeyValueItemModel("Tool Calls", _result_tool_calls_label(invocation)),
+                    OperationsKeyValueItemModel(
+                        "Assistant Progress Messages",
+                        run_context.get("assistant_progress_message_count", "-"),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Assistant Progress IDs",
+                        run_context.get("assistant_progress_message_ids", "-"),
+                    ),
                 ),
                 request_context=(
                     OperationsKeyValueItemModel(
@@ -1655,6 +1707,60 @@ def _invocation_details(
                     ),
                     OperationsKeyValueItemModel("Messages", str(len(invocation.messages))),
                     OperationsKeyValueItemModel("Tool Schemas", str(len(invocation.tool_schemas))),
+                    OperationsKeyValueItemModel(
+                        "Provider Prompt Tokens",
+                        _metadata_int_label(
+                            invocation,
+                            "estimated_provider_prompt_tokens",
+                        ),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Direct Transcript Messages",
+                        _metadata_int_label(
+                            invocation,
+                            "direct_transcript_session_message_count",
+                        ),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Direct Transcript Tokens",
+                        _metadata_int_label(
+                            invocation,
+                            "direct_transcript_estimated_tokens",
+                        ),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Tool Protocol Calls",
+                        str(_direct_tool_protocol_count(invocation)),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Artifact Tokens",
+                        _metadata_int_label(
+                            invocation,
+                            "artifact_content_estimated_tokens",
+                        ),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Artifact Blocks",
+                        _metadata_int_label(
+                            invocation,
+                            "artifact_content_block_count",
+                        ),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Artifact Omitted",
+                        _metadata_int_label(
+                            invocation,
+                            "artifact_content_omitted_count",
+                        ),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Direct Sequence Range",
+                        _direct_transcript_sequence_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Context Snapshot",
+                        _metadata_text_label(invocation, "context_render_snapshot_id"),
+                    ),
                     OperationsKeyValueItemModel("Response Format", "Configured" if invocation.response_format else "-"),
                     OperationsKeyValueItemModel("Provider Request ID", invocation.provider_request_id or "-"),
                 ),
@@ -2319,45 +2425,26 @@ def _latest_invocation_by_profile(
     return latest
 
 
-def _invocation_run_contexts(run_query: Any | None) -> dict[str, dict[str, str]]:
-    if run_query is None or not hasattr(run_query, "list_runs"):
-        return {}
-    try:
-        runs = run_query.list_runs()
-    except Exception:
+def _invocation_run_contexts(
+    run_query: Any | None,
+    invocations: list[LlmInvocation],
+) -> dict[str, dict[str, str]]:
+    if run_query is None or not hasattr(run_query, "find_execution_step_items_by_owner"):
         return {}
     contexts: dict[str, dict[str, str]] = {}
-    for run in runs:
-        invocation_id = _run_llm_invocation_id(run)
-        if invocation_id is None:
-            continue
-        run_id = _text(getattr(run, "id", None))
-        if run_id is None:
-            continue
-        metadata = getattr(run, "metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        trace_id = _text(metadata.get("trace_id")) or run_id
-        context = {
-            "run_id": run_id,
-            "turn_id": _text(metadata.get("turn_id")) or run_id,
-            "trace_id": trace_id,
-            "session_key": _text(metadata.get("session_key")) or "-",
-            "route": f"/ui/workbench/runs/{run_id}",
-            "trace_route": f"/ui/trace/{trace_id}",
-        }
-        existing = contexts.get(invocation_id)
-        existing_updated_at = (
-            str(existing.get("updated_at", ""))
-            if existing is not None
-            else ""
+    for invocation in invocations:
+        context = _execution_owner_context(
+            run_query,
+            ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=invocation.id,
+            ),
         )
-        run_updated_at = _run_updated_at(run)
-        if existing is None or run_updated_at > existing_updated_at:
-            contexts[invocation_id] = {
-                **context,
-                "updated_at": run_updated_at,
-            }
+        if not context:
+            continue
+        existing = contexts.get(invocation.id)
+        if existing is None or context.get("updated_at", "") > existing.get("updated_at", ""):
+            contexts[invocation.id] = context
     return {
         invocation_id: {
             key: value
@@ -2368,23 +2455,80 @@ def _invocation_run_contexts(run_query: Any | None) -> dict[str, dict[str, str]]
     }
 
 
-def _run_llm_invocation_id(run: Any) -> str | None:
-    result_payload = getattr(run, "result_payload", None)
-    if isinstance(result_payload, dict):
-        invocation_id = _text(result_payload.get("llm_invocation_id"))
-        if invocation_id is not None:
-            return invocation_id
-    metadata = getattr(run, "metadata", None)
-    if isinstance(metadata, dict):
-        return _text(metadata.get("llm_invocation_id"))
-    return None
+def _execution_owner_context(
+    run_query: Any,
+    owner: ExecutionOwnerReference,
+) -> dict[str, str] | None:
+    try:
+        items = run_query.find_execution_step_items_by_owner(owner)
+    except Exception:
+        return None
+    if not items:
+        return None
+    item = max(items, key=_execution_item_updated_at)
+    try:
+        step = run_query.get_execution_step(item.step_id)
+    except Exception:
+        step = None
+    try:
+        run = run_query.get_run(item.turn_id)
+    except Exception:
+        run = None
+    run_id = _text(getattr(run, "id", None)) or _text(getattr(item, "turn_id", None))
+    if run_id is None:
+        return None
+    metadata = getattr(run, "metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    trace_id = _text(metadata.get("trace_id")) or run_id
+    return {
+        "run_id": run_id,
+        "turn_id": _text(metadata.get("turn_id")) or item.turn_id,
+        "trace_id": trace_id,
+        "session_key": _text(metadata.get("session_key")) or "-",
+        "route": f"/ui/workbench/runs/{run_id}",
+        "trace_route": f"/ui/trace/{trace_id}?step_id={item.step_id}",
+        "chain_id": item.chain_id,
+        "step_id": item.step_id,
+        "step_kind": _enum_value(getattr(step, "kind", None)),
+        "step_status": _enum_value(getattr(step, "status", None)),
+        "item_status": _enum_value(getattr(item, "status", None)),
+        **_llm_execution_summary_context(getattr(item, "summary_payload", None)),
+        "updated_at": _execution_item_updated_at(item),
+    }
 
 
-def _run_updated_at(run: Any) -> str:
-    updated_at = getattr(run, "updated_at", None)
+def _llm_execution_summary_context(summary_payload: Any) -> dict[str, str]:
+    if not isinstance(summary_payload, dict):
+        return {}
+    progress_ids = _text_list(summary_payload.get("assistant_progress_message_ids"))
+    result: dict[str, str] = {}
+    if progress_ids:
+        result["assistant_progress_message_ids"] = ", ".join(progress_ids)
+        result["assistant_progress_message_count"] = str(len(progress_ids))
+    progress_text = _text(summary_payload.get("assistant_progress_text"))
+    if progress_text is not None:
+        result["assistant_progress_text"] = _truncate(progress_text, 160)
+    tool_call_names = _text_list(summary_payload.get("tool_call_names"))
+    if tool_call_names:
+        result["tool_call_names"] = ", ".join(tool_call_names)
+        result["tool_call_count"] = str(len(tool_call_names))
+    return result
+
+
+def _execution_item_updated_at(item: Any) -> str:
+    updated_at = getattr(item, "updated_at", None)
     if isinstance(updated_at, datetime):
         return format_datetime_utc(updated_at)
     return str(updated_at or "")
+
+
+def _enum_value(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    if raw is None:
+        return "-"
+    normalized = str(raw).strip()
+    return normalized or "-"
 
 
 def _resolver_events_by_run_id(
@@ -2511,6 +2655,80 @@ def _invocation_input_tokens(invocation: LlmInvocation) -> int:
     if invocation.result is None or invocation.result.usage is None:
         return 0
     return invocation.result.usage.input_tokens or 0
+
+
+def _request_metadata(invocation: LlmInvocation) -> dict[str, object]:
+    metadata = invocation.request_metadata
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _metadata_int(invocation: LlmInvocation, key: str) -> int:
+    value = _request_metadata(invocation).get(key)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    if isinstance(value, str):
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _metadata_int_label(invocation: LlmInvocation, key: str) -> str:
+    return str(value) if (value := _metadata_int(invocation, key)) else "-"
+
+
+def _metadata_text_label(invocation: LlmInvocation, key: str) -> str:
+    value = _text(_request_metadata(invocation).get(key))
+    return value or "-"
+
+
+def _direct_tool_protocol_count(invocation: LlmInvocation) -> int:
+    value = _request_metadata(invocation).get("direct_tool_protocol_call_ids")
+    if isinstance(value, (list, tuple)):
+        return len([item for item in value if str(item or "").strip()])
+    return 0
+
+
+def _response_text_label(invocation: LlmInvocation) -> str:
+    text = getattr(getattr(invocation, "result", None), "text", None)
+    if isinstance(text, str) and text.strip():
+        return f"{len(text.strip())} chars"
+    return "-"
+
+
+def _result_tool_calls_label(invocation: LlmInvocation) -> str:
+    tool_calls = getattr(getattr(invocation, "result", None), "tool_calls", None)
+    if isinstance(tool_calls, (list, tuple)) and tool_calls:
+        return str(len(tool_calls))
+    return "-"
+
+
+def _direct_transcript_sequence_label(invocation: LlmInvocation) -> str:
+    sequence_range = _request_metadata(invocation).get("direct_transcript_sequence_range")
+    if not isinstance(sequence_range, dict):
+        return "-"
+    sessions = sequence_range.get("sessions")
+    if not isinstance(sessions, list) or not sessions:
+        return "-"
+    labels: list[str] = []
+    for item in sessions[:3]:
+        if not isinstance(item, dict):
+            continue
+        session_id = _text(item.get("session_id")) or "session"
+        from_sequence = _text(item.get("from_sequence_no")) or "?"
+        to_sequence = _text(item.get("to_sequence_no")) or "?"
+        message_count = _text(item.get("message_count")) or "?"
+        labels.append(f"{session_id}:{from_sequence}-{to_sequence} ({message_count})")
+    if not labels:
+        return "-"
+    if len(sessions) > 3:
+        labels.append(f"+{len(sessions) - 3}")
+    return ", ".join(labels)
 
 
 def _max_context_label(profiles: list[LlmProfile]) -> str:
@@ -2706,6 +2924,7 @@ def _request_payload(invocation: LlmInvocation) -> dict[str, Any]:
             ],
             "response_format": invocation.response_format,
             "overrides": invocation.request_overrides,
+            "request_metadata": invocation.request_metadata,
         },
     )
 
@@ -2806,6 +3025,17 @@ def _text(value: Any) -> str | None:
     if isinstance(value, (int, float)):
         return str(value)
     return None
+
+
+def _text_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    items: list[str] = []
+    for item in value:
+        text = _text(item)
+        if text is not None:
+            items.append(text)
+    return tuple(items)
 
 
 def _bool(value: Any) -> bool:

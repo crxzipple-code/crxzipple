@@ -89,6 +89,7 @@ export interface TurnStepView {
   run_id: string;
   type:
     | "user_input"
+    | "agent_progress"
     | "agent_thinking"
     | "llm"
     | "tool_call"

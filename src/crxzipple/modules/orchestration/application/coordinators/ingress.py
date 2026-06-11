@@ -4,14 +4,40 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from uuid import uuid4
 
+from crxzipple.modules.dispatch.domain import (
+    DispatchPolicy,
+    DispatchTask,
+    DispatchTaskRepository,
+)
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+)
 from crxzipple.modules.orchestration.domain import (
+    ExecutionChainRepository,
+    ExecutionOwnerReference,
+    ExecutionStepItemRepository,
+    ExecutionStepRepository,
     OrchestrationBoundSessionTarget,
     OrchestrationIngressRequest,
     OrchestrationIngressRequestRepository,
+    OrchestrationIngressStatus,
+    OrchestrationQueuePolicy,
     OrchestrationRun,
     OrchestrationRunRepository,
 )
+from crxzipple.modules.orchestration.domain.exceptions import (
+    OrchestrationValidationError,
+)
+from crxzipple.modules.orchestration.application.execution_chain_lifecycle import (
+    INTAKE_OWNER_KIND,
+    ensure_intake_execution_chain,
+)
+from crxzipple.modules.session.application.resolution import resolve_session_key
+from crxzipple.modules.session.domain.exceptions import SessionValidationError
 from crxzipple.shared.domain.aggregates import AggregateRoot
+
+_INGRESS_TASK_KIND = "orchestration_ingress_request"
+_DEFAULT_INGRESS_LEASE_SECONDS = 300
 
 if TYPE_CHECKING:
     from crxzipple.modules.orchestration.application.commands import (
@@ -21,8 +47,12 @@ if TYPE_CHECKING:
 
 
 class IngressCoordinatorUnitOfWork(Protocol):
+    execution_chains: ExecutionChainRepository
+    execution_steps: ExecutionStepRepository
+    execution_step_items: ExecutionStepItemRepository
     orchestration_runs: OrchestrationRunRepository
     orchestration_ingress_requests: OrchestrationIngressRequestRepository
+    dispatch_tasks: DispatchTaskRepository
 
     def __enter__(self) -> "IngressCoordinatorUnitOfWork":
         ...
@@ -48,12 +78,11 @@ class IngressCoordinatorUnitOfWork(Protocol):
 @dataclass(slots=True)
 class RunIngressCoordinator:
     uow_factory: Callable[[], IngressCoordinatorUnitOfWork]
+    lease_seconds: int = _DEFAULT_INGRESS_LEASE_SECONDS
 
     def submit_turn(
         self,
         data: "SubmitOrchestrationTurnInput",
-        *,
-        claimed_worker_id: str | None = None,
     ) -> OrchestrationRun:
         run = OrchestrationRun.accept(
             run_id=data.accept_input.run_id or uuid4().hex,
@@ -62,7 +91,7 @@ class RunIngressCoordinator:
             queue_policy=data.accept_input.queue_policy,
             priority=data.accept_input.priority,
             max_steps=data.accept_input.max_steps,
-            metadata=data.accept_input.metadata,
+            metadata=self._initial_routed_metadata(data),
         )
         request = OrchestrationIngressRequest.queue_turn(
             request_id=uuid4().hex,
@@ -72,7 +101,10 @@ class RunIngressCoordinator:
             ensure_session=data.ensure_session,
             touch_activity=data.touch_activity,
             reset_policy_payload=self._reset_policy_payload(data),
-            prepare_metadata=dict(data.prepare_metadata),
+            prepare_metadata={
+                **dict(data.accept_input.metadata),
+                **dict(data.prepare_metadata),
+            },
             queue_policy=(
                 data.enqueue_queue_policy
                 if data.enqueue_queue_policy is not None
@@ -84,15 +116,11 @@ class RunIngressCoordinator:
                 else data.accept_input.priority
             ),
         )
-        if claimed_worker_id is not None:
-            request.claim(worker_id=claimed_worker_id)
         return self._persist_submitted(run=run, request=request)
 
     def submit_bound_turn(
         self,
         data: "SubmitBoundOrchestrationTurnInput",
-        *,
-        claimed_worker_id: str | None = None,
     ) -> OrchestrationRun:
         run = OrchestrationRun.accept(
             run_id=data.accept_input.run_id or uuid4().hex,
@@ -101,7 +129,7 @@ class RunIngressCoordinator:
             queue_policy=data.accept_input.queue_policy,
             priority=data.accept_input.priority,
             max_steps=data.accept_input.max_steps,
-            metadata=data.accept_input.metadata,
+            metadata=self._initial_bound_metadata(data),
         )
         request = OrchestrationIngressRequest.queue_bound_turn(
             request_id=uuid4().hex,
@@ -120,8 +148,6 @@ class RunIngressCoordinator:
                 else data.accept_input.priority
             ),
         )
-        if claimed_worker_id is not None:
-            request.claim(worker_id=claimed_worker_id)
         return self._persist_submitted(run=run, request=request)
 
     def _persist_submitted(
@@ -133,30 +159,79 @@ class RunIngressCoordinator:
         with self.uow_factory() as uow:
             uow.orchestration_runs.add(run)
             uow.flush()
+            ensure_intake_execution_chain(
+                uow,
+                run=run,
+                owner=ExecutionOwnerReference(
+                    owner_kind=INTAKE_OWNER_KIND,
+                    owner_id=request.id,
+                ),
+            )
             uow.orchestration_ingress_requests.add(request)
+            self._enqueue_ingress_dispatch_task(uow, request)
             uow.collect(run)
             uow.collect(request)
             uow.commit()
         return run
 
-    def claim_next_request(self, *, worker_id: str) -> OrchestrationIngressRequest | None:
+    def claim_next_dispatch_request(
+        self,
+        *,
+        worker_id: str,
+    ) -> OrchestrationIngressRequest | None:
         with self.uow_factory() as uow:
-            request = uow.orchestration_ingress_requests.claim_next(worker_id=worker_id)
+            if self._recover_missing_ingress_dispatch_tasks(uow):
+                uow.flush()
+            self._recover_abandoned_ingress_tasks(uow)
+            task = uow.dispatch_tasks.claim_next_queued(
+                owner_kind=ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+                worker_id=worker_id,
+                claim_token=_claim_token(worker_id),
+                lease_seconds=self.lease_seconds,
+            )
+            if task is None:
+                uow.commit()
+                return None
+            request = self._claim_request_for_dispatch_task(
+                uow,
+                task,
+                worker_id=worker_id,
+            )
             if request is None:
+                uow.commit()
                 return None
             uow.collect(request)
             uow.commit()
             return request
 
-    def claim_request_for_run(
+    def claim_dispatch_request_for_run(
         self,
         *,
         run_id: str,
         worker_id: str,
     ) -> OrchestrationIngressRequest | None:
         with self.uow_factory() as uow:
-            request = uow.orchestration_ingress_requests.claim_for_run(
-                run_id=run_id,
+            request = uow.orchestration_ingress_requests.get_by_run_id(run_id)
+            if request is None:
+                return None
+            if (
+                request.status is OrchestrationIngressStatus.QUEUED
+                and uow.dispatch_tasks.get(_ingress_task_id(request.id)) is None
+            ):
+                self._enqueue_ingress_dispatch_task(uow, request)
+                uow.flush()
+            task = uow.dispatch_tasks.claim_queued(
+                task_id=_ingress_task_id(request.id),
+                owner_kind=ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+                worker_id=worker_id,
+                claim_token=_claim_token(worker_id),
+                lease_seconds=self.lease_seconds,
+            )
+            if task is None:
+                return None
+            request = self._claim_request_for_dispatch_task(
+                uow,
+                task,
                 worker_id=worker_id,
             )
             if request is None:
@@ -176,6 +251,11 @@ class RunIngressCoordinator:
                 return None
             request.complete()
             uow.orchestration_ingress_requests.add(request)
+            task = uow.dispatch_tasks.get(_ingress_task_id(request.id))
+            if task is not None and _is_ingress_dispatch_task(task):
+                task.complete(now=request.completed_at)
+                uow.dispatch_tasks.add(task)
+                uow.collect(task)
             uow.collect(request)
             uow.commit()
             return request
@@ -198,9 +278,115 @@ class RunIngressCoordinator:
                 details=details or {},
             )
             uow.orchestration_ingress_requests.add(request)
+            task = uow.dispatch_tasks.get(_ingress_task_id(request.id))
+            if task is not None and _is_ingress_dispatch_task(task):
+                task.fail(
+                    message=message,
+                    code=code,
+                    details=details or {},
+                    now=request.completed_at,
+                )
+                uow.dispatch_tasks.add(task)
+                uow.collect(task)
             uow.collect(request)
             uow.commit()
             return request
+
+    def _enqueue_ingress_dispatch_task(
+        self,
+        uow: IngressCoordinatorUnitOfWork,
+        request: OrchestrationIngressRequest,
+    ) -> DispatchTask:
+        task = uow.dispatch_tasks.get(_ingress_task_id(request.id))
+        if task is None:
+            task = DispatchTask.create(
+                task_id=_ingress_task_id(request.id),
+                owner_kind=ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+                owner_id=request.id,
+                policy=_to_dispatch_policy(request.queue_policy),
+                priority=_dispatch_priority(request.priority),
+                payload_ref=request.run_id,
+                metadata={
+                    "task_kind": _INGRESS_TASK_KIND,
+                    "request_id": request.id,
+                    "request_kind": request.kind.value,
+                    "run_id": request.run_id,
+                },
+            )
+        task.enqueue(
+            policy=_to_dispatch_policy(request.queue_policy),
+            priority=_dispatch_priority(request.priority),
+            queued_at=request.created_at,
+        )
+        uow.dispatch_tasks.add(task)
+        uow.collect(task)
+        return task
+
+    def _recover_missing_ingress_dispatch_tasks(
+        self,
+        uow: IngressCoordinatorUnitOfWork,
+    ) -> int:
+        recovered_count = 0
+        for request in uow.orchestration_ingress_requests.list(
+            status=OrchestrationIngressStatus.QUEUED,
+        ):
+            if uow.dispatch_tasks.get(_ingress_task_id(request.id)) is not None:
+                continue
+            self._enqueue_ingress_dispatch_task(uow, request)
+            recovered_count += 1
+        return recovered_count
+
+    def _recover_abandoned_ingress_tasks(
+        self,
+        uow: IngressCoordinatorUnitOfWork,
+    ) -> None:
+        for task in uow.dispatch_tasks.recover_abandoned(
+            owner_kind=ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+        ):
+            task.recover_abandoned(
+                reason="Orchestration ingress lease expired before processing.",
+            )
+            uow.dispatch_tasks.add(task)
+            uow.collect(task)
+
+    def _claim_request_for_dispatch_task(
+        self,
+        uow: IngressCoordinatorUnitOfWork,
+        task: DispatchTask,
+        *,
+        worker_id: str,
+    ) -> OrchestrationIngressRequest | None:
+        task.claim(
+            worker_id=worker_id,
+            claim_token=task.claim_token or _claim_token(worker_id),
+            lease_seconds=self.lease_seconds,
+            claimed_at=task.claimed_at,
+        )
+        uow.dispatch_tasks.add(task)
+        uow.collect(task)
+        if not _is_ingress_dispatch_task(task):
+            return None
+        request = uow.orchestration_ingress_requests.get(task.owner_id)
+        if request is None:
+            task.fail(
+                message=f"Orchestration ingress request '{task.owner_id}' was not found.",
+                code="ingress_request_not_found",
+                details={"request_id": task.owner_id},
+            )
+            uow.dispatch_tasks.add(task)
+            uow.collect(task)
+            return None
+        if request.status in {
+            OrchestrationIngressStatus.COMPLETED,
+            OrchestrationIngressStatus.FAILED,
+        }:
+            task.complete(now=request.completed_at)
+            uow.dispatch_tasks.add(task)
+            uow.collect(task)
+            return None
+        request.claim(worker_id=worker_id, claimed_at=task.claimed_at)
+        uow.orchestration_ingress_requests.add(request)
+        return request
 
     @staticmethod
     def _route_context_payload(data: "SubmitOrchestrationTurnInput") -> dict[str, object]:
@@ -234,6 +420,33 @@ class RunIngressCoordinator:
         return payload
 
     @staticmethod
+    def _initial_routed_metadata(
+        data: "SubmitOrchestrationTurnInput",
+    ) -> dict[str, object]:
+        metadata = dict(data.accept_input.metadata)
+        try:
+            resolution = resolve_session_key(data.context)
+        except SessionValidationError as exc:
+            raise OrchestrationValidationError(str(exc)) from exc
+        metadata["session_key"] = resolution.key
+        metadata["session_kind"] = resolution.kind.value
+        requested_llm_id = _requested_llm_id(data.requested_llm_id)
+        if requested_llm_id is not None:
+            metadata.setdefault("requested_llm_id", requested_llm_id)
+        return metadata
+
+    @staticmethod
+    def _initial_bound_metadata(
+        data: "SubmitBoundOrchestrationTurnInput",
+    ) -> dict[str, object]:
+        metadata = dict(data.accept_input.metadata)
+        metadata["session_key"] = data.session_key
+        requested_llm_id = _requested_llm_id(data.requested_llm_id)
+        if requested_llm_id is not None:
+            metadata.setdefault("requested_llm_id", requested_llm_id)
+        return metadata
+
+    @staticmethod
     def _bound_session_target(
         data: "SubmitBoundOrchestrationTurnInput",
     ) -> OrchestrationBoundSessionTarget:
@@ -243,3 +456,33 @@ class RunIngressCoordinator:
             active_session_id=data.active_session_id,
             lane_key=data.lane_key,
         )
+
+
+def _requested_llm_id(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _ingress_task_id(request_id: str) -> str:
+    return f"ingress:{request_id.strip()}"
+
+
+def _is_ingress_dispatch_task(task: DispatchTask) -> bool:
+    return (
+        task.owner_kind == ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND
+        and task.metadata.get("task_kind") == _INGRESS_TASK_KIND
+    )
+
+
+def _to_dispatch_policy(policy: OrchestrationQueuePolicy) -> DispatchPolicy:
+    return DispatchPolicy(policy.value)
+
+
+def _dispatch_priority(priority: int | None) -> int:
+    return priority if priority is not None else 100
+
+
+def _claim_token(worker_id: str) -> str:
+    return f"orchestration-ingress:{worker_id.strip()}"

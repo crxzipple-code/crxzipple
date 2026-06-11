@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -8,6 +9,9 @@ from crxzipple.modules.process import (
     ProcessApplicationService,
     ProcessNotFoundError,
     ProcessSession,
+)
+from crxzipple.modules.tool.application.result_envelope import (
+    TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY,
 )
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from tools.command.command_exec import (
@@ -111,6 +115,18 @@ def exec(deps: CommandToolDeps | Any):
             default=DEFAULT_WORKSPACE_EXEC_TIMEOUT_SECONDS,
             label="exec timeout",
         )
+        max_output_tokens = _coerce_positive_int(
+            arguments,
+            keys=("max_output_tokens", "maxOutputTokens", "max_tokens", "maxTokens"),
+            default=None,
+            label="exec max_output_tokens",
+        )
+        yield_time_ms = _coerce_positive_int(
+            arguments,
+            keys=("yield_time_ms", "yieldTimeMs", "yield_ms", "yieldMs"),
+            default=None,
+            label="exec yield_time_ms",
+        )
         background = _coerce_bool_argument(
             arguments,
             keys=("background", "detached"),
@@ -127,20 +143,14 @@ def exec(deps: CommandToolDeps | Any):
                 if timeout_seconds is not None
                 else DEFAULT_WORKSPACE_EXEC_TIMEOUT_SECONDS
             ),
+            max_output_tokens=max_output_tokens,
         )
         if background:
             session_key = _resolve_session_key(execution_context)
-            process_session = process_service.start_command(
+            process_session = _start_prepared_process(
+                process_service,
+                prepared_command=prepared_command,
                 session_key=session_key,
-                command=prepared_command.command,
-                shell=prepared_command.shell,
-                working_directory=prepared_command.working_directory,
-                metadata={
-                    "workspace_root": prepared_command.workspace_root,
-                    "working_directory_relative": (
-                        prepared_command.working_directory_relative
-                    ),
-                },
             )
             rendered = render_process_started(process_session)
             return ToolRunResult.text(
@@ -151,25 +161,44 @@ def exec(deps: CommandToolDeps | Any):
                     background=True,
                 ),
             )
+        if yield_time_ms is not None:
+            return await _execute_with_yield(
+                process_service=process_service,
+                prepared_command=prepared_command,
+                execution_context=execution_context,
+                yield_time_ms=yield_time_ms,
+            )
         exec_result = await execute_prepared_workspace_command(prepared_command)
         rendered = render_workspace_exec_result(exec_result)
+        metadata = {
+            "tool": WORKSPACE_EXEC_TOOL_ID,
+            "background": False,
+            "workspace_dir": exec_result.workspace_root,
+            "cwd": exec_result.working_directory_relative or ".",
+            "absolute_cwd": exec_result.working_directory,
+            "shell": exec_result.shell,
+            "command": exec_result.command,
+            "exit_code": exec_result.exit_code,
+            "timed_out": exec_result.timed_out,
+            "wall_time_seconds": exec_result.wall_time_seconds,
+            "stdout": exec_result.stdout,
+            "stderr": exec_result.stderr,
+            "stdout_truncated": exec_result.stdout_truncated,
+            "stderr_truncated": exec_result.stderr_truncated,
+            "stdout_original_chars": exec_result.stdout_original_chars,
+            "stderr_original_chars": exec_result.stderr_original_chars,
+            "output_truncated": exec_result.output_truncated,
+            "output_budget_chars": exec_result.output_budget_chars,
+            "output_budget_tokens": exec_result.output_budget_tokens,
+            "output_estimated_tokens": exec_result.output_estimated_tokens,
+            "timeout_seconds": exec_result.timeout_seconds,
+        }
+        raw_blocks = _raw_output_blocks_for_exec_result(exec_result)
+        if raw_blocks:
+            metadata[TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY] = raw_blocks
         return ToolRunResult.text(
             rendered.content,
-            metadata={
-                "tool": WORKSPACE_EXEC_TOOL_ID,
-                "background": False,
-                "workspace_dir": exec_result.workspace_root,
-                "cwd": exec_result.working_directory_relative or ".",
-                "absolute_cwd": exec_result.working_directory,
-                "shell": exec_result.shell,
-                "command": exec_result.command,
-                "exit_code": exec_result.exit_code,
-                "stdout": exec_result.stdout,
-                "stderr": exec_result.stderr,
-                "stdout_truncated": exec_result.stdout_truncated,
-                "stderr_truncated": exec_result.stderr_truncated,
-                "timeout_seconds": exec_result.timeout_seconds,
-            },
+            metadata=metadata,
         )
 
     return handler
@@ -363,7 +392,12 @@ def render_workspace_exec_result(
         f"- cwd: {result.working_directory_relative or '.'}",
         f"- shell: {result.shell}",
         f"- exit_code: {result.exit_code}",
+        f"- timed_out: {str(result.timed_out).lower()}",
+        f"- wall_time_seconds: {result.wall_time_seconds:g}",
         f"- timeout_seconds: {result.timeout_seconds}",
+        f"- output_budget_tokens: {result.output_budget_tokens or '(default)'}",
+        f"- output_estimated_tokens: {result.output_estimated_tokens}",
+        f"- output_truncated: {str(result.output_truncated).lower()}",
         "",
         "## stdout",
         "```text",
@@ -396,6 +430,121 @@ def render_workspace_exec_result(
     return RenderedWorkspaceExec(content="\n".join(lines).strip())
 
 
+def _raw_output_blocks_for_exec_result(
+    result: WorkspaceCommandExecution,
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    if result.stdout_truncated and result.stdout_raw:
+        blocks.append(
+            {
+                "name": "stdout",
+                "text": result.stdout_raw,
+                "mime_type": "text/plain",
+            },
+        )
+    if result.stderr_truncated and result.stderr_raw:
+        blocks.append(
+            {
+                "name": "stderr",
+                "text": result.stderr_raw,
+                "mime_type": "text/plain",
+            },
+        )
+    return blocks
+
+
+async def _execute_with_yield(
+    *,
+    process_service: ProcessApplicationService,
+    prepared_command: Any,
+    execution_context: ToolExecutionContext | None,
+    yield_time_ms: int,
+) -> ToolRunResult:
+    session_key = _resolve_session_key(execution_context)
+    process_session = _start_prepared_process(
+        process_service,
+        prepared_command=prepared_command,
+        session_key=session_key,
+    )
+    wait_seconds = min(
+        max(yield_time_ms, 1) / 1000,
+        max(prepared_command.timeout_seconds, 1),
+    )
+    await asyncio.sleep(wait_seconds)
+    session = process_service.get_session(process_id=process_session.id)
+    output = process_service.read_output(
+        process_id=session.id,
+        stdout_offset=0,
+        stderr_offset=0,
+        limit=prepared_command.max_output_chars,
+    )
+    if session.is_running:
+        rendered = render_process_yielded(session, output, yield_time_ms=yield_time_ms)
+        return ToolRunResult.text(
+            rendered.content,
+            metadata={
+                **_process_metadata(
+                    session,
+                    tool_id=WORKSPACE_EXEC_TOOL_ID,
+                    background=True,
+                ),
+                "yielded": True,
+                "yield_time_ms": yield_time_ms,
+                "stdout": output.stdout,
+                "stderr": output.stderr,
+                "stdout_offset": output.stdout_offset,
+                "stderr_offset": output.stderr_offset,
+                "next_stdout_offset": output.next_stdout_offset,
+                "next_stderr_offset": output.next_stderr_offset,
+                "output_budget_chars": prepared_command.max_output_chars,
+                "output_budget_tokens": prepared_command.max_output_tokens,
+            },
+        )
+    rendered = render_process_completed_after_yield(
+        session,
+        output,
+        yield_time_ms=yield_time_ms,
+    )
+    return ToolRunResult.text(
+        rendered.content,
+        metadata={
+            **_process_metadata(
+                session,
+                tool_id=WORKSPACE_EXEC_TOOL_ID,
+                background=False,
+            ),
+            "yielded": False,
+            "yield_time_ms": yield_time_ms,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+            "stdout_offset": output.stdout_offset,
+            "stderr_offset": output.stderr_offset,
+            "next_stdout_offset": output.next_stdout_offset,
+            "next_stderr_offset": output.next_stderr_offset,
+            "output_budget_chars": prepared_command.max_output_chars,
+            "output_budget_tokens": prepared_command.max_output_tokens,
+        },
+    )
+
+
+def _start_prepared_process(
+    process_service: ProcessApplicationService,
+    *,
+    prepared_command: Any,
+    session_key: str | None,
+) -> ProcessSession:
+    return process_service.start_command(
+        session_key=session_key,
+        command=prepared_command.command,
+        shell=prepared_command.shell,
+        working_directory=prepared_command.working_directory,
+        metadata={
+            "workspace_root": prepared_command.workspace_root,
+            "working_directory_relative": prepared_command.working_directory_relative,
+        },
+    )
+
+
 def render_process_started(session: ProcessSession) -> RenderedWorkspaceExec:
     lines = [
         "# Background Process Started",
@@ -407,6 +556,70 @@ def render_process_started(session: ProcessSession) -> RenderedWorkspaceExec:
         f"- status: {session.status.value}",
         "",
         "Use the `process` tool to list, poll, read logs, kill, or remove this process.",
+    ]
+    return RenderedWorkspaceExec(content="\n".join(lines).strip())
+
+
+def render_process_yielded(
+    session: ProcessSession,
+    output: Any,
+    *,
+    yield_time_ms: int,
+) -> RenderedWorkspaceExec:
+    lines = [
+        "# Workspace Command Yielded",
+        "",
+        f"- process_id: {session.id}",
+        f"- command: {session.command}",
+        f"- cwd: {_process_cwd(session)}",
+        f"- pid: {session.pid}",
+        f"- status: {session.status.value}",
+        f"- yield_time_ms: {yield_time_ms}",
+        f"- next_stdout_offset: {output.next_stdout_offset}",
+        f"- next_stderr_offset: {output.next_stderr_offset}",
+        "",
+        "The command is still running. Use the `process` tool to poll, read logs, kill, or remove it.",
+        "",
+        "## stdout",
+        "```text",
+        output.stdout or "(empty)",
+        "```",
+        "",
+        "## stderr",
+        "```text",
+        output.stderr or "(empty)",
+        "```",
+    ]
+    return RenderedWorkspaceExec(content="\n".join(lines).strip())
+
+
+def render_process_completed_after_yield(
+    session: ProcessSession,
+    output: Any,
+    *,
+    yield_time_ms: int,
+) -> RenderedWorkspaceExec:
+    lines = [
+        "# Workspace Command Completed",
+        "",
+        f"- process_id: {session.id}",
+        f"- command: {session.command}",
+        f"- cwd: {_process_cwd(session)}",
+        f"- status: {session.status.value}",
+        f"- exit_code: {session.exit_code}",
+        f"- yield_time_ms: {yield_time_ms}",
+        f"- next_stdout_offset: {output.next_stdout_offset}",
+        f"- next_stderr_offset: {output.next_stderr_offset}",
+        "",
+        "## stdout",
+        "```text",
+        output.stdout or "(empty)",
+        "```",
+        "",
+        "## stderr",
+        "```text",
+        output.stderr or "(empty)",
+        "```",
     ]
     return RenderedWorkspaceExec(content="\n".join(lines).strip())
 

@@ -31,6 +31,7 @@ def build_runtime_context_block(
     llm_id: str,
     home_dir: str | None,
     workspace_dir: str | None,
+    available_tool_ids: tuple[str, ...] = (),
 ) -> PromptBlock | None:
     if run.agent_id is None or not run.agent_id.strip():
         return None
@@ -41,6 +42,7 @@ def build_runtime_context_block(
             llm_id=llm_id,
             home_dir=home_dir,
             workspace_dir=workspace_dir,
+            available_tool_ids=available_tool_ids,
         ),
         metadata={
             "agent_id": run.agent_id,
@@ -53,6 +55,7 @@ def build_runtime_context_block(
                 if workspace_dir is not None and workspace_dir.strip()
                 else (home_dir.strip() if home_dir is not None and home_dir.strip() else None)
             ),
+            "available_tool_ids": tuple(available_tool_ids),
         },
         policy=_RUNTIME_CONTEXT_POLICY,
     )

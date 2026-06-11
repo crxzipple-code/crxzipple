@@ -7,6 +7,7 @@ import json
 import re
 from typing import Any, Mapping
 
+from crxzipple.modules.orchestration.domain import ExecutionOwnerReference
 from crxzipple.modules.operations.application.read_models.models import (
     MetricCardModel,
     OperationsChartSectionModel,
@@ -247,6 +248,7 @@ class ToolOperationsReadModelProvider:
     tool_service: OperationsToolQueryPort
     access_service: Any | None = None
     artifact_service: Any | None = None
+    run_query: Any | None = None
     events_service: Any | None = None
     event_definition_registry: Any | None = None
     operations_observation: Any | None = None
@@ -380,6 +382,7 @@ class ToolOperationsReadModelProvider:
                 *long_running_detail_runs,
             ),
         )
+        run_contexts = _tool_run_contexts(self.run_query, detail_runs)
         health = _health(
             tools=tools,
             active_runs=active_runs,
@@ -459,6 +462,7 @@ class ToolOperationsReadModelProvider:
                 active_runs,
                 tools=tools,
                 assignment_by_run=assignment_by_run,
+                run_contexts=run_contexts,
                 now=now,
             ),
             tool_queue_runs=_tool_queue_runs_section(
@@ -486,6 +490,7 @@ class ToolOperationsReadModelProvider:
                 tools=tools,
                 assignment_by_run=assignment_by_run,
                 artifact_service=self.artifact_service,
+                run_contexts=run_contexts,
                 now=now,
                 total_count=len(filtered_tool_runs),
                 empty_state=_tool_runs_empty_state(query),
@@ -597,6 +602,7 @@ class ToolOperationsReadModelProvider:
                 assignments=assignments,
                 observed_events=observed_events,
                 artifact_service=self.artifact_service,
+                run_contexts=run_contexts,
                 now=now,
             ),
         )
@@ -1018,6 +1024,7 @@ def _tool_runs_section(
     tools: list[Tool],
     assignment_by_run: dict[str, ToolRunAssignment],
     artifact_service: Any | None,
+    run_contexts: dict[str, dict[str, str]],
     now: datetime,
     total_count: int | None = None,
     empty_state: str = "No tool runs recorded.",
@@ -1029,6 +1036,7 @@ def _tool_runs_section(
             tools_by_id=tools_by_id,
             assignment=assignment_by_run.get(run.id),
             artifact_service=artifact_service,
+            run_context=run_contexts.get(run.id),
             now=now,
         )
         for run in sorted(runs, key=_run_time, reverse=True)[:50]
@@ -1041,6 +1049,9 @@ def _tool_runs_section(
             ("tool", "Tool"),
             ("run_id", "Run ID"),
             ("source", "Source"),
+            ("orchestration_run_id", "Turn ID"),
+            ("chain_id", "Chain ID"),
+            ("step_id", "Step ID"),
             ("browser", "Browser"),
             ("status", "Status"),
             ("assignment_status", "Assignment"),
@@ -1064,6 +1075,7 @@ def _active_tool_runs_section(
     *,
     tools: list[Tool],
     assignment_by_run: dict[str, ToolRunAssignment],
+    run_contexts: dict[str, dict[str, str]],
     now: datetime,
 ) -> OperationsTableSectionModel:
     tools_by_id = _tool_lookup(tools)
@@ -1072,6 +1084,7 @@ def _active_tool_runs_section(
             run,
             tools_by_id=tools_by_id,
             assignment=assignment_by_run.get(run.id),
+            run_context=run_contexts.get(run.id),
             now=now,
         )
         for run in sorted(runs, key=_run_time, reverse=True)[:50]
@@ -1083,6 +1096,9 @@ def _active_tool_runs_section(
             ("run_id", "Tool Run ID"),
             ("tool", "Tool"),
             ("source", "Source"),
+            ("orchestration_run_id", "Turn ID"),
+            ("chain_id", "Chain ID"),
+            ("step_id", "Step ID"),
             ("browser", "Browser"),
             ("worker", "Worker ID"),
             ("duration", "Duration"),
@@ -1103,6 +1119,7 @@ def _tool_run_row(
     tools_by_id: dict[str, Tool],
     assignment: ToolRunAssignment | None,
     artifact_service: Any | None = None,
+    run_context: Mapping[str, str] | None = None,
     now: datetime,
 ) -> OperationsTableRowModel:
     tool = tools_by_id.get(run.tool_id)
@@ -1117,7 +1134,14 @@ def _tool_run_row(
                 "tool_id": run.tool_id,
                 "provider": _tool_provider_key(tool).lower(),
                 "run_id": run.id,
-                "source": _source_label(run),
+                "source": _source_label(run, run_context=run_context),
+                "orchestration_run_id": _orchestration_run_id(
+                    run,
+                    run_context=run_context,
+                )
+                or "-",
+                "chain_id": _context_value(run_context, "chain_id"),
+                "step_id": _context_value(run_context, "step_id"),
                 "browser": _browser_run_label(run),
                 "status": _status_label(run.status),
                 "assignment_status": _assignment_status_label(assignment),
@@ -1144,10 +1168,14 @@ def _tool_run_row(
                 "has_artifact": "yes" if artifact_count else "no",
                 "retryable": "yes" if retryable else "no",
                 "actions": _tool_run_actions(run),
-                "route": _source_route(run),
-                "trace": _trace_id(run),
-                "trace_route": _trace_route(run),
-                "search_text": _tool_run_search_text(run, tool=tool),
+                "route": _source_route(run, run_context=run_context),
+                "trace": _trace_id(run, run_context=run_context),
+                "trace_route": _trace_route(run, run_context=run_context),
+                "search_text": _tool_run_search_text(
+                    run,
+                    tool=tool,
+                    run_context=run_context,
+                ),
             },
             status=run.status.value,
             tone=_tone_for_status(run.status),
@@ -1155,7 +1183,12 @@ def _tool_run_row(
     )
 
 
-def _tool_run_search_text(run: ToolRun, *, tool: Tool | None) -> str:
+def _tool_run_search_text(
+    run: ToolRun,
+    *,
+    tool: Tool | None,
+    run_context: Mapping[str, str] | None = None,
+) -> str:
     return " ".join(
         item
         for item in (
@@ -1163,8 +1196,8 @@ def _tool_run_search_text(run: ToolRun, *, tool: Tool | None) -> str:
             run.tool_id,
             tool.name if tool is not None else "",
             _display(run.worker_id),
-            _source_label(run),
-            _trace_id(run),
+            _source_label(run, run_context=run_context),
+            _trace_id(run, run_context=run_context),
             _display(run.error_message),
         )
         if item
@@ -1644,10 +1677,14 @@ def _source_runtime_dependency_label(source: Any) -> str:
 
 
 def _is_browser_source(source: Any) -> bool:
-    if _record_text(source, "source_id") == "configured.browser":
+    if _record_text(source, "source_id") == "bundled.local_package.browser":
         return True
     config = getattr(source, "config", None)
-    return isinstance(config, Mapping) and config.get("source") == "configured_browser"
+    return (
+        isinstance(config, Mapping)
+        and config.get("namespace") == "browser"
+        and config.get("package_kind") == "local_package"
+    )
 
 
 def _source_tools_list_label(source: Any, discovery_status: str | None) -> str:
@@ -4228,6 +4265,7 @@ def _tool_run_details(
     assignments: list[ToolRunAssignment],
     observed_events: tuple[OperationsObservedEvent, ...],
     artifact_service: Any | None,
+    run_contexts: dict[str, dict[str, str]],
     now: datetime,
 ) -> tuple[ToolRunDetailModel, ...]:
     tools_by_id = _tool_lookup(tools)
@@ -4246,6 +4284,7 @@ def _tool_run_details(
             assignments=assignments_by_run.get(run.id, []),
             events=events_by_run.get(run.id, []),
             artifact_service=artifact_service,
+            run_context=run_contexts.get(run.id),
             now=now,
         )
         for run in sorted(runs, key=_run_time, reverse=True)[:50]
@@ -4259,6 +4298,7 @@ def _tool_run_detail(
     assignments: list[ToolRunAssignment],
     events: list[OperationsObservedEvent],
     artifact_service: Any | None,
+    run_context: Mapping[str, str] | None,
     now: datetime,
 ) -> ToolRunDetailModel:
     assignment = _latest_assignment_by_run(assignments).get(run.id)
@@ -4271,6 +4311,7 @@ def _tool_run_detail(
             run,
             tools_by_id=tools_by_id,
             assignment=assignment,
+            run_context=run_context,
             now=now,
         ),
         invocation_context=_invocation_context_items(run),
@@ -4380,6 +4421,7 @@ def _tool_run_detail_summary(
     *,
     tools_by_id: dict[str, Tool],
     assignment: ToolRunAssignment | None,
+    run_context: Mapping[str, str] | None,
     now: datetime,
 ) -> tuple[OperationsKeyValueItemModel, ...]:
     return (
@@ -4415,11 +4457,27 @@ def _tool_run_detail_summary(
         ),
         OperationsKeyValueItemModel(
             label="Source",
-            value=_source_label(run),
+            value=_source_label(run, run_context=run_context),
+        ),
+        OperationsKeyValueItemModel(
+            label="Turn ID",
+            value=_orchestration_run_id(run, run_context=run_context) or "-",
+        ),
+        OperationsKeyValueItemModel(
+            label="Chain ID",
+            value=_context_value(run_context, "chain_id"),
+        ),
+        OperationsKeyValueItemModel(
+            label="Step ID",
+            value=_context_value(run_context, "step_id"),
+        ),
+        OperationsKeyValueItemModel(
+            label="Step Kind",
+            value=_context_value(run_context, "step_kind"),
         ),
         OperationsKeyValueItemModel(
             label="Trace",
-            value=_trace_id(run),
+            value=_trace_id(run, run_context=run_context),
         ),
     )
 
@@ -4498,7 +4556,7 @@ def _is_browser_tool_run(run: ToolRun) -> bool:
             run.source_id or "",
             result_tool or "",
         )
-    ) or run.source_id == "configured.browser"
+    ) or run.source_id == "bundled.local_package.browser"
 
 
 def _result_metadata(run: ToolRun) -> dict[str, Any]:
@@ -6025,11 +6083,117 @@ def _looks_like_access_failure(run: ToolRun) -> bool:
     )
 
 
-def _source_label(run: ToolRun) -> str:
-    run_id = _metadata_str(run, "orchestration_run_id") or _context_str(run, "run_id")
-    tool_call_id = _metadata_str(run, "tool_call_id")
-    step_id = _context_str(run, "step_id")
-    turn_id = _context_str(run, "turn_id")
+def _tool_run_contexts(
+    run_query: Any | None,
+    runs: list[ToolRun],
+) -> dict[str, dict[str, str]]:
+    if run_query is None or not hasattr(run_query, "find_execution_step_items_by_owner"):
+        return {}
+    contexts: dict[str, dict[str, str]] = {}
+    for run in runs:
+        context = _execution_owner_context(
+            run_query,
+            ExecutionOwnerReference(owner_kind="tool_run", owner_id=run.id),
+        )
+        if not context:
+            continue
+        existing = contexts.get(run.id)
+        if existing is None or context.get("updated_at", "") > existing.get("updated_at", ""):
+            contexts[run.id] = context
+    return {
+        run_id: {
+            key: value
+            for key, value in context.items()
+            if key != "updated_at"
+        }
+        for run_id, context in contexts.items()
+    }
+
+
+def _execution_owner_context(
+    run_query: Any,
+    owner: ExecutionOwnerReference,
+) -> dict[str, str] | None:
+    try:
+        items = run_query.find_execution_step_items_by_owner(owner)
+    except Exception:
+        return None
+    if not items:
+        return None
+    item = max(items, key=_execution_item_updated_at)
+    try:
+        step = run_query.get_execution_step(item.step_id)
+    except Exception:
+        step = None
+    try:
+        run = run_query.get_run(item.turn_id)
+    except Exception:
+        run = None
+    run_id = _optional_metadata_text(getattr(run, "id", None)) or _optional_metadata_text(
+        getattr(item, "turn_id", None),
+    )
+    if run_id is None:
+        return None
+    metadata = getattr(run, "metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    trace_id = _optional_metadata_text(metadata.get("trace_id")) or run_id
+    summary_payload = item.summary_payload if isinstance(item.summary_payload, dict) else {}
+    tool_call_id = _optional_metadata_text(item.correlation_key) or _optional_metadata_text(
+        summary_payload.get("tool_call_id"),
+    )
+    return {
+        "run_id": run_id,
+        "turn_id": _optional_metadata_text(metadata.get("turn_id")) or item.turn_id,
+        "trace_id": trace_id,
+        "session_key": _optional_metadata_text(metadata.get("session_key")) or "-",
+        "route": f"/ui/workbench/runs/{run_id}",
+        "trace_route": f"/ui/trace/{trace_id}?step_id={item.step_id}",
+        "chain_id": item.chain_id,
+        "step_id": item.step_id,
+        "step_kind": _enum_value(getattr(step, "kind", None)),
+        "step_status": _enum_value(getattr(step, "status", None)),
+        "item_status": _enum_value(getattr(item, "status", None)),
+        "tool_call_id": tool_call_id or "-",
+        "updated_at": _execution_item_updated_at(item),
+    }
+
+
+def _execution_item_updated_at(item: Any) -> str:
+    updated_at = getattr(item, "updated_at", None)
+    if isinstance(updated_at, datetime):
+        return format_datetime_utc(updated_at)
+    return str(updated_at or "")
+
+
+def _enum_value(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    if raw is None:
+        return "-"
+    normalized = str(raw).strip()
+    return normalized or "-"
+
+
+def _source_label(
+    run: ToolRun,
+    *,
+    run_context: Mapping[str, str] | None = None,
+) -> str:
+    run_id = _orchestration_run_id(run, run_context=run_context)
+    tool_call_id = (
+        _context_value(run_context, "tool_call_id", blank_as_none=True)
+        or _metadata_str(run, "tool_call_id")
+    )
+    step_id = _context_value(
+        run_context,
+        "step_id",
+        blank_as_none=True,
+    ) or _context_str(run, "step_id")
+    turn_id = _context_value(
+        run_context,
+        "turn_id",
+        blank_as_none=True,
+    ) or _context_str(run, "turn_id")
     if run_id and tool_call_id:
         return f"{run_id} / {tool_call_id}"
     if run_id and step_id:
@@ -6039,14 +6203,26 @@ def _source_label(run: ToolRun) -> str:
     return run_id or turn_id or "-"
 
 
-def _source_route(run: ToolRun) -> str:
-    run_id = _metadata_str(run, "orchestration_run_id") or _context_str(run, "run_id")
+def _source_route(
+    run: ToolRun,
+    *,
+    run_context: Mapping[str, str] | None = None,
+) -> str:
+    route = _context_value(run_context, "route", blank_as_none=True)
+    if route:
+        return route
+    run_id = _orchestration_run_id(run, run_context=run_context)
     return f"/ui/workbench/runs/{run_id}" if run_id else "-"
 
 
-def _trace_id(run: ToolRun) -> str:
+def _trace_id(
+    run: ToolRun,
+    *,
+    run_context: Mapping[str, str] | None = None,
+) -> str:
     return (
-        _context_str(run, "trace_id")
+        _context_value(run_context, "trace_id", blank_as_none=True)
+        or _context_str(run, "trace_id")
         or _context_str(run, "correlation_id")
         or _metadata_str(run, "orchestration_run_id")
         or _context_str(run, "run_id")
@@ -6054,8 +6230,44 @@ def _trace_id(run: ToolRun) -> str:
     )
 
 
-def _trace_route(run: ToolRun) -> str:
-    return f"/ui/trace/{_trace_id(run)}"
+def _trace_route(
+    run: ToolRun,
+    *,
+    run_context: Mapping[str, str] | None = None,
+) -> str:
+    route = _context_value(run_context, "trace_route", blank_as_none=True)
+    if route:
+        return route
+    return f"/ui/trace/{_trace_id(run, run_context=run_context)}"
+
+
+def _orchestration_run_id(
+    run: ToolRun,
+    *,
+    run_context: Mapping[str, str] | None = None,
+) -> str | None:
+    return (
+        _context_value(run_context, "run_id", blank_as_none=True)
+        or _metadata_str(run, "orchestration_run_id")
+        or _context_str(run, "run_id")
+    )
+
+
+def _context_value(
+    run_context: Mapping[str, str] | None,
+    key: str,
+    *,
+    blank_as_none: bool = False,
+) -> str | None:
+    if run_context is None:
+        return None if blank_as_none else "-"
+    value = run_context.get(key)
+    if value is None:
+        return None if blank_as_none else "-"
+    normalized = str(value).strip()
+    if not normalized or normalized == "-":
+        return None if blank_as_none else "-"
+    return normalized
 
 
 def _context_str(run: ToolRun, key: str) -> str | None:

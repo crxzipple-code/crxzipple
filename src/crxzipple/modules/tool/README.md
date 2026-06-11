@@ -190,6 +190,37 @@ It intentionally does not auto-generate `ToolFunction` records from arbitrary CL
 help text. A help probe can inform a user or agent, but publishing a stable CLI
 function requires an explicit promoted function contract.
 
+## Bundled command source contract
+
+The bundled `command` local package is the default engineering runtime source
+for workspace-bound command execution.
+
+- `exec` runs a shell command in the bound workspace.
+- `process` manages background command sessions created by `exec`.
+- Source-local prompt guidance lives in `tools/command/tool.yaml`; global
+  runtime prompts must not duplicate command-specific strategy.
+- The command source default prompt groups expose `exec` and `process` through
+  Context Workspace provider mirror when the source is visible and policy allows
+  the default group refs.
+
+`exec` supports these model-facing control parameters:
+
+- `timeout_seconds`: hard execution timeout for synchronous command execution.
+- `max_output_tokens`: approximate combined stdout/stderr budget returned to the
+  model. Full truncated raw output is preserved through Tool result artifacts
+  and read handles when truncation occurs.
+- `yield_time_ms`: optional wait budget for synchronous commands. If the command
+  is still running after this many milliseconds, `exec` returns a background
+  process handle instead of waiting for completion. The model should continue
+  with `process poll` or `process log`. This parameter is ignored when
+  `background=true`.
+- `background`: start the command directly as a background process.
+
+`exec` result metadata includes structured execution facts such as `exit_code`,
+`timed_out`, `wall_time_seconds`, output budget fields, estimated output tokens,
+and truncation flags. Provider-facing content remains bounded; owner facts and
+artifacts keep the traceable full result path.
+
 Removed legacy paths:
 
 - `/tools/providers`, `/tools/discover`, `tool providers`, and `tool discover`

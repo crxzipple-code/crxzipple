@@ -17,6 +17,7 @@ class AppKey(StrEnum):
     EVENTS_BACKEND = "events.backend"
     EVENTS_SERVICE = "events.service"
     EVENTS_BUS = "events.bus"
+    EVENT_OUTBOX_PUBLISHER_SERVICE = "events.outbox_publisher_service"
     EVENT_CONTRACT_REGISTRY = "events.contract_registry"
     EVENT_DEFINITION_REGISTRY = "events.definition_registry"
 
@@ -49,6 +50,7 @@ class AppKey(StrEnum):
     CONTEXT_TREE_SERVICE = "context_workspace.tree_service"
     CONTEXT_RENDER_SERVICE = "context_workspace.render_service"
     CONTEXT_SESSION_NODE_PROVIDER = "context_workspace.session_node_provider"
+    CONTEXT_AGENT_HOME_NODE_PROVIDER = "context_workspace.agent_home_node_provider"
     CONTEXT_SKILL_NODE_PROVIDER = "context_workspace.skill_node_provider"
     CONTEXT_TOOL_NODE_PROVIDER = "context_workspace.tool_node_provider"
     CONTEXT_MEMORY_NODE_PROVIDER = "context_workspace.memory_node_provider"
@@ -77,6 +79,7 @@ class AppKey(StrEnum):
     BROWSER_PROFILE_ALLOCATOR_SERVICE = "browser.profile_allocator_service"
     BROWSER_QUERY_SERVICE = "browser.query_service"
     BROWSER_TOOL_APPLICATION_SERVICE = "browser.tool_application_service"
+    BROWSER_OBSERVATION_SERVICE = "browser.observation_service"
     BROWSER_FACADE = "browser.facade"
     BROWSER_RESULT_SERIALIZER = "browser.result_serializer"
     MOBILE_INFRASTRUCTURE = "mobile.infrastructure"

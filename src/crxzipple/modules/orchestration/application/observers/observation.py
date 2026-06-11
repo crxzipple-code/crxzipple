@@ -152,13 +152,13 @@ class RunObservationObserver:
             "waiting_reason": run.waiting_reason,
             "pending_tool_run_ids": list(run.pending_tool_run_ids),
             "pending_approval_request": (
-                dict(run.metadata.get("pending_approval_request"))
-                if isinstance(run.metadata.get("pending_approval_request"), dict)
+                dict(run.pending_approval_request_payload)
+                if run.pending_approval_request_payload is not None
                 else None
             ),
             "last_approval_resolution": (
-                dict(run.metadata.get("last_approval_resolution"))
-                if isinstance(run.metadata.get("last_approval_resolution"), dict)
+                dict(run.last_approval_resolution_payload)
+                if run.last_approval_resolution_payload is not None
                 else None
             ),
         }

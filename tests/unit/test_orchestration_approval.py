@@ -10,7 +10,7 @@ from crxzipple.modules.orchestration.application.approval import ApprovalResolut
 from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
 )
-from crxzipple.modules.tool.domain import ToolRunResult
+from crxzipple.modules.tool.domain import ToolExecutionNotAllowedError, ToolRunResult
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
 from tests.unit.tool_runtime_test_support import process_next_background_tool_run
@@ -89,7 +89,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 effect=AuthorizationEffect.DENY,
                 actions=("tool.run",),
                 resource_kind="tool",
-                resource_match={"source_id": "configured.browser"},
+                resource_match={"source_id": "bundled.local_package.browser"},
                 context_match={"browser_profile": "user"},
                 priority=1000,
             ),
@@ -825,10 +825,10 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(completed)
         assert completed is not None
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertGreaterEqual(len(adapter.requests), 2)
+        self.assertGreaterEqual(len(adapter.requests), 3)
         resume_system_messages = [
             message
-            for message in adapter.requests[1].messages
+            for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
         context_tree_message = next(
@@ -934,6 +934,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             for message in session_messages
             if message.role == "assistant"
             and message.content_payload.get("type") == "function_call"
+            and message.metadata.get("tool_name") == "echo"
         ]
         self.assertEqual(function_call_ids, ["call-echo-1"])
 
@@ -1020,7 +1021,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
 
         self.assertEqual(stalled.status, OrchestrationRunStatus.WAITING)
         self.assertEqual(stalled.stage, OrchestrationRunStage.WAITING_FOR_CONFIRMATION)
-        recovery_contract = stalled.metadata.get("recovery_contract")
+        recovery_contract = stalled.recovery_contract_payload
         assert isinstance(recovery_contract, dict)
         self.assertEqual(recovery_contract.get("kind"), "approval")
         self.assertEqual(recovery_contract.get("state"), "resolved_allow_pending_replay")
@@ -1040,6 +1041,103 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         assert completed is not None
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(completed.result_payload.get("output_text"), "approval flow complete")
+
+    def test_recover_abandoned_runs_fails_resolved_approval_when_replay_fails(self) -> None:
+        self._register_test_openai_profile(
+            self.container,
+            profile_id="local-capability",
+        )
+        self.agent_service.register_profile(
+            RegisterAgentProfileInput(
+                id="writer",
+                name="Writer",
+                instruction_policy=AgentInstructionPolicy(
+                    system_prompt="Use tools when needed.",
+                ),
+                llm_routing_policy=AgentLlmRoutingPolicy(default_llm_id="local-capability"),
+            ),
+        )
+
+        self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Echoes a message.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
+            required_effect_ids=("local_tool_access",),
+        )
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _EffectApprovalAdapter(),
+        )
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-approval-replay-fails",
+                inbound_instruction=InboundInstruction(source="cli", content="complete the task"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="writer",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        waiting = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+        assert waiting is not None
+        pending_request = waiting.pending_approval_request()
+        assert pending_request is not None
+
+        wait_coordinator = (
+            self.orchestration_approval_control_service.resolve_approval_request_fn.__self__
+        )
+        with patch.object(
+            wait_coordinator,
+            "continue_recovery_contract_fn",
+            lambda run_id: self.orchestration_run_query_service.get_run(run_id),
+        ):
+            self.orchestration_approval_control_service.resolve_approval_request(
+                ResolveApprovalRequestInput(
+                    run_id=run.id,
+                    request_id=pending_request.request_id,
+                    decision=ApprovalDecision.ALLOW_ONCE,
+                ),
+            )
+
+        assert wait_coordinator.engine is not None
+        with patch.object(
+            type(wait_coordinator.engine.tool_executor),
+            "replay_approved_tool_call",
+            side_effect=ToolExecutionNotAllowedError(
+                "Tool requires setup.",
+                code="credential_kind_mismatch",
+                detail={"credential_binding_id": "bad-binding"},
+            ),
+        ):
+            recovered = self.orchestration_scheduler_service.recover_abandoned_runs()
+
+        self.assertTrue(any(item.id == run.id for item in recovered))
+        failed = self.orchestration_run_query_service.get_run(run.id)
+        self.assertEqual(failed.status, OrchestrationRunStatus.FAILED)
+        self.assertEqual(failed.stage, OrchestrationRunStage.FAILED)
+        self.assertIsNone(failed.pending_approval_request_payload)
+        assert failed.error is not None
+        self.assertEqual(failed.error.code, "credential_kind_mismatch")
+        self.assertEqual(
+            failed.recovery_contract_payload.get("state"),
+            "replay_failed",
+        )
 
     def test_process_next_orchestration_assignment_includes_approval_denied_flow_node(self) -> None:
         self._register_test_openai_profile(
@@ -1126,7 +1224,7 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         self.assertEqual(completed.result_payload["output_text"], "fallback after denial")
         denied_system_messages = [
             message
-            for message in adapter.requests[1].messages
+            for message in adapter.requests[-1].messages
             if message.role is LlmMessageRole.SYSTEM
         ]
         context_tree_message = next(
@@ -1393,13 +1491,16 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             self.assertIsNotNone(finished_tool_run)
             assert finished_tool_run is not None
             self.assertEqual(finished_tool_run.status, ToolRunStatus.SUCCEEDED)
+            publish_outbox_events(container)
             container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
                 limit_per_subscription=10,
             )
-            processed_signal = container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_next_signal(
+            processed_continuation = container.require(
+                AppKey.ORCHESTRATION_SCHEDULER_SERVICE,
+            ).process_next_continuation(
                 worker_id="scheduler-1",
             )
-            self.assertIsNotNone(processed_signal)
+            self.assertIsNotNone(processed_continuation)
 
             resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id)
             self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
@@ -1526,17 +1627,22 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
                 uow.tool_functions.upsert(function)
                 uow.commit()
 
-            with self.assertRaises(OrchestrationValidationError) as exc_info:
-                container.require(AppKey.ORCHESTRATION_APPROVAL_CONTROL_SERVICE).resolve_approval_request(
-                    ResolveApprovalRequestInput(
-                        run_id=run.id,
-                        request_id=pending_request.request_id,
-                        decision=ApprovalDecision.ALLOW_ONCE,
-                    ),
-                )
+            failed = container.require(
+                AppKey.ORCHESTRATION_APPROVAL_CONTROL_SERVICE,
+            ).resolve_approval_request(
+                ResolveApprovalRequestInput(
+                    run_id=run.id,
+                    request_id=pending_request.request_id,
+                    decision=ApprovalDecision.ALLOW_ONCE,
+                ),
+            )
+            self.assertEqual(failed.status, OrchestrationRunStatus.FAILED)
+            self.assertEqual(failed.stage, OrchestrationRunStage.FAILED)
+            assert failed.error is not None
+            self.assertEqual(failed.error.code, "approval_replay_failed")
             self.assertIn(
                 "Approved tool replay target is no longer supported",
-                str(exc_info.exception),
+                failed.error.message,
             )
         finally:
             custom_harness.close()

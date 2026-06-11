@@ -7,12 +7,10 @@ from crxzipple.modules.orchestration.infrastructure.persistence import (
     OrchestrationIngressRequestModel,
     OrchestrationRunModel,
     OrchestrationRunWaitModel,
-    OrchestrationSchedulerSignalModel,
     SqlAlchemyOrchestrationExecutorLeaseRepository,
     SqlAlchemyOrchestrationIngressRequestRepository,
     SqlAlchemyOrchestrationRunRepository,
     SqlAlchemyOrchestrationRunWaitRepository,
-    SqlAlchemyOrchestrationSchedulerSignalRepository,
 )
 
 __all__ = [
@@ -22,10 +20,8 @@ __all__ = [
     "OrchestrationIngressRequestModel",
     "OrchestrationRunModel",
     "OrchestrationRunWaitModel",
-    "OrchestrationSchedulerSignalModel",
     "SqlAlchemyOrchestrationExecutorLeaseRepository",
     "SqlAlchemyOrchestrationIngressRequestRepository",
     "SqlAlchemyOrchestrationRunRepository",
     "SqlAlchemyOrchestrationRunWaitRepository",
-    "SqlAlchemyOrchestrationSchedulerSignalRepository",
 ]

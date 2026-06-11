@@ -15,7 +15,7 @@ from crxzipple.modules.orchestration.application.intake_workflows import (
     build_run_intake_coordinator,
 )
 from crxzipple.modules.orchestration.application.ports import (
-    RunDispatchPort,
+    OrchestrationDispatchPort,
     SessionResolutionPort,
 )
 from crxzipple.modules.orchestration.application.ports.runtime import (
@@ -46,7 +46,7 @@ class OrchestrationIngressRuntimeService:
     uow_factory: Callable[[], Any]
     run_query_service: OrchestrationRunQueryPort
     session_resolution_service: SessionResolutionPort
-    dispatch_port: RunDispatchPort
+    dispatch_port: OrchestrationDispatchPort
     _ingress: RunIngressCoordinator = field(init=False)
     _intake: RunIntakeCoordinator = field(init=False)
 
@@ -65,10 +65,7 @@ class OrchestrationIngressRuntimeService:
         *,
         inline_worker_id: str | None = None,
     ) -> "OrchestrationRun":
-        run = self._ingress.submit_turn(
-            data,
-            claimed_worker_id=inline_worker_id,
-        )
+        run = self._ingress.submit_turn(data)
         if inline_worker_id is None:
             return run
         processed = self.process_run_request(
@@ -83,10 +80,7 @@ class OrchestrationIngressRuntimeService:
         *,
         inline_worker_id: str | None = None,
     ) -> "OrchestrationRun":
-        run = self._ingress.submit_bound_turn(
-            data,
-            claimed_worker_id=inline_worker_id,
-        )
+        run = self._ingress.submit_bound_turn(data)
         if inline_worker_id is None:
             return run
         processed = self.process_run_request(
@@ -102,7 +96,7 @@ class OrchestrationIngressRuntimeService:
         worker_id: str,
     ) -> "OrchestrationRun | None":
         return process_ingress_request(
-            self._ingress.claim_request_for_run(
+            self._ingress.claim_dispatch_request_for_run(
                 run_id=run_id,
                 worker_id=worker_id,
             ),

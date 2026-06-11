@@ -79,7 +79,7 @@ activate runtime
 ## P4/P5 验收审查 2026-05-13
 
 P4 生产代码已落地：app assembly 主路径只调用 `activate_tool_packages(...)`，由
-`app/assembly/tool.py` 构造 `ToolPackageApplyContext`；Tool package 先解析
+`app/assembly/tool_packages.py` 构造 `ToolPackageApplyContext`；Tool package 先解析
 `ResolvedToolPackageActivation` 再一次性 apply。P5 readiness 已覆盖
 Access credential、OAuth account 与 daemon runtime，剩余口径继续升级为生产代码守卫。
 
@@ -89,15 +89,17 @@ P3 已完成项：
 - `_build_tool_infrastructure()` 只负责 Tool core registries/gateway，不注册
   scanned package handler。
 - `runtime_plan()` 在 owner module service/port 就绪后统一执行一次
-  `activate_tool_packages(...)`；直接 `ToolPackageApplyContext` 构造收在
-  `app/assembly/tool.py`。
+  `tool.activate_packages`；直接 `ToolPackageApplyContext` 构造收在
+  `app/assembly/tool_packages.py`。
 - 架构测试已守住薄 `app/container.py` 不执行 tool package apply，且
-  `app/assembly/tool.py` 统一保留 `ToolPackageApplyContext` 与 `activate_tool_packages(...)`，防止
+  `app/assembly/tool.py` 只声明 activation task，`app/assembly/tool_packages.py`
+  统一保留 `ToolPackageApplyContext` 与 `activate_tool_packages(...)`，防止
   `include_local=False` / `include_runtimes=False` 二段装载回潮。
 
 P4 已落地项：
 
-- `app/assembly/tool.py` 统一保留 `ToolPackageApplyContext` 与
+- `app/assembly/tool.py` 只声明 Tool package activation task；
+  `app/assembly/tool_packages.py` 统一保留 `ToolPackageApplyContext` 与
   `activate_tool_packages(...)`；旧 `register_tool_namespaces(...)`
   入口已移除，不再作为兼容路径保留。
 - native/local tool factory 已完成 openai_image、memory、workspace、command、sessions、
@@ -123,9 +125,9 @@ P5 已落地项：
   `daemon:<service_key>` 与 `daemon-group:<group>` requirement。
 - Tool package manifest 中的 `external_requirement` dependency 会同步投影为
   runtime readiness requirement，不会作为 handler factory deps 注入。
-- Browser 工具目录已收敛为 `configured.browser` source 下的 `browser.*`
-  profile-context functions；profile 诊断/启动由 Browser module query/control surface
-  和 daemon readiness 负责，不再通过旧 local package tool 入口承载。
+- Browser 工具目录已收敛为 `bundled.local_package.browser` source 下的 `browser.*`
+  profile-context functions，source/function/prompt metadata 来自 `tools/browser/tool.yaml`；
+  profile 诊断/启动由 Browser module query/control surface 和 daemon readiness 负责。
 - Required internal service dependency 已在 Tool package apply 阶段 fail-fast；缺依赖时
   `build_runtime_services()` 不返回，后续 tool/orchestration runtime event service 不会构建。
 - `GET /tools/{tool_id}/readiness` 暴露工具级 readiness；`POST /tools/{tool_id}/runs`
@@ -223,7 +225,7 @@ tool handler -> explicit constructor deps only
 验收：
 
 ```bash
-rg -n 'apply_tool_package_plans\\(' src/crxzipple/app/assembly/tool.py
+rg -n 'apply_tool_package_plans\\(' src/crxzipple/app/assembly/tool_packages.py
 rg -n 'SimpleNamespace\\(' src/crxzipple/app src/crxzipple/modules/tool tools
 rg -n 'orchestration_.*_lookup|PortResolver|container\\.' src/crxzipple/modules/tool tools
 PYTHONPATH=src pytest -q tests/unit/test_tool_access_architecture.py tests/unit/test_openai_image_tool.py
@@ -296,7 +298,7 @@ PYTHONPATH=src pytest -q tests/unit/test_tool_settings_integration.py tests/unit
 验收：
 
 ```bash
-rg -n 'apply_tool_package_plans\\(' src/crxzipple/app/assembly/tool.py
+rg -n 'apply_tool_package_plans\\(' src/crxzipple/app/assembly/tool_packages.py
 PYTHONPATH=src pytest -q \
   tests/unit/test_tool_catalog.py \
   tests/unit/test_tool_providers.py \

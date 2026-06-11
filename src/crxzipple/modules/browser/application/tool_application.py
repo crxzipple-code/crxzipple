@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 from crxzipple.modules.browser.domain import (
     BrowserActionResult,
@@ -128,7 +130,11 @@ class BrowserToolApplicationService:
             raise
         except BrowserValidationError as exc:
             raise BrowserToolApplicationError(
-                _browser_tool_error_from_exception(exc, command=command),
+                self._browser_tool_error_from_exception(exc, command=command),
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise BrowserToolApplicationError(
+                self._browser_tool_error_from_exception(exc, command=command),
             ) from exc
         return BrowserToolExecutionResult(
             payload=self._serialize_result(result),
@@ -136,6 +142,24 @@ class BrowserToolApplicationService:
                 profile_name=command.profile_name,
                 target_id=result.target_id or _command_target_id(command),
             ),
+        )
+
+    def _browser_tool_error_from_exception(
+        self,
+        exc: Exception,
+        *,
+        command: BrowserControlCommand | BrowserPageActionCommand,
+    ) -> BrowserToolExecutionError:
+        try:
+            runtime_state = self.runtime_state_store.get(
+                profile_name=command.profile_name.strip().lower(),
+            )
+        except Exception:  # noqa: BLE001
+            runtime_state = None
+        return _browser_tool_error_from_exception(
+            exc,
+            command=command,
+            runtime_state=runtime_state,
         )
 
     def _runtime_metadata(
@@ -175,12 +199,20 @@ class BrowserToolApplicationService:
         return metadata
 
     def _serialize_result(self, result: BrowserActionResult) -> dict[str, Any]:
+        value = self._serialize_value(result.value)
+        if isinstance(result.command, BrowserControlCommand):
+            value = _attach_control_action_envelope(
+                command=result.command,
+                target_id=result.target_id,
+                value=value,
+                tool_ok=result.ok,
+            )
         return {
             "ok": result.ok,
             "target_id": result.target_id,
             "message": result.message,
             "command": self._serialize_command(result.command),
-            "value": self._serialize_value(result.value),
+            "value": value,
         }
 
     def _serialize_command(
@@ -232,10 +264,65 @@ def _command_target_id(command: BrowserControlCommand | BrowserPageActionCommand
     return command.target.target_id
 
 
+def _attach_control_action_envelope(
+    *,
+    command: BrowserControlCommand,
+    target_id: str | None,
+    value: Any,
+    tool_ok: bool,
+) -> Any:
+    if command.kind not in {"open-tab", "navigate-tab"}:
+        return value
+    if not isinstance(value, dict):
+        return value
+    after = {
+        key: value.get(key)
+        for key in ("target_id", "url", "title", "type")
+        if value.get(key) is not None
+    }
+    if target_id is not None:
+        after.setdefault("target_id", target_id)
+    page_effect_ok = bool(after.get("url"))
+    value["action_envelope"] = {
+        "kind": command.kind,
+        "tool_ok": bool(tool_ok),
+        "page_effect_ok": page_effect_ok,
+        "page_effect_status": (
+            "observed_change" if page_effect_ok else "no_observable_change"
+        ),
+        "before": {
+            "target_id": command.target_id,
+        }
+        if command.target_id is not None
+        else {},
+        "after": after,
+        "changes": {
+            "url": {
+                "before": None,
+                "after": after.get("url"),
+            },
+        }
+        if after.get("url") is not None
+        else {},
+        "result": {
+            "target_id": after.get("target_id"),
+            "url": after.get("url"),
+        },
+        "next_action": (
+            "observe-current-state"
+            if page_effect_ok
+            else "use-action-trace-or-observe"
+        ),
+        "errors": [],
+    }
+    return value
+
+
 def _browser_tool_error_from_exception(
-    exc: BrowserValidationError,
+    exc: Exception,
     *,
     command: BrowserControlCommand | BrowserPageActionCommand,
+    runtime_state: Any | None = None,
 ) -> BrowserToolExecutionError:
     message = _safe_error_message(str(exc))
     code, retryable, setup_required = _classify_browser_error(message)
@@ -247,6 +334,14 @@ def _browser_tool_error_from_exception(
     target_id = _command_target_id(command)
     if target_id is not None:
         details["target_id"] = target_id
+    recovery = _browser_recovery_details(
+        command=command,
+        runtime_state=runtime_state,
+        message=message,
+        code=code,
+    )
+    if recovery:
+        details["browser_recovery"] = recovery
     return BrowserToolExecutionError(
         code=code,
         message=message,
@@ -275,6 +370,12 @@ def _classify_browser_error(message: str) -> tuple[str, bool, bool]:
         return "browser_runtime_not_ready", True, True
     if "timeout" in normalized or "timed out" in normalized:
         return "browser_timeout", True, False
+    if (
+        "requires ref or selector targeting" in normalized
+        or ("browser ref '" in normalized and "was not found" in normalized)
+        or ("browser ref '" in normalized and "is stale" in normalized)
+    ):
+        return "browser_ref_not_available", True, False
     if "tab '" in normalized and "was not found" in normalized:
         return "browser_target_not_found", False, False
     if "tab '" in normalized and "not available through playwright cdp" in normalized:
@@ -284,6 +385,187 @@ def _classify_browser_error(message: str) -> tuple[str, bool, bool]:
     if "unsupported" in normalized:
         return "browser_unsupported_action", False, False
     return "browser_execution_failed", False, False
+
+
+def _browser_recovery_details(
+    *,
+    command: BrowserControlCommand | BrowserPageActionCommand,
+    runtime_state: Any | None,
+    message: str,
+    code: str,
+) -> dict[str, Any]:
+    if runtime_state is None:
+        return {}
+
+    target_id = _command_target_id(command)
+    ref = command.target.ref if isinstance(command, BrowserPageActionCommand) else None
+    requested_ref = _optional_text(ref) or _extract_browser_ref(message)
+    if code == "browser_ref_not_available":
+        return _browser_ref_recovery_details(
+            command=command,
+            runtime_state=runtime_state,
+            target_id=target_id,
+            requested_ref=requested_ref,
+        )
+    if code == "browser_target_not_found":
+        return _browser_target_recovery_details(
+            runtime_state=runtime_state,
+            requested_target_id=target_id,
+        )
+    return {}
+
+
+def _browser_target_recovery_details(
+    *,
+    runtime_state: Any,
+    requested_target_id: str | None,
+) -> dict[str, Any]:
+    active_target_id = _optional_text(_runtime_metadata_value(runtime_state, "active_target_id"))
+    last_target_id = _optional_text(getattr(runtime_state, "last_target_id", None))
+    tabs = _runtime_page_tabs(runtime_state)
+    details: dict[str, Any] = {
+        "next_action": "refresh-browser-observation",
+        "reason": (
+            "Browser target ids are runtime handles. Refresh the tab list or observe the "
+            "active page before retrying with a stale target_id."
+        ),
+        "recommended_tools": ["browser.tabs.list", "browser.observe"],
+        "retry_without_target_id": active_target_id is not None or bool(tabs.get("items")),
+        "available_tabs": tabs,
+    }
+    if requested_target_id is not None:
+        details["requested_target_id"] = requested_target_id
+    if active_target_id is not None:
+        details["active_target_id"] = active_target_id
+        details["retry_target_id"] = active_target_id
+    if last_target_id is not None:
+        details["last_target_id"] = last_target_id
+    return details
+
+
+def _browser_ref_recovery_details(
+    *,
+    command: BrowserControlCommand | BrowserPageActionCommand,
+    runtime_state: Any,
+    target_id: str | None,
+    requested_ref: str | None,
+) -> dict[str, Any]:
+    resolved_target_id = (
+        _optional_text(target_id)
+        or _optional_text(_runtime_metadata_value(runtime_state, "active_target_id"))
+        or _optional_text(getattr(runtime_state, "last_target_id", None))
+    )
+    page_state = _runtime_page_state(runtime_state, target_id=resolved_target_id)
+    details: dict[str, Any] = {
+        "next_action": "refresh-interactive-refs",
+        "reason": (
+            "Browser refs belong to the latest interactive observation for a page. "
+            "Run browser.observe before retrying a ref-based action."
+        ),
+        "recommended_tools": ["browser.observe", "browser.dom.clickability"],
+        "retry_with_selector": (
+            isinstance(command, BrowserPageActionCommand)
+            and _optional_text(command.target.selector) is not None
+        ),
+        "available_tabs": _runtime_page_tabs(runtime_state),
+    }
+    if requested_ref is not None:
+        details["requested_ref"] = requested_ref
+    if resolved_target_id is not None:
+        details["target_id"] = resolved_target_id
+    generation = _positive_int(page_state.get("current_ref_generation")) if page_state else None
+    if generation is not None:
+        details["current_ref_generation"] = generation
+    snapshot_generation = _positive_int(page_state.get("snapshot_generation")) if page_state else None
+    if snapshot_generation is not None:
+        details["snapshot_generation"] = snapshot_generation
+    return details
+
+
+def _runtime_page_tabs(runtime_state: Any) -> dict[str, Any]:
+    raw_tabs = _runtime_metadata_value(runtime_state, "tabs")
+    if not isinstance(raw_tabs, list):
+        return {"count": 0, "items": [], "has_more": False}
+    active_target_id = _optional_text(_runtime_metadata_value(runtime_state, "active_target_id"))
+    last_target_id = _optional_text(getattr(runtime_state, "last_target_id", None))
+    tabs = []
+    for item in raw_tabs:
+        if not isinstance(item, Mapping):
+            continue
+        target_id = _optional_text(item.get("target_id"))
+        if target_id is None:
+            continue
+        tab_type = _optional_text(item.get("type")) or "page"
+        if tab_type != "page":
+            continue
+        payload = {
+            "target_id": target_id,
+            "type": tab_type,
+            "title": _truncate_text(_optional_text(item.get("title")), 80),
+            "url": _safe_tab_url(item.get("url")),
+            "is_active": target_id == active_target_id,
+            "is_last": target_id == last_target_id,
+        }
+        tabs.append({key: value for key, value in payload.items() if value is not None})
+    limit = 8
+    return {
+        "count": len(tabs),
+        "items": tabs[:limit],
+        "has_more": len(tabs) > limit,
+    }
+
+
+def _runtime_page_state(runtime_state: Any, *, target_id: str | None) -> dict[str, Any] | None:
+    normalized_target = _optional_text(target_id)
+    if normalized_target is None or not hasattr(runtime_state, "page_state"):
+        return None
+    try:
+        page_state = runtime_state.page_state(target_id=normalized_target)
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(page_state) if isinstance(page_state, Mapping) else None
+
+
+def _runtime_metadata_value(runtime_state: Any, key: str) -> Any:
+    metadata = getattr(runtime_state, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    return metadata.get(key)
+
+
+def _extract_browser_ref(message: str) -> str | None:
+    match = re.search(r"Browser ref '([^']+)'", message)
+    return _optional_text(match.group(1)) if match else None
+
+
+def _safe_tab_url(value: Any) -> str | None:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return _truncate_text(text, 180)
+    if parsed.scheme and parsed.netloc:
+        hostname = parsed.hostname or parsed.netloc
+        netloc = hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        path = _truncate_text(parsed.path or "/", 140) or "/"
+        return urlunsplit((parsed.scheme, netloc, path, "", ""))
+    return _truncate_text(text, 180)
+
+
+def _truncate_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= limit:
+        return value
+    return f"{value[: max(limit - 1, 0)]}..."
 
 
 def _safe_error_message(value: str) -> str:

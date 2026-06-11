@@ -221,7 +221,7 @@ class OrchestrationServiceSurfaceTests(unittest.TestCase):
             / "modules"
             / "orchestration"
             / "application"
-            / "prompt_surface.py",
+            / "prompt_input.py",
             REPO_ROOT
             / "src"
             / "crxzipple"

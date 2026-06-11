@@ -1,6 +1,9 @@
 kind: openapi
 namespace: itick_market
 description: iTick market data APIs for stock and crypto quotes.
+prompt:
+  title: iTick Market Data
+  summary: Retrieve stock, crypto, and market instrument data from iTick APIs.
 capabilities:
   - bounded_network.http
   - credential.read

@@ -45,6 +45,7 @@ Optional top-level fields:
 
 - `capabilities`
 - `dependencies`
+- `prompt`
 - `remote_runtimes`
 - `sandbox_runtimes`
 
@@ -98,6 +99,39 @@ Expected fields:
 
 Credential bindings reference Access binding ids, not secret source locations.
 
+## Prompt Bundle Metadata
+
+Every bundled source may declare a prompt-facing ability bundle. The source is
+the stable grouping boundary; `prompt` only controls how that bundle is
+introduced to the agent. Do not use source-kind labels such as "OpenAPI",
+"MCP", or "local package" as the bundle title.
+
+```yaml
+prompt:
+  title: Workspace Files
+  summary: Inspect, search, read, and edit files inside the session-bound workspace.
+```
+
+For very large sources, `prompt.groups` can divide functions inside that single
+source. Groups must declare exact function ids; the system will not infer groups
+from names, tags, source kind, or capability ids.
+Use `order` when prompt display order matters; source config is otherwise
+normalized for stable hashing.
+
+```yaml
+prompt:
+  title: Browser Automation
+  summary: Operate browser profiles, tabs, pages, DOM snapshots, network traces, and diagnostics.
+  groups:
+    navigation:
+      order: 10
+      title: Navigation
+      summary: Open pages, switch tabs, and wait for page state.
+      function_ids:
+        - browser.navigate
+        - browser.tabs.list
+```
+
 ## Runtime Behavior
 
 - App assembly first syncs bundled sources into the ToolSource repository.
@@ -111,6 +145,10 @@ Credential bindings reference Access binding ids, not secret source locations.
 
 ## Bundled Namespace Notes
 
+- `browser`: local browser automation tools backed by Browser owner services and
+  daemon-managed profile runtime. The stable source id is
+  `bundled.local_package.browser`; browser profile is runtime context, not a
+  separate Tool Source.
 - `command`: local command-execution tools bound to the current session
   workspace.
 - `openai_image`: OpenAI image generation and editing tools backed by the Images

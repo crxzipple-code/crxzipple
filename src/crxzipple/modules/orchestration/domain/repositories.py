@@ -4,17 +4,84 @@ from datetime import datetime
 from typing import Protocol
 
 from crxzipple.modules.orchestration.domain.entities import (
+    ExecutionChain,
+    ExecutionStep,
+    ExecutionStepItem,
     OrchestrationExecutorLease,
     OrchestrationIngressRequest,
     OrchestrationRun,
-    OrchestrationSchedulerSignal,
 )
 from crxzipple.modules.orchestration.domain.value_objects import (
+    ExecutionChainStatus,
+    ExecutionOwnerReference,
+    ExecutionStepItemStatus,
+    ExecutionStepStatus,
     OrchestrationExecutorLeaseStatus,
     OrchestrationIngressStatus,
-    OrchestrationSchedulerSignalStatus,
     OrchestrationRunStatus,
 )
+
+
+class ExecutionChainRepository(Protocol):
+    def add(self, chain: ExecutionChain) -> None:
+        ...
+
+    def get(self, chain_id: str) -> ExecutionChain | None:
+        ...
+
+    def get_active_for_turn(self, turn_id: str) -> ExecutionChain | None:
+        ...
+
+    def list_for_turn(
+        self,
+        turn_id: str,
+        *,
+        status: ExecutionChainStatus | None = None,
+    ) -> list[ExecutionChain]:
+        ...
+
+
+class ExecutionStepRepository(Protocol):
+    def add(self, step: ExecutionStep) -> None:
+        ...
+
+    def get(self, step_id: str) -> ExecutionStep | None:
+        ...
+
+    def get_by_correlation_key(self, correlation_key: str) -> ExecutionStep | None:
+        ...
+
+    def list_for_chain(
+        self,
+        chain_id: str,
+        *,
+        status: ExecutionStepStatus | None = None,
+    ) -> list[ExecutionStep]:
+        ...
+
+
+class ExecutionStepItemRepository(Protocol):
+    def add(self, item: ExecutionStepItem) -> None:
+        ...
+
+    def get(self, item_id: str) -> ExecutionStepItem | None:
+        ...
+
+    def find_by_owner_reference(
+        self,
+        owner: ExecutionOwnerReference,
+        *,
+        status: ExecutionStepItemStatus | None = None,
+    ) -> list[ExecutionStepItem]:
+        ...
+
+    def list_for_step(
+        self,
+        step_id: str,
+        *,
+        status: ExecutionStepItemStatus | None = None,
+    ) -> list[ExecutionStepItem]:
+        ...
 
 
 class OrchestrationRunRepository(Protocol):
@@ -70,40 +137,11 @@ class OrchestrationIngressRequestRepository(Protocol):
     def get_by_run_id(self, run_id: str) -> OrchestrationIngressRequest | None:
         ...
 
-    def claim_next(self, *, worker_id: str) -> OrchestrationIngressRequest | None:
-        ...
-
-    def claim_for_run(
-        self,
-        *,
-        run_id: str,
-        worker_id: str,
-    ) -> OrchestrationIngressRequest | None:
-        ...
-
     def list(
         self,
         *,
         status: OrchestrationIngressStatus | None = None,
     ) -> list[OrchestrationIngressRequest]:
-        ...
-
-
-class OrchestrationSchedulerSignalRepository(Protocol):
-    def add(self, signal: OrchestrationSchedulerSignal) -> None:
-        ...
-
-    def get(self, signal_id: str) -> OrchestrationSchedulerSignal | None:
-        ...
-
-    def claim_next(self, *, worker_id: str) -> OrchestrationSchedulerSignal | None:
-        ...
-
-    def list(
-        self,
-        *,
-        status: OrchestrationSchedulerSignalStatus | None = None,
-    ) -> list[OrchestrationSchedulerSignal]:
         ...
 
 

@@ -69,6 +69,9 @@ def test_container_uses_single_scanned_tool_package_apply_hook() -> None:
     app_tool_assembly = (
         REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool.py"
     ).read_text(encoding="utf-8")
+    app_tool_package_assembly = (
+        REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_packages.py"
+    ).read_text(encoding="utf-8")
     tool_packages = (
         REPO_ROOT
         / "src"
@@ -90,12 +93,12 @@ def test_container_uses_single_scanned_tool_package_apply_hook() -> None:
     ).read_text(encoding="utf-8")
 
     assert len(tool_activation_tasks) == 1
-    assert app_tool_assembly.count("apply_tool_package_plans(") == 1
+    assert app_tool_package_assembly.count("apply_tool_package_plans(") == 1
     assert "register_tool_namespaces(" not in app_tool_assembly
     assert "def register_scanned_tool_packages(" not in tool_packages
     assert "register_scanned_tool_packages" not in sandbox_worker
-    assert "include_local=False" not in app_tool_assembly
-    assert "include_runtimes=False" not in app_tool_assembly
+    assert "include_local=False" not in app_tool_package_assembly
+    assert "include_runtimes=False" not in app_tool_package_assembly
 
 
 def test_modules_do_not_import_app_assembly_layer() -> None:
@@ -215,17 +218,20 @@ def test_tool_execution_binding_assembly_lives_in_app_tool_assembly() -> None:
     app_tool_assembly = (
         REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool.py"
     ).read_text(encoding="utf-8")
+    app_tool_package_assembly = (
+        REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_packages.py"
+    ).read_text(encoding="utf-8")
 
     assert "def _runtime_tool_dependency_bindings(" not in app_runtime_assembly
     assert "ToolDependencyBinding(" not in app_runtime_assembly
     assert "ToolPackageApplyContext(" not in app_runtime_assembly
-    assert "def build_tool_execution_capability_bindings(" in app_tool_assembly
+    assert "def build_tool_execution_capability_bindings(" in app_tool_package_assembly
     assert "def build_tool_execution_services(" in app_tool_assembly
-    assert "artifact_service" in app_tool_assembly
-    assert "browser_tool_application" in app_tool_assembly
-    assert "mobile_facade" in app_tool_assembly
-    assert "process_service" in app_tool_assembly
-    assert "session_runtime_control" in app_tool_assembly
+    assert "artifact_service" in app_tool_package_assembly
+    assert "browser_tool_application" in app_tool_package_assembly
+    assert "mobile_facade" in app_tool_package_assembly
+    assert "process_service" in app_tool_package_assembly
+    assert "session_runtime_control" in app_tool_package_assembly
 
 
 def test_orchestration_uses_tool_execution_port_before_tool_package_apply() -> None:
@@ -319,7 +325,7 @@ def test_operations_source_read_model_context_is_explicitly_typed() -> None:
 
 def test_orchestration_does_not_reintroduce_retired_prompt_helpers() -> None:
     retired_paths = (
-        "src/crxzipple/modules/orchestration/application/prompt_assembler.py",
+        "src/crxzipple/modules/orchestration/application/prompt_input_collectr.py",
         "src/crxzipple/modules/orchestration/application/memory_context.py",
         "src/crxzipple/modules/orchestration/application/workspace_context.py",
         "src/crxzipple/modules/orchestration/application/prompting/flow_prompts.py",
@@ -426,10 +432,20 @@ def test_tool_handler_factory_deps_are_manifest_driven() -> None:
     app_tool_assembly = (
         REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool.py"
     ).read_text(encoding="utf-8")
-    assert not browser_manifest.exists()
-    assert "def _register_browser_tool_source_catalog" in app_tool_assembly
-    assert "browser_tool_application" in app_tool_assembly
-    assert "browser_system_config_store" in app_tool_assembly
+    browser_manifest_text = browser_manifest.read_text(encoding="utf-8")
+    browser_local = (REPO_ROOT / "tools" / "browser" / "local.py").read_text(
+        encoding="utf-8",
+    )
+    assert browser_manifest.exists()
+    assert "def _register_browser_tool_source_catalog" not in app_tool_assembly
+    assert "register_browser_tool_source_catalog" not in app_tool_assembly
+    assert "namespace: browser" in browser_manifest_text
+    assert "bundled.local_package.browser" in browser_manifest_text
+    assert "browser-profile-runtime" in browser_manifest_text
+    assert "tools.browser.local:create_browser_manifest_handler" in browser_manifest_text
+    assert "def create_browser_manifest_handler" in browser_local
+    assert "browser_tool_application" in browser_manifest_text
+    assert "browser_system_config_store" in browser_manifest_text
 
 
 def test_tool_handler_runtime_paths_do_not_hold_service_locator_objects() -> None:
@@ -535,7 +551,7 @@ def test_checklist_records_p3_done_and_p4_p5_remaining_acceptance_scope() -> Non
     required_review_points = [
         "P4 生产代码已落地",
         "Tool scanned package 已从两段装载收成单次 apply hook。",
-        "`app/assembly/tool.py` 统一保留 `ToolPackageApplyContext` 与 `activate_tool_packages(...)`",
+        "`app/assembly/tool_packages.py` 统一保留 `ToolPackageApplyContext` 与",
         "`OpenAIImageDeps(credential_provider=...)` 这类 typed deps 是目标形态",
         "Tool execution path 已接入 `ToolAccessReadinessPort`",
         "Tool execution path 已接入 `ToolRuntimeReadinessPort`",
@@ -543,7 +559,7 @@ def test_checklist_records_p3_done_and_p4_p5_remaining_acceptance_scope() -> Non
         "OAuth account credential binding 已纳入同一 Tool readiness 门禁",
         "DaemonServiceToolRuntimeReadinessAdapter",
         "Required internal service dependency 已在 Tool package apply 阶段 fail-fast",
-        "Browser 工具目录已收敛为 `configured.browser` source 下的 `browser.*`",
+        "Browser 工具目录已收敛为 `bundled.local_package.browser` source 下的 `browser.*`",
         "Operations Tool 风险表已读取合并 Tool readiness",
         "typed deps 迁移完成后，architecture tests 应从文档守卫升级为生产代码守卫",
     ]

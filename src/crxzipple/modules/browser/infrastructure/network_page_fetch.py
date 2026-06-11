@@ -100,6 +100,7 @@ _FORBIDDEN_REQUEST_HEADER_NAMES = {
 }
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _SUPPORTED_METHODS = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+_DEFAULT_BODY_PREVIEW_BYTES = 1200
 
 
 @dataclass(slots=True)
@@ -124,6 +125,11 @@ class BrowserPageNetworkFetchService:
                 source_kind="manual",
             )
             result = self._execute(page=page, request=request, kind="network-fetch-as-page")
+            result["fetch_safety"] = self._fetch_safety(
+                page_url=page_url,
+                request=request,
+            )
+            result["response_summary"] = _response_summary(result)
         except Exception as exc:
             self._emit_failure(
                 event_name=BROWSER_NETWORK_FETCH_FAILED_EVENT,
@@ -158,6 +164,7 @@ class BrowserPageNetworkFetchService:
             "headers": dict(request.request_headers),
             **dict(payload),
         }
+        body_source = _replay_body_source(payload)
         try:
             if "body" not in merged and "json" not in merged and request_body is not None:
                 if request_body.redacted:
@@ -165,6 +172,7 @@ class BrowserPageNetworkFetchService:
                         "Captured request body was redacted; provide payload.body or payload.json to replay safely.",
                     )
                 merged["body"] = request_body.body
+                body_source = "captured"
             replay = self._request_from_payload(
                 payload=merged,
                 page_url=page_url,
@@ -173,6 +181,20 @@ class BrowserPageNetworkFetchService:
             result = self._execute(page=page, request=replay, kind="network-replay-request")
             result["source_request_id"] = request.request_id
             result["source_capture_id"] = request.capture_id
+            result["replay_suitability"] = self._replay_suitability(
+                page_url=page_url,
+                request=request,
+                request_body=request_body,
+                replay=replay,
+                body_source=body_source,
+            )
+            result["request_diff"] = self._request_diff(
+                request=request,
+                request_body=request_body,
+                replay=replay,
+                body_source=body_source,
+            )
+            result["response_summary"] = _response_summary(result)
         except Exception as exc:
             self._emit_failure(
                 event_name=BROWSER_NETWORK_REPLAY_FAILED_EVENT,
@@ -227,7 +249,14 @@ class BrowserPageNetworkFetchService:
             "max_body_bytes": _non_negative_int(
                 payload.get("max_body_bytes"),
                 self.default_max_body_bytes,
+                label="max_body_bytes",
             ),
+            "body_preview_bytes": _non_negative_int(
+                _payload_value_any(payload, "body_preview_bytes", "bodyPreviewBytes"),
+                _DEFAULT_BODY_PREVIEW_BYTES,
+                label="body_preview_bytes",
+            ),
+            "include_body": _payload_bool_any(payload, "include_body", "includeBody") or False,
             "allow_cross_origin": bool(payload.get("allow_cross_origin")),
             "allow_mutating": allow_mutating,
         }
@@ -255,7 +284,12 @@ class BrowserPageNetworkFetchService:
             mime_type=mime_type,
             headers=headers,
         )
-        return {
+        body_preview, body_preview_truncated = _body_preview(
+            redacted_body,
+            max_bytes=int(request.get("body_preview_bytes") or 0),
+        )
+        include_body = bool(request.get("include_body"))
+        result = {
             "kind": kind,
             "request": {
                 "url": self.redactor.redact_url(str(request["url"])),
@@ -264,13 +298,18 @@ class BrowserPageNetworkFetchService:
                 "source_kind": request["source_kind"],
                 "allow_cross_origin": request["allow_cross_origin"],
                 "allow_mutating": request["allow_mutating"],
+                "include_body": include_body,
+                "body_preview_bytes": request.get("body_preview_bytes"),
             },
             "url": self.redactor.redact_url(str(raw_result.get("url") or request["url"])),
             "status": int(raw_result.get("status") or 0),
             "status_text": str(raw_result.get("status_text") or ""),
             "redirected": bool(raw_result.get("redirected")),
             "headers": self.redactor.redact_headers(headers),
-            "body": redacted_body,
+            "body_preview": body_preview,
+            "body_available": bool(redacted_body),
+            "body_omitted": bool(redacted_body) and not include_body,
+            "body_preview_truncated": body_preview_truncated,
             "mime_type": mime_type,
             "body_kind": "response",
             "base64_encoded": False,
@@ -279,6 +318,9 @@ class BrowserPageNetworkFetchService:
             "truncated": bool(raw_result.get("truncated")),
             "redacted": redacted_body != body,
         }
+        if include_body:
+            result["body"] = redacted_body
+        return result
 
     def _emit_result(
         self,
@@ -365,6 +407,307 @@ class BrowserPageNetworkFetchService:
             level="error",
         )
 
+    def _replay_suitability(
+        self,
+        *,
+        page_url: str,
+        request: BrowserNetworkRequest,
+        request_body: BrowserNetworkBody | None,
+        replay: Mapping[str, Any],
+        body_source: str,
+    ) -> dict[str, Any]:
+        method = _optional_text(replay.get("method"), request.method) or "GET"
+        page_origin = _safe_origin(page_url)
+        target_origin = _safe_origin(_optional_text(replay.get("url")))
+        cross_origin_required = (
+            page_origin is not None
+            and target_origin is not None
+            and page_origin != target_origin
+        )
+        mutating_required = method.upper() not in _SAFE_METHODS
+        captured_body_expected = request.request_body_ref is not None
+        captured_body_available = request_body is not None
+        captured_body_redacted = bool(request_body.redacted) if request_body is not None else False
+        warnings: list[str] = []
+        reasons: list[str] = []
+
+        if cross_origin_required:
+            reasons.append("Cross-origin replay was explicitly allowed.")
+        else:
+            reasons.append("Replay target stays within the page origin.")
+
+        if mutating_required:
+            reasons.append("Mutating HTTP method was explicitly allowed.")
+        else:
+            reasons.append("Replay uses a safe HTTP method.")
+
+        if body_source == "captured":
+            reasons.append("Captured request body was reused.")
+        elif body_source in {"override-body", "override-json"}:
+            reasons.append("Request body was supplied by the replay payload.")
+        elif captured_body_expected:
+            warnings.append("Captured request body was not available to replay.")
+        else:
+            reasons.append("Source request did not require a body.")
+
+        if _text_contains_redaction_marker(request.url):
+            warnings.append("Source request URL contains redacted values; replay may not match the original request.")
+        if _mapping_contains_redaction_marker(request.request_headers):
+            warnings.append(
+                "Source request headers contain redacted values; sensitive headers were not reused.",
+            )
+        if captured_body_redacted:
+            warnings.append("Captured request body was redacted; replay requires an explicit replacement body.")
+        if request.failure_text is not None:
+            warnings.append("Source request had a captured failure.")
+
+        level = "ready" if not warnings else "warning"
+        return {
+            "level": level,
+            "reasons": reasons,
+            "warnings": warnings,
+            "gates": {
+                "cross_origin": {
+                    "required": cross_origin_required,
+                    "allowed": bool(replay.get("allow_cross_origin")),
+                    "page_origin": page_origin,
+                    "target_origin": target_origin,
+                },
+                "mutating_method": {
+                    "required": mutating_required,
+                    "allowed": bool(replay.get("allow_mutating")),
+                    "method": method,
+                },
+                "captured_body": {
+                    "required": captured_body_expected,
+                    "available": captured_body_available,
+                    "redacted": captured_body_redacted,
+                    "reused": body_source == "captured",
+                    "source": body_source,
+                },
+            },
+        }
+
+    def _fetch_safety(
+        self,
+        *,
+        page_url: str,
+        request: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        method = _optional_text(request.get("method"), "GET") or "GET"
+        page_origin = _safe_origin(page_url)
+        target_origin = _safe_origin(_optional_text(request.get("url")))
+        cross_origin_required = (
+            page_origin is not None
+            and target_origin is not None
+            and page_origin != target_origin
+        )
+        mutating_required = method.upper() not in _SAFE_METHODS
+        body = request.get("body")
+        reasons: list[str] = []
+        warnings: list[str] = []
+
+        if cross_origin_required:
+            warnings.append("Cross-origin page fetch was explicitly allowed.")
+        else:
+            reasons.append("Fetch target stays within the page origin.")
+
+        if mutating_required:
+            warnings.append("Mutating HTTP method was explicitly allowed.")
+        else:
+            reasons.append("Fetch uses a safe HTTP method.")
+
+        if body is not None:
+            reasons.append("Fetch includes an explicit request body.")
+        else:
+            reasons.append("Fetch has no request body.")
+
+        reasons.append("Fetch runs inside the browser page and includes page credentials.")
+        return {
+            "level": "ready" if not warnings else "warning",
+            "reasons": reasons,
+            "warnings": warnings,
+            "gates": {
+                "cross_origin": {
+                    "required": cross_origin_required,
+                    "allowed": bool(request.get("allow_cross_origin")),
+                    "page_origin": page_origin,
+                    "target_origin": target_origin,
+                },
+                "mutating_method": {
+                    "required": mutating_required,
+                    "allowed": bool(request.get("allow_mutating")),
+                    "method": method,
+                },
+                "body": {
+                    "present": body is not None,
+                    "size_bytes": _text_size(body),
+                },
+                "credentials": {
+                    "included": True,
+                    "source": "browser-page",
+                },
+            },
+        }
+
+    def _request_diff(
+        self,
+        *,
+        request: BrowserNetworkRequest,
+        request_body: BrowserNetworkBody | None,
+        replay: Mapping[str, Any],
+        body_source: str,
+    ) -> dict[str, Any]:
+        replay_url = _optional_text(replay.get("url")) or ""
+        replay_method = _optional_text(replay.get("method"), request.method) or "GET"
+        source_headers = _normalize_header_items(_sanitize_request_headers(request.request_headers))
+        replay_headers = _normalize_header_items(_dict(replay.get("headers")))
+        source_body_state = _source_body_state(request=request, request_body=request_body)
+        replay_body = replay.get("body")
+        body_changed: bool | None
+        if source_body_state["state"] == "available":
+            body_changed = str(request_body.body) != ("" if replay_body is None else str(replay_body))
+        elif request.request_body_ref is None and replay_body is None:
+            body_changed = False
+        else:
+            body_changed = None
+
+        changed_fields: list[str] = []
+        if request.url != replay_url:
+            changed_fields.append("url")
+        if request.method.upper() != replay_method.upper():
+            changed_fields.append("method")
+        if source_headers != replay_headers:
+            changed_fields.append("headers")
+        if body_changed is True:
+            changed_fields.append("body")
+        elif body_changed is None:
+            changed_fields.append("body_unknown")
+
+        return {
+            "changed_fields": changed_fields,
+            "url_changed": request.url != replay_url,
+            "method_changed": request.method.upper() != replay_method.upper(),
+            "headers_changed": source_headers != replay_headers,
+            "body_changed": body_changed,
+            "body_source": body_source,
+            "source": {
+                "url": self.redactor.redact_url(request.url),
+                "method": request.method,
+                "header_names": [key for key, _value in source_headers],
+                "body": source_body_state,
+            },
+            "replay": {
+                "url": self.redactor.redact_url(replay_url),
+                "method": replay_method,
+                "header_names": [key for key, _value in replay_headers],
+                "body": {
+                    "present": replay_body is not None,
+                    "size_bytes": _text_size(replay_body),
+                },
+            },
+        }
+
+
+def _replay_body_source(payload: Mapping[str, Any]) -> str:
+    if _payload_has_json(payload):
+        return "override-json"
+    if "body" in payload and payload.get("body") is not None:
+        return "override-body"
+    return "none"
+
+
+def _normalize_header_items(value: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    items: list[tuple[str, str]] = []
+    for key, item in value.items():
+        normalized_key = str(key).strip().lower()
+        if not normalized_key:
+            continue
+        items.append((normalized_key, "" if item is None else str(item)))
+    return tuple(sorted(items))
+
+
+def _source_body_state(
+    *,
+    request: BrowserNetworkRequest,
+    request_body: BrowserNetworkBody | None,
+) -> dict[str, Any]:
+    if request_body is not None:
+        if request_body.redacted:
+            return {
+                "state": "redacted",
+                "present": True,
+                "redacted": True,
+                "size_bytes": request_body.size_bytes,
+                "stored_size_bytes": request_body.stored_size_bytes,
+            }
+        return {
+            "state": "available",
+            "present": True,
+            "redacted": False,
+            "size_bytes": request_body.size_bytes,
+            "stored_size_bytes": request_body.stored_size_bytes,
+        }
+    if request.request_body_ref is not None:
+        return {
+            "state": "missing",
+            "present": True,
+            "redacted": False,
+            "size_bytes": None,
+            "stored_size_bytes": None,
+        }
+    return {
+        "state": "none",
+        "present": False,
+        "redacted": False,
+        "size_bytes": 0,
+        "stored_size_bytes": 0,
+    }
+
+
+def _response_summary(result: Mapping[str, Any]) -> dict[str, Any]:
+    status = _int_or_none(result.get("status"))
+    body = result.get("body")
+    body_preview = result.get("body_preview")
+    return {
+        "status": status,
+        "ok": status is not None and 200 <= status < 400,
+        "status_text": _optional_text(result.get("status_text")),
+        "redirected": bool(result.get("redirected")),
+        "mime_type": _optional_text(result.get("mime_type")),
+        "size_bytes": _int_or_none(result.get("size_bytes")),
+        "stored_size_bytes": _int_or_none(result.get("stored_size_bytes")),
+        "body_present": bool(result.get("body_available")) or (isinstance(body, str) and bool(body)),
+        "body_omitted": bool(result.get("body_omitted")),
+        "body_preview_bytes": _text_size(body_preview if body_preview is not None else body),
+        "body_preview_truncated": bool(result.get("body_preview_truncated")),
+        "truncated": bool(result.get("truncated")),
+        "redacted": bool(result.get("redacted")),
+    }
+
+
+def _text_size(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return len(str(value).encode("utf-8"))
+    except Exception:
+        return None
+
+
+def _text_contains_redaction_marker(value: Any) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).lower()
+    return "[redacted]" in normalized or "%5bredacted%5d" in normalized
+
+
+def _mapping_contains_redaction_marker(value: Mapping[str, Any]) -> bool:
+    return any(
+        _text_contains_redaction_marker(key) or _text_contains_redaction_marker(item)
+        for key, item in value.items()
+    )
+
 
 def _normalize_url(value: Any, *, page_url: str, allow_cross_origin: bool) -> str:
     normalized = str(value or "").strip()
@@ -447,16 +790,40 @@ def _positive_int(value: Any, default: int) -> int:
     return resolved
 
 
-def _non_negative_int(value: Any, default: int) -> int:
+def _non_negative_int(value: Any, default: int, *, label: str) -> int:
     if value in (None, ""):
         return default
     try:
         resolved = int(value)
     except (TypeError, ValueError) as exc:
-        raise BrowserValidationError("payload.max_body_bytes must be an integer.") from exc
+        raise BrowserValidationError(f"payload.{label} must be an integer.") from exc
     if resolved < 0:
-        raise BrowserValidationError("payload.max_body_bytes must be greater than or equal to 0.")
+        raise BrowserValidationError(f"payload.{label} must be greater than or equal to 0.")
     return resolved
+
+
+def _payload_value_any(payload: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+    return None
+
+
+def _payload_bool_any(payload: Mapping[str, Any], *keys: str) -> bool | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _body_preview(value: str, *, max_bytes: int) -> tuple[str, bool]:
+    if not value or max_bytes <= 0:
+        return "", bool(value)
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
 
 
 def _string_mapping(value: Any) -> dict[str, str]:

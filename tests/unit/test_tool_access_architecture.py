@@ -113,6 +113,9 @@ def test_tool_package_activation_filters_local_handlers_by_function_catalog() ->
     app_tool_assembly = (
         ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool.py"
     ).read_text(encoding="utf-8")
+    app_tool_package_assembly = (
+        ROOT / "src" / "crxzipple" / "app" / "assembly" / "tool_packages.py"
+    ).read_text(encoding="utf-8")
     tool_packages = (
         ROOT
         / "src"
@@ -124,8 +127,8 @@ def test_tool_package_activation_filters_local_handlers_by_function_catalog() ->
     ).read_text(encoding="utf-8")
 
     assert "AppKey.TOOL_SOURCE_QUERY_SERVICE" in app_tool_assembly
-    assert "def _active_local_function_refs_by_namespace(" in app_tool_assembly
-    assert "local_function_refs_by_namespace=" in app_tool_assembly
+    assert "def active_local_function_refs_by_namespace(" in app_tool_package_assembly
+    assert "local_function_refs_by_namespace=" in app_tool_package_assembly
     assert "def _local_handler_enabled_by_catalog(" in tool_packages
     assert "context.local_function_refs_for_namespace(" in tool_packages
 

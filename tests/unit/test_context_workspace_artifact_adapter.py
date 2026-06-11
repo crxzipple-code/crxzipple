@@ -97,13 +97,13 @@ def test_artifact_adapter_expands_session_artifact_handles() -> None:
         "artifacts.artifact.file-1",
     ]
     assert artifact_nodes[0].kind == "artifact_image"
-    assert artifact_nodes[0].actions[0] is ContextAction.OPEN_ARTIFACT
+    assert ContextAction.PIN in artifact_nodes[0].actions
     assert artifact_nodes[0].owner_ref["preferred_variant"] == "llm"
     assert artifact_nodes[1].kind == "artifact_file"
     assert artifact_nodes[1].owner_ref["preferred_variant"] == "original"
 
 
-def test_artifact_provider_mirror_only_includes_opened_artifacts() -> None:
+def test_artifact_provider_mirror_includes_pinned_artifacts() -> None:
     session_service = _FakeSessionService(
         SessionMessage(
             id="message-1",
@@ -146,25 +146,25 @@ def test_artifact_provider_mirror_only_includes_opened_artifacts() -> None:
             action=ContextAction.EXPAND,
         ),
     )
-    before_open = services["render"].render_prompt_body(
+    before_pin = services["render"].render_prompt_body(
         RenderContextPromptInput(session_key="session:artifacts"),
     )
 
-    assert "artifact_content_candidates" not in before_open.provider_attachments
+    assert "artifact_content_candidates" not in before_pin.provider_attachments
 
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:artifacts",
             node_id="artifacts.artifact.image-1",
-            action=ContextAction.OPEN_ARTIFACT,
+            action=ContextAction.PIN,
         ),
     )
-    after_open = services["render"].render_prompt_body(
+    after_pin = services["render"].render_prompt_body(
         RenderContextPromptInput(session_key="session:artifacts"),
     )
 
-    assert after_open.mirrored_node_ids == ("artifacts.artifact.image-1",)
-    assert after_open.provider_attachments["artifact_content_candidates"] == [
+    assert after_pin.mirrored_node_ids == ("artifacts.artifact.image-1",)
+    assert after_pin.provider_attachments["artifact_content_candidates"] == [
         {
             "node_id": "artifacts.artifact.image-1",
             "artifact_id": "image-1",

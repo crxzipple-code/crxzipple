@@ -111,6 +111,7 @@ class SqlAlchemyLlmInvocationRepository:
                     else None
                 ),
                 request_overrides=dict(invocation.request_overrides),
+                request_metadata=dict(invocation.request_metadata),
                 status=invocation.status.value,
                 result_payload=(
                     invocation.result.to_payload()
@@ -175,6 +176,11 @@ class SqlAlchemyLlmInvocationRepository:
             request_overrides=(
                 dict(model.request_overrides)
                 if isinstance(model.request_overrides, dict)
+                else {}
+            ),
+            request_metadata=(
+                dict(model.request_metadata)
+                if isinstance(model.request_metadata, dict)
                 else {}
             ),
             status=LlmInvocationStatus(model.status),

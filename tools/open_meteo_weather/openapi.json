@@ -71,7 +71,7 @@
           {
             "name": "forecast_days",
             "in": "query",
-            "description": "Number of forecast days to return.",
+            "description": "Number of forecast days to return. Use this OR start_date/end_date, never both.",
             "schema": {
               "type": "integer"
             }
@@ -87,7 +87,7 @@
           {
             "name": "start_date",
             "in": "query",
-            "description": "Forecast start date in ISO 8601 format.",
+            "description": "Forecast start date in ISO 8601 format. Use with end_date OR forecast_days, never both.",
             "schema": {
               "type": "string",
               "format": "date"
@@ -96,7 +96,7 @@
           {
             "name": "end_date",
             "in": "query",
-            "description": "Forecast end date in ISO 8601 format.",
+            "description": "Forecast end date in ISO 8601 format. Use with start_date OR forecast_days, never both.",
             "schema": {
               "type": "string",
               "format": "date"

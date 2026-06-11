@@ -1,12 +1,12 @@
 kind: local_package
 namespace: context_tree
+prompt:
+  title: Context Tree Controls
+  summary: "Operate the prompt tree itself: list, expand, collapse, pin, estimate, and mirror selected schemas. Inspect relevant capability, session, skill, memory, artifact, and workspace handles before declaring context or tools unavailable. Do not expand many historical tool_interaction nodes as a substitute for the next owner-tool action."
 capabilities:
   - context_workspace.read
   - context_workspace.write
   - context_workspace.render
-  - memory.context_lookup
-  - memory.search
-  - artifact.read
 dependencies:
   - id: context_tree_service
     kind: service_dependency
@@ -15,14 +15,6 @@ dependencies:
   - id: context_render_service
     kind: service_dependency
     description: Context Workspace render service used to estimate visible prompt payloads and provider mirrors.
-    required: false
-  - id: memory_runtime_service
-    kind: service_dependency
-    description: Memory runtime service used to recall governed memory into context tree nodes.
-    required: false
-  - id: artifact_service
-    kind: service_dependency
-    description: Artifact application service used to resolve opened context artifact handles.
     required: false
 local_tools:
   - id: context_tree.list
@@ -53,7 +45,7 @@ local_tools:
     runtime_key: context_tree.list
   - id: context_tree.expand
     name: Context Tree Expand
-    description: Expand a context tree node and load owner-provided children when available.
+    description: Expand one relevant context tree node and load owner-provided children when available. Use for a specific missing fact or capability handle; avoid expanding multiple historical tool_interaction nodes instead of taking the next useful owner-tool action.
     provider_name: local_system
     entrypoint: tools.context_tree.local:context_tree_expand
     tool_kind: function
@@ -201,23 +193,56 @@ local_tools:
     context_requirements:
       - session_key
     runtime_key: context_tree.estimate
-  - id: context_tree.read_skill
-    name: Context Tree Read Skill
-    description: Read an available skill node and attach its instructions as a child context node.
+  - id: context_tree.update_plan
+    name: Context Tree Update Plan
+    description: Update the visible public working plan node only when the task phase, objective, verified facts, blocker, or next-step strategy materially changes. Do not use this as a per-tool-call progress log or private reasoning scratchpad. Repeating phase_update/phase_change inside the same phase is treated as no-op; use verified_fact, blocker, recovery, or final_summary to record meaningful state inside the same phase.
     provider_name: local_system
-    entrypoint: tools.context_tree.local:context_tree_read_skill
+    entrypoint: tools.context_tree.local:context_tree_update_plan
     tool_kind: function
     parameters:
-      - name: node_id
+      - name: objective
         data_type: string
-        description: Skill context node id to read.
+        description: Public objective currently being advanced.
         required: true
+      - name: status
+        data_type: string
+        description: Plan status such as in_progress, verifying, blocked, or done.
+        required: false
+      - name: current_step
+        data_type: string
+        description: Current public execution phase or milestone, not every minor action.
+        required: false
+      - name: completed_steps
+        data_type: array
+        description: Public list of completed steps.
+        required: false
+      - name: verified_facts
+        data_type: array
+        description: Public list of verified facts or evidence.
+        required: false
+      - name: assumptions
+        data_type: array
+        description: Public assumptions still needing validation.
+        required: false
+      - name: blockers
+        data_type: array
+        description: Public blockers or unresolved limitations.
+        required: false
+      - name: next_steps
+        data_type: array
+        description: Public next steps.
+        required: false
+      - name: update_reason
+        data_type: string
+        description: Why the public plan needs an update, such as phase_change, verified_fact, blocker, objective_change, recovery, or final_summary. Repeating the same plan is treated as no-op; repeating phase_change/phase_update for the same objective/status/current_step is also no-op.
+        required: false
       - name: session_key
         data_type: string
         description: Optional session key. Defaults to the current session in tool context.
         required: false
     tags:
       - context_tree
+      - planning
       - builtin
       - system-managed
       - scope:session_context
@@ -231,82 +256,7 @@ local_tools:
       - local
     context_requirements:
       - session_key
-    runtime_key: context_tree.read_skill
-  - id: context_tree.recall_memory
-    name: Context Tree Recall Memory
-    description: Recall governed memory for a query and attach the results under a memory context node.
-    provider_name: local_system
-    entrypoint: tools.context_tree.local:context_tree_recall_memory
-    tool_kind: function
-    parameters:
-      - name: query
-        data_type: string
-        description: Query describing the memory to recall.
-        required: true
-      - name: node_id
-        data_type: string
-        description: Optional memory context node id. Defaults to memory.visible.
-        required: false
-      - name: limit
-        data_type: integer
-        description: Maximum number of memory items to attach.
-        required: false
-      - name: session_key
-        data_type: string
-        description: Optional session key. Defaults to the current session in tool context.
-        required: false
-    tags:
-      - context_tree
-      - builtin
-      - system-managed
-      - scope:session_context
-      - surface:interactive
-    mutates_state: true
-    supported_modes:
-      - inline
-    supported_strategies:
-      - async
-    supported_environments:
-      - local
-    context_requirements:
-      - session_key
-      - agent_id
-    runtime_key: context_tree.recall_memory
-  - id: context_tree.open_artifact
-    name: Context Tree Open Artifact
-    description: Resolve a session artifact context node to a provider-ready local artifact variant.
-    provider_name: local_system
-    entrypoint: tools.context_tree.local:context_tree_open_artifact
-    tool_kind: function
-    parameters:
-      - name: node_id
-        data_type: string
-        description: Artifact context node id to open.
-        required: true
-      - name: variant
-        data_type: string
-        description: "Optional artifact variant: original, preview, or llm."
-        required: false
-      - name: session_key
-        data_type: string
-        description: Optional session key. Defaults to the current session in tool context.
-        required: false
-    tags:
-      - context_tree
-      - builtin
-      - system-managed
-      - scope:session_context
-      - surface:interactive
-    mutates_state: true
-    supported_modes:
-      - inline
-    supported_strategies:
-      - async
-    supported_environments:
-      - local
-    context_requirements:
-      - session_key
-    runtime_key: context_tree.open_artifact
+    runtime_key: context_tree.update_plan
   - id: context_tree.enable_tool_schema
     name: Context Tree Enable Tool Schema
     description: Mirror an expanded tool node as a provider tool schema on the next prompt render.

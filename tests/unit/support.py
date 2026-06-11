@@ -16,6 +16,7 @@ from sqlalchemy.engine import make_url
 from crxzipple.core.config import Settings, load_settings
 from crxzipple.core.db import create_schema
 from crxzipple.interfaces.runtime_container import (
+    AppKey,
     AppContainer as RuntimeAppContainer,
     AssemblyTarget,
     build_runtime_container as build_runtime_app_container,
@@ -66,6 +67,26 @@ def _ensure_schema_template() -> Path:
             engine.dispose()
         _SCHEMA_TEMPLATE_READY = True
         return _SCHEMA_TEMPLATE_PATH
+
+
+def publish_outbox_events(container: RuntimeAppContainer, *, limit: int = 1000) -> int:
+    if not container.has(AppKey.EVENT_OUTBOX_PUBLISHER_SERVICE):
+        return 0
+    result = container.require(AppKey.EVENT_OUTBOX_PUBLISHER_SERVICE).publish_available(
+        limit=limit,
+    )
+    return int(getattr(result, "processed", 0))
+
+
+def published_event_bus_events(
+    container: RuntimeAppContainer,
+    *,
+    drain_outbox: bool = True,
+) -> tuple[object, ...]:
+    if drain_outbox:
+        publish_outbox_events(container)
+    event_bus = container.require(AppKey.EVENTS_BUS)
+    return tuple(getattr(event_bus, "published_events", ()))
 
 
 def _matches_fake_item_selector(item: dict[str, object], item_selector: str | None) -> bool:
@@ -590,29 +611,49 @@ class FakePlaywrightLocator:
         return FakePlaywrightLocator(self.context, selector, candidates=candidates, container_selector=base_scope)
 
     def click(self, **kwargs) -> None:  # noqa: ANN003
+        resolved_selector = self._resolved_selector()
         self.page.operations.append(
-            ("click", self._resolved_selector(), dict(kwargs), tuple(self.context.frame_path))
+            ("click", resolved_selector, dict(kwargs), tuple(self.context.frame_path))
         )
-        failures = self.page.click_failures.get(self._resolved_selector())
+        failures = self.page.click_failures.get(resolved_selector)
         if failures and not kwargs.get("force", False):
             raise failures.pop(0)
+        self.page.emit_configured_network_events(
+            operation="click",
+            selector=resolved_selector,
+        )
 
     def dblclick(self, **kwargs) -> None:  # noqa: ANN003
+        resolved_selector = self._resolved_selector()
         self.page.operations.append(
-            ("dblclick", self._resolved_selector(), dict(kwargs), tuple(self.context.frame_path))
+            ("dblclick", resolved_selector, dict(kwargs), tuple(self.context.frame_path))
         )
-        failures = self.page.click_failures.get(self._resolved_selector())
+        failures = self.page.click_failures.get(resolved_selector)
         if failures and not kwargs.get("force", False):
             raise failures.pop(0)
+        self.page.emit_configured_network_events(
+            operation="dblclick",
+            selector=resolved_selector,
+        )
 
     def type(self, text: str, **kwargs) -> None:  # noqa: ANN003
+        resolved_selector = self._resolved_selector()
         self.page.operations.append(
-            ("type", self._resolved_selector(), text, dict(kwargs), tuple(self.context.frame_path))
+            ("type", resolved_selector, text, dict(kwargs), tuple(self.context.frame_path))
+        )
+        self.page.emit_configured_network_events(
+            operation="type",
+            selector=resolved_selector,
         )
 
     def fill(self, text: str, **kwargs) -> None:  # noqa: ANN003
+        resolved_selector = self._resolved_selector()
         self.page.operations.append(
-            ("fill", self._resolved_selector(), text, dict(kwargs), tuple(self.context.frame_path))
+            ("fill", resolved_selector, text, dict(kwargs), tuple(self.context.frame_path))
+        )
+        self.page.emit_configured_network_events(
+            operation="fill",
+            selector=resolved_selector,
         )
 
     def set_input_files(self, files, **kwargs) -> None:  # noqa: ANN001, ANN003
@@ -748,6 +789,29 @@ class FakePlaywrightLocator:
                     "pointer-events": "auto",
                     "cursor": "pointer" if clickable else "default",
                 }
+            event_summary = item.get("event_summary")
+            if not isinstance(event_summary, dict):
+                inline_handlers = item.get("inline_handlers")
+                property_handlers = item.get("property_handlers")
+                listener_types = item.get("listener_types")
+                inline_list = [
+                    str(value)
+                    for value in (inline_handlers if isinstance(inline_handlers, list) else [])
+                ]
+                property_list = [
+                    str(value)
+                    for value in (property_handlers if isinstance(property_handlers, list) else [])
+                ]
+                listener_list = [
+                    str(value)
+                    for value in (listener_types if isinstance(listener_types, list) else [])
+                ]
+                event_summary = {
+                    "inline_handlers": inline_list,
+                    "property_handlers": property_list,
+                    "listener_types": listener_list,
+                    "has_handlers": bool(inline_list or property_list or listener_list),
+                }
             return {
                 "tag": str(item.get("tag") or "").strip().lower() or None,
                 "role": str(item.get("role") or "").strip().lower() or None,
@@ -769,6 +833,7 @@ class FakePlaywrightLocator:
                 },
                 "blocked_by": blocked_by,
                 "computed_style": dict(computed_style),
+                "event_summary": dict(event_summary),
                 "reasons": reasons,
             }
         if "__crxzipple_dom_highlight__" in expression:
@@ -1341,6 +1406,90 @@ class _FakeBrowserCdpSession:
                 "product": "FakeChrome/126",
                 "userAgent": "FakeChrome/126 Test",
             }
+        if method == "Debugger.enable":
+            for script in self.page.debugger_scripts:
+                if isinstance(script, dict):
+                    self.emit("Debugger.scriptParsed", dict(script))
+            return {}
+        if method == "Debugger.disable":
+            return {}
+        if method == "Debugger.getScriptSource":
+            script_id = str(payload.get("scriptId") or "")
+            return {
+                "scriptSource": self.page.debugger_script_sources.get(script_id, ""),
+            }
+        if method == "DOM.getNodeForLocation":
+            key = (int(payload.get("x") or 0), int(payload.get("y") or 0))
+            node = self.page.dom_nodes_for_location.get(key)
+            if isinstance(node, dict):
+                return dict(node)
+            return {}
+        if method == "DOM.resolveNode":
+            backend_node_id = int(payload.get("backendNodeId") or 0)
+            selector = self.page.backend_node_selectors.get(backend_node_id)
+            if selector is None:
+                return {}
+            return {
+                "object": {
+                    "objectId": f"backend-node:{backend_node_id}",
+                    "subtype": "node",
+                }
+            }
+        if method == "DOMDebugger.getEventListeners":
+            object_id = str(payload.get("objectId") or "")
+            if object_id.startswith("backend-node:"):
+                backend_node_id = int(object_id.removeprefix("backend-node:") or 0)
+                return {
+                    "listeners": [
+                        dict(item)
+                        for item in self.page.devtools_event_listeners_by_backend_node.get(
+                            backend_node_id,
+                            [],
+                        )
+                        if isinstance(item, dict)
+                    ]
+                }
+            return {"listeners": []}
+        if method == "Runtime.callFunctionOn":
+            object_id = str(payload.get("objectId") or "")
+            if not object_id.startswith("backend-node:"):
+                return {"result": {"value": {"ok": False, "reason": "unknown object"}}}
+            backend_node_id = int(object_id.removeprefix("backend-node:") or 0)
+            selector = self.page.backend_node_selectors.get(backend_node_id)
+            if selector is None:
+                return {
+                    "result": {
+                        "value": {
+                            "ok": False,
+                            "reason": "backend node is not registered",
+                        }
+                    }
+                }
+            args = payload.get("arguments")
+            if not isinstance(args, list) or len(args) < 2:
+                return {
+                    "result": {
+                        "value": {
+                            "ok": False,
+                            "reason": "marker arguments are missing",
+                        }
+                    }
+                }
+            attribute_name = str(dict(args[0]).get("value") or "")
+            attribute_value = str(dict(args[1]).get("value") or "")
+            marker_selector = f'[{attribute_name}="{attribute_value}"]'
+            self.page.selector_aliases[marker_selector] = selector
+            item = self.page.fake_item_for_selector(selector)
+            return {
+                "result": {
+                    "value": {
+                        "ok": True,
+                        "tag": str((item or {}).get("tag") or ""),
+                        "id": selector.removeprefix("#") if selector.startswith("#") else "",
+                        "text": str((item or {}).get("text") or (item or {}).get("label") or ""),
+                    }
+                }
+            }
         if method == "Page.getNavigationHistory":
             return {
                 "currentIndex": 0,
@@ -1527,14 +1676,20 @@ class FakePlaywrightFrame:
 
     def items_for_selector(self, selector: str) -> list[dict[str, object]]:
         normalized = str(selector).strip()
+        alias_selector = self.page.selector_aliases.get(normalized)
+        lookup_selector = alias_selector or normalized
         if not normalized or normalized in {"body", ":root"}:
             return [dict(item) for item in self.interactive_items]
         resolved: list[dict[str, object]] = []
         for item in self.interactive_items:
             item_selector = str(item.get("selector") or "").strip()
             scope_selector = str(item.get("scope_selector") or "").strip()
-            if item_selector == normalized or scope_selector == normalized:
-                resolved.append(dict(item))
+            if item_selector == lookup_selector or scope_selector == lookup_selector:
+                resolved_item = dict(item)
+                if alias_selector is not None:
+                    resolved_item["resolved_selector"] = item_selector
+                    resolved_item["selector"] = normalized
+                resolved.append(resolved_item)
         return resolved
 
     def get_by_role(self, role: str, **kwargs):  # noqa: ANN003
@@ -1768,6 +1923,14 @@ class FakePlaywrightPage:
         self.service_worker_registrations: list[dict[str, object]] = []
         self.network_response_bodies: dict[str, dict[str, object]] = {}
         self.network_fetch_responses: dict[str, dict[str, object]] = {}
+        self.debugger_scripts: list[dict[str, object]] = []
+        self.debugger_script_sources: dict[str, str] = {}
+        self.runtime_globals: dict[str, object] = {}
+        self.dom_nodes_for_location: dict[tuple[int, int], dict[str, object]] = {}
+        self.backend_node_selectors: dict[int, str] = {}
+        self.devtools_event_listeners_by_backend_node: dict[int, list[dict[str, object]]] = {}
+        self.selector_aliases: dict[str, str] = {}
+        self.network_events_on_operation: dict[str, list[dict[str, object]]] = {}
         self.browser_context = _FakeBrowserContext(self)
         self.operations: list[tuple[object, ...]] = []
         self.click_failures: dict[str, list[Exception]] = {}
@@ -1789,6 +1952,14 @@ class FakePlaywrightPage:
 
     def locator(self, selector: str) -> FakePlaywrightLocator:
         return self.main_frame.locator(selector)
+
+    def fake_item_for_selector(self, selector: str) -> dict[str, object] | None:
+        normalized = str(selector).strip()
+        for item in self.main_frame.interactive_items:
+            item_selector = str(item.get("selector") or "").strip()
+            if item_selector == normalized:
+                return dict(item)
+        return None
 
     def get_by_role(self, role: str, **kwargs):  # noqa: ANN003
         return self.main_frame.get_by_role(role, **kwargs)
@@ -1839,6 +2010,32 @@ class FakePlaywrightPage:
         self.operations.append(("evaluate", expression, arg))
         if self.evaluate_failures:
             raise self.evaluate_failures.pop(0)
+        if "__crxzipple_action_trace_storage_snapshot__" in expression:
+            return {
+                "local": {
+                    "count": len(self.local_storage),
+                    "keys": list(self.local_storage.keys()),
+                },
+                "session": {
+                    "count": len(self.session_storage),
+                    "keys": list(self.session_storage.keys()),
+                },
+            }
+        if "__crxzipple_action_trace_lifecycle_snapshot__" in expression:
+            return {
+                "url": self.url,
+                "title": "Fake Page",
+                "ready_state": "complete",
+                "visibility_state": "visible",
+                "focused": True,
+                "history_length": 1,
+                "online": True,
+            }
+        if "__crxzipple_test_action_trace_mutate__" in expression:
+            self.local_storage["flight_search"] = "redacted"
+            self.session_storage["search_step"] = "redacted"
+            self.url = "https://example.com/flights/results"
+            return {"mutated": True}
         if "__crxzipple_browser_network_page_fetch__" in expression:
             payload = json.loads(str(arg or "{}"))
             url = str(payload.get("url") or self.url)
@@ -1870,6 +2067,404 @@ class FakePlaywrightPage:
             response.setdefault("stored_size_bytes", response["size_bytes"])
             response.setdefault("truncated", False)
             return response
+        if "__crxzipple_browser_client_call__" in expression:
+            payload = arg if isinstance(arg, dict) else {}
+            object_path = str(payload.get("object_path") or "").strip()
+            method_name = str(payload.get("method_name") or "").strip()
+            raw_arguments = payload.get("arguments")
+            arguments = list(raw_arguments) if isinstance(raw_arguments, list) else []
+            result_store_key = str(payload.get("result_store_key") or "fake_client_call")
+
+            def _segments(path: str) -> list[str]:
+                return [
+                    segment.strip()
+                    for segment in path.replace("window.", "", 1).split(".")
+                    if segment.strip()
+                ]
+
+            def _resolve(path: str):
+                current: object = self.runtime_globals
+                traversed: list[str] = []
+                for segment in _segments(path):
+                    if isinstance(current, dict) and segment in current:
+                        current = current[segment]
+                        traversed.append(segment)
+                        continue
+                    return False, None, segment, traversed
+                return True, current, None, traversed
+
+            def _overview(value: object) -> dict[str, object]:
+                if isinstance(value, list):
+                    return {
+                        "type": "array",
+                        "length": len(value),
+                        "sample": [_overview(item) for item in value[:3]],
+                    }
+                if isinstance(value, dict):
+                    return {
+                        "type": "object",
+                        "key_count": len(value),
+                        "keys": list(value.keys())[:24],
+                    }
+                return {"type": type(value).__name__, "value": value}
+
+            resolved, target, missing_segment, traversed = _resolve(object_path)
+            if not resolved:
+                return {
+                    "ok": False,
+                    "object_path": object_path,
+                    "method_name": method_name or None,
+                    "reason": "path segment is not available",
+                    "missing_segment": missing_segment,
+                    "traversed": traversed,
+                }
+            callable_target = target
+            if method_name:
+                if not isinstance(target, dict) or method_name not in target:
+                    return {
+                        "ok": False,
+                        "object_path": object_path,
+                        "method_name": method_name,
+                        "reason": "resolved target is not callable",
+                        "traversed": traversed,
+                    }
+                callable_target = target[method_name]
+            if not callable(callable_target):
+                return {
+                    "ok": False,
+                    "object_path": object_path,
+                    "method_name": method_name or None,
+                    "reason": "resolved target is not callable",
+                    "traversed": traversed,
+                }
+            try:
+                call_result = callable_target(*arguments)
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "object_path": object_path,
+                    "method_name": method_name or None,
+                    "argument_count": len(arguments),
+                    "reason": str(exc),
+                    "error_name": type(exc).__name__,
+                }
+            result_store = self.runtime_globals.setdefault(
+                "__crxzipple_client_call_results",
+                {},
+            )
+            if isinstance(result_store, dict):
+                result_store[result_store_key] = call_result
+            result_json = json.dumps(call_result, ensure_ascii=False, default=str)
+            return {
+                "ok": True,
+                "object_path": object_path,
+                "method_name": method_name or None,
+                "argument_count": len(arguments),
+                "result_ref": result_store_key,
+                "result_type": "array" if isinstance(call_result, list) else type(call_result).__name__,
+                "result_overview": _overview(call_result),
+                "result_json_chars": len(result_json),
+                "result_truncated": False,
+                "result": call_result,
+            }
+        if "__crxzipple_browser_client_probe__" in expression:
+            payload = arg if isinstance(arg, dict) else {}
+            object_path = str(payload.get("object_path") or "").strip()
+            method_name = str(payload.get("method_name") or "").strip()
+            limit = int(payload.get("limit") or 20)
+
+            def _segments(path: str) -> list[str]:
+                return [
+                    segment.strip()
+                    for segment in path.replace("window.", "", 1).split(".")
+                    if segment.strip()
+                ]
+
+            def _resolve(path: str):
+                current: object = self.runtime_globals
+                traversed: list[str] = []
+                for segment in _segments(path):
+                    if isinstance(current, dict) and segment in current:
+                        current = current[segment]
+                        traversed.append(segment)
+                        continue
+                    return False, None, segment, traversed
+                return True, current, None, traversed
+
+            def _describe(value: object, path: str) -> dict[str, object]:
+                relevance_terms = (
+                    "shopping",
+                    "search",
+                    "flight",
+                    "fare",
+                    "price",
+                    "brief",
+                    "info",
+                    "route",
+                    "airport",
+                    "city",
+                    "query",
+                    "calendar",
+                    "schedule",
+                    "availability",
+                    "booking",
+                    "order",
+                    "cabin",
+                    "detail",
+                )
+
+                def _score(name: object) -> int:
+                    lowered = str(name or "").lower()
+                    score = sum(len(term) for term in relevance_terms if term in lowered)
+                    if lowered.startswith(("get", "query", "search", "list", "find", "fetch", "load")):
+                        score += 3
+                    return score
+
+                if value is None:
+                    return {"path": path, "exists": False, "type": "undefined"}
+                if callable(value):
+                    arity = getattr(getattr(value, "__code__", None), "co_argcount", 0)
+                    endpoint_hint = getattr(value, "_crxzipple_endpoint_hint", None)
+                    payload_key_candidates = getattr(
+                        value,
+                        "_crxzipple_payload_key_candidates",
+                        (),
+                    )
+                    return {
+                        "path": path,
+                        "exists": True,
+                        "type": "function",
+                        "constructor_name": "Function",
+                        "callable": True,
+                        "function_name": getattr(value, "__name__", None),
+                        "arity": arity,
+                        "endpoint_hint": endpoint_hint,
+                        "payload_key_candidates": list(payload_key_candidates),
+                        "source_chars": len(repr(value)),
+                        "source_preview": repr(value),
+                    }
+                if isinstance(value, dict):
+                    all_keys = list(value.keys())
+                    keys = [
+                        item[1]
+                        for item in sorted(
+                            enumerate(all_keys),
+                            key=lambda item: (-_score(item[1]), item[0]),
+                        )
+                    ][:limit]
+                    methods = [
+                        {
+                            "name": str(key),
+                            "path": f"{path}.{key}",
+                            "arity": getattr(
+                                getattr(child, "__code__", None),
+                                "co_argcount",
+                                0,
+                            ),
+                            "function_name": getattr(child, "__name__", None),
+                            "endpoint_hint": getattr(child, "_crxzipple_endpoint_hint", None),
+                            "payload_key_candidates": list(
+                                getattr(child, "_crxzipple_payload_key_candidates", ()),
+                            ),
+                        }
+                        for key, child in sorted(
+                            value.items(),
+                            key=lambda item: (-_score(item[0]), all_keys.index(item[0])),
+                        )
+                        if callable(child)
+                    ][:limit]
+                    return {
+                        "path": path,
+                        "exists": True,
+                        "type": "object",
+                        "constructor_name": "Object",
+                        "keys": keys,
+                        "key_count": len(value),
+                        "methods": methods,
+                        "method_count": len([child for child in value.values() if callable(child)]),
+                    }
+                return {
+                    "path": path,
+                    "exists": True,
+                    "type": type(value).__name__,
+                    "constructor_name": type(value).__name__,
+                    "preview": str(value),
+                }
+
+            resolved, value, missing_segment, traversed = _resolve(object_path)
+            if not resolved:
+                return {
+                    "ok": False,
+                    "reason": "path segment is not available",
+                    "object_path": object_path,
+                    "missing_segment": missing_segment,
+                    "traversed": traversed,
+                }
+            result = {
+                "ok": True,
+                "object_path": object_path,
+                "method_name": method_name or None,
+                "object": _describe(value, object_path),
+                "method": None,
+            }
+            if method_name:
+                method_value = value.get(method_name) if isinstance(value, dict) else None
+                result["method"] = _describe(method_value, f"{object_path}.{method_name}")
+            return result
+        if "__crxzipple_browser_runtime_inspect__" in expression:
+            payload = arg if isinstance(arg, dict) else {}
+            limit = int(payload.get("limit") or 40)
+            requested_globals = payload.get("global_names")
+            if not isinstance(requested_globals, list):
+                requested_globals = []
+            known_globals = [
+                "__REACT_DEVTOOLS_GLOBAL_HOOK__",
+                "__NEXT_DATA__",
+                "__NUXT__",
+                "Vue",
+                "__VUE__",
+                "ng",
+                "angular",
+                "Svelte",
+                "__REDUX_DEVTOOLS_EXTENSION__",
+                "__APOLLO_CLIENT__",
+            ]
+            global_names = list(
+                dict.fromkeys(
+                    [
+                        *known_globals,
+                        *(str(item) for item in requested_globals if str(item).strip()),
+                    ]
+                )
+            )[:limit]
+            parsed_url = urlparse(self.url)
+            route_hints: list[dict[str, object]] = [
+                {
+                    "source": "location",
+                    "path": parsed_url.path or "/",
+                    "search": f"?{parsed_url.query}" if parsed_url.query else "",
+                    "hash": f"#{parsed_url.fragment}" if parsed_url.fragment else "",
+                }
+            ]
+            globals_payload: list[dict[str, object]] = []
+            for name in global_names:
+                if name not in self.runtime_globals:
+                    globals_payload.append({"name": name, "exists": False})
+                    continue
+                value = self.runtime_globals[name]
+                item: dict[str, object] = {
+                    "name": name,
+                    "exists": True,
+                    "type": type(value).__name__,
+                    "constructor_name": type(value).__name__,
+                }
+                if isinstance(value, dict):
+                    item["keys"] = list(value.keys())[:12]
+                    route_keys: list[dict[str, object]] = []
+                    for route_key in (
+                        "route",
+                        "router",
+                        "path",
+                        "pathname",
+                        "asPath",
+                        "currentRoute",
+                        "fullPath",
+                    ):
+                        route_value = value.get(route_key)
+                        if isinstance(route_value, str) and route_value.strip():
+                            route_keys.append(
+                                {
+                                    "key": route_key,
+                                    "value": route_value.strip(),
+                                }
+                            )
+                    if route_keys:
+                        item["route_hint"] = {
+                            "source": name,
+                            "keys": route_keys,
+                        }
+                        route_hints.append(dict(item["route_hint"]))
+                    if name == "__NEXT_DATA__":
+                        query = value.get("query")
+                        route_hints.append(
+                            {
+                                "source": "__NEXT_DATA__",
+                                "page": str(value.get("page") or ""),
+                                "query": json.dumps(query) if isinstance(query, dict) else None,
+                            }
+                        )
+                elif isinstance(value, (str, int, float, bool)):
+                    item["preview"] = str(value)
+                    item["keys"] = []
+                else:
+                    item["keys"] = []
+                globals_payload.append(item)
+            detected = []
+            if "__REACT_DEVTOOLS_GLOBAL_HOOK__" in self.runtime_globals:
+                detected.append("react")
+            if "__NEXT_DATA__" in self.runtime_globals:
+                detected.append("next")
+            if "Vue" in self.runtime_globals or "__VUE__" in self.runtime_globals:
+                detected.append("vue")
+            if "__NUXT__" in self.runtime_globals:
+                detected.append("nuxt")
+            if "ng" in self.runtime_globals or "angular" in self.runtime_globals:
+                detected.append("angular")
+            if "Svelte" in self.runtime_globals:
+                detected.append("svelte")
+            include_storage = payload.get("include_storage", True) is not False
+            include_performance = payload.get("include_performance", True) is not False
+            result: dict[str, object] = {
+                "url": self.url,
+                "title": "Fake Page",
+                "page_state": {
+                    "ready_state": "complete",
+                    "visibility_state": "visible",
+                    "focused": True,
+                    "history_length": 1,
+                    "online": True,
+                },
+                "location": {
+                    "origin": "https://example.com",
+                    "pathname": "/",
+                    "search": "",
+                    "hash": "",
+                },
+                "navigator": {
+                    "user_agent": "FakeChrome/126 Test",
+                    "language": "en-US",
+                    "platform": "MacIntel",
+                    "webdriver": False,
+                },
+                "frameworks": {
+                    "detected": detected,
+                    "items": [
+                        {"key": "react", "label": "React", "detected": "react" in detected},
+                        {"key": "next", "label": "Next.js", "detected": "next" in detected},
+                        {"key": "vue", "label": "Vue", "detected": "vue" in detected},
+                    ],
+                },
+                "globals": globals_payload,
+                "route_hints": route_hints,
+            }
+            if include_storage:
+                result["storage"] = {
+                    "local": {
+                        "count": len(self.local_storage),
+                        "keys": list(self.local_storage.keys())[:limit],
+                    },
+                    "session": {
+                        "count": len(self.session_storage),
+                        "keys": list(self.session_storage.keys())[:limit],
+                    },
+                }
+            if include_performance:
+                result["performance"] = {
+                    "resource_count": 1,
+                    "navigation_count": 1,
+                    "by_initiator": {"script": 1},
+                }
+            return result
         if "document.readyState" in expression and "document.visibilityState" in expression:
             return {
                 "url": self.url,
@@ -2140,6 +2735,39 @@ class FakePlaywrightPage:
         self.page_errors.append(error)
         for callback in list(self._event_listeners.get("pageerror", ())):
             callback(error)
+
+    def emit_configured_network_events(
+        self,
+        *,
+        operation: str,
+        selector: str | None = None,
+    ) -> None:
+        keys = [operation]
+        if selector is not None:
+            keys.append(f"{operation}:{selector}")
+        for key in keys:
+            for raw_event in self.network_events_on_operation.get(key, ()):
+                if not isinstance(raw_event, dict):
+                    continue
+                event_name = str(
+                    raw_event.get("event")
+                    or raw_event.get("event_name")
+                    or raw_event.get("method")
+                    or ""
+                ).strip()
+                if not event_name:
+                    continue
+                payload = raw_event.get("payload")
+                if isinstance(payload, dict):
+                    event_payload = dict(payload)
+                else:
+                    event_payload = {
+                        str(item_key): item_value
+                        for item_key, item_value in raw_event.items()
+                        if item_key not in {"event", "event_name", "method"}
+                    }
+                for session in list(self.browser_context.cdp_sessions):
+                    session.emit(event_name, event_payload)
 
     def _pop_download(self) -> FakePlaywrightDownload:
         if self.queued_downloads:

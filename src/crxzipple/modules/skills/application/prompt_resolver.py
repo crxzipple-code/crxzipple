@@ -6,6 +6,7 @@ from typing import Protocol
 from crxzipple.modules.skills.application.catalog import build_skill_catalog_prompt
 from crxzipple.modules.skills.application.environment import unsupported_platforms
 from crxzipple.modules.skills.application.models import SkillCatalogPrompt, SkillPackage
+from crxzipple.modules.skills.application.surface import skill_surface_matches
 
 
 SKILL_READINESS_READY = "ready"
@@ -354,11 +355,9 @@ def _unsupported_surfaces(
     surface: str | None,
 ) -> tuple[str, ...]:
     supported = _normalize_values(package.requirements.surfaces)
-    if not supported or surface is None:
+    if skill_surface_matches(supported, surface):
         return ()
-    normalized_surface = surface.strip()
-    if not normalized_surface or normalized_surface in supported:
-        return ()
+    normalized_surface = surface.strip() if surface is not None else ""
     return (normalized_surface,)
 
 

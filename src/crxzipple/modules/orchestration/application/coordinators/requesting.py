@@ -6,14 +6,20 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from uuid import uuid4
 
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
+from crxzipple.modules.orchestration.application.execution_chain_lifecycle import (
+    prepare_dispatch_execution_step,
+)
 from crxzipple.modules.orchestration.application.ports import (
-    RunDispatchPort,
+    OrchestrationDispatchPort,
     SessionCompactionStatePort,
 )
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
 )
 from crxzipple.modules.orchestration.domain import (
+    ExecutionChainRepository,
+    ExecutionStepItemRepository,
+    ExecutionStepRepository,
     InboundInstruction,
     OrchestrationQueuePolicy,
     OrchestrationRun,
@@ -51,6 +57,9 @@ class RequestAnchorContext:
 
 
 class RequestCoordinatorUnitOfWork(Protocol):
+    execution_chains: ExecutionChainRepository
+    execution_steps: ExecutionStepRepository
+    execution_step_items: ExecutionStepItemRepository
     orchestration_runs: OrchestrationRunRepository
     dispatch_tasks: DispatchTaskRepository
 
@@ -76,7 +85,7 @@ class RequestCoordinatorUnitOfWork(Protocol):
 class RunRequestCoordinator:
     uow_factory: Callable[[], RequestCoordinatorUnitOfWork]
     scheduler: OrchestrationScheduler
-    dispatch_port: RunDispatchPort
+    dispatch_port: OrchestrationDispatchPort
     session_service: SessionCompactionStatePort | None
     request_heartbeat_input_factory: Callable[..., "RequestHeartbeatInput"]
 
@@ -365,7 +374,14 @@ class RunRequestCoordinator:
             queue_policy=queue_policy,
             priority=run.priority,
         )
-        self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
+        dispatch_step = prepare_dispatch_execution_step(uow, run=run)
+        self.dispatch_port.enqueue(
+            uow.dispatch_tasks,
+            uow,
+            run,
+            dispatch_task_id=dispatch_step.step.dispatch_task_id
+            or dispatch_step.step.id,
+        )
         uow.orchestration_runs.add(run)
         uow.collect(run)
         uow.commit()

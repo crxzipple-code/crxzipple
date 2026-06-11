@@ -11,7 +11,14 @@ from crxzipple.modules.authorization.domain import (
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ToolResolver
 from crxzipple.modules.orchestration.domain import InboundInstruction, OrchestrationRun
-from crxzipple.modules.tool.domain import Tool
+from crxzipple.modules.tool.domain import (
+    Tool,
+    ToolEnvironment,
+    ToolExecutionPolicy,
+    ToolExecutionStrategy,
+    ToolExecutionSupport,
+    ToolMode,
+)
 
 
 class _FakeToolCatalog:
@@ -40,6 +47,21 @@ class _DisabledAuthorizationPort:
     ) -> AuthorizationDecision:
         del request
         return AuthorizationDecision(allowed=True, reason="authorization disabled")
+
+
+class _RecordingAuthorizationPort(_DisabledAuthorizationPort):
+    def __init__(self) -> None:
+        self.tool_execution_requests: list[ToolExecutionAuthorizationRequest] = []
+
+    def is_enabled(self) -> bool:
+        return True
+
+    def check_tool_execution(
+        self,
+        request: ToolExecutionAuthorizationRequest,
+    ) -> AuthorizationDecision:
+        self.tool_execution_requests.append(request)
+        return AuthorizationDecision(allowed=True, reason="recorded")
 
 
 class OrchestrationAccessResolutionTestCase(unittest.TestCase):
@@ -111,6 +133,47 @@ class OrchestrationAccessResolutionTestCase(unittest.TestCase):
 
         self.assertEqual([item.tool.id for item in resolved.tools], ["either_remote"])
         self.assertIsNone(resolved.blocked_access_by_name("either_remote"))
+
+    def test_explicit_tool_effects_are_the_complete_authorization_contract(self) -> None:
+        authorization = _RecordingAuthorizationPort()
+        tool = Tool(
+            id="skill_draft_apply",
+            name="Skill Draft Apply",
+            description="Apply a governed skill draft.",
+            required_effect_ids=("skill_authoring.apply",),
+            execution_policy=ToolExecutionPolicy(
+                requires_confirmation=True,
+                mutates_state=True,
+            ),
+            execution_support=ToolExecutionSupport(
+                supported_modes=(ToolMode.BACKGROUND,),
+                supported_strategies=(ToolExecutionStrategy.ASYNC,),
+                supported_environments=(ToolEnvironment.REMOTE,),
+            ),
+        )
+        resolver = ToolResolver(
+            tool_catalog=_FakeToolCatalog(tool),
+            authorization_port=authorization,
+            access_port=AccessApplicationService(),
+        )
+        run = OrchestrationRun.accept(
+            run_id="run-explicit-effect-contract",
+            inbound_instruction=InboundInstruction(source="cli", content="apply"),
+        )
+
+        resolved = resolver.resolve(run)
+        resolved_tool = resolved.by_name("skill_draft_apply")
+        assert resolved_tool is not None
+        resolver.execution_decision(
+            run,
+            tool=resolved_tool.tool,
+            target=resolved_tool.target,
+        )
+
+        self.assertEqual(
+            authorization.tool_execution_requests[-1].required_effect_ids,
+            ("skill_authoring.apply",),
+        )
 
 
 if __name__ == "__main__":

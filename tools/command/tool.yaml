@@ -1,5 +1,36 @@
 kind: local_package
 namespace: command
+prompt:
+  title: Command Execution
+  summary: Run shell commands for tests, builds, diagnostics, and managed process sessions inside the session-bound workspace. Prefer high-signal commands, narrow verification, explicit timeouts, and bounded output.
+  default_tool_schema_policy:
+    priority: 10
+  default_tool_schema_group_refs:
+    - source_id: bundled.local_package.command
+      group_key: run_and_verify
+    - source_id: bundled.local_package.command
+      group_key: background_processes
+  groups:
+    run_and_verify:
+      order: 10
+      title: Run And Verify
+      summary: Prefer high-signal commands, narrow verification, explicit timeouts, and max_output_tokens for potentially long output. Execute focused tests, builds, linters, searches, and diagnostics from the bound workspace. Do not use long raw output as the default exploration surface.
+      function_ids:
+        - exec
+      default_tool_schema_ids:
+        - exec
+      default_tool_schema_max_count: 1
+      default_tool_schema_source: bundled.local_package.command.prompt_group.run_and_verify
+    background_processes:
+      order: 20
+      title: Background Processes
+      summary: Poll bounded logs, track process state, and stop or remove stale sessions when no longer needed. Manage long-running commands started for servers, watchers, or diagnostics.
+      function_ids:
+        - process
+      default_tool_schema_ids:
+        - process
+      default_tool_schema_max_count: 1
+      default_tool_schema_source: bundled.local_package.command.prompt_group.background_processes
 capabilities:
   - workspace.lookup
   - process.spawn
@@ -14,7 +45,7 @@ dependencies:
 local_tools:
   - id: exec
     name: Workspace Exec
-    description: Run a local shell command from the current bound workspace.
+    description: Run a local shell command from the current bound workspace. Prefer focused, high-signal commands and set max_output_tokens for commands that may produce long output.
     provider_name: local_system
     entrypoint: tools.command.local:exec
     tool_kind: function
@@ -30,6 +61,14 @@ local_tools:
       - name: timeout_seconds
         data_type: integer
         description: Optional command timeout in seconds.
+        required: false
+      - name: max_output_tokens
+        data_type: integer
+        description: Optional approximate token budget for combined stdout and stderr returned to the model.
+        required: false
+      - name: yield_time_ms
+        data_type: integer
+        description: Optional milliseconds to wait before returning a background process handle if the command is still running. Ignored when background is true.
         required: false
       - name: background
         data_type: boolean
@@ -54,7 +93,7 @@ local_tools:
     runtime_key: exec
   - id: process
     name: Background Process
-    description: Manage background commands started from the current bound workspace.
+    description: Manage background commands started from the current bound workspace. Poll bounded logs and stop or remove stale sessions after verification.
     provider_name: local_system
     entrypoint: tools.command.local:process
     tool_kind: function

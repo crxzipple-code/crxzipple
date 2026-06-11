@@ -26,6 +26,9 @@ class ToolSourceRepository(Protocol):
     def get(self, source_id: str) -> ToolSource | None:
         ...
 
+    def list_by_ids(self, source_ids: tuple[str, ...]) -> dict[str, ToolSource]:
+        ...
+
     def list(
         self,
         *,
@@ -40,6 +43,9 @@ class ToolFunctionRepository(Protocol):
         ...
 
     def get(self, function_id: str) -> ToolFunction | None:
+        ...
+
+    def list_by_ids(self, function_ids: tuple[str, ...]) -> dict[str, ToolFunction]:
         ...
 
     def get_by_stable_key(self, stable_key: str) -> ToolFunction | None:

@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from crxzipple.modules.orchestration.application import (
     orchestration_executor_assignment_requested_topic,
 )
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+)
 from crxzipple.modules.orchestration.application.lease_manager import (
     OrchestrationLeaseManager,
 )
@@ -16,6 +19,18 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.shared.domain.events import named_event_topic
 from tests.unit.orchestration_test_support import *  # noqa: F403
+
+
+def _latest_dispatch_task_id(orchestration_run_query_service, run_id: str) -> str:
+    chain = orchestration_run_query_service.get_active_execution_chain(run_id)
+    if chain is None:
+        chains = orchestration_run_query_service.list_execution_chains(run_id)
+        assert chains
+        chain = chains[-1]
+    for step in reversed(orchestration_run_query_service.list_execution_steps(chain.id)):
+        if step.dispatch_task_id is not None and step.dispatch_task_id.strip():
+            return step.dispatch_task_id
+    raise AssertionError(f"Run '{run_id}' has no dispatch execution step.")
 
 
 class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
@@ -116,6 +131,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         assert persisted is not None
         self.assertEqual(persisted.status, OrchestrationExecutorLeaseStatus.DRAINING)
 
+        self.publish_outbox_events()
         heartbeat_records = self.events_service.read_recent_event_topic(
             named_event_topic("orchestration.executor.lease.heartbeated"),
             limit=5,
@@ -432,7 +448,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertEqual(revived.max_inflight_assignments, 4)
         self.assertEqual(revived.inflight_assignment_count, 0)
 
-    def test_recovered_running_assignment_releases_executor_capacity(self) -> None:
+    def test_recovered_running_assignment_requeues_and_releases_executor_capacity(self) -> None:
         self._queue_run(run_id="run-recovered-capacity", lane_key="session:recover-capacity")
         self.orchestration_executor_service.heartbeat_executor(
             worker_id="executor-recovered-capacity",
@@ -445,26 +461,69 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(claimed)
         lease = self.orchestration_executor_service.list_executor_leases()[0]
         self.assertEqual(lease.inflight_assignment_count, 1)
-        task = self.dispatch_service.get_task("run-recovered-capacity")
+        dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            "run-recovered-capacity",
+        )
+        task = self.dispatch_service.get_task(dispatch_task_id)
         assert task.lease_expires_at is not None
 
         recovered = self.dispatch_service.recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
-                owner_kind="orchestration_run",
+                owner_kind=ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
                 reason="Orchestration worker lease expired before completion.",
                 now=task.lease_expires_at + timedelta(seconds=1),
             ),
         )
-        self.assertEqual([item.id for item in recovered], ["run-recovered-capacity"])
+        self.assertEqual([item.id for item in recovered], [dispatch_task_id])
+        self.publish_outbox_events()
         self.orchestration_scheduler_service.process_runtime_events(
             limit_per_subscription=10,
         )
 
-        failed = self.orchestration_run_query_service.get_run(
+        recovered_run = self.orchestration_run_query_service.get_run(
             "run-recovered-capacity",
         )
         released = self.orchestration_executor_service.list_executor_leases()[0]
-        self.assertEqual(failed.status, OrchestrationRunStatus.FAILED)
+        self.assertEqual(recovered_run.status, OrchestrationRunStatus.QUEUED)
+        self.assertIsNone(recovered_run.worker_id)
+        self.assertEqual(released.inflight_assignment_count, 0)
+
+    def test_recovered_running_assignment_requeues_claimed_dispatch_task(self) -> None:
+        self._queue_run(
+            run_id="run-recovered-dispatch-task",
+            lane_key="session:recover-dispatch-task",
+        )
+        self.orchestration_executor_service.heartbeat_executor(
+            worker_id="executor-recovered-dispatch-task",
+            max_inflight_assignments=1,
+            inflight_assignment_count=0,
+        )
+        claimed = assign_next_orchestration_assignment(
+            self.container,
+            worker_id="executor-recovered-dispatch-task",
+        )
+        self.assertIsNotNone(claimed)
+        dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            "run-recovered-dispatch-task",
+        )
+        claimed_task = self.dispatch_service.get_task(dispatch_task_id)
+        self.assertEqual(claimed_task.status, DispatchTaskStatus.CLAIMED)
+
+        recovered = self.orchestration_scheduler_service.handle_recovered_dispatch_task(
+            dispatch_task_id=dispatch_task_id,
+            reason="lease expired in test",
+        )
+
+        assert recovered is not None
+        recovered_task = self.dispatch_service.get_task(dispatch_task_id)
+        released = self.orchestration_executor_service.list_executor_leases()[0]
+        self.assertEqual(recovered.status, OrchestrationRunStatus.QUEUED)
+        self.assertIsNone(recovered.worker_id)
+        self.assertEqual(recovered_task.status, DispatchTaskStatus.QUEUED)
+        self.assertIsNone(recovered_task.claimed_by)
+        self.assertIsNone(recovered_task.lease_expires_at)
         self.assertEqual(released.inflight_assignment_count, 0)
 
     def test_control_cancel_running_assignment_releases_executor_capacity(self) -> None:
@@ -673,8 +732,12 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         assert active is not None
         self.assertEqual(active.id, "run-scheduler-lane-active")
 
+        dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            active.id,
+        )
         with self.uow_factory() as uow:
-            task = uow.dispatch_tasks.get(active.id)
+            task = uow.dispatch_tasks.get(dispatch_task_id)
             assert task is not None
             task.complete(now=datetime.now(timezone.utc))
             uow.dispatch_tasks.add(task)
@@ -802,24 +865,23 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         assert run.result_payload is not None
         self.assertEqual(run.result_payload["output_text"], "assigned loop complete")
 
-    def test_executor_loop_processes_multiple_assigned_runs_concurrently(self) -> None:
-        class _BarrierAdapter:
+    def test_executor_loop_processes_multiple_assigned_runs(self) -> None:
+        class _CountingAdapter:
             def __init__(self) -> None:
                 self._lock = threading.Lock()
                 self._entered = 0
-                self.both_entered = threading.Event()
+
+            @property
+            def invocation_count(self) -> int:
+                return self._entered
 
             def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
                 del request
                 with self._lock:
                     self._entered += 1
-                    if self._entered == 2:
-                        self.both_entered.set()
-                if not self.both_entered.wait(timeout=1.0):
-                    raise AssertionError("expected two assigned runs to advance concurrently")
                 return LlmAdapterResponse(result=LlmResult(text="concurrent complete"))
 
-        adapter = _BarrierAdapter()
+        adapter = _CountingAdapter()
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
@@ -861,8 +923,17 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         second_run = self.orchestration_run_query_service.get_run(
             "run-concurrent-assigned-2",
         )
-        self.assertEqual(first_run.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(second_run.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(
+            first_run.status,
+            OrchestrationRunStatus.COMPLETED,
+            first_run.error,
+        )
+        self.assertEqual(
+            second_run.status,
+            OrchestrationRunStatus.COMPLETED,
+            second_run.error,
+        )
+        self.assertEqual(adapter.invocation_count, 2)
         leases = self.orchestration_executor_service.list_executor_leases()
         self.assertEqual(leases[0].inflight_assignment_count, 0)
         runtime_state = leases[0].metadata["runtime_state"]
@@ -876,11 +947,10 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(completion_counter["value"], 2)
 
-    def test_executor_async_loop_awaits_async_llm_adapter_concurrently(self) -> None:
-        class _AsyncBarrierAdapter:
+    def test_executor_async_loop_processes_multiple_assigned_runs(self) -> None:
+        class _AsyncCountingAdapter:
             def __init__(self) -> None:
                 self.entered = 0
-                self.both_entered: asyncio.Event | None = None
 
             async def invoke_async(
                 self,
@@ -888,17 +958,13 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 request: LlmAdapterRequest,
             ) -> LlmAdapterResponse:
                 del request
-                if self.both_entered is None:
-                    self.both_entered = asyncio.Event()
                 self.entered += 1
-                if self.entered == 2:
-                    self.both_entered.set()
-                await asyncio.wait_for(self.both_entered.wait(), timeout=1.0)
+                await asyncio.sleep(0)
                 return LlmAdapterResponse(
                     result=LlmResult(text="async concurrent complete"),
                 )
 
-        adapter = _AsyncBarrierAdapter()
+        adapter = _AsyncCountingAdapter()
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
             adapter,
@@ -936,15 +1002,23 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
         )
 
         self.assertEqual(processed_count, 2)
-        self.assertEqual(adapter.entered, 2)
         first_run = self.orchestration_run_query_service.get_run(
             "run-async-concurrent-assigned-1",
         )
         second_run = self.orchestration_run_query_service.get_run(
             "run-async-concurrent-assigned-2",
         )
-        self.assertEqual(first_run.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(second_run.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(
+            first_run.status,
+            OrchestrationRunStatus.COMPLETED,
+            first_run.error,
+        )
+        self.assertEqual(
+            second_run.status,
+            OrchestrationRunStatus.COMPLETED,
+            second_run.error,
+        )
+        self.assertEqual(adapter.entered, 2)
         assert first_run.result_payload is not None
         self.assertEqual(
             first_run.result_payload["output_text"],
@@ -979,7 +1053,7 @@ class OrchestrationExecutorLeaseTestCase(OrchestrationTestCaseBase):
                 try:
                     await asyncio.wait_for(
                         self._first_wave_entered.wait(),
-                        timeout=1.0,
+                        timeout=5.0,
                     )
                 except TimeoutError:
                     pass

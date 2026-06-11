@@ -62,7 +62,6 @@ _MEMORY_SCOPE_ACTIONS = (
     ContextAction.COLLAPSE,
     ContextAction.PIN,
     ContextAction.UNPIN,
-    ContextAction.RECALL_MEMORY,
     ContextAction.ESTIMATE,
 )
 

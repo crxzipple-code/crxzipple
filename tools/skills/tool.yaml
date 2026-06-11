@@ -1,5 +1,8 @@
 kind: local_package
 namespace: skills
+prompt:
+  title: Skills
+  summary: Read installed skills and draft, review, validate, apply, or reject skill authoring changes.
 capabilities:
   - skill.read
   - skill.authoring

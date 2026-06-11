@@ -10,7 +10,7 @@ import json
 import secrets
 import subprocess
 import sys
-from threading import Thread, Timer
+from threading import Lock, Thread, Timer
 from typing import Any, Mapping, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
@@ -50,6 +50,8 @@ CODEX_OAUTH_AUTHORIZE_EXTRAS = {
 }
 CODEX_JWT_AUTH_CLAIM = "https://api.openai.com/auth"
 CODEX_JWT_PROFILE_CLAIM = "https://api.openai.com/profile"
+_CODEX_OAUTH_CALLBACK_LOCK = Lock()
+_CODEX_OAUTH_CALLBACK_ACTIVE: dict[str, Any] | None = None
 
 
 class AccessOAuthRepository(Protocol):
@@ -1172,6 +1174,11 @@ def _start_codex_oauth_callback_listener(
     credential_binding_id: str,
     timeout_seconds: int,
 ) -> JsonObject:
+    _stop_active_codex_oauth_callback_listener(
+        service=service,
+        reason="OpenAI Codex OAuth callback listener was superseded by a newer login.",
+        superseded_by_session_id=session_id,
+    )
     completed = {"value": False}
 
     class CodexOAuthHTTPServer(HTTPServer):
@@ -1254,6 +1261,10 @@ def _start_codex_oauth_callback_listener(
         if completed["value"]:
             return
         completed["value"] = True
+        _clear_active_codex_oauth_callback_listener(
+            session_id=session_id,
+            completed=completed,
+        )
         Thread(target=server.shutdown, daemon=True).start()
 
     def _expire_callback_server() -> None:
@@ -1275,6 +1286,11 @@ def _start_codex_oauth_callback_listener(
             timer.cancel()
             server.server_close()
 
+    _register_active_codex_oauth_callback_listener(
+        session_id=session_id,
+        server=server,
+        completed=completed,
+    )
     Thread(target=_serve, name=f"codex-oauth-{session_id}", daemon=True).start()
     return {
         "status": "listening",
@@ -1283,6 +1299,83 @@ def _start_codex_oauth_callback_listener(
         "path": CODEX_OAUTH_CALLBACK_PATH,
         "timeout_seconds": timeout_seconds,
     }
+
+
+def _register_active_codex_oauth_callback_listener(
+    *,
+    session_id: str,
+    server: HTTPServer,
+    completed: dict[str, bool],
+) -> None:
+    global _CODEX_OAUTH_CALLBACK_ACTIVE
+    with _CODEX_OAUTH_CALLBACK_LOCK:
+        _CODEX_OAUTH_CALLBACK_ACTIVE = {
+            "session_id": session_id,
+            "server": server,
+            "completed": completed,
+        }
+
+
+def _clear_active_codex_oauth_callback_listener(
+    *,
+    session_id: str,
+    completed: dict[str, bool],
+) -> None:
+    global _CODEX_OAUTH_CALLBACK_ACTIVE
+    with _CODEX_OAUTH_CALLBACK_LOCK:
+        active = _CODEX_OAUTH_CALLBACK_ACTIVE
+        if active is None:
+            return
+        if active.get("session_id") != session_id:
+            return
+        if active.get("completed") is not completed:
+            return
+        _CODEX_OAUTH_CALLBACK_ACTIVE = None
+
+
+def _stop_active_codex_oauth_callback_listener(
+    *,
+    service: AccessOAuthService,
+    reason: str,
+    superseded_by_session_id: str | None = None,
+) -> None:
+    global _CODEX_OAUTH_CALLBACK_ACTIVE
+    with _CODEX_OAUTH_CALLBACK_LOCK:
+        active = _CODEX_OAUTH_CALLBACK_ACTIVE
+        _CODEX_OAUTH_CALLBACK_ACTIVE = None
+    if active is None:
+        return
+
+    completed = active.get("completed")
+    if isinstance(completed, dict):
+        if completed.get("value"):
+            return
+        completed["value"] = True
+
+    previous_session_id = _optional_text(active.get("session_id"))
+    if previous_session_id is not None:
+        metadata: JsonObject = {
+            "error": reason,
+            "callback_listener": {"status": "superseded"},
+        }
+        if superseded_by_session_id is not None:
+            metadata["superseded_by_session_id"] = superseded_by_session_id
+        try:
+            service.repository.complete_setup_session(
+                previous_session_id,
+                status="expired",
+                metadata=metadata,
+                completed_at=service._now(),
+            )
+        except Exception:
+            pass
+
+    server = active.get("server")
+    if isinstance(server, HTTPServer):
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
 
 
 def _oauth_callback_html(title: str, message: str) -> str:

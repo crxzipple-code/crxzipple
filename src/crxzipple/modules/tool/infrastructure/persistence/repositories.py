@@ -341,6 +341,19 @@ class SqlAlchemyToolSourceRepository:
         self._loaded_models[source_id] = model
         return self._to_entity(model)
 
+    def list_by_ids(self, source_ids: tuple[str, ...]) -> dict[str, ToolSource]:
+        ordered_ids = tuple(dict.fromkeys(item for item in source_ids if item))
+        if not ordered_ids:
+            return {}
+        models = self.session.scalars(
+            select(ToolSourceModel).where(ToolSourceModel.source_id.in_(ordered_ids)),
+        ).all()
+        result: dict[str, ToolSource] = {}
+        for model in models:
+            self._loaded_models[model.source_id] = model
+            result[model.source_id] = self._to_entity(model)
+        return result
+
     def list(
         self,
         *,
@@ -501,6 +514,21 @@ class SqlAlchemyToolFunctionRepository:
             return None
         self._loaded_models[function_id] = model
         return self._to_entity(model)
+
+    def list_by_ids(self, function_ids: tuple[str, ...]) -> dict[str, ToolFunction]:
+        ordered_ids = tuple(dict.fromkeys(item for item in function_ids if item))
+        if not ordered_ids:
+            return {}
+        models = self.session.scalars(
+            select(ToolFunctionModel).where(
+                ToolFunctionModel.function_id.in_(ordered_ids),
+            ),
+        ).all()
+        result: dict[str, ToolFunction] = {}
+        for model in models:
+            self._loaded_models[model.function_id] = model
+            result[model.function_id] = self._to_entity(model)
+        return result
 
     def get_by_stable_key(self, stable_key: str) -> ToolFunction | None:
         model = self.session.scalars(

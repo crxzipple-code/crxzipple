@@ -6,6 +6,7 @@ import unittest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
+from crxzipple.modules.access.application import oauth as oauth_module
 from crxzipple.modules.access.application.settings_integration import (
     AccessSettingsConfigProvider,
 )
@@ -196,6 +197,53 @@ class AccessOAuthServiceTestCase(unittest.TestCase):
         self.assertEqual(setup.metadata["callback_listener"], {"status": "listening"})
         self.assertEqual(setup.metadata["browser_opened"], True)
         open_browser.assert_called_once_with(setup.authorize_url)
+
+    def test_codex_oauth_listener_supersedes_active_listener(self) -> None:
+        class _FakeServer(oauth_module.HTTPServer):
+            def __init__(self) -> None:
+                self.shutdown_called = False
+                self.close_called = False
+
+            def shutdown(self) -> None:
+                self.shutdown_called = True
+
+            def server_close(self) -> None:
+                self.close_called = True
+
+        old_setup = self.service.begin_browser_setup(provider_id="openai-codex")
+        server = _FakeServer()
+        completed = {"value": False}
+        previous_active = oauth_module._CODEX_OAUTH_CALLBACK_ACTIVE
+        try:
+            oauth_module._CODEX_OAUTH_CALLBACK_ACTIVE = {
+                "session_id": old_setup.session_id,
+                "server": server,
+                "completed": completed,
+            }
+            oauth_module._stop_active_codex_oauth_callback_listener(
+                service=self.service,
+                reason=(
+                    "OpenAI Codex OAuth callback listener was superseded by a "
+                    "newer login."
+                ),
+                superseded_by_session_id="new-session",
+            )
+        finally:
+            oauth_module._CODEX_OAUTH_CALLBACK_ACTIVE = previous_active
+
+        old_session = self.access_governance_repository.get_setup_session(
+            old_setup.session_id,
+        )
+        assert old_session is not None
+        self.assertEqual(old_session.status, "expired")
+        self.assertEqual(old_session.metadata["superseded_by_session_id"], "new-session")
+        self.assertEqual(
+            old_session.metadata["callback_listener"],
+            {"status": "superseded"},
+        )
+        self.assertTrue(completed["value"])
+        self.assertTrue(server.shutdown_called)
+        self.assertTrue(server.close_called)
 
     def test_device_code_setup_has_structured_unsupported_and_ready_entries(self) -> None:
         self.service.register_provider(

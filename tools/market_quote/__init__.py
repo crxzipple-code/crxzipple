@@ -1,0 +1,1 @@
+"""Market quote local tools."""

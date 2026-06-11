@@ -16,11 +16,18 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
         )
 
     def _process_operations_events(self) -> None:
+        outbox_container = self._target_container(AssemblyTarget.EVENT_OUTBOX_PUBLISHER)
+        try:
+            outbox_container.require(
+                AppKey.EVENT_OUTBOX_PUBLISHER_SERVICE,
+            ).publish_available(limit=500)
+        finally:
+            outbox_container.close()
         observer_container = self._target_container(AssemblyTarget.OPERATIONS_OBSERVER)
         try:
             observer_container.require(
                 AppKey.OPERATIONS_OBSERVER_RUNTIME_EVENT_SERVICE,
-            ).process_available_events()
+            ).process_available_events(from_beginning=True)
         finally:
             observer_container.close()
 
@@ -90,6 +97,7 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
                 "Run ID": "run-ui-ops",
                 "Lane Key": "session:agent:assistant:main",
                 "Wait Reason": "fifo",
+                "Dispatch": "queued",
                 "Wait Time": payload["queue"][0]["Wait Time"],
             },
             payload["queue"],
@@ -162,6 +170,20 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
         self.assertEqual(queue_row["cells"]["run_id"], "run-ui-ops-page")
         self.assertEqual(queue_row["cells"]["lane_key"], "session:agent:assistant:main")
         self.assertEqual(queue_row["cells"]["trace"], "trace-ui-ops-page")
+        execution_tab = {
+            item["id"]: item for item in payload["tabs"]
+        }["execution_chains"]
+        self.assertGreaterEqual(execution_tab["count"], 1)
+        execution_rows = payload["execution_chains"]["rows"]
+        self.assertTrue(execution_rows)
+        execution_row = next(
+            item
+            for item in execution_rows
+            if item["cells"]["run_id"] == "run-ui-ops-page"
+        )
+        self.assertTrue(execution_row["cells"]["chain_id"])
+        self.assertEqual(execution_row["cells"]["dispatch_status"], "queued")
+        self.assertNotEqual(execution_row["cells"]["active_step"], "-")
         executor_row = payload["executor_overview"]["rows"][0]
         self.assertEqual(executor_row["cells"]["worker_id"], "worker-ui-page")
         self.assertEqual(executor_row["cells"]["load"], "33%")
@@ -186,7 +208,7 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
         self.assertIn("run-ui-ops-page", event_run_ids)
         self.assertIn("run-ui-ops-direct-event", event_run_ids)
 
-    def test_page_uses_ingress_signal_and_event_sources(self) -> None:
+    def test_page_uses_ingress_continuation_and_event_sources(self) -> None:
         self._register_agent_and_llm()
         intake_response = self.client.post(
             "/orchestration/runs/intake",
@@ -206,7 +228,7 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
 
         self.client.app.state.container.require(
             AppKey.ORCHESTRATION_SCHEDULER_MAINTENANCE_SERVICE,
-        ).queue_tool_terminal_signal(tool_run_id="tool-ui-signal")
+        ).queue_tool_terminal_continuation(tool_run_id="tool-ui-continuation")
         self._process_operations_events()
         self._materialize_operations("orchestration")
         response = self.client.get("/operations/orchestration")
@@ -219,6 +241,11 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
         ingress_row = payload["ingress_queue"]["rows"][0]
         self.assertEqual(ingress_row["cells"]["run_id"], "run-ui-ingress-page")
         self.assertEqual(ingress_row["cells"]["status"], "queued")
+        self.assertEqual(
+            ingress_row["cells"]["dispatch_owner_kind"],
+            "orchestration_ingress",
+        )
+        self.assertEqual(ingress_row["cells"]["dispatch_status"], "queued")
         self.assertNotEqual(
             ingress_row["cells"]["intake_key"],
             ingress_row["cells"]["run_id"],
@@ -226,7 +253,7 @@ class UiOperationsOrchestrationHttpTestCase(HttpModuleTestCase):
         scheduler_items = {
             item["label"]: item["value"] for item in payload["scheduler_status"]["items"]
         }
-        self.assertEqual(scheduler_items["Scheduler Signals"], "1 queued / 0 processing")
+        self.assertEqual(scheduler_items["Continuation Tasks"], "1 queued / 0 processing")
         policy_items = {
             item["label"]: item["value"] for item in payload["policy_limits"]["items"]
         }

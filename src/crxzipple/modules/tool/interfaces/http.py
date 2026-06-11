@@ -42,6 +42,9 @@ class ToolExecutionPolicyResponse(BaseModel):
     timeout_seconds: int
     requires_confirmation: bool
     mutates_state: bool
+    supports_parallel: bool
+    resource_scope: str | None = None
+    serial_group_key: str | None = None
 
 
 class ToolExecutionSupportResponse(BaseModel):
@@ -709,6 +712,9 @@ def _to_response(tool) -> ToolResponse:
             timeout_seconds=tool.execution_policy.timeout_seconds,
             requires_confirmation=tool.execution_policy.requires_confirmation,
             mutates_state=tool.execution_policy.mutates_state,
+            supports_parallel=tool.execution_policy.supports_parallel,
+            resource_scope=tool.execution_policy.resource_scope,
+            serial_group_key=tool.execution_policy.serial_group_key,
         ),
         execution_support=ToolExecutionSupportResponse(
             supported_modes=[
@@ -884,6 +890,9 @@ def _function_execution_policy(
         timeout_seconds=max(_optional_int(policy.get("timeout_seconds"), 30), 1),
         requires_confirmation=bool(policy.get("requires_confirmation", False)),
         mutates_state=bool(policy.get("mutates_state", False)),
+        supports_parallel=bool(policy.get("supports_parallel", True)),
+        resource_scope=_optional_policy_text(policy.get("resource_scope")),
+        serial_group_key=_optional_policy_text(policy.get("serial_group_key")),
     )
 
 
@@ -920,6 +929,13 @@ def _optional_int(value: object, default: int) -> int:
         return int(value) if value is not None and value != "" else default
     except (TypeError, ValueError):
         return default
+
+
+def _optional_policy_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _function_definition_origin(function: ToolFunctionCatalogRecord) -> str:

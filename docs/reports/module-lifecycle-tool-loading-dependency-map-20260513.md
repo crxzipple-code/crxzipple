@@ -12,8 +12,9 @@ activation plans and typed handler dependencies.
 
 P4 implementation has landed for the app assembly path:
 `runtime_plan()` delegates scanned package activation to
-`app/assembly/tool.py::activate_tool_packages(...)`. The app assembly layer owns
-the direct `ToolPackageApplyContext` construction, resolves
+`app/assembly/tool_packages.py::activate_tool_packages(...)`. The app assembly
+package activation helper owns the direct `ToolPackageApplyContext`
+construction, resolves
 `ResolvedToolPackageActivation` entries, and calls `apply_tool_package_plans(...)`
 once. P5 readiness has also landed for Tool execution: Access-backed
 credential/access requirements, OAuth account bindings, and daemon runtime
@@ -47,6 +48,7 @@ build_runtime_app_container(target)
   -> orchestration_factories()
        -> builds orchestration graph with ToolServiceAdapter(AppKey.TOOL_SERVICE)
   -> tool.activate_packages
+       -> activate_tool_packages_from_context(...)
        -> activate_tool_packages(...)
        -> ToolPackageApplyContext(explicit dependency bindings, registries, settings)
        -> apply_tool_package_plans(..., include_openapi=dynamic)
@@ -54,9 +56,10 @@ build_runtime_app_container(target)
 ```
 
 `activate_tool_packages()` is now the app activation scanned package stage;
-`app/assembly/tool.py` owns the direct `apply_tool_package_plans()` call. The
-previous two-phase split has been removed from the runtime container path:
-scan once, resolve dependencies once, apply
+`app/assembly/tool.py` declares the activation task and delegates package apply
+to `app/assembly/tool_packages.py`, which owns the direct
+`apply_tool_package_plans()` call. The previous two-phase split has been removed
+from the runtime container path: scan once, resolve dependencies once, apply
 local/openapi/runtime handlers once.
 The old `register_tool_namespaces(...)` compatibility entrypoint has been
 removed.
@@ -171,9 +174,10 @@ is still migrating:
   `orchestration_*_lookup` service discovery.
 - `tools/*/tool.yaml` remains a Tool module resource protocol; module lifecycle
   or kernel code must not parse tool package manifests directly.
-- `app/assembly/tool.py` calls `activate_tool_packages(...)` as the clearly
-  named Tool package activation phase; `app/container.py` must not call
-  `register_tool_namespaces(...)` or construct a package apply context.
+- `app/assembly/tool.py` declares the clearly named `tool.activate_packages`
+  phase, while `app/assembly/tool_packages.py` owns package activation details;
+  `app/container.py` must not call `register_tool_namespaces(...)` or construct
+  a package apply context.
 
 ## P7 Regression Plan
 

@@ -1,7 +1,7 @@
 from crxzipple.modules.orchestration.application.engine import (
     EngineAdvanceOutcome,
     OrchestrationEngine,
-    PromptSurfacePreview,
+    RunPromptInputPreview,
 )
 from crxzipple.modules.orchestration.application.engine_llm_invoker import (
     OrchestrationEngineLlmInvoker,
@@ -39,8 +39,8 @@ from crxzipple.modules.orchestration.application.ports import (
     OrchestrationSchedulerMaintenancePort,
     OrchestrationSchedulerRuntimePort,
     OrchestrationSubmissionPort,
-    RunDispatchClaim,
-    RunDispatchPort,
+    OrchestrationDispatchClaim,
+    OrchestrationDispatchPort,
     SessionCatalogPort,
     SessionCompactionStatePort,
     SessionLookupPort,
@@ -65,9 +65,16 @@ from crxzipple.modules.orchestration.application.event_contracts import (
     orchestration_event_surfaces,
     orchestration_event_topic_contracts,
 )
-from crxzipple.modules.orchestration.application.prompt_surface import (
-    PromptSurfaceBuilder,
-    PromptSurface,
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_DISPATCH_OWNER_KINDS,
+    ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_TURN_MAINTENANCE_DISPATCH_OWNER_KIND,
+)
+from crxzipple.modules.orchestration.application.prompt_input import (
+    RunPromptInputCollector,
+    RunPromptInput,
 )
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
@@ -107,10 +114,8 @@ from crxzipple.modules.orchestration.application.ingress_runtime import (
 )
 from crxzipple.modules.orchestration.application.scheduler_service import (
     ORCHESTRATION_INGRESS_REQUESTED_EVENT,
-    ORCHESTRATION_SCHEDULER_SIGNAL_REQUESTED_EVENT,
     OrchestrationSchedulerService,
     orchestration_ingress_requested_topic,
-    orchestration_scheduler_signal_requested_topic,
 )
 from crxzipple.modules.orchestration.application.commands import (
     AdvanceAssignmentInput,
@@ -189,13 +194,17 @@ __all__ = [
     "OrchestrationIngressRuntimeService",
     "OrchestrationIngressProcessingPort",
     "OrchestrationRunEnqueuedCallbackBindingPort",
+    "ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND",
+    "ORCHESTRATION_DISPATCH_OWNER_KINDS",
+    "ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND",
     "ORCHESTRATION_EXECUTOR_ASSIGNMENT_REQUESTED_EVENT",
     "orchestration_event_definitions",
     "orchestration_event_observers",
     "orchestration_event_surfaces",
     "orchestration_event_topic_contracts",
     "ORCHESTRATION_INGRESS_REQUESTED_EVENT",
-    "ORCHESTRATION_SCHEDULER_SIGNAL_REQUESTED_EVENT",
+    "ORCHESTRATION_STEP_DISPATCH_OWNER_KIND",
+    "ORCHESTRATION_TURN_MAINTENANCE_DISPATCH_OWNER_KIND",
     "OrchestrationRunLookupPort",
     "OrchestrationRunQueryPort",
     "OrchestrationRunQueryService",
@@ -228,14 +237,14 @@ __all__ = [
     "SubmitBoundOrchestrationTurnInput",
     "ResolvedLlmSelection",
     "SubmitOrchestrationTurnInput",
-    "PromptSurfaceBuilder",
-    "PromptSurface",
-    "PromptSurfacePreview",
+    "RunPromptInputCollector",
+    "RunPromptInput",
+    "RunPromptInputPreview",
     "ResolvedTool",
     "ResolvedToolSet",
     "ResumeOrchestrationRunInput",
-    "RunDispatchClaim",
-    "RunDispatchPort",
+    "OrchestrationDispatchClaim",
+    "OrchestrationDispatchPort",
     "RunCancellationService",
     "cancel_run_record",
     "fail_run_record",
@@ -259,7 +268,6 @@ __all__ = [
     "normalize_requested_llm_id",
     "orchestration_ingress_requested_topic",
     "orchestration_executor_assignment_requested_topic",
-    "orchestration_scheduler_signal_requested_topic",
     "orchestration_runtime_observation_topic",
     "turn_session_live_topic",
     "turn_session_topic",

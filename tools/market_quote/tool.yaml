@@ -1,0 +1,36 @@
+kind: local_package
+namespace: market_quote
+prompt:
+  title: Market Quotes
+  summary: Fetch live market quotes and computed quote views for common instruments.
+capabilities:
+  - bounded_network.http
+local_tools:
+  - id: market_quote.gold_spot
+    name: Gold Spot Quote
+    description: Fetch the current XAU gold quote in USD per troy ounce, USD/CNY, and computed CNY per gram with source timestamps. Use this before web search for gold price questions.
+    provider_name: local_system
+    entrypoint: tools.market_quote.local:gold_spot
+    tool_kind: function
+    parameters:
+      - name: timeout_seconds
+        data_type: integer
+        description: Optional HTTP timeout in seconds. Defaults to 12 and caps at 30.
+        required: false
+    tags:
+      - market
+      - finance
+      - gold
+      - quote
+      - builtin
+      - surface:interactive
+    required_effect_ids:
+      - market_data
+      - network_search
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: market_quote.gold_spot

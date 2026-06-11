@@ -63,6 +63,11 @@ EVENT_RELAY_WORKER_ENTRYPOINT = AssemblyTargetEntrypoint(
     cli_args=("event-relay", "run"),
     daemon_service_key="worker:event-relay",
 )
+EVENT_OUTBOX_PUBLISHER_ENTRYPOINT = AssemblyTargetEntrypoint(
+    target=AssemblyTarget.EVENT_OUTBOX_PUBLISHER,
+    cli_args=("event-outbox", "run"),
+    daemon_service_key="worker:event-outbox",
+)
 CHANNEL_RUNTIME_ENTRYPOINT = AssemblyTargetEntrypoint(
     target=AssemblyTarget.CHANNEL_RUNTIME,
     cli_args=("channel-runtime", "run"),
@@ -83,6 +88,7 @@ ALL_TARGET_ENTRYPOINTS: tuple[AssemblyTargetEntrypoint, ...] = (
     TOOL_WORKER_ENTRYPOINT,
     OPERATIONS_OBSERVER_ENTRYPOINT,
     EVENT_RELAY_WORKER_ENTRYPOINT,
+    EVENT_OUTBOX_PUBLISHER_ENTRYPOINT,
     CHANNEL_RUNTIME_ENTRYPOINT,
     TEST_ENTRYPOINT,
 )
@@ -97,6 +103,7 @@ ALL_RUNTIME_TARGETS: tuple[AssemblyTarget, ...] = (
     AssemblyTarget.TOOL_WORKER,
     AssemblyTarget.OPERATIONS_OBSERVER,
     AssemblyTarget.EVENT_RELAY_WORKER,
+    AssemblyTarget.EVENT_OUTBOX_PUBLISHER,
     AssemblyTarget.CHANNEL_RUNTIME,
 )
 
@@ -156,6 +163,7 @@ __all__ = [
     "DAEMON_SUPERVISOR_ENTRYPOINT",
     "ENTRYPOINTS_BY_TARGET",
     "EVENT_RELAY_WORKER_ENTRYPOINT",
+    "EVENT_OUTBOX_PUBLISHER_ENTRYPOINT",
     "OPERATIONS_OBSERVER_ENTRYPOINT",
     "ORCHESTRATION_EXECUTOR_ENTRYPOINT",
     "ORCHESTRATION_SCHEDULER_ENTRYPOINT",

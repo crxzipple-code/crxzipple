@@ -101,6 +101,7 @@ class InvokeLlmRequest(BaseModel):
     tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = Field(default_factory=dict)
+    request_metadata: dict[str, Any] = Field(default_factory=dict)
     invocation_id: str | None = None
 
 
@@ -110,6 +111,7 @@ class TestLlmProfileRequest(BaseModel):
     tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = Field(default_factory=dict)
+    request_metadata: dict[str, Any] = Field(default_factory=dict)
     invocation_id: str | None = None
 
 
@@ -148,6 +150,7 @@ class LlmInvocationResponse(BaseModel):
     tool_schemas: list[ToolSchemaRequest]
     response_format: dict[str, Any] | None = None
     request_overrides: dict[str, Any]
+    request_metadata: dict[str, Any] = Field(default_factory=dict)
     status: str
     result: LlmResultResponse | None = None
     error: LlmErrorResponse | None = None
@@ -155,6 +158,21 @@ class LlmInvocationResponse(BaseModel):
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None
+
+
+class LlmInvocationPromptPreviewResponse(BaseModel):
+    invocation_id: str
+    run_id: str | None = None
+    llm_id: str
+    mode: str
+    messages: list[LlmMessageRequest] = Field(default_factory=list)
+    tool_schemas: list[ToolSchemaRequest] = Field(default_factory=list)
+    prompt_report: dict[str, Any] | None = None
+    context_render_snapshot_id: str | None = None
+    context_render: dict[str, Any] | None = None
+    context_render_metadata: dict[str, Any] = Field(default_factory=dict)
+    provider_attachments: dict[str, Any] = Field(default_factory=dict)
+    provider_request_options: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("", response_model=LlmProfileResponse, status_code=status.HTTP_201_CREATED)
@@ -282,6 +300,7 @@ def test_profile(
                 ),
                 response_format=payload.response_format,
                 overrides=payload.overrides,
+                request_metadata=payload.request_metadata,
                 invocation_id=payload.invocation_id,
             ),
         )
@@ -399,6 +418,7 @@ def invoke_llm(
             ),
             response_format=payload.response_format,
             overrides=payload.overrides,
+            request_metadata=payload.request_metadata,
             invocation_id=payload.invocation_id,
         ),
     )
@@ -442,6 +462,7 @@ def stream_llm(
                 ),
                 response_format=payload.response_format,
                 overrides=payload.overrides,
+                request_metadata=payload.request_metadata,
                 invocation_id=payload.invocation_id,
             ),
         ):
@@ -471,6 +492,19 @@ def get_invocation(
     container: Annotated[AppContainer, Depends(get_container)],
 ) -> LlmInvocationResponse:
     return _to_invocation_response(container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id))
+
+
+@router.get(
+    "/calls/{invocation_id}/prompt-preview",
+    response_model=LlmInvocationPromptPreviewResponse,
+)
+def get_invocation_prompt_preview(
+    invocation_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+    run_id: str | None = Query(default=None),
+) -> LlmInvocationPromptPreviewResponse:
+    invocation = container.require(AppKey.LLM_SERVICE).get_invocation(invocation_id)
+    return _to_invocation_prompt_preview_response(invocation, run_id=run_id)
 
 
 def _format_sse_event(event_name: str, payload: dict[str, Any]) -> str:
@@ -531,6 +565,7 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
             else None
         ),
         request_overrides=dict(invocation.request_overrides),
+        request_metadata=dict(invocation.request_metadata),
         status=invocation.status.value,
         result=(
             LlmResultResponse(
@@ -574,3 +609,65 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
         started_at=format_optional_datetime_utc(invocation.started_at),
         completed_at=format_optional_datetime_utc(invocation.completed_at),
     )
+
+
+def _to_invocation_prompt_preview_response(
+    invocation: Any,
+    *,
+    run_id: str | None,
+) -> LlmInvocationPromptPreviewResponse:
+    request_metadata = dict(invocation.request_metadata)
+    context_render_snapshot_id = _optional_metadata_string(
+        request_metadata.get("context_render_snapshot_id"),
+    )
+    mode = _optional_metadata_string(request_metadata.get("prompt_mode")) or "unknown"
+    return LlmInvocationPromptPreviewResponse(
+        invocation_id=invocation.id,
+        run_id=run_id,
+        llm_id=invocation.llm_id,
+        mode=mode,
+        messages=[
+            LlmMessageRequest(
+                role=item.role,
+                content=item.content,
+                name=item.name,
+                tool_call_id=item.tool_call_id,
+                metadata=dict(item.metadata),
+            )
+            for item in invocation.messages
+        ],
+        tool_schemas=[
+            ToolSchemaRequest(
+                name=item.name,
+                description=item.description,
+                input_schema=dict(item.input_schema),
+            )
+            for item in invocation.tool_schemas
+        ],
+        prompt_report=None,
+        context_render_snapshot_id=context_render_snapshot_id,
+        context_render=None,
+        context_render_metadata={},
+        provider_attachments={},
+        provider_request_options={
+            "response_format": (
+                dict(invocation.response_format)
+                if invocation.response_format is not None
+                else None
+            ),
+            "output_schema": None,
+            "overrides": dict(invocation.request_overrides),
+            "request_metadata": request_metadata,
+            "invocation_id": invocation.id,
+            "status": invocation.status.value,
+            "provider_request_id": invocation.provider_request_id,
+            "request_source": "llm_invocation",
+        },
+    )
+
+
+def _optional_metadata_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None

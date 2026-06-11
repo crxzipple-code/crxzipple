@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Protocol
@@ -143,6 +143,32 @@ class ToolSourceCatalogSyncResult:
         return sum(1 for result in self.results if result.error_message)
 
 
+@dataclass(frozen=True, slots=True)
+class ToolPromptBundleGroup:
+    group_key: str
+    title: str
+    summary: str
+    function_ids: tuple[str, ...]
+    function_count: int
+    capability_ids: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPromptBundle:
+    source_id: str
+    title: str
+    summary: str
+    source_kind: str
+    function_ids: tuple[str, ...]
+    function_count: int
+    groups: tuple[ToolPromptBundleGroup, ...] = ()
+    credential_requirement_count: int = 0
+    runtime_requirement_count: int = 0
+    capability_ids: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
 class ToolSourceQueryService:
     def __init__(self, uow_factory: Callable[[], ToolSourceUnitOfWork]) -> None:
         self._uow_factory = uow_factory
@@ -198,6 +224,68 @@ class ToolSourceQueryService:
             if function is None:
                 return None
             return _function_entity_to_record(function)
+
+    def list_prompt_bundles(
+        self,
+        function_ids: Iterable[str],
+    ) -> tuple[ToolPromptBundle, ...]:
+        requested_ids = tuple(
+            dict.fromkeys(
+                str(function_id).strip()
+                for function_id in function_ids
+                if str(function_id).strip()
+            ),
+        )
+        if not requested_ids:
+            return ()
+
+        with self._uow_factory() as uow:
+            functions_by_id = uow.tool_functions.list_by_ids(requested_ids)
+            function_records = []
+            source_ids = []
+            for function_id in requested_ids:
+                function = functions_by_id.get(function_id)
+                if function is None:
+                    continue
+                function_record = _function_entity_to_record(function)
+                if (
+                    function_record.status is not ToolFunctionStatus.ACTIVE
+                    or not function_record.enabled
+                ):
+                    continue
+                function_records.append(function_record)
+                if function_record.source_id not in source_ids:
+                    source_ids.append(function_record.source_id)
+
+            sources_by_id = uow.tool_sources.list_by_ids(tuple(source_ids))
+
+        source_records: dict[str, ToolSourceCatalogRecord] = {}
+        function_records_by_source: dict[str, list[ToolFunctionCatalogRecord]] = {}
+        ordered_source_ids: list[str] = []
+        for function_record in function_records:
+            source_record = source_records.get(function_record.source_id)
+            if source_record is None:
+                source = sources_by_id.get(function_record.source_id)
+                if source is None:
+                    continue
+                source_record = _source_entity_to_record(source)
+                if source_record.status is not CatalogToolSourceStatus.ACTIVE:
+                    continue
+                source_records[source_record.source_id] = source_record
+                ordered_source_ids.append(source_record.source_id)
+            function_records_by_source.setdefault(
+                function_record.source_id,
+                [],
+            ).append(function_record)
+
+        return tuple(
+            _prompt_bundle_from_records(
+                source_records[source_id],
+                tuple(function_records_by_source.get(source_id, ())),
+            )
+            for source_id in ordered_source_ids
+            if function_records_by_source.get(source_id)
+        )
 
     def list_provider_backends(
         self,
@@ -606,6 +694,323 @@ class ToolFunctionCommandService:
                 function=_function_entity_to_record(function),
                 changed=changed,
             )
+
+
+def _prompt_bundle_from_records(
+    source: ToolSourceCatalogRecord,
+    functions: tuple[ToolFunctionCatalogRecord, ...],
+) -> ToolPromptBundle:
+    prompt = _prompt_config(source)
+    title = _prompt_text(prompt, "title") or source.display_name
+    summary = (
+        _prompt_text(prompt, "summary")
+        or source.description
+        or f"Tool bundle '{title}' exposed by source '{source.source_id}'."
+    )
+    return ToolPromptBundle(
+        source_id=source.source_id,
+        title=title,
+        summary=summary,
+        source_kind=source.kind.value,
+        function_ids=tuple(function.function_id for function in functions),
+        function_count=len(functions),
+        groups=_prompt_bundle_groups(source, prompt, functions),
+        credential_requirement_count=_credential_requirement_count(
+            source,
+            functions,
+        ),
+        runtime_requirement_count=_runtime_requirement_count(source, functions),
+        capability_ids=_bundle_capability_ids(source, functions),
+        metadata={
+            "source_id": source.source_id,
+            "source_kind": source.kind.value,
+            "prompt": dict(prompt),
+            "config_hash": source.config_hash,
+            "function_ids": [function.function_id for function in functions],
+        },
+    )
+
+
+def _prompt_config(source: ToolSourceCatalogRecord) -> Mapping[str, Any]:
+    raw_prompt = source.config.get("prompt")
+    if isinstance(raw_prompt, Mapping):
+        return dict(raw_prompt)
+    provider = source.config.get("provider")
+    if isinstance(provider, Mapping):
+        provider_prompt = provider.get("prompt")
+        if isinstance(provider_prompt, Mapping):
+            return dict(provider_prompt)
+    return {}
+
+
+def _prompt_bundle_groups(
+    source: ToolSourceCatalogRecord,
+    prompt: Mapping[str, Any],
+    functions: tuple[ToolFunctionCatalogRecord, ...],
+) -> tuple[ToolPromptBundleGroup, ...]:
+    raw_groups = prompt.get("groups")
+    function_by_id = {function.function_id: function for function in functions}
+    groups: list[tuple[int, int, ToolPromptBundleGroup]] = []
+    grouped_function_ids: set[str] = set()
+    if isinstance(raw_groups, Mapping):
+        for index, (raw_group_key, raw_group) in enumerate(raw_groups.items()):
+            group_key = str(raw_group_key).strip()
+            if not group_key or not isinstance(raw_group, Mapping):
+                continue
+            declared_function_ids = _prompt_group_function_ids(raw_group)
+            group_functions = tuple(
+                function_by_id[function_id]
+                for function_id in declared_function_ids
+                if function_id in function_by_id
+            )
+            if not group_functions:
+                continue
+            grouped_function_ids.update(function.function_id for function in group_functions)
+            title = _prompt_text(raw_group, "title") or group_key.replace("_", " ").title()
+            summary = (
+                _prompt_text(raw_group, "summary")
+                or f"Tool functions in the '{title}' group."
+            )
+            order = _prompt_group_order(raw_group, fallback=1000 + index)
+            groups.append(
+                (
+                    order,
+                    index,
+                    ToolPromptBundleGroup(
+                        group_key=group_key,
+                        title=title,
+                        summary=summary,
+                        function_ids=tuple(
+                            function.function_id for function in group_functions
+                        ),
+                        function_count=len(group_functions),
+                        capability_ids=_function_capability_ids(group_functions),
+                        metadata={
+                            "group_key": group_key,
+                            "order": order,
+                            "function_ids": [
+                                function.function_id for function in group_functions
+                            ],
+                            **_prompt_group_metadata(raw_group),
+                        },
+                    ),
+                ),
+            )
+    ungrouped_functions = tuple(
+        function
+        for function in functions
+        if function.function_id not in grouped_function_ids
+    )
+    if ungrouped_functions:
+        group_key = "source" if not groups else "other"
+        order = 10000 + len(groups)
+        groups.append(
+            (
+                order,
+                len(groups),
+                ToolPromptBundleGroup(
+                    group_key=group_key,
+                    title=_default_source_group_title(source, prompt, group_key),
+                    summary=_default_source_group_summary(source, prompt, group_key),
+                    function_ids=tuple(function.function_id for function in ungrouped_functions),
+                    function_count=len(ungrouped_functions),
+                    capability_ids=_function_capability_ids(ungrouped_functions),
+                    metadata={
+                        "group_key": group_key,
+                        "order": order,
+                        "auto_source_group": True,
+                        "source_kind": source.kind.value,
+                        "function_ids": [
+                            function.function_id for function in ungrouped_functions
+                        ],
+                    },
+                ),
+            ),
+        )
+    return tuple(group for _, _, group in sorted(groups, key=lambda item: item[:2]))
+
+
+def _default_source_group_title(
+    source: ToolSourceCatalogRecord,
+    prompt: Mapping[str, Any],
+    group_key: str,
+) -> str:
+    if group_key == "other":
+        return "Other Functions"
+    return _prompt_text(prompt, "title") or source.display_name
+
+
+def _default_source_group_summary(
+    source: ToolSourceCatalogRecord,
+    prompt: Mapping[str, Any],
+    group_key: str,
+) -> str:
+    if group_key == "other":
+        return (
+            "Additional functions from this source that were not assigned to a "
+            "more specific prompt group. Expand to inspect exact callable functions."
+        )
+    source_summary = _prompt_text(prompt, "summary") or source.description
+    kind_summary = _default_source_kind_summary(source.kind)
+    if source_summary:
+        return (
+            f"{source_summary} {kind_summary} Expand this group to inspect exact "
+            "callable functions and their input schemas."
+        )
+    return f"{kind_summary} Expand this group to inspect exact callable functions and their input schemas."
+
+
+def _default_source_kind_summary(source_kind: ToolSourceCatalogKind) -> str:
+    if source_kind is ToolSourceCatalogKind.OPENAPI:
+        return "OpenAPI source operations are API-backed calls from one configured service."
+    if source_kind is ToolSourceCatalogKind.MCP:
+        return "MCP source tools are remote protocol capabilities from one configured server."
+    if source_kind is ToolSourceCatalogKind.CLI:
+        return "CLI source entries are command-line guidance; use command execution tools to inspect help and run commands."
+    if source_kind is ToolSourceCatalogKind.LOCAL_PACKAGE:
+        return "Local package functions are CRXZipple-owned runtime capabilities from one package."
+    if source_kind is ToolSourceCatalogKind.PROVIDER_BACKEND:
+        return "Provider backend functions are routed through one configured backend capability."
+    return "Tool source functions come from one configured capability source."
+
+
+def _prompt_group_order(group: Mapping[str, Any], *, fallback: int) -> int:
+    raw_order = group.get("order")
+    if raw_order is None:
+        return fallback
+    try:
+        return int(raw_order)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _prompt_group_function_ids(group: Mapping[str, Any]) -> tuple[str, ...]:
+    raw_function_ids = group.get("function_ids")
+    if not isinstance(raw_function_ids, Iterable) or isinstance(
+        raw_function_ids,
+        (str, bytes),
+    ):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(function_id).strip()
+            for function_id in raw_function_ids
+            if str(function_id).strip()
+        ),
+    )
+
+
+def _prompt_group_metadata(group: Mapping[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    default_schema_ids = _prompt_group_string_values(
+        group.get("default_tool_schema_ids"),
+    )
+    if default_schema_ids:
+        metadata["default_tool_schema_ids"] = list(default_schema_ids)
+    default_schema_source = _prompt_text(group, "default_tool_schema_source")
+    if default_schema_source:
+        metadata["default_tool_schema_source"] = default_schema_source
+    default_schema_max_count = _prompt_group_positive_int(
+        group.get("default_tool_schema_max_count"),
+    )
+    if default_schema_max_count is not None:
+        metadata["default_tool_schema_max_count"] = default_schema_max_count
+    return metadata
+
+
+def _prompt_group_string_values(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ),
+    )
+
+
+def _prompt_group_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _prompt_text(prompt: Mapping[str, Any], key: str) -> str | None:
+    value = prompt.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _credential_requirement_count(
+    source: ToolSourceCatalogRecord,
+    functions: tuple[ToolFunctionCatalogRecord, ...],
+) -> int:
+    return len(source.credential_requirements) + sum(
+        len(function.requirements.credential_requirements)
+        for function in functions
+    )
+
+
+def _runtime_requirement_count(
+    source: ToolSourceCatalogRecord,
+    functions: tuple[ToolFunctionCatalogRecord, ...],
+) -> int:
+    function_requirement_count = sum(
+        len(requirement_set)
+        for function in functions
+        for requirement_set in function.requirements.runtime_requirement_sets
+    )
+    return len(source.runtime_requirements) + function_requirement_count
+
+
+def _bundle_capability_ids(
+    source: ToolSourceCatalogRecord,
+    functions: tuple[ToolFunctionCatalogRecord, ...],
+) -> tuple[str, ...]:
+    raw_source_capabilities = source.config.get("capability_ids")
+    source_capabilities = (
+        tuple(
+            str(capability_id).strip()
+            for capability_id in raw_source_capabilities
+            if str(capability_id).strip()
+        )
+        if isinstance(raw_source_capabilities, (list, tuple))
+        else ()
+    )
+    return tuple(
+        dict.fromkeys(
+            capability_id
+            for capability_id in (
+                *source_capabilities,
+                *_function_capability_ids(functions),
+            )
+            if capability_id
+        ),
+    )
+
+
+def _function_capability_ids(
+    functions: tuple[ToolFunctionCatalogRecord, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            capability_id
+            for function in functions
+            for capability_id in function.capabilities
+            if capability_id
+        ),
+    )
 
 
 def _source_status_event_name(status: ToolSourceStatus) -> str:

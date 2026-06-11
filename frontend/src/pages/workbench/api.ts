@@ -5,6 +5,9 @@ import {
 } from "@/mocks/fixtures/runtime";
 import { ApiClientError, buildApiUrl, dataMode, requestJson } from "@/shared/api/client";
 import type {
+  RunPromptInputPreview,
+} from "@/shared/runtime/promptPreview";
+import type {
   TurnStepView,
   WorkbenchHomeReadModel,
   WorkbenchRunView,
@@ -55,13 +58,14 @@ export interface CreateTurnPayload {
   content: string | WorkbenchContentBlock[];
   agent_id?: string;
   llm_id?: string;
+  session_key?: string;
+  new_session?: boolean;
   channel?: string;
   chat_type?: "direct" | "channel" | "group" | string;
   peer_id?: string;
   conversation_id?: string;
   thread_id?: string;
   account_id?: string;
-  main_key?: string;
   direct_scope?: "main" | "per_peer" | "per_channel_peer" | "per_account_channel_peer" | string;
   source?: string;
   queue_policy?: "fifo" | "jump_queue" | string;
@@ -341,6 +345,43 @@ export async function loadWorkbenchContextRenderSnapshot(
       `/context-workspaces/runs/${encodeURIComponent(runId)}/render-snapshot`,
     );
     return payload.snapshot;
+  } catch {
+    return null;
+  }
+}
+
+export async function loadWorkbenchContextRenderSnapshotById(
+  snapshotId: string,
+): Promise<WorkbenchContextRenderSnapshot | null> {
+  try {
+    const payload = await requestJson<{ snapshot: WorkbenchContextRenderSnapshot }>(
+      `/context-workspaces/render-snapshots/${encodeURIComponent(snapshotId)}`,
+    );
+    return payload.snapshot;
+  } catch {
+    return null;
+  }
+}
+
+export async function loadWorkbenchPromptPreview(runId: string): Promise<RunPromptInputPreview | null> {
+  try {
+    return await requestJson<RunPromptInputPreview>(
+      `/turns/${encodeURIComponent(runId)}/prompt-preview`,
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function loadWorkbenchInvocationPromptPreview(
+  invocationId: string,
+  runId: string,
+): Promise<RunPromptInputPreview | null> {
+  try {
+    const query = new URLSearchParams({ run_id: runId });
+    return await requestJson<RunPromptInputPreview>(
+      `/llms/calls/${encodeURIComponent(invocationId)}/prompt-preview?${query.toString()}`,
+    );
   } catch {
     return null;
   }

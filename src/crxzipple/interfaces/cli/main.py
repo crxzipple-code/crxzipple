@@ -25,6 +25,9 @@ from crxzipple.modules.authorization.domain import AuthorizationDeniedError
 from crxzipple.modules.event_relay.interfaces.worker_cli import (
     build_cli as build_event_relay_cli,
 )
+from crxzipple.modules.events.interfaces.worker_cli import (
+    build_cli as build_event_outbox_cli,
+)
 from crxzipple.modules.llm.interfaces.cli import build_cli as build_llm_cli
 from crxzipple.modules.memory.interfaces.cli import build_cli as build_memory_cli
 from crxzipple.modules.mobile.interfaces.cli import build_cli as build_mobile_cli
@@ -67,6 +70,7 @@ app.add_typer(build_ocr_cli(), name="ocr")
 app.add_typer(build_daemon_cli(), name="daemon")
 app.add_typer(build_dispatch_cli(), name="dispatch")
 app.add_typer(build_event_relay_cli(), name="event-relay", hidden=True)
+app.add_typer(build_event_outbox_cli(), name="event-outbox", hidden=True)
 app.add_typer(build_orchestration_cli(), name="orchestration")
 app.add_typer(
     build_orchestration_scheduler_cli(),

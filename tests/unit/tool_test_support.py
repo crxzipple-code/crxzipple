@@ -50,6 +50,8 @@ from tests.unit.support import (
     SqliteTestHarness,
     fixture_path,
     openapi_fixture_path,
+    publish_outbox_events,
+    published_event_bus_events,
 )
 from tests.unit.orchestration_test_support import (
     process_next_orchestration_assignment,
@@ -63,7 +65,16 @@ _TOOL_DEPENDENCY_CAPABILITIES: Mapping[str, tuple[str, ...]] = {
         "browser.profile_read",
         "browser.runtime_readiness",
     ),
-    "browser_tool_application": ("browser.control", "browser.page_action"),
+    "browser_tool_application": (
+        "browser.control",
+        "browser.page_action",
+        "browser.code_read",
+    ),
+    "browser_observation_service": (
+        "browser.profile_read",
+        "browser.page_action",
+        "browser.runtime_readiness",
+    ),
     "browser_profile_probe_service": ("browser.runtime_readiness",),
     "browser_profile_resolver": ("browser.profile_read", "browser.runtime_readiness"),
     "browser_runtime_state_store": ("browser.runtime_readiness",),
@@ -176,6 +187,12 @@ class ToolTestCaseBase(unittest.TestCase):
 
     def seed_tool(self, **kwargs: Any):
         return seed_catalog_tool(self.container, **kwargs)
+
+    def publish_outbox_events(self) -> int:
+        return publish_outbox_events(self.container)
+
+    def published_event_bus_events(self) -> tuple[object, ...]:
+        return published_event_bus_events(self.container)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

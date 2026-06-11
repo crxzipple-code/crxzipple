@@ -5,21 +5,34 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from crxzipple.modules.dispatch.domain import DispatchTask, DispatchTaskStatus
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+)
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationExecutorLeaseQueryPort,
     OrchestrationRunQueryPort,
 )
+from crxzipple.modules.orchestration.application.coordinators.continuation_tasks import (
+    OrchestrationContinuationStatus,
+    OrchestrationContinuationTask,
+)
 from crxzipple.modules.orchestration.domain import (
+    ExecutionChain,
+    ExecutionStep,
+    ExecutionStepItem,
     OrchestrationExecutorLease,
     OrchestrationIngressRequest,
     OrchestrationRun,
-    OrchestrationSchedulerSignal,
 )
 from crxzipple.modules.orchestration.domain.value_objects import (
+    ExecutionChainStatus,
+    ExecutionStepItemStatus,
+    ExecutionStepStatus,
     OrchestrationIngressStatus,
     OrchestrationRunStage,
     OrchestrationRunStatus,
-    OrchestrationSchedulerSignalStatus,
     utcnow,
 )
 from crxzipple.modules.operations.application.read_models.models import (
@@ -52,12 +65,22 @@ class OrchestrationIngressRequestQueryPort(Protocol):
     ) -> list[OrchestrationIngressRequest]: ...
 
 
-class OrchestrationSchedulerSignalQueryPort(Protocol):
-    def list_scheduler_signals(
+class OrchestrationContinuationQueryPort(Protocol):
+    def list_continuation_tasks(
         self,
         *,
-        status: OrchestrationSchedulerSignalStatus | None = None,
-    ) -> list[OrchestrationSchedulerSignal]: ...
+        status: OrchestrationContinuationStatus | None = None,
+    ) -> list[OrchestrationContinuationTask]: ...
+
+
+class OrchestrationDispatchTaskQueryPort(Protocol):
+    def list_dispatch_tasks(
+        self,
+        *,
+        status: DispatchTaskStatus | None = None,
+        owner_kind: str | None = None,
+        lane_key: str | None = None,
+    ) -> list[DispatchTask]: ...
 
 
 class OperationsObservationReadPort(Protocol):
@@ -82,6 +105,8 @@ class OrchestrationOperationsPage:
     stuck_runs: OperationsTableSectionModel
     policy_limits: OperationsKeyValueSectionModel
     run_queue: OperationsTableSectionModel
+    execution_chains: OperationsTableSectionModel
+    repeated_probes: OperationsTableSectionModel
     lane_locks: OperationsTableSectionModel
     executor_overview: OperationsTableSectionModel
     ingress_queue: OperationsTableSectionModel
@@ -94,7 +119,8 @@ class OrchestrationOperationsReadModelProvider:
     run_query: OrchestrationRunQueryPort
     executor_lease_query: OrchestrationExecutorLeaseQueryPort
     ingress_query: OrchestrationIngressRequestQueryPort | None = None
-    scheduler_signal_query: OrchestrationSchedulerSignalQueryPort | None = None
+    continuation_query: OrchestrationContinuationQueryPort | None = None
+    dispatch_query: OrchestrationDispatchTaskQueryPort | None = None
     operations_observation: OperationsObservationReadPort | None = None
     runtime_bootstrap_config: Any | None = None
     worker_lease_seconds: int | None = None
@@ -105,10 +131,24 @@ class OrchestrationOperationsReadModelProvider:
         runs = self.run_query.list_runs()
         leases = self.executor_lease_query.list_executor_leases(status=None)
         ingress_requests = _list_ingress_requests(self.ingress_query)
-        pending_ingress_requests = _pending_ingress_requests(ingress_requests)
+        dispatch_tasks = _list_dispatch_tasks(self.dispatch_query)
+        ingress_dispatch_by_request_id = _dispatch_tasks_by_owner(
+            dispatch_tasks,
+            owner_kind=ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+        )
+        step_dispatch_by_run_id = _dispatch_tasks_by_payload_ref(
+            dispatch_tasks,
+            owner_kind=ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+        )
+        pending_ingress_requests = _pending_ingress_requests(
+            ingress_requests,
+            dispatch_task_by_request_id=ingress_dispatch_by_request_id,
+        )
         visible_ingress_count = len(pending_ingress_requests)
         queued_runs = [
-            run for run in runs if run.status is OrchestrationRunStatus.QUEUED
+            run
+            for run in runs
+            if _run_is_dispatch_queued(run, step_dispatch_by_run_id.get(run.id))
         ]
         running_runs = [
             run for run in runs if run.status is OrchestrationRunStatus.RUNNING
@@ -195,7 +235,11 @@ class OrchestrationOperationsReadModelProvider:
                     cancelled_runs=[],
                 ),
             ),
-            queue=_queue_rows(queued_runs, now=now),
+            queue=_queue_rows(
+                queued_runs,
+                dispatch_task_by_run_id=step_dispatch_by_run_id,
+                now=now,
+            ),
             lane_locks=_lane_lock_rows(running_runs, now=now),
             executor=_executor_rows(leases, running_runs=running_runs, now=now),
             actions=(
@@ -246,7 +290,16 @@ class OrchestrationOperationsReadModelProvider:
         runs = self.run_query.list_runs()
         leases = self.executor_lease_query.list_executor_leases(status=None)
         ingress_requests = _list_ingress_requests(self.ingress_query)
-        scheduler_signals = _list_scheduler_signals(self.scheduler_signal_query)
+        continuation_tasks = _list_continuation_tasks(self.continuation_query)
+        dispatch_tasks = _list_dispatch_tasks(self.dispatch_query)
+        ingress_dispatch_by_request_id = _dispatch_tasks_by_owner(
+            dispatch_tasks,
+            owner_kind=ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+        )
+        step_dispatch_by_run_id = _dispatch_tasks_by_payload_ref(
+            dispatch_tasks,
+            owner_kind=ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+        )
         observed_events = _recent_operations_events(
             observation=self.operations_observation,
             module="orchestration",
@@ -257,11 +310,16 @@ class OrchestrationOperationsReadModelProvider:
             module="orchestration",
         )
         operations_event_records: tuple[Any, ...] = observed_events
-        pending_ingress_requests = _pending_ingress_requests(ingress_requests)
+        pending_ingress_requests = _pending_ingress_requests(
+            ingress_requests,
+            dispatch_task_by_request_id=ingress_dispatch_by_request_id,
+        )
         counts = Counter(run.status for run in runs)
         visible_ingress_count = len(pending_ingress_requests)
         queued_runs = [
-            run for run in runs if run.status is OrchestrationRunStatus.QUEUED
+            run
+            for run in runs
+            if _run_is_dispatch_queued(run, step_dispatch_by_run_id.get(run.id))
         ]
         running_runs = [
             run for run in runs if run.status is OrchestrationRunStatus.RUNNING
@@ -352,6 +410,13 @@ class OrchestrationOperationsReadModelProvider:
                 if run.stage is OrchestrationRunStage.WAITING_FOR_CONFIRMATION
             ],
         )
+        execution_chains = _execution_chain_section(
+            self.run_query,
+            runs,
+            dispatch_task_by_run_id=step_dispatch_by_run_id,
+            now=now,
+        )
+        repeated_probes = _repeated_probe_section(runs)
 
         return OrchestrationOperationsPage(
             module="orchestration",
@@ -441,6 +506,17 @@ class OrchestrationOperationsReadModelProvider:
                 OperationsTabModel(id="overview", label="Overview"),
                 OperationsTabModel(id="runs", label="Runs", count=len(queued_runs)),
                 OperationsTabModel(
+                    id="execution_chains",
+                    label="Execution",
+                    count=execution_chains.total,
+                ),
+                OperationsTabModel(
+                    id="repeated_probes",
+                    label="Repeated Probes",
+                    count=repeated_probes.total,
+                    tone="warning" if repeated_probes.total else "neutral",
+                ),
+                OperationsTabModel(
                     id="lane_locks",
                     label="Lane Locks",
                     count=len([run for run in running_runs if run.lane_lock_key]),
@@ -461,7 +537,8 @@ class OrchestrationOperationsReadModelProvider:
             scheduler_status=_scheduler_status_section(
                 runs=runs,
                 queued_runs=queued_runs,
-                scheduler_signals=scheduler_signals,
+                continuation_tasks=continuation_tasks,
+                dispatch_tasks=dispatch_tasks,
                 event_records=operations_event_records,
                 completed_count=completed_count,
                 failed_count=len(failed_runs),
@@ -492,7 +569,13 @@ class OrchestrationOperationsReadModelProvider:
                 worker_lease_seconds=self.worker_lease_seconds,
                 worker_heartbeat_seconds=self.worker_heartbeat_seconds,
             ),
-            run_queue=_run_queue_section(queued_runs, now=now),
+            run_queue=_run_queue_section(
+                queued_runs,
+                dispatch_task_by_run_id=step_dispatch_by_run_id,
+                now=now,
+            ),
+            execution_chains=execution_chains,
+            repeated_probes=repeated_probes,
             lane_locks=_lane_locks_section(running_runs, leases=leases, now=now),
             executor_overview=_executor_section(
                 leases,
@@ -504,6 +587,7 @@ class OrchestrationOperationsReadModelProvider:
                 pending_ingress_requests,
                 fallback_runs=[],
                 run_by_id={run.id: run for run in runs},
+                dispatch_task_by_request_id=ingress_dispatch_by_request_id,
                 now=now,
             ),
             recent_failures=_recent_failures_section(failed_runs),
@@ -686,22 +770,36 @@ def _metadata_string_list(value: object | None) -> list[str]:
 def _queue_rows(
     runs: list[OrchestrationRun],
     *,
+    dispatch_task_by_run_id: dict[str, DispatchTask],
     now: datetime,
 ) -> tuple[dict[str, str], ...]:
     sorted_runs = sorted(
         runs,
         key=lambda run: (run.priority, run.queued_at or run.created_at),
     )
-    return tuple(
-        {
-            "Priority": f"P{run.priority}",
-            "Run ID": run.id,
-            "Lane Key": run.lane_key or "-",
-            "Wait Reason": run.waiting_reason or run.queue_policy.value,
-            "Wait Time": _age_label(run.queued_at or run.created_at, now=now),
-        }
-        for run in sorted_runs[:20]
-    )
+    rows: list[dict[str, str]] = []
+    for run in sorted_runs[:20]:
+        dispatch_task = dispatch_task_by_run_id.get(run.id)
+        queued_at = _dispatch_queued_at(dispatch_task) or run.queued_at or run.created_at
+        rows.append(
+            {
+                "Priority": f"P{_dispatch_priority_label(dispatch_task, run.priority)}",
+                "Run ID": run.id,
+                "Lane Key": (
+                    dispatch_task.lane_key
+                    if dispatch_task is not None and dispatch_task.lane_key
+                    else run.lane_key or "-"
+                ),
+                "Wait Reason": (
+                    _dispatch_wait_reason(dispatch_task) or run.waiting_reason or "-"
+                ),
+                "Dispatch": (
+                    dispatch_task.status.value if dispatch_task is not None else "-"
+                ),
+                "Wait Time": _age_label(queued_at, now=now),
+            },
+        )
+    return tuple(rows)
 
 
 def _lane_lock_rows(
@@ -759,7 +857,8 @@ def _scheduler_status_section(
     *,
     runs: list[OrchestrationRun],
     queued_runs: list[OrchestrationRun],
-    scheduler_signals: list[OrchestrationSchedulerSignal],
+    continuation_tasks: list[OrchestrationContinuationTask],
+    dispatch_tasks: list[DispatchTask],
     event_records: tuple[Any, ...],
     completed_count: int,
     failed_count: int,
@@ -786,25 +885,24 @@ def _scheduler_status_section(
             if run.status is OrchestrationRunStatus.COMPLETED
         ],
     )
-    latest_update = _latest_event_time(event_records) or max(
+    latest_update = _latest_event_time(event_records) or _latest_datetime(
         (
             *[run.updated_at for run in runs],
-            *[signal.updated_at for signal in scheduler_signals],
+            *[task.updated_at for task in continuation_tasks],
         ),
-        default=None,
     )
-    queued_signal_count = len(
+    queued_continuation_count = len(
         [
-            signal
-            for signal in scheduler_signals
-            if signal.status is OrchestrationSchedulerSignalStatus.QUEUED
+            task
+            for task in continuation_tasks
+            if task.status is OrchestrationContinuationStatus.QUEUED
         ],
     )
-    processing_signal_count = len(
+    processing_continuation_count = len(
         [
-            signal
-            for signal in scheduler_signals
-            if signal.status is OrchestrationSchedulerSignalStatus.PROCESSING
+            task
+            for task in continuation_tasks
+            if task.status is OrchestrationContinuationStatus.PROCESSING
         ],
     )
     event_loop_value = "Observed" if latest_update else "No events"
@@ -831,7 +929,7 @@ def _scheduler_status_section(
             ),
             OperationsKeyValueItemModel(
                 label="Dispatch Latency",
-                value=_scheduler_signal_latency_label(scheduler_signals),
+                value=_continuation_latency_label(continuation_tasks),
             ),
             OperationsKeyValueItemModel(
                 label="Queue Age (p95)",
@@ -855,11 +953,19 @@ def _scheduler_status_section(
                 ),
             ),
             OperationsKeyValueItemModel(
-                label="Scheduler Signals",
-                value=f"{queued_signal_count} queued / {processing_signal_count} processing",
+                label="Continuation Tasks",
+                value=(
+                    f"{queued_continuation_count} queued / "
+                    f"{processing_continuation_count} processing"
+                ),
                 tone="warning"
-                if queued_signal_count or processing_signal_count
+                if queued_continuation_count or processing_continuation_count
                 else "success",
+            ),
+            OperationsKeyValueItemModel(
+                label="Dispatch Tasks",
+                value=_dispatch_task_breakdown(dispatch_tasks),
+                tone="warning" if _active_dispatch_tasks(dispatch_tasks) else "success",
             ),
             OperationsKeyValueItemModel(
                 label="Observed Cursor",
@@ -1195,6 +1301,7 @@ def _token_pair_label(reserve_tokens: int | None, soft_threshold_tokens: int | N
 def _run_queue_section(
     runs: list[OrchestrationRun],
     *,
+    dispatch_task_by_run_id: dict[str, DispatchTask],
     now: datetime,
 ) -> OperationsTableSectionModel:
     sorted_runs = sorted(
@@ -1202,25 +1309,10 @@ def _run_queue_section(
         key=lambda run: (run.priority, run.queued_at or run.created_at),
     )
     rows = tuple(
-        OperationsTableRowModel(
-            id=run.id,
-            cells={
-                "priority": f"P{run.priority}",
-                "run_id": run.id,
-                "lane_key": _display(run.lane_key),
-                "enqueued_at": format_datetime_utc(run.queued_at or run.created_at),
-                "agent_target": _display(run.agent_id),
-                "wait_reason": _run_wait_reason(run),
-                "wait_time": _age_label(run.queued_at or run.created_at, now=now),
-                "actions": "Open / Trace / Cancel / Requeue",
-                "policy": run.queue_policy.value,
-                "stage": run.stage.value,
-                "trace": _trace_id(run),
-                "route": _workbench_route(run),
-                "trace_route": _trace_route(run),
-            },
-            status=run.status.value,
-            tone=_tone_for_run_status(run.status),
+        _run_queue_row(
+            run,
+            dispatch_task=dispatch_task_by_run_id.get(run.id),
+            now=now,
         )
         for run in sorted_runs[:50]
     )
@@ -1234,6 +1326,7 @@ def _run_queue_section(
             ("enqueued_at", "Enqueued At"),
             ("agent_target", "Agent (Target)"),
             ("wait_reason", "Wait Reason"),
+            ("dispatch_status", "Dispatch"),
             ("wait_time", "Wait Time"),
             ("actions", "Actions"),
         ),
@@ -1242,6 +1335,350 @@ def _run_queue_section(
         view_all_route="/operations/orchestration?tab=runs",
         empty_state="Run queue is empty.",
     )
+
+
+def _run_queue_row(
+    run: OrchestrationRun,
+    *,
+    dispatch_task: DispatchTask | None,
+    now: datetime,
+) -> OperationsTableRowModel:
+    queued_at = _dispatch_queued_at(dispatch_task) or run.queued_at or run.created_at
+    status = dispatch_task.status.value if dispatch_task is not None else run.status.value
+    return OperationsTableRowModel(
+        id=run.id,
+        cells={
+            "priority": f"P{_dispatch_priority_label(dispatch_task, run.priority)}",
+            "run_id": run.id,
+            "lane_key": _display(
+                dispatch_task.lane_key if dispatch_task is not None else run.lane_key,
+            ),
+            "enqueued_at": format_datetime_utc(queued_at),
+            "agent_target": _display(run.agent_id),
+            "wait_reason": _dispatch_wait_reason(dispatch_task) or _run_wait_reason(run),
+            "wait_time": _age_label(queued_at, now=now),
+            "dispatch_status": status,
+            "dispatch_task_id": dispatch_task.id if dispatch_task is not None else "-",
+            "dispatch_owner_kind": (
+                dispatch_task.owner_kind if dispatch_task is not None else "-"
+            ),
+            "dispatch_worker": _dispatch_worker(dispatch_task),
+            "dispatch_lease_expires_at": _dispatch_lease_expires_at(dispatch_task),
+            "actions": "Open / Trace / Cancel / Requeue",
+            "policy": (
+                dispatch_task.policy.value if dispatch_task is not None else run.queue_policy.value
+            ),
+            "stage": run.stage.value,
+            "trace": _trace_id(run),
+            "route": _workbench_route(run),
+            "trace_route": _trace_route(run),
+        },
+        status=status,
+        tone=_tone_for_dispatch_or_run_status(dispatch_task, run.status),
+    )
+
+
+def _repeated_probe_section(
+    runs: list[OrchestrationRun],
+) -> OperationsTableSectionModel:
+    rows: list[OperationsTableRowModel] = []
+    for run in runs:
+        observation = run.metadata.get("repeated_probe_observation")
+        if not isinstance(observation, dict):
+            continue
+        repeated = observation.get("repeated")
+        if not isinstance(repeated, list):
+            continue
+        for index, item in enumerate(repeated[:5]):
+            if not isinstance(item, dict):
+                continue
+            count = _int(item.get("count"), 0)
+            if count < 3:
+                continue
+            target = _probe_target_label(item)
+            rows.append(
+                OperationsTableRowModel(
+                    id=f"{run.id}:{index}:{target}",
+                    cells={
+                        "run_id": run.id,
+                        "tool_id": _display(item.get("tool_id")),
+                        "kind": _display(item.get("kind")),
+                        "target": target,
+                        "count": str(count),
+                        "first_seen_step": _display(item.get("first_seen_step")),
+                        "last_seen_step": _display(item.get("last_seen_step")),
+                        "trace": _trace_id(run),
+                        "route": _workbench_route(run),
+                        "trace_route": _trace_route(run),
+                    },
+                    status="repeated_probe",
+                    tone="warning",
+                ),
+            )
+    rows.sort(
+        key=lambda row: (
+            -_int(row.cells.get("count"), 0),
+            row.cells.get("run_id", ""),
+            row.cells.get("target", ""),
+        ),
+    )
+    return OperationsTableSectionModel(
+        id="repeated_probes",
+        title="Repeated Probes",
+        columns=_columns(
+            ("run_id", "Run ID"),
+            ("tool_id", "Tool"),
+            ("kind", "Kind"),
+            ("target", "Target"),
+            ("count", "Count"),
+            ("last_seen_step", "Last Seen"),
+        ),
+        rows=tuple(rows[:50]),
+        total=len(rows),
+        view_all_route="/operations/orchestration?tab=repeated_probes",
+        empty_state="No repeated probes detected.",
+    )
+
+
+def _probe_target_label(item: dict[str, Any]) -> str:
+    normalized_url = _optional_metadata_text(item.get("normalized_url"))
+    if normalized_url is not None:
+        return _truncate(normalized_url, limit=120)
+    command_fingerprint = _optional_metadata_text(item.get("command_fingerprint"))
+    if command_fingerprint is not None:
+        return f"command:{command_fingerprint}"
+    argument_fingerprint = _optional_metadata_text(item.get("argument_fingerprint"))
+    if argument_fingerprint is not None:
+        return f"args:{argument_fingerprint}"
+    key = _optional_metadata_text(item.get("key"))
+    return _truncate(key or "-", limit=120)
+
+
+def _execution_chain_section(
+    run_query: OrchestrationRunQueryPort,
+    runs: list[OrchestrationRun],
+    *,
+    dispatch_task_by_run_id: dict[str, DispatchTask],
+    now: datetime,
+) -> OperationsTableSectionModel:
+    rows: list[OperationsTableRowModel] = []
+    total_chains = 0
+    for run in _execution_chain_candidate_runs(runs, now=now):
+        chains = _safe_execution_chains(run_query, run.id)
+        if not chains:
+            continue
+        total_chains += len(chains)
+        for chain in sorted(chains, key=lambda item: item.updated_at, reverse=True)[:2]:
+            rows.append(
+                _execution_chain_row(
+                    run_query,
+                    run,
+                    chain,
+                    dispatch_task=dispatch_task_by_run_id.get(run.id),
+                    now=now,
+                ),
+            )
+            if len(rows) >= 50:
+                break
+        if len(rows) >= 50:
+            break
+    return OperationsTableSectionModel(
+        id="execution_chains",
+        title="Execution Chains",
+        columns=_columns(
+            ("run_id", "Run ID"),
+            ("chain_id", "Chain ID"),
+            ("chain_status", "Chain Status"),
+            ("active_step", "Active Step"),
+            ("last_step", "Last Step"),
+            ("steps", "Steps"),
+            ("items", "Items"),
+            ("dispatch_status", "Dispatch"),
+            ("updated_at", "Updated At"),
+            ("actions", "Actions"),
+        ),
+        rows=tuple(rows),
+        total=total_chains,
+        view_all_route="/operations/orchestration?tab=execution_chains",
+        empty_state="No execution chains observed.",
+    )
+
+
+def _execution_chain_candidate_runs(
+    runs: list[OrchestrationRun],
+    *,
+    now: datetime,
+) -> list[OrchestrationRun]:
+    selected: dict[str, OrchestrationRun] = {}
+    active_statuses = {
+        OrchestrationRunStatus.ACCEPTED,
+        OrchestrationRunStatus.QUEUED,
+        OrchestrationRunStatus.RUNNING,
+        OrchestrationRunStatus.WAITING,
+    }
+    for run in sorted(runs, key=lambda item: item.updated_at, reverse=True):
+        if run.status in active_statuses:
+            selected[run.id] = run
+    for run in sorted(runs, key=lambda item: item.updated_at, reverse=True):
+        if len(selected) >= 30:
+            break
+        if run.id in selected:
+            continue
+        if _age_seconds(run.completed_at or run.updated_at, now=now) <= 900:
+            selected[run.id] = run
+    return list(selected.values())[:30]
+
+
+def _execution_chain_row(
+    run_query: OrchestrationRunQueryPort,
+    run: OrchestrationRun,
+    chain: ExecutionChain,
+    *,
+    dispatch_task: DispatchTask | None,
+    now: datetime,
+) -> OperationsTableRowModel:
+    steps = _safe_execution_steps(run_query, chain.id)
+    items = [
+        item
+        for step in steps
+        for item in _safe_execution_step_items(run_query, step.id)
+    ]
+    active_step = _active_execution_step(chain, steps)
+    last_step = max(steps, key=lambda item: item.step_index, default=None)
+    active_item_count = len(
+        [item for item in items if item.status in _ACTIVE_EXECUTION_ITEM_STATUSES],
+    )
+    dispatch_status = (
+        dispatch_task.status.value if dispatch_task is not None else run.status.value
+    )
+    return OperationsTableRowModel(
+        id=f"{run.id}:{chain.id}",
+        cells={
+            "run_id": run.id,
+            "chain_id": chain.id,
+            "chain_status": chain.status.value,
+            "active_step": _execution_step_label(active_step),
+            "last_step": _execution_step_label(last_step),
+            "steps": f"{len(steps)}",
+            "items": f"{len(items)} / {active_item_count} active",
+            "dispatch_status": dispatch_status,
+            "dispatch_task_id": dispatch_task.id if dispatch_task is not None else "-",
+            "dispatch_worker": _dispatch_worker(dispatch_task),
+            "updated_at": format_datetime_utc(chain.updated_at),
+            "started_at": (
+                format_datetime_utc(chain.started_at) if chain.started_at else "-"
+            ),
+            "completed_at": (
+                format_datetime_utc(chain.completed_at) if chain.completed_at else "-"
+            ),
+            "age": _age_label(chain.updated_at, now=now),
+            "step_breakdown": _execution_step_breakdown(steps),
+            "item_breakdown": _execution_item_breakdown(items),
+            "active_step_id": chain.active_step_id or "-",
+            "stage": run.stage.value,
+            "trace": _trace_id(run),
+            "route": _workbench_route(run),
+            "trace_route": _trace_route(run),
+            "actions": "Open / Trace",
+        },
+        status=chain.status.value,
+        tone=_tone_for_execution_chain_status(chain.status),
+    )
+
+
+_ACTIVE_EXECUTION_ITEM_STATUSES = frozenset(
+    {
+        ExecutionStepItemStatus.CREATED,
+        ExecutionStepItemStatus.RUNNING,
+        ExecutionStepItemStatus.WAITING,
+    },
+)
+
+
+def _safe_execution_chains(
+    run_query: OrchestrationRunQueryPort,
+    run_id: str,
+) -> list[ExecutionChain]:
+    try:
+        return run_query.list_execution_chains(run_id)
+    except Exception:
+        return []
+
+
+def _safe_execution_steps(
+    run_query: OrchestrationRunQueryPort,
+    chain_id: str,
+) -> list[ExecutionStep]:
+    try:
+        return run_query.list_execution_steps(chain_id)
+    except Exception:
+        return []
+
+
+def _safe_execution_step_items(
+    run_query: OrchestrationRunQueryPort,
+    step_id: str,
+) -> list[ExecutionStepItem]:
+    try:
+        return run_query.list_execution_step_items(step_id)
+    except Exception:
+        return []
+
+
+def _active_execution_step(
+    chain: ExecutionChain,
+    steps: list[ExecutionStep],
+) -> ExecutionStep | None:
+    if chain.active_step_id:
+        for step in steps:
+            if step.id == chain.active_step_id:
+                return step
+    for step in sorted(steps, key=lambda item: item.step_index):
+        if step.status in {
+            ExecutionStepStatus.CREATED,
+            ExecutionStepStatus.RUNNING,
+            ExecutionStepStatus.WAITING,
+        }:
+            return step
+    return max(steps, key=lambda item: item.step_index, default=None)
+
+
+def _execution_step_label(step: ExecutionStep | None) -> str:
+    if step is None:
+        return "-"
+    return f"{step.step_index}:{step.kind.value}/{step.status.value}"
+
+
+def _execution_step_breakdown(steps: list[ExecutionStep]) -> str:
+    if not steps:
+        return "-"
+    return "; ".join(
+        _execution_step_label(step)
+        for step in sorted(steps, key=lambda item: item.step_index)[:12]
+    )
+
+
+def _execution_item_breakdown(items: list[ExecutionStepItem]) -> str:
+    if not items:
+        return "-"
+    counts: Counter[str] = Counter(
+        f"{item.kind.value}:{item.status.value}" for item in items
+    )
+    return " / ".join(
+        f"{count} {key}" for key, count in sorted(counts.items())
+    )
+
+
+def _tone_for_execution_chain_status(status: ExecutionChainStatus) -> str:
+    if status is ExecutionChainStatus.FAILED:
+        return "danger"
+    if status is ExecutionChainStatus.WAITING:
+        return "warning"
+    if status is ExecutionChainStatus.RUNNING:
+        return "info"
+    if status is ExecutionChainStatus.COMPLETED:
+        return "success"
+    return "neutral"
 
 
 def _lane_locks_section(
@@ -1400,6 +1837,7 @@ def _ingress_queue_section(
     *,
     fallback_runs: list[OrchestrationRun],
     run_by_id: dict[str, OrchestrationRun],
+    dispatch_task_by_request_id: dict[str, DispatchTask],
     now: datetime,
 ) -> OperationsTableSectionModel:
     fallback_rows = tuple(
@@ -1428,7 +1866,12 @@ def _ingress_queue_section(
     )
     if requests:
         request_rows = tuple(
-            _ingress_request_row(request, run_by_id=run_by_id, now=now)
+            _ingress_request_row(
+                request,
+                run_by_id=run_by_id,
+                dispatch_task=dispatch_task_by_request_id.get(request.id),
+                now=now,
+            )
             for request in sorted(requests, key=lambda item: item.created_at)[:50]
         )
         rows = request_rows + fallback_rows[: max(0, 50 - len(request_rows))]
@@ -1445,6 +1888,8 @@ def _ingress_queue_section(
             ("received_at", "Received At"),
             ("target_lane", "Target Lane"),
             ("priority", "Priority"),
+            ("status", "Status"),
+            ("dispatch_worker", "Worker"),
             ("age", "Age"),
             ("actions", "Actions"),
         ),
@@ -1534,12 +1979,88 @@ def _list_ingress_requests(
     return query.list_ingress_requests(status=None)
 
 
-def _list_scheduler_signals(
-    query: OrchestrationSchedulerSignalQueryPort | None,
-) -> list[OrchestrationSchedulerSignal]:
+def _list_continuation_tasks(
+    query: OrchestrationContinuationQueryPort | None,
+) -> list[OrchestrationContinuationTask]:
     if query is None:
         return []
-    return query.list_scheduler_signals(status=None)
+    return query.list_continuation_tasks(status=None)
+
+
+def _list_dispatch_tasks(
+    query: OrchestrationDispatchTaskQueryPort | None,
+) -> list[DispatchTask]:
+    if query is None:
+        return []
+    return query.list_dispatch_tasks(status=None)
+
+
+def _dispatch_tasks_by_owner(
+    tasks: list[DispatchTask],
+    *,
+    owner_kind: str,
+) -> dict[str, DispatchTask]:
+    result: dict[str, DispatchTask] = {}
+    for task in tasks:
+        if task.owner_kind != owner_kind:
+            continue
+        previous = result.get(task.owner_id)
+        if previous is None or task.updated_at > previous.updated_at:
+            result[task.owner_id] = task
+    return result
+
+
+def _dispatch_tasks_by_payload_ref(
+    tasks: list[DispatchTask],
+    *,
+    owner_kind: str,
+) -> dict[str, DispatchTask]:
+    result: dict[str, DispatchTask] = {}
+    for task in tasks:
+        if task.owner_kind != owner_kind:
+            continue
+        if task.payload_ref is None or not task.payload_ref.strip():
+            continue
+        payload_ref = task.payload_ref.strip()
+        previous = result.get(payload_ref)
+        if previous is None or task.updated_at > previous.updated_at:
+            result[payload_ref] = task
+    return result
+
+
+def _active_dispatch_tasks(tasks: list[DispatchTask]) -> list[DispatchTask]:
+    return [task for task in tasks if _is_active_dispatch_status(task.status)]
+
+
+def _is_active_dispatch_status(status: DispatchTaskStatus) -> bool:
+    return status in {
+        DispatchTaskStatus.QUEUED,
+        DispatchTaskStatus.CLAIMED,
+        DispatchTaskStatus.WAITING,
+    }
+
+
+def _dispatch_task_breakdown(tasks: list[DispatchTask]) -> str:
+    active_tasks = _active_dispatch_tasks(tasks)
+    if not active_tasks:
+        return "0 active"
+    by_kind: Counter[str] = Counter(task.owner_kind for task in active_tasks)
+    return " / ".join(
+        f"{count} {owner_kind}"
+        for owner_kind, count in sorted(by_kind.items(), key=lambda item: item[0])
+    )
+
+
+def _run_is_dispatch_queued(
+    run: OrchestrationRun,
+    dispatch_task: DispatchTask | None,
+) -> bool:
+    if dispatch_task is not None:
+        return dispatch_task.status in {
+            DispatchTaskStatus.QUEUED,
+            DispatchTaskStatus.WAITING,
+        }
+    return run.status is OrchestrationRunStatus.QUEUED
 
 
 def _recent_failed_runs(
@@ -1557,16 +2078,23 @@ def _recent_failed_runs(
 
 def _pending_ingress_requests(
     requests: list[OrchestrationIngressRequest],
+    *,
+    dispatch_task_by_request_id: dict[str, DispatchTask] | None = None,
 ) -> list[OrchestrationIngressRequest]:
-    return [
-        request
-        for request in requests
-        if request.status
-        in {
+    dispatch_task_by_request_id = dispatch_task_by_request_id or {}
+    result: list[OrchestrationIngressRequest] = []
+    for request in requests:
+        dispatch_task = dispatch_task_by_request_id.get(request.id)
+        if dispatch_task is not None:
+            if _is_active_dispatch_status(dispatch_task.status):
+                result.append(request)
+            continue
+        if request.status in {
             OrchestrationIngressStatus.QUEUED,
             OrchestrationIngressStatus.PROCESSING,
-        }
-    ]
+        }:
+            result.append(request)
+    return result
 
 
 def _active_lane_keys(
@@ -1661,6 +2189,15 @@ def _latest_event_time(event_records: tuple[Any, ...]) -> datetime | None:
     return max(timestamps, default=None)
 
 
+def _latest_datetime(values: tuple[datetime | None, ...]) -> datetime | None:
+    timestamps = [
+        coerce_utc_datetime(value)
+        for value in values
+        if isinstance(value, datetime)
+    ]
+    return max(timestamps, default=None)
+
+
 def _event_record_time(record: Any) -> datetime:
     occurred_at = getattr(record, "occurred_at", None)
     if isinstance(occurred_at, datetime):
@@ -1672,13 +2209,13 @@ def _event_record_time(record: Any) -> datetime:
     return datetime.min
 
 
-def _scheduler_signal_latency_label(
-    scheduler_signals: list[OrchestrationSchedulerSignal],
+def _continuation_latency_label(
+    continuation_tasks: list[OrchestrationContinuationTask],
 ) -> str:
     latencies = [
-        _age_seconds(signal.created_at, now=signal.completed_at)
-        for signal in scheduler_signals
-        if signal.completed_at is not None
+        _age_seconds(task.created_at, now=task.completed_at)
+        for task in continuation_tasks
+        if task.completed_at is not None
     ]
     if not latencies:
         return "-"
@@ -1689,21 +2226,34 @@ def _ingress_request_row(
     request: OrchestrationIngressRequest,
     *,
     run_by_id: dict[str, OrchestrationRun],
+    dispatch_task: DispatchTask | None,
     now: datetime,
 ) -> OperationsTableRowModel:
     run = run_by_id.get(request.run_id)
     trace_id = _trace_id(run) if run is not None else request.run_id
+    received_at = _dispatch_queued_at(dispatch_task) or request.created_at
+    status = (
+        dispatch_task.status.value if dispatch_task is not None else request.status.value
+    )
     return OperationsTableRowModel(
         id=request.id,
         cells={
             "source": _ingress_source(request, run),
             "intake_key": request.id,
-            "received_at": format_datetime_utc(request.created_at),
+            "received_at": format_datetime_utc(received_at),
             "target_lane": _ingress_target_lane(request, run),
-            "priority": _ingress_priority(request, run),
-            "age": _age_label(request.created_at, now=now),
+            "priority": _ingress_priority(request, run, dispatch_task=dispatch_task),
+            "age": _age_label(received_at, now=now),
             "actions": "Open",
-            "status": request.status.value,
+            "status": status,
+            "request_status": request.status.value,
+            "dispatch_status": status,
+            "dispatch_task_id": dispatch_task.id if dispatch_task is not None else "-",
+            "dispatch_owner_kind": (
+                dispatch_task.owner_kind if dispatch_task is not None else "-"
+            ),
+            "dispatch_worker": _dispatch_worker(dispatch_task),
+            "dispatch_lease_expires_at": _dispatch_lease_expires_at(dispatch_task),
             "kind": request.kind.value,
             "worker_id": _display(request.worker_id),
             "run_id": request.run_id,
@@ -1713,8 +2263,8 @@ def _ingress_request_row(
             "route": f"/ui/workbench/runs/{request.run_id}",
             "trace_route": _trace_route_from_id(trace_id),
         },
-        status=request.status.value,
-        tone=_tone_for_ingress_status(request.status),
+        status=status,
+        tone=_tone_for_dispatch_or_ingress_status(dispatch_task, request.status),
     )
 
 
@@ -1748,7 +2298,11 @@ def _ingress_target_lane(
 def _ingress_priority(
     request: OrchestrationIngressRequest,
     run: OrchestrationRun | None,
+    *,
+    dispatch_task: DispatchTask | None = None,
 ) -> str:
+    if dispatch_task is not None:
+        return f"P{dispatch_task.priority}"
     if request.priority is not None:
         return f"P{request.priority}"
     if run is not None:
@@ -1764,6 +2318,68 @@ def _tone_for_ingress_status(status: OrchestrationIngressStatus) -> str:
     if status is OrchestrationIngressStatus.PROCESSING:
         return "info"
     return "neutral"
+
+
+def _tone_for_dispatch_or_ingress_status(
+    dispatch_task: DispatchTask | None,
+    ingress_status: OrchestrationIngressStatus,
+) -> str:
+    if dispatch_task is None:
+        return _tone_for_ingress_status(ingress_status)
+    return _tone_for_dispatch_status(dispatch_task.status)
+
+
+def _tone_for_dispatch_or_run_status(
+    dispatch_task: DispatchTask | None,
+    run_status: OrchestrationRunStatus,
+) -> str:
+    if dispatch_task is None:
+        return _tone_for_run_status(run_status)
+    return _tone_for_dispatch_status(dispatch_task.status)
+
+
+def _tone_for_dispatch_status(status: DispatchTaskStatus) -> str:
+    if status is DispatchTaskStatus.FAILED:
+        return "danger"
+    if status is DispatchTaskStatus.CANCELLED:
+        return "neutral"
+    if status is DispatchTaskStatus.COMPLETED:
+        return "success"
+    if status is DispatchTaskStatus.CLAIMED:
+        return "info"
+    if status in {DispatchTaskStatus.QUEUED, DispatchTaskStatus.WAITING}:
+        return "warning"
+    return "neutral"
+
+
+def _dispatch_worker(task: DispatchTask | None) -> str:
+    if task is None:
+        return "-"
+    return _display(task.claimed_by)
+
+
+def _dispatch_lease_expires_at(task: DispatchTask | None) -> str:
+    if task is None or task.lease_expires_at is None:
+        return "-"
+    return format_datetime_utc(task.lease_expires_at)
+
+
+def _dispatch_queued_at(task: DispatchTask | None) -> datetime | None:
+    if task is None:
+        return None
+    return task.queued_at or task.created_at
+
+
+def _dispatch_wait_reason(task: DispatchTask | None) -> str | None:
+    if task is None:
+        return None
+    if task.waiting_reason is not None and task.waiting_reason.strip():
+        return task.waiting_reason.strip()
+    return task.policy.value
+
+
+def _dispatch_priority_label(task: DispatchTask | None, fallback: int) -> int:
+    return task.priority if task is not None else fallback
 
 
 def _lane_lock_ttl_label(
@@ -1885,7 +2501,6 @@ def _event_entity_id(
     for key in (
         "run_id",
         "request_id",
-        "signal_id",
         "worker_id",
         "tool_run_id",
         "source_event_id",
@@ -1941,6 +2556,7 @@ def _event_display_label(event_name: str, payload: dict[str, object]) -> str:
         "orchestration.run.accepted": "Run Accepted",
         "orchestration.run.queued": "Run Queued",
         "orchestration.run.claimed": "Run Claimed",
+        "orchestration.run.worker_lease_recovered": "Worker Lease Recovered",
         "orchestration.run.resumed": "Run Resumed",
         "orchestration.run.waiting": "Run Waiting",
         "orchestration.run.completed": "Run Completed",
@@ -1951,10 +2567,6 @@ def _event_display_label(event_name: str, payload: dict[str, object]) -> str:
         "orchestration.ingress.claimed": "Ingress Claimed",
         "orchestration.ingress.completed": "Ingress Completed",
         "orchestration.ingress.failed": "Ingress Failed",
-        "orchestration.scheduler.signal.requested": "Scheduler Signal Requested",
-        "orchestration.scheduler.signal.claimed": "Scheduler Signal Claimed",
-        "orchestration.scheduler.signal.completed": "Scheduler Signal Completed",
-        "orchestration.scheduler.signal.failed": "Scheduler Signal Failed",
         "orchestration.executor.assignment.requested": "Executor Assignment Requested",
         "orchestration.executor.lease.registered": "Executor Registered",
         "orchestration.executor.lease.heartbeated": "Executor Heartbeat",
@@ -1996,7 +2608,6 @@ def _event_details(payload: dict[str, object]) -> str:
         "message",
         "reason",
         "status",
-        "signal_kind",
         "worker_id",
         "lane_key",
         "request_id",
@@ -2132,6 +2743,22 @@ def _display(value: object | None) -> str:
         return "-"
     text = str(value).strip()
     return text or "-"
+
+
+def _optional_metadata_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _int(value: object | None, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _trace_id(run: OrchestrationRun) -> str:

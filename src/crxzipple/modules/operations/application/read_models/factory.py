@@ -137,7 +137,8 @@ def build_operations_source_read_model_provider(
             run_query=context.orchestration_run_query_service,
             executor_lease_query=context.orchestration_executor_lease_query,
             ingress_query=context.orchestration_run_query_service,
-            scheduler_signal_query=context.orchestration_run_query_service,
+            continuation_query=context.orchestration_run_query_service,
+            dispatch_query=context.orchestration_run_query_service,
             operations_observation=context.operations_observation_store,
             runtime_bootstrap_config=context.runtime_bootstrap_config,
             worker_lease_seconds=(
@@ -151,6 +152,7 @@ def build_operations_source_read_model_provider(
             tool_service=context.tool_service,
             access_service=context.access_service,
             artifact_service=context.artifact_service,
+            run_query=context.orchestration_run_query_service,
             events_service=context.events_service,
             event_definition_registry=context.event_definition_registry,
             operations_observation=context.operations_observation_store,

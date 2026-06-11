@@ -20,6 +20,28 @@ _DEFAULT_CAPABILITY_DESCRIPTIONS: tuple[tuple[str, str, str], ...] = (
     ("browser.profile_read", "Browser Profile Read", "Read browser profile metadata."),
     ("browser.control", "Browser Control", "Control browser runtime lifecycle."),
     ("browser.page_action", "Browser Page Action", "Act on a browser page."),
+    ("browser.code_read", "Browser Code Read", "Read bounded browser script facts."),
+    ("browser.network_read", "Browser Network Read", "Read browser network facts."),
+    (
+        "browser.network_sensitive_read",
+        "Browser Sensitive Network Read",
+        "Read browser request or response bodies.",
+    ),
+    (
+        "browser.environment_control",
+        "Browser Environment Control",
+        "Change browser emulation, permissions, geolocation, or network conditions.",
+    ),
+    (
+        "browser.diagnostics_read",
+        "Browser Diagnostics Read",
+        "Read browser diagnostics, performance metrics, traces, and page errors.",
+    ),
+    (
+        "browser.context_control",
+        "Browser Context Control",
+        "Acquire, heartbeat, release, or reconcile browser context leases.",
+    ),
     (
         "browser.artifact_write",
         "Browser Artifact Write",

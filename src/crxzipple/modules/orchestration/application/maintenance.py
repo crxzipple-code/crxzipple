@@ -11,7 +11,7 @@ from crxzipple.modules.orchestration.application.commands import (
 )
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    PromptSurfacePreview,
+    RunPromptInputPreview,
 )
 from crxzipple.modules.orchestration.application.ports import (
     LlmPort,
@@ -31,7 +31,7 @@ from crxzipple.modules.orchestration.domain import (
     OrchestrationRunStatus,
 )
 from crxzipple.modules.session.application import (
-    ArchiveSessionMessagesInput,
+    CompactSessionSegmentInput,
     ListSessionMessagesInput,
     MergeSessionMessageMetadataInput,
 )
@@ -74,7 +74,7 @@ class OrchestrationMaintenanceService:
         session_key = str(run.metadata.get("session_key", "")).strip()
         if not session_key:
             return False, None
-        preview: PromptSurfacePreview | None = None
+        preview: RunPromptInputPreview | None = None
         trigger = self._preflight_compaction_trigger(
             run=run,
             preview=preview,
@@ -258,42 +258,37 @@ class OrchestrationMaintenanceService:
         cutoff_sequence_no = summary_message.sequence_no - 1
         if cutoff_sequence_no <= 0:
             return
-        archived_count = self.session_service.archive_messages(
-            ArchiveSessionMessagesInput(
+        compacted_at = (
+            format_datetime_utc(run.completed_at)
+            if run.completed_at is not None
+            else format_datetime_utc(run.updated_at)
+        )
+        segment_result = self.session_service.compact_active_segment(
+            CompactSessionSegmentInput(
                 session_key=session_key,
                 session_id=run.active_session_id,
-                max_sequence_no=cutoff_sequence_no,
+                summary_message_id=summary_message.id,
+                summary_text=summary_text.strip(),
+                compaction_run_id=run.id,
+                archived_through_sequence_no=cutoff_sequence_no,
                 reason="compaction",
             ),
         )
-        self.session_service.merge_session_metadata(
-            session_key=session_key,
-            metadata={
-                "compaction": {
-                    "run_id": run.id,
-                    "assistant_message_id": summary_message_id.strip(),
-                    "archived_message_count": archived_count,
-                    "archived_through_sequence_no": cutoff_sequence_no,
-                    "summary": summary_text.strip(),
-                    "compacted_at": (
-                        format_datetime_utc(run.completed_at)
-                        if run.completed_at is not None
-                        else format_datetime_utc(run.updated_at)
-                    ),
-                },
-            },
-            touch_activity=False,
+        archived_count = int(segment_result.archived_message_count)
+        archived_through_sequence_no = (
+            segment_result.archived_through_sequence_no
+            if segment_result.archived_through_sequence_no is not None
+            else cutoff_sequence_no
         )
+        result_compacted_at = segment_result.compacted_at or compacted_at
         with self.uow_factory() as uow:
             persisted_run = self._get_run(uow, run.id)
             updated_result_payload = dict(persisted_run.result_payload or {})
             updated_result_payload["archived_message_count"] = archived_count
-            updated_result_payload["archived_through_sequence_no"] = cutoff_sequence_no
-            updated_result_payload["compacted_at"] = (
-                format_datetime_utc(run.completed_at)
-                if run.completed_at is not None
-                else format_datetime_utc(run.updated_at)
+            updated_result_payload["archived_through_sequence_no"] = (
+                archived_through_sequence_no
             )
+            updated_result_payload["compacted_at"] = result_compacted_at
             persisted_run.result_payload = updated_result_payload
             uow.orchestration_runs.add(persisted_run)
             uow.collect(persisted_run)
@@ -490,7 +485,7 @@ class OrchestrationMaintenanceService:
         self,
         *,
         run: OrchestrationRun,
-        preview: PromptSurfacePreview | None,
+        preview: RunPromptInputPreview | None,
         force: bool,
         failure_message: str | None,
     ) -> dict[str, object] | None:
@@ -520,7 +515,7 @@ class OrchestrationMaintenanceService:
         self,
         run: OrchestrationRun,
         *,
-        preview: PromptSurfacePreview | None,
+        preview: RunPromptInputPreview | None,
     ) -> dict[str, int | None]:
         estimated_total_tokens = 0
         transcript_chars = 0
@@ -528,8 +523,9 @@ class OrchestrationMaintenanceService:
         prompt_threshold_tokens: int | None = None
         if preview is not None and preview.prompt_report is not None:
             report = preview.prompt_report
+            context_estimated_tokens = _compaction_pressure_context_tokens(report)
             estimated_total_tokens = (
-                report.context_estimated_tokens + report.transcript_estimated_tokens
+                context_estimated_tokens + report.transcript_estimated_tokens
             )
             transcript_chars = report.transcript_chars
             transcript_estimated_tokens = report.transcript_estimated_tokens
@@ -599,7 +595,7 @@ class OrchestrationMaintenanceService:
             return 0, 0
         return len(content), estimate_text_tokens(content)
 
-    def _safe_preview_prompt(self, run: OrchestrationRun) -> PromptSurfacePreview | None:
+    def _safe_preview_prompt(self, run: OrchestrationRun) -> RunPromptInputPreview | None:
         if self.engine is None:
             return None
         try:
@@ -786,3 +782,25 @@ def _coerce_optional_positive_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return resolved if resolved > 0 else None
+
+
+def _compaction_pressure_context_tokens(report: object) -> int:
+    base_tokens = _coerce_non_negative_int(
+        getattr(report, "context_estimated_tokens", 0),
+    )
+    context_render = getattr(report, "context_render", None)
+    estimate = getattr(context_render, "estimate", None)
+    if not isinstance(estimate, dict):
+        return base_tokens
+    breakdown = estimate.get("breakdown")
+    if not isinstance(breakdown, dict):
+        return base_tokens
+    by_owner = breakdown.get("by_owner")
+    if not isinstance(by_owner, dict):
+        return base_tokens
+    session_estimate = by_owner.get("session")
+    if not isinstance(session_estimate, dict):
+        return base_tokens
+    return base_tokens + _coerce_non_negative_int(
+        session_estimate.get("text_tokens"),
+    )

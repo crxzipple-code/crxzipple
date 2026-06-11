@@ -17,7 +17,6 @@ from crxzipple.modules.context_workspace.domain import (
 )
 from crxzipple.modules.session.application import (
     ListSessionMessagesInput,
-    SessionApplicationService,
 )
 from crxzipple.modules.session.domain import SessionMessage, SessionNotFoundError
 from crxzipple.shared.content_blocks import (
@@ -32,13 +31,21 @@ class ArtifactContextService(Protocol):
         ...
 
 
+class ArtifactSessionMessageService(Protocol):
+    def list_messages(
+        self,
+        data: ListSessionMessagesInput,
+    ) -> list[SessionMessage]:
+        ...
+
+
 class ArtifactContextNodeProvider:
     owner = "artifacts"
 
     def __init__(
         self,
         *,
-        session_service: SessionApplicationService,
+        session_service: ArtifactSessionMessageService,
         artifact_service: ArtifactContextService,
         message_limit: int = 200,
     ) -> None:
@@ -97,7 +104,6 @@ class _ArtifactRef:
 
 
 _ARTIFACT_ACTIONS = (
-    ContextAction.OPEN_ARTIFACT,
     ContextAction.PIN,
     ContextAction.UNPIN,
     ContextAction.ESTIMATE,

@@ -39,6 +39,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"crxzipple.modules.context_workspace.application.prompts" = ["*.md"]
+
 [tool.pytest.ini_options]
 markers = [
     "benchmark: benchmark or throughput checks; keep out of default fast loops unless explicitly selected",

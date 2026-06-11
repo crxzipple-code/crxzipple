@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
+import time
 
 from tools.workspace.fs_safe import (
     resolve_workspace_root,
@@ -16,6 +17,8 @@ DEFAULT_WORKSPACE_EXEC_TIMEOUT_SECONDS = 20
 MAX_WORKSPACE_EXEC_TIMEOUT_SECONDS = 300
 MAX_WORKSPACE_EXEC_COMMAND_CHARS = 8_000
 MAX_WORKSPACE_EXEC_OUTPUT_CHARS = 12_000
+MIN_WORKSPACE_EXEC_OUTPUT_CHARS = 256
+WORKSPACE_EXEC_TOKEN_CHAR_RATIO = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +29,8 @@ class PreparedWorkspaceCommand:
     shell: str
     command: str
     timeout_seconds: int
+    max_output_tokens: int | None
+    max_output_chars: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,11 +40,21 @@ class WorkspaceCommandExecution:
     working_directory_relative: str | None
     shell: str
     command: str
-    exit_code: int
+    exit_code: int | None
+    timed_out: bool
+    wall_time_seconds: float
     stdout: str
     stderr: str
+    stdout_raw: str
+    stderr_raw: str
     stdout_truncated: bool
     stderr_truncated: bool
+    stdout_original_chars: int
+    stderr_original_chars: int
+    output_truncated: bool
+    output_budget_chars: int
+    output_budget_tokens: int | None
+    output_estimated_tokens: int
     timeout_seconds: int
 
 
@@ -49,12 +64,14 @@ async def execute_workspace_command(
     command: str,
     cwd: str | None = None,
     timeout_seconds: int = DEFAULT_WORKSPACE_EXEC_TIMEOUT_SECONDS,
+    max_output_tokens: int | None = None,
 ) -> WorkspaceCommandExecution:
     prepared = prepare_workspace_command(
         workspace_dir=workspace_dir,
         command=command,
         cwd=cwd,
         timeout_seconds=timeout_seconds,
+        max_output_tokens=max_output_tokens,
     )
     return await execute_prepared_workspace_command(prepared)
 
@@ -65,6 +82,7 @@ def prepare_workspace_command(
     command: str,
     cwd: str | None = None,
     timeout_seconds: int = DEFAULT_WORKSPACE_EXEC_TIMEOUT_SECONDS,
+    max_output_tokens: int | None = None,
 ) -> PreparedWorkspaceCommand:
     normalized_command = command.strip()
     if not normalized_command:
@@ -77,6 +95,9 @@ def prepare_workspace_command(
     normalized_timeout = min(
         max(int(timeout_seconds), 1),
         MAX_WORKSPACE_EXEC_TIMEOUT_SECONDS,
+    )
+    output_budget_tokens, output_budget_chars = _normalize_output_budget(
+        max_output_tokens,
     )
     root = resolve_workspace_root(workspace_dir)
     working_directory, working_directory_relative = _resolve_working_directory(
@@ -91,12 +112,15 @@ def prepare_workspace_command(
         shell=shell,
         command=normalized_command,
         timeout_seconds=normalized_timeout,
+        max_output_tokens=output_budget_tokens,
+        max_output_chars=output_budget_chars,
     )
 
 
 async def execute_prepared_workspace_command(
     prepared: PreparedWorkspaceCommand,
 ) -> WorkspaceCommandExecution:
+    started_at = time.monotonic()
     try:
         process = await asyncio.create_subprocess_exec(
             prepared.shell,
@@ -114,18 +138,33 @@ async def execute_prepared_workspace_command(
             process.communicate(),
             timeout=prepared.timeout_seconds,
         )
-    except asyncio.TimeoutError as exc:
+        timed_out = False
+    except asyncio.TimeoutError:
         process.kill()
-        await process.communicate()
-        raise ValueError(
-            f"Workspace command timed out after {prepared.timeout_seconds} seconds.",
-        ) from exc
+        stdout_raw, stderr_raw = await process.communicate()
+        timed_out = True
 
-    if process.returncode is None:
+    wall_time_seconds = round(time.monotonic() - started_at, 3)
+
+    if process.returncode is None and not timed_out:
         raise ValueError("Workspace command did not report an exit code.")
 
-    stdout, stdout_truncated = _truncate_output(_decode_output(stdout_raw))
-    stderr, stderr_truncated = _truncate_output(_decode_output(stderr_raw))
+    stdout_raw_text = _decode_output(stdout_raw)
+    stderr_raw_text = _decode_output(stderr_raw)
+    if timed_out:
+        timeout_notice = (
+            f"Workspace command timed out after {prepared.timeout_seconds} seconds."
+        )
+        stderr_raw_text = (
+            f"{stderr_raw_text.rstrip()}\n{timeout_notice}"
+            if stderr_raw_text.strip()
+            else timeout_notice
+        )
+    stdout, stderr, stdout_truncated, stderr_truncated = _truncate_combined_output(
+        stdout_raw_text,
+        stderr_raw_text,
+        max_chars=prepared.max_output_chars,
+    )
     return WorkspaceCommandExecution(
         workspace_root=prepared.workspace_root,
         working_directory=prepared.working_directory,
@@ -133,10 +172,20 @@ async def execute_prepared_workspace_command(
         shell=prepared.shell,
         command=prepared.command,
         exit_code=process.returncode,
+        timed_out=timed_out,
+        wall_time_seconds=wall_time_seconds,
         stdout=stdout,
         stderr=stderr,
+        stdout_raw=stdout_raw_text,
+        stderr_raw=stderr_raw_text,
         stdout_truncated=stdout_truncated,
         stderr_truncated=stderr_truncated,
+        stdout_original_chars=len(stdout_raw_text),
+        stderr_original_chars=len(stderr_raw_text),
+        output_truncated=stdout_truncated or stderr_truncated,
+        output_budget_chars=prepared.max_output_chars,
+        output_budget_tokens=prepared.max_output_tokens,
+        output_estimated_tokens=_estimate_output_tokens(stdout, stderr),
         timeout_seconds=prepared.timeout_seconds,
     )
 
@@ -172,11 +221,64 @@ def _decode_output(raw: bytes | None) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _truncate_output(text: str) -> tuple[str, bool]:
-    if len(text) <= MAX_WORKSPACE_EXEC_OUTPUT_CHARS:
+def _normalize_output_budget(max_output_tokens: int | None) -> tuple[int | None, int]:
+    if max_output_tokens is None:
+        return None, MAX_WORKSPACE_EXEC_OUTPUT_CHARS
+    normalized_tokens = max(int(max_output_tokens), 1)
+    requested_chars = normalized_tokens * WORKSPACE_EXEC_TOKEN_CHAR_RATIO
+    return normalized_tokens, min(
+        max(requested_chars, MIN_WORKSPACE_EXEC_OUTPUT_CHARS),
+        MAX_WORKSPACE_EXEC_OUTPUT_CHARS,
+    )
+
+
+def _estimate_output_tokens(stdout: str, stderr: str) -> int:
+    chars = len(stdout) + len(stderr)
+    return max(
+        1,
+        (chars + WORKSPACE_EXEC_TOKEN_CHAR_RATIO - 1)
+        // WORKSPACE_EXEC_TOKEN_CHAR_RATIO,
+    )
+
+
+def _truncate_combined_output(
+    stdout: str,
+    stderr: str,
+    *,
+    max_chars: int,
+) -> tuple[str, str, bool, bool]:
+    total_chars = len(stdout) + len(stderr)
+    if total_chars <= max_chars:
+        return stdout, stderr, False, False
+    if not stdout:
+        stderr_output, stderr_truncated = _truncate_output(stderr, max_chars=max_chars)
+        return stdout, stderr_output, False, stderr_truncated
+    if not stderr:
+        stdout_output, stdout_truncated = _truncate_output(stdout, max_chars=max_chars)
+        return stdout_output, stderr, stdout_truncated, False
+
+    stdout_budget = max(
+        MIN_WORKSPACE_EXEC_OUTPUT_CHARS // 2,
+        int(max_chars * (len(stdout) / total_chars)),
+    )
+    stdout_budget = min(stdout_budget, max_chars - 1)
+    stderr_budget = max_chars - stdout_budget
+    stdout_output, stdout_truncated = _truncate_output(
+        stdout,
+        max_chars=stdout_budget,
+    )
+    stderr_output, stderr_truncated = _truncate_output(
+        stderr,
+        max_chars=stderr_budget,
+    )
+    return stdout_output, stderr_output, stdout_truncated, stderr_truncated
+
+
+def _truncate_output(text: str, *, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
         return text, False
     suffix = "\n... [output truncated]"
-    kept = MAX_WORKSPACE_EXEC_OUTPUT_CHARS - len(suffix)
+    kept = max_chars - len(suffix)
     if kept <= 0:
         return suffix.lstrip(), True
     return f"{text[:kept].rstrip()}{suffix}", True

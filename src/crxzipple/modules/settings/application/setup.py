@@ -555,7 +555,7 @@ def _access_config_resources(settings: object) -> tuple[BootstrapSettingsResourc
             payload={
                 "access_declaration_kind": "credential_binding",
                 "binding_id": "itick-api-token",
-                "binding_kind": "bearer_token",
+                "binding_kind": "api_key",
                 "source_kind": "env",
                 "source_ref": "ITICK_API_TOKEN",
                 "masked_preview": "env:ITICK_API_TOKEN",

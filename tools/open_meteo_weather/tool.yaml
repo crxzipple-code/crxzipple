@@ -1,6 +1,9 @@
 kind: openapi
 namespace: open_meteo_weather
 description: Open-Meteo forecast API for current, hourly, and daily weather data.
+prompt:
+  title: Open-Meteo Weather
+  summary: Fetch current, hourly, and daily weather forecasts from Open-Meteo.
 capabilities:
   - bounded_network.http
 spec: openapi.json

@@ -14,14 +14,33 @@ import {
 import { computed, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
-import { formatDuration, formatLocalTime } from "@/shared/i18n/formatters";
+import {
+  formatDuration,
+  formatLocalTime,
+  formatNumber,
+  formatRawKeyLabel,
+  looksLikeRawKey,
+} from "@/shared/i18n/formatters";
 import { useI18n } from "@/shared/i18n";
+import {
+  promptPreviewContentText,
+  stringifyPromptPreviewJson,
+  type RunPromptInputPreview,
+} from "@/shared/runtime/promptPreview";
 import type { TraceEventView, TraceLinkedEntity, TraceSummaryView } from "@/shared/runtime/types";
 import UiBadge from "@/shared/ui/UiBadge.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
 import UiCard from "@/shared/ui/UiCard.vue";
 import StatusDot from "@/shared/ui/StatusDot.vue";
-import { loadTraceData } from "./api";
+import XmlSourceViewer from "@/shared/ui/XmlSourceViewer.vue";
+import {
+  loadTraceContextRenderSnapshotById,
+  loadTraceContextRenderSnapshot,
+  loadTraceData,
+  loadTraceInvocationPromptPreview,
+  loadTracePromptPreview,
+  type TraceContextRenderSnapshot,
+} from "./api";
 
 const { t } = useI18n();
 const route = useRoute();
@@ -33,6 +52,47 @@ const traceEvents = ref<TraceEventView[]>([]);
 const graphTraceEvents = ref<TraceEventView[]>([]);
 const selectedEventId = ref<string | null>(null);
 const activeTraceView = ref<"timeline" | "graph">(traceViewFromQuery(route.query.view));
+const contextRenderSnapshot = ref<TraceContextRenderSnapshot | null>(null);
+const contextPromptPreview = ref<RunPromptInputPreview | null>(null);
+const loadingContextSnapshot = ref(false);
+const contextActualRequestTab = ref<ContextActualRequestTabId>("xml");
+let contextSnapshotSerial = 0;
+
+type ContextActualRequestTabId = "xml" | "messages" | "tool_schemas" | "options" | "attachments";
+type ContextRouteDiagnosticTone = "success" | "warning" | "danger" | "info";
+interface ContextRouteGroupRow {
+  id: string;
+  group: string;
+  source: string;
+  functions: string;
+  defaultSchemas: string;
+  visibility: string;
+  tone: ContextRouteDiagnosticTone;
+}
+interface ContextRouteSchemaRow {
+  id: string;
+  schema: string;
+  status: string;
+  reason: string;
+  priority: string;
+  tone: ContextRouteDiagnosticTone;
+}
+interface ContextBrowserEvidencePathRow {
+  id: string;
+  path: string;
+  status: string;
+  schemas: string;
+  count: string;
+  tone: ContextRouteDiagnosticTone;
+}
+interface ContextBrowserWarningRow {
+  id: string;
+  warningType: string;
+  code: string;
+  latestTool: string;
+  summary: string;
+  tone: ContextRouteDiagnosticTone;
+}
 
 const activeEvents = computed(() => activeTraceView.value === "graph" ? graphTraceEvents.value : traceEvents.value);
 
@@ -52,8 +112,17 @@ const activeTraceId = computed(() => {
   return traceSummary.value?.trace_id ?? routeTraceId ?? "-";
 });
 
+const activeStepId = computed(() => {
+  const raw = route.query.step_id;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+});
+
 const runId = computed(() => {
   return linkedEntity("run_id")?.id ?? selectedEvent.value?.trace.run_id ?? null;
+});
+const selectedLlmInvocationId = computed(() => {
+  const value = selectedEvent.value?.trace.llm_invocation_id;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 });
 
 const sessionKey = computed(() => {
@@ -91,6 +160,500 @@ const familyTotals = computed(() => {
 
 const displaySummaryStatus = computed(() => activeTraceView.value === "graph" ? "failed" : traceSummary.value?.status);
 const displaySummaryDuration = computed(() => activeTraceView.value === "graph" ? 168000 : traceSummary.value?.duration_ms);
+const contextSnapshotRows = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return [];
+  const requestMetadata = snapshotLlmRequestMetadata(snapshot);
+  const metadata = snapshot.metadata;
+  const renderedTokens = (
+    metadataOptionalNumber(metadata.rendered_prompt_estimated_tokens)
+    ?? promptEstimateTokenTotal(snapshot.estimate)
+  );
+  return [
+    { label: t("trace.id.run"), value: shortId(snapshot.run_id, 24) },
+    { label: t("workbench.context.revision"), value: String(snapshot.tree_revision) },
+    { label: t("workbench.context.runtimeContractVersion"), value: textValue(requestMetadata.runtime_contract_version) },
+    { label: t("workbench.context.runtimeContractHash"), value: shortId(textValue(requestMetadata.runtime_contract_hash, ""), 16) },
+    { label: t("workbench.context.includedNodes"), value: formatNumber(snapshot.included_node_ids.length) },
+    { label: t("workbench.context.mirroredNodes"), value: formatNumber(snapshot.mirrored_node_ids.length) },
+    { label: t("workbench.context.renderedPromptTokens"), value: formatNumber(renderedTokens) },
+    { label: t("workbench.context.providerPromptTokens"), value: formatOptionalNumber(metadata.estimated_provider_prompt_tokens) },
+    { label: t("workbench.context.directTranscriptTokens"), value: formatOptionalNumber(metadata.direct_transcript_estimated_tokens) },
+    { label: t("workbench.context.schemaMirrorTokens"), value: formatOptionalNumber(metadata.mirrored_tool_schema_estimated_tokens) },
+    { label: t("workbench.context.schemaMirrorBudget"), value: schemaMirrorBudgetValue(metadata) },
+    { label: t("workbench.context.schemaMirrorSkipped"), value: formatOptionalNumber(metadata.tool_schema_mirror_skipped_count) },
+    { label: t("table.createdAt"), value: formatLocalTime(snapshot.created_at) },
+  ];
+});
+const contextSnapshotRiskRows = computed<Array<{
+  label: string;
+  value: string;
+  tone: "success" | "warning" | "danger";
+  detail: string;
+}>>(() => {
+  const metadata = contextRenderSnapshot.value?.metadata;
+  if (!metadata) return [];
+  const warnings = metadataNumber(metadata.session_range_warning_count);
+  const blocked = metadataNumber(metadata.session_range_blocked_count);
+  const limited = metadataNumber(metadata.session_range_limited_count);
+  const budgetStatus = titleize(metadata.session_budget_status, "Ok");
+  const budgetTone = blocked > 0 ? "danger" : warnings > 0 || limited > 0 ? "warning" : "success";
+  return [
+    {
+      label: t("workbench.context.sessionBudgetStatus"),
+      value: budgetStatus,
+      tone: budgetTone,
+      detail: t("workbench.context.sessionBudgetHelp"),
+    },
+    {
+      label: t("workbench.context.rangeWarnings"),
+      value: formatNumber(warnings),
+      tone: warnings > 0 ? "warning" : "success",
+      detail: t("workbench.context.rangeWarningsHelp"),
+    },
+    {
+      label: t("workbench.context.rangeBlocked"),
+      value: formatNumber(blocked),
+      tone: blocked > 0 ? "danger" : "success",
+      detail: t("workbench.context.rangeBlockedHelp"),
+    },
+    {
+      label: t("workbench.context.rangeLimited"),
+      value: formatNumber(limited),
+      tone: limited > 0 ? "warning" : "success",
+      detail: t("workbench.context.rangeLimitedHelp"),
+    },
+  ];
+});
+const contextRouteDiagnosticRows = computed<Array<{
+  label: string;
+  value: string;
+  tone: ContextRouteDiagnosticTone;
+  detail: string;
+}>>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const promptInput = snapshot ? snapshotRunPromptInputMetadata(snapshot) : previewRunPromptInputMetadata(preview);
+  const messageCount = (
+    metadataOptionalNumber(promptInput.message_count)
+    ?? contextActualRequestMessages.value.length
+  );
+  const schemaCount = (
+    metadataOptionalNumber(promptInput.tool_schema_count)
+    ?? contextActualRequestToolSchemas.value.length
+  );
+  const mirroredCount = (
+    metadataOptionalNumber(metadata.mirrored_tool_schema_count)
+    ?? schemaCount
+  );
+  const maxMirrorCount = metadataOptionalNumber(metadata.tool_schema_mirror_max_count);
+  const skippedCount = metadataNumber(metadata.tool_schema_mirror_skipped_count);
+  const budgetStatus = textValue(metadata.tool_schema_mirror_budget_status, "ok");
+  const budgetTone: ContextRouteDiagnosticTone = (
+    skippedCount > 0 || budgetStatus !== "ok"
+      ? "warning"
+      : "success"
+  );
+  const browserGroups = browserGroupRefsValue(metadata.tool_schema_mirror_default_group_refs);
+  const skippedSummary = skippedSchemaSummary(metadata, skippedCount);
+  const capabilityVisibility = capabilityVisibilityValue(metadata);
+  const toolResultCompaction = toolResultTruncationSummary(contextActualRequestMessages.value);
+  const browserAffordance = browserInvestigationAffordanceSummary(metadata);
+  const browserWarnings = browserInvestigationWarningSummary(metadata);
+  const workPlanUpdates = workPlanUpdateSummary(metadata);
+  const finalEvidence = finalResponseEvidenceSummary(metadata);
+  return [
+    {
+      label: t("workbench.context.routeProviderShape"),
+      value: `${formatNumber(messageCount)} ${t("workbench.context.routeMessagesShort")} · ${formatNumber(schemaCount)} ${t("workbench.context.routeSchemasShort")}`,
+      tone: schemaCount > 0 ? "success" : "warning",
+      detail: t("workbench.context.routeProviderShapeHelp"),
+    },
+    {
+      label: t("workbench.context.routePlanUpdates"),
+      value: workPlanUpdates.value,
+      tone: workPlanUpdates.tone,
+      detail: workPlanUpdates.detail,
+    },
+    {
+      label: t("workbench.context.routeBrowserGroups"),
+      value: browserGroups || t("text.none"),
+      tone: browserGroups ? "success" : "warning",
+      detail: schemaReasonSummary(metadata),
+    },
+    {
+      label: t("workbench.context.routeBrowserAffordance"),
+      value: browserAffordance.value,
+      tone: browserAffordance.tone,
+      detail: browserAffordance.detail,
+    },
+    {
+      label: t("workbench.context.routeBrowserWarnings"),
+      value: browserWarnings.value,
+      tone: browserWarnings.tone,
+      detail: browserWarnings.detail,
+    },
+    {
+      label: t("workbench.context.routeFinalEvidence"),
+      value: finalEvidence.value,
+      tone: finalEvidence.tone,
+      detail: finalEvidence.detail,
+    },
+    {
+      label: t("workbench.context.routeSchemaMirror"),
+      value: `${formatNumber(mirroredCount)}/${maxMirrorCount === null ? "-" : formatNumber(maxMirrorCount)} · ${formatNumber(skippedCount)} ${t("workbench.context.routeSkippedShort")}`,
+      tone: budgetTone,
+      detail: schemaMirrorBudgetValue(metadata),
+    },
+    {
+      label: t("workbench.context.routeCapabilityVisibility"),
+      value: capabilityVisibility,
+      tone: metadataNumber(metadata.tool_schema_mirror_available_count) > 0 ? "info" : "warning",
+      detail: t("workbench.context.routeCapabilityVisibilityHelp"),
+    },
+    {
+      label: t("workbench.context.routeBudgetSplit"),
+      value: routeBudgetSplitValue(metadata),
+      tone: metadataNumber(metadata.estimated_provider_prompt_tokens) > 0 ? "info" : "warning",
+      detail: t("workbench.context.routeBudgetSplitHelp"),
+    },
+    {
+      label: t("workbench.context.routeSkipped"),
+      value: skippedSummary,
+      tone: skippedCount > 0 ? "warning" : "success",
+      detail: skippedCount > 0 ? skippedSummary : t("workbench.context.routeSkippedNone"),
+    },
+    {
+      label: t("workbench.context.routeToolResultTruncation"),
+      value: toolResultCompaction.value,
+      tone: toolResultCompaction.compactedCount > 0 ? "info" : "success",
+      detail: t("workbench.context.routeToolResultTruncationHelp"),
+    },
+  ];
+});
+const contextRouteGroupRows = computed<ContextRouteGroupRow[]>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const groups = Array.isArray(metadata.tool_schema_mirror_groups)
+    ? metadata.tool_schema_mirror_groups.filter(isRecord)
+    : [];
+  return groups.map((group, index) => {
+    const title = textValue(group.title ?? group.group_key ?? group.node_id, "-");
+    const groupKey = textValue(group.group_key, "");
+    const sourceId = textValue(group.source_id, "");
+    const state = textValue(group.state, "-");
+    const visibility = textValue(group.visibility, state);
+    const defaultGroup = group.default_group === true;
+    const defaultSchemaCount = (
+      metadataOptionalNumber(group.default_schema_count)
+      ?? (Array.isArray(group.default_schema_ids) ? group.default_schema_ids.length : 0)
+    );
+    return {
+      id: textValue(group.node_id, `${sourceId}:${groupKey}:${index}`),
+      group: groupKey ? `${title} · ${groupKey}` : title,
+      source: sourceId ? shortId(sourceId, 28) : textValue(group.kind, "-"),
+      functions: formatOptionalNumber(group.function_count, "0"),
+      defaultSchemas: defaultGroup
+        ? `${formatNumber(defaultSchemaCount)} · ${t("workbench.context.routeDefaultShort")}`
+        : formatNumber(defaultSchemaCount),
+      visibility: titleize(visibility, "-"),
+      tone: defaultGroup ? "info" : state === "collapsed" ? "warning" : "success",
+    };
+  });
+});
+const contextRouteSchemaRows = computed<ContextRouteSchemaRow[]>(() => {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return [];
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  const metadata = { ...requestMetadata, ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}) };
+  const mirrored = Array.isArray(metadata.tool_schema_mirror_default_mirrored)
+    ? metadata.tool_schema_mirror_default_mirrored.filter(isRecord)
+    : [];
+  const skipped = Array.isArray(metadata.tool_schema_mirror_skipped)
+    ? metadata.tool_schema_mirror_skipped.filter(isRecord)
+    : [];
+  const rows: ContextRouteSchemaRow[] = [];
+  for (const item of mirrored) {
+    const schema = textValue(item.name ?? item.schema_name ?? item.node_id, "");
+    if (!schema) continue;
+    rows.push({
+      id: `mirrored:${textValue(item.node_id, schema)}`,
+      schema,
+      status: t("workbench.context.routeMirrored"),
+      reason: textValue(item.bootstrap_reason, t("text.none")),
+      priority: formatOptionalNumber(item.priority, "-"),
+      tone: "success",
+    });
+  }
+  for (const item of skipped) {
+    const schema = textValue(item.name ?? item.schema_name ?? item.node_id, "");
+    if (!schema) continue;
+    rows.push({
+      id: `skipped:${textValue(item.node_id, schema)}:${textValue(item.reason, "")}`,
+      schema,
+      status: t("workbench.context.routeSkippedShort"),
+      reason: textValue(item.reason ?? item.bootstrap_reason, t("text.none")),
+      priority: formatOptionalNumber(item.priority, "-"),
+      tone: "warning",
+    });
+  }
+  return rows.slice(0, 32);
+});
+const contextBrowserEvidencePathRows = computed<ContextBrowserEvidencePathRow[]>(() => {
+  const metadata = contextRouteMetadata();
+  const ladder = Array.isArray(metadata.browser_evidence_path_ladder)
+    ? metadata.browser_evidence_path_ladder.filter(isRecord)
+    : [];
+  return ladder.map((item, index) => {
+    const path = textValue(item.path, "-");
+    const status = textValue(item.status, "-");
+    const schemaNames = metadataStringList(item.schemas);
+    return {
+      id: `${path}:${index}`,
+      path: titleize(path, "-"),
+      status: titleize(status, "-"),
+      schemas: schemaNames.slice(0, 3).join(", ") || "-",
+      count: formatOptionalNumber(item.schema_count, "0"),
+      tone: status === "present" ? "success" : "warning",
+    };
+  });
+});
+const contextBrowserWarningRows = computed<ContextBrowserWarningRow[]>(() => {
+  const metadata = contextRouteMetadata();
+  const warnings = Array.isArray(metadata.browser_investigation_warnings)
+    ? metadata.browser_investigation_warnings.filter(isRecord)
+    : [];
+  return warnings.map((item, index) => {
+    const severity = textValue(item.severity, "warning");
+    const warningTypes = metadataStringList(item.warning_types);
+    return {
+      id: textValue(item.node_id, `${textValue(item.code, "warning")}:${index}`),
+      warningType: warningTypes.map((value) => titleize(value, value)).join(", ") || "-",
+      code: textValue(item.code, "-"),
+      latestTool: textValue(item.latest_tool, "-"),
+      summary: textValue(item.summary, "-"),
+      tone: severity === "error" || severity === "danger" ? "danger" : "warning",
+    };
+  });
+});
+const contextSnapshotDiagnosticRows = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return [];
+  const metadata = snapshot.metadata;
+  const promptInput = snapshotRunPromptInputMetadata(snapshot);
+  const requestMetadata = snapshotLlmRequestMetadata(snapshot);
+  return [
+    {
+      label: t("table.invocationId"),
+      value: shortId(textValue(contextPromptPreview.value?.provider_request_options?.invocation_id, ""), 24),
+    },
+    {
+      label: t("workbench.context.requestMetadataSnapshot"),
+      value: shortId(textValue(requestMetadata.context_render_snapshot_id, snapshot.id), 24),
+    },
+    {
+      label: t("workbench.context.treeSchemaVersion"),
+      value: textValue(requestMetadata.tree_schema_version ?? metadata.tree_schema_version),
+    },
+    {
+      label: t("workbench.context.rootNodes"),
+      value: textValue(metadata.root_node_ids),
+    },
+    {
+      label: t("workbench.context.topRenderedNodes"),
+      value: topRenderedNodesValue(metadata),
+    },
+    {
+      label: t("workbench.context.requestMetadataHistory"),
+      value: titleize(requestMetadata.context_history_delivery, "-"),
+    },
+    {
+      label: t("workbench.context.runtimeContractVersion"),
+      value: textValue(requestMetadata.runtime_contract_version),
+    },
+    {
+      label: t("workbench.context.runtimeContractHash"),
+      value: shortId(textValue(requestMetadata.runtime_contract_hash, ""), 24),
+    },
+    {
+      label: t("workbench.context.requestMetadataMirroredSchemas"),
+      value: formatOptionalNumber(requestMetadata.mirrored_tool_schema_count),
+    },
+    {
+      label: t("workbench.context.requestMetadataMirroredNodes"),
+      value: formatOptionalNumber(requestMetadata.mirrored_node_count),
+    },
+    {
+      label: t("workbench.context.historyDelivery"),
+      value: titleize(metadata.history_delivery, "-"),
+    },
+    {
+      label: t("workbench.context.directTranscriptMessages"),
+      value: formatOptionalNumber(metadata.direct_transcript_message_count),
+    },
+    {
+      label: t("workbench.context.directTranscriptRoles"),
+      value: textValue(metadata.direct_transcript_roles),
+    },
+    {
+      label: t("workbench.context.treeSessionMessages"),
+      value: formatOptionalNumber(metadata.tree_session_message_count),
+    },
+    {
+      label: t("workbench.context.toolInteractions"),
+      value: formatOptionalNumber(metadata.tree_tool_interaction_count),
+    },
+    {
+      label: t("workbench.context.foldedHistory"),
+      value: formatOptionalNumber(metadata.folded_history_node_count),
+    },
+    {
+      label: t("workbench.context.sessionTokens"),
+      value: formatOptionalNumber(metadata.session_estimated_text_tokens),
+    },
+    {
+      label: t("workbench.context.sessionBudgetStatus"),
+      value: titleize(metadata.session_budget_status, "-"),
+    },
+    {
+      label: t("workbench.context.rangeWarnings"),
+      value: formatOptionalNumber(metadata.session_range_warning_count),
+    },
+    {
+      label: t("workbench.context.rangeBlocked"),
+      value: formatOptionalNumber(metadata.session_range_blocked_count),
+    },
+    {
+      label: t("workbench.context.rangeLimited"),
+      value: formatOptionalNumber(metadata.session_range_limited_count),
+    },
+    {
+      label: t("workbench.context.artifactBlocks"),
+      value: formatOptionalNumber(metadata.artifact_content_block_count),
+    },
+    {
+      label: t("workbench.context.providerMessages"),
+      value: formatOptionalNumber(promptInput.message_count),
+    },
+    {
+      label: t("workbench.context.providerToolSchemas"),
+      value: formatOptionalNumber(promptInput.tool_schema_count),
+    },
+    {
+      label: t("workbench.context.llm"),
+      value: textValue(promptInput.llm_id),
+    },
+    {
+      label: t("workbench.context.llmCapabilities"),
+      value: textValue(promptInput.llm_capabilities, t("text.none")),
+    },
+    {
+      label: t("workbench.context.currentInbound"),
+      value: shortId(textValue(metadata.current_inbound_message_id, ""), 24),
+    },
+    {
+      label: t("trace.contextSnapshot.currentInboundNode"),
+      value: shortId(textValue(metadata.current_inbound_node_id, ""), 24),
+    },
+  ];
+});
+const contextSnapshotPromptCharCount = computed(() => (
+  contextActualRequestXmlSource.value.length
+));
+const contextPreviewPromptBody = computed(() => {
+  const messages = contextPromptPreview.value?.messages ?? [];
+  for (const message of messages) {
+    if (message.metadata?.prompt_block_kind !== "context_workspace") continue;
+    const text = promptPreviewContentText(message.content).trim();
+    if (text) return text;
+  }
+  return "";
+});
+const contextActualRequestXmlSource = computed(() => (
+  contextRenderSnapshot.value?.prompt_body ?? contextPreviewPromptBody.value
+));
+const contextActualRequestProviderAttachments = computed<Record<string, unknown>>(() => (
+  firstNonEmptyRecord(
+    contextPromptPreview.value?.provider_attachments,
+    contextRenderSnapshot.value?.provider_attachments,
+  )
+));
+const contextActualRequestProviderOptions = computed<Record<string, unknown>>(() => (
+  contextPromptPreview.value?.provider_request_options ?? {}
+));
+const contextActualRequestMessages = computed<unknown[]>(() => (
+  contextPromptPreview.value?.messages ?? []
+));
+const contextActualRequestToolSchemas = computed<unknown[]>(() => {
+  const previewSchemas = contextPromptPreview.value?.tool_schemas ?? [];
+  if (previewSchemas.length > 0) return previewSchemas;
+  const attachmentSchemas = contextActualRequestProviderAttachments.value.tool_schemas;
+  return Array.isArray(attachmentSchemas) ? attachmentSchemas : [];
+});
+const contextActualRequestTabs = computed<Array<{ id: ContextActualRequestTabId; label: string; count: string }>>(() => [
+  {
+    id: "xml",
+    label: t("workbench.context.requestTab.xml"),
+    count: formatNumber(contextActualRequestXmlSource.value.length),
+  },
+  {
+    id: "messages",
+    label: t("workbench.context.requestTab.messages"),
+    count: formatNumber(contextActualRequestMessages.value.length),
+  },
+  {
+    id: "tool_schemas",
+    label: t("workbench.context.requestTab.toolSchemas"),
+    count: formatNumber(contextActualRequestToolSchemas.value.length),
+  },
+  {
+    id: "options",
+    label: t("workbench.context.requestTab.options"),
+    count: formatNumber(Object.keys(contextActualRequestProviderOptions.value).length),
+  },
+  {
+    id: "attachments",
+    label: t("workbench.context.requestTab.attachments"),
+    count: formatNumber(Object.keys(contextActualRequestProviderAttachments.value).length),
+  },
+]);
+const contextActualRequestJson = computed(() => {
+  if (contextActualRequestTab.value === "messages") {
+    return stringifyPromptPreviewJson(contextActualRequestMessages.value);
+  }
+  if (contextActualRequestTab.value === "tool_schemas") {
+    return stringifyPromptPreviewJson(contextActualRequestToolSchemas.value);
+  }
+  if (contextActualRequestTab.value === "options") {
+    return stringifyPromptPreviewJson(contextActualRequestProviderOptions.value);
+  }
+  return stringifyPromptPreviewJson(contextActualRequestProviderAttachments.value);
+});
+const contextSnapshotSessionNodeRows = computed(() => {
+  const refs = contextRenderSnapshot.value?.metadata.session_message_node_refs;
+  if (!Array.isArray(refs)) return [];
+  return refs
+    .filter(isRecord)
+    .map((ref) => ({
+      nodeId: textValue(ref.node_id, ""),
+      sequence: textValue(ref.sequence_no, "-"),
+      sessionId: textValue(ref.session_id, "-"),
+    }))
+    .filter((ref) => ref.nodeId);
+});
+const contextSnapshotSessionNodePreviewRows = computed(() => (
+  contextSnapshotSessionNodeRows.value.slice(0, 4)
+));
+const contextSnapshotHiddenSessionNodeCount = computed(() => (
+  Math.max(contextSnapshotSessionNodeRows.value.length - contextSnapshotSessionNodePreviewRows.value.length, 0)
+));
 const graphVisibleEvents = computed(() => graphTraceEvents.value.filter((event) => event.key_event));
 const timelineAxisStyle = computed(() => ({
   "--trace-axis-height": `${Math.max(traceEvents.value.length - 1, 0) * 72}px`,
@@ -175,13 +738,14 @@ const graphEdges = computed(() => {
 });
 
 watch(
-  () => route.params.traceId,
-  async (traceIdParam) => {
+  () => [route.params.traceId, route.query.step_id],
+  async ([traceIdParam, stepIdParam]) => {
     loadingTrace.value = true;
     loadError.value = null;
     try {
       const traceId = typeof traceIdParam === "string" ? traceIdParam : null;
-      const loaded = await loadTraceData(traceId);
+      const stepId = typeof stepIdParam === "string" ? stepIdParam : null;
+      const loaded = await loadTraceData(traceId, stepId);
       traceSummary.value = loaded.summary;
       traceEvents.value = loaded.events;
       graphTraceEvents.value = loaded.graphEvents;
@@ -202,6 +766,48 @@ watch(
     selectedEventId.value = preferredEventId(activeTraceView.value);
   },
 );
+
+watch(
+  () => [runId.value, selectedLlmInvocationId.value],
+  ([nextRunId]) => {
+    void refreshTraceContextRenderSnapshot(
+      typeof nextRunId === "string" ? nextRunId : null,
+    );
+  },
+  { immediate: true },
+);
+
+async function refreshTraceContextRenderSnapshot(nextRunId: string | null): Promise<void> {
+  const serial = ++contextSnapshotSerial;
+  if (!nextRunId) {
+    contextRenderSnapshot.value = null;
+    contextPromptPreview.value = null;
+    loadingContextSnapshot.value = false;
+    return;
+  }
+
+  loadingContextSnapshot.value = true;
+  contextRenderSnapshot.value = null;
+  contextPromptPreview.value = null;
+  const invocationId = selectedLlmInvocationId.value;
+  let preview = invocationId
+    ? await loadTraceInvocationPromptPreview(invocationId, nextRunId)
+    : await loadTracePromptPreview(nextRunId);
+  if (invocationId && !preview) {
+    preview = await loadTracePromptPreview(nextRunId);
+  }
+  const snapshotId = typeof preview?.context_render_snapshot_id === "string"
+    ? preview.context_render_snapshot_id.trim()
+    : "";
+  const snapshot = snapshotId
+    ? await loadTraceContextRenderSnapshotById(snapshotId)
+    : await loadTraceContextRenderSnapshot(nextRunId);
+  if (serial === contextSnapshotSerial) {
+    contextRenderSnapshot.value = snapshot;
+    contextPromptPreview.value = preview;
+    loadingContextSnapshot.value = false;
+  }
+}
 
 function traceViewFromQuery(view: unknown): "timeline" | "graph" {
   return view === "graph" ? "graph" : "timeline";
@@ -273,13 +879,412 @@ function eventDisplayName(event: TraceEventView): string {
     "Run Marked Failed": "runMarkedFailed",
     "Failure Delivered": "failureDelivered",
   }[event.name];
-  return key ? t(`trace.eventName.${key}`) : event.name;
+  if (key) return t(`trace.eventName.${key}`);
+  return looksLikeRawKey(event.name) ? formatRawKeyLabel(event.name) : event.name;
 }
 
 function shortId(value: string | null | undefined, maxLength = 18): string {
   if (!value) return "-";
   if (value.length <= maxLength) return value;
   return `${value.slice(0, Math.max(maxLength - 3, 1))}...`;
+}
+
+function textValue(value: unknown, fallback = "-"): string {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "boolean") return value ? t("common.yes") : t("common.no");
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value.trim() || fallback;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => textValue(item, "")).filter(Boolean);
+    return items.length ? items.join(", ") : fallback;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function formatOptionalNumber(value: unknown, fallback = "-"): string {
+  if (typeof value === "number" && Number.isFinite(value)) return formatNumber(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return formatNumber(parsed);
+  }
+  return fallback;
+}
+
+function metadataOptionalNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function metadataNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function metadataStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => textValue(item, ""))
+      .filter(Boolean);
+  }
+  const text = textValue(value, "");
+  return text ? [text] : [];
+}
+
+function promptEstimateTokenTotal(
+  estimate: {
+    text_tokens?: unknown;
+    tool_schema_tokens?: unknown;
+    file_tokens?: unknown;
+  } | null | undefined,
+): number {
+  if (!estimate) return 0;
+  return metadataNumber(estimate.text_tokens) + metadataNumber(estimate.tool_schema_tokens) + metadataNumber(estimate.file_tokens);
+}
+
+function schemaMirrorBudgetValue(metadata: Record<string, unknown>): string {
+  const status = titleize(metadata.tool_schema_mirror_budget_status, "Ok");
+  const mirrored = formatOptionalNumber(metadata.mirrored_tool_schema_count, "0");
+  const maxCount = formatOptionalNumber(metadata.tool_schema_mirror_max_count);
+  const tokens = formatOptionalNumber(metadata.mirrored_tool_schema_estimated_tokens, "0");
+  const maxTokens = formatOptionalNumber(metadata.tool_schema_mirror_max_estimated_tokens);
+  return `${status} · ${mirrored}/${maxCount} · ${tokens}/${maxTokens}`;
+}
+
+function browserGroupRefsValue(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  const labels = value
+    .filter(isRecord)
+    .filter((row) => textValue(row.source_id, "").includes("browser"))
+    .map((row) => {
+      const source = shortId(textValue(row.source_id, ""), 28);
+      const group = textValue(row.group_key, "");
+      const reason = textValue(row.reason, "");
+      return [source, group, reason].filter(Boolean).join(" / ");
+    })
+    .filter(Boolean);
+  return labels.slice(0, 3).join(" · ");
+}
+
+function schemaReasonSummary(metadata: Record<string, unknown>): string {
+  const reasons = isRecord(metadata.tool_schema_mirror_default_schema_reasons)
+    ? metadata.tool_schema_mirror_default_schema_reasons
+    : {};
+  const mirrored = Array.isArray(metadata.tool_schema_mirror_default_mirrored)
+    ? metadata.tool_schema_mirror_default_mirrored.filter(isRecord)
+    : [];
+  const names = mirrored
+    .map((item) => textValue(item.name, ""))
+    .filter(Boolean)
+    .slice(0, 4);
+  if (names.length) {
+    return names
+      .map((name) => {
+        const reason = textValue(reasons[name], "");
+        return reason ? `${name} (${reason})` : name;
+      })
+      .join(" · ");
+  }
+  return t("workbench.context.routeBrowserGroupsHelp");
+}
+
+function browserInvestigationAffordanceSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const status = textValue(metadata.browser_investigation_affordance_status, "");
+  const routeBias = textValue(metadata.browser_investigation_route_bias, "");
+  const present = metadataStringList(metadata.browser_investigation_present_paths);
+  const missing = metadataStringList(metadata.browser_investigation_missing_paths);
+  const schemaCount = metadataStringList(metadata.browser_investigation_schema_names).length;
+  const tone: ContextRouteDiagnosticTone = status === "ok"
+    ? "success"
+    : status === "dom_form_only" || status === "missing_browser_tools"
+      ? "danger"
+      : "warning";
+  const value = [status ? titleize(status) : "", routeBias && routeBias !== status ? titleize(routeBias) : ""]
+    .filter(Boolean)
+    .join(" · ");
+  const detail = [
+    `${t("workbench.context.routePresentPathsShort")} ${present.length ? present.join(", ") : "-"}`,
+    `${t("workbench.context.routeMissingPathsShort")} ${missing.length ? missing.join(", ") : "-"}`,
+    `${t("workbench.context.routeSchemasVisibleShort")} ${formatNumber(schemaCount)}`,
+  ].join(" · ");
+  return {
+    value: value || t("text.none"),
+    tone,
+    detail: value ? detail : t("workbench.context.routeBrowserAffordanceHelp"),
+  };
+}
+
+function browserInvestigationWarningSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const count = metadataNumber(metadata.browser_investigation_warning_count);
+  const terminalFactGap = metadata.browser_evidence_path_no_terminal_fact === true;
+  const warningTypes = metadataStringList(metadata.browser_investigation_warning_types);
+  const value = count > 0
+    ? `${formatNumber(count)} · ${warningTypes.map((item) => titleize(item, item)).slice(0, 3).join(", ")}`
+    : terminalFactGap
+      ? t("workbench.context.routeEvidencePathNoTerminalFact")
+      : t("text.none");
+  const detailParts = [
+    terminalFactGap ? t("workbench.context.routeEvidencePathNoTerminalFactHelp") : "",
+    warningTypes.length ? warningTypes.join(", ") : "",
+  ].filter(Boolean);
+  return {
+    value,
+    tone: count > 0 || terminalFactGap ? "warning" : "success",
+    detail: detailParts.join(" · ") || t("workbench.context.routeBrowserWarningsHelp"),
+  };
+}
+
+function workPlanUpdateSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const count = metadataNumber(metadata.work_plan_update_count);
+  const phase = textValue(metadata.work_plan_phase, "");
+  const status = textValue(metadata.work_plan_status, "");
+  const reason = textValue(metadata.work_plan_update_reason, "");
+  const tone: ContextRouteDiagnosticTone = count > 6
+    ? "warning"
+    : count > 0
+      ? "info"
+      : "success";
+  const detail = [
+    status ? `${t("workbench.context.routePlanStatusShort")} ${titleize(status)}` : "",
+    reason ? `${t("workbench.context.routePlanReasonShort")} ${titleize(reason)}` : "",
+    metadata.work_plan_phase_changed === true
+      ? t("workbench.context.routePlanPhaseChanged")
+      : "",
+  ].filter(Boolean).join(" · ");
+  return {
+    value: phase ? `${formatNumber(count)} · ${phase}` : formatNumber(count),
+    tone,
+    detail: detail || t("workbench.context.routePlanUpdatesHelp"),
+  };
+}
+
+function finalResponseEvidenceSummary(
+  metadata: Record<string, unknown>,
+): { value: string; tone: ContextRouteDiagnosticTone; detail: string } {
+  const required = metadata.final_response_requires_evidence_path === true;
+  const browserPaths = metadataStringList(metadata.browser_verified_evidence_paths);
+  const verifiedPaths = metadataStringList(metadata.verified_evidence_paths);
+  const paths = browserPaths.length ? browserPaths : verifiedPaths;
+  if (!required) {
+    return {
+      value: t("workbench.context.routeFinalEvidenceNotRequired"),
+      tone: "info",
+      detail: t("workbench.context.routeFinalEvidenceHelp"),
+    };
+  }
+  return {
+    value: paths.length
+      ? `${t("workbench.context.routeFinalEvidenceRequired")} · ${paths.join(", ")}`
+      : t("workbench.context.routeFinalEvidenceRequired"),
+    tone: paths.length ? "success" : "warning",
+    detail: t("workbench.context.routeFinalEvidenceRequiredHelp"),
+  };
+}
+
+function skippedSchemaSummary(
+  metadata: Record<string, unknown>,
+  skippedCount: number,
+): string {
+  if (skippedCount <= 0) return t("workbench.context.routeSkippedNone");
+  const byReason = isRecord(metadata.tool_schema_mirror_skipped_by_reason)
+    ? metadata.tool_schema_mirror_skipped_by_reason
+    : {};
+  const reasonLabels = Object.entries(byReason)
+    .slice(0, 3)
+    .map(([reason, count]) => `${titleize(reason, reason)} ${formatOptionalNumber(count, "0")}`);
+  if (reasonLabels.length) return reasonLabels.join(" · ");
+  const skipped = Array.isArray(metadata.tool_schema_mirror_skipped)
+    ? metadata.tool_schema_mirror_skipped.filter(isRecord)
+    : [];
+  const skippedNames = skipped
+    .map((item) => textValue(item.name ?? item.tool_name ?? item.node_id, ""))
+    .filter(Boolean)
+    .slice(0, 3);
+  if (skippedNames.length) return skippedNames.join(" · ");
+  return `${formatNumber(skippedCount)} ${t("workbench.context.routeSkippedShort")}`;
+}
+
+function routeBudgetSplitValue(metadata: Record<string, unknown>): string {
+  const direct = formatOptionalNumber(metadata.direct_transcript_estimated_tokens, "0");
+  const tree = formatOptionalNumber(metadata.rendered_prompt_estimated_tokens, "0");
+  const schemas = formatOptionalNumber(metadata.mirrored_tool_schema_estimated_tokens, "0");
+  return `${t("workbench.context.routeDirectShort")} ${direct} · ${t("workbench.context.routeTreeShort")} ${tree} · ${t("workbench.context.routeSchemasShort")} ${schemas}`;
+}
+
+function capabilityVisibilityValue(metadata: Record<string, unknown>): string {
+  const available = formatOptionalNumber(metadata.tool_schema_mirror_available_count, "0");
+  const enabled = formatOptionalNumber(metadata.tool_schema_mirror_enabled_candidate_count, "0");
+  const defaultMirrored = formatOptionalNumber(metadata.tool_schema_mirror_default_mirrored_count, "0");
+  const defaultRequested = formatOptionalNumber(metadata.tool_schema_mirror_default_requested_count, "0");
+  const duplicate = formatOptionalNumber(metadata.tool_schema_mirror_duplicate_count, "0");
+  return `${t("workbench.context.routeAvailableShort")} ${available} · ${t("workbench.context.routeEnabledShort")} ${enabled} · ${t("workbench.context.routeDefaultShort")} ${defaultMirrored}/${defaultRequested} · ${t("workbench.context.routeDuplicateShort")} ${duplicate}`;
+}
+
+function toolResultTruncationSummary(messages: unknown[]): { value: string; compactedCount: number } {
+  let compactedCount = 0;
+  let omittedChars = 0;
+  let omittedCount = 0;
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const role = textValue(message.role, "");
+    if (role && role !== "tool") continue;
+    const text = promptPreviewContentText(message.content);
+    if (!text.includes("omitted_from_provider_transcript")) continue;
+    compactedCount += 1;
+    omittedChars += sumLineNumbers(text, /omitted_chars:\s*(\d+)/g);
+    omittedCount += sumLineNumbers(text, /omitted_count:\s*(\d+)/g);
+  }
+  if (compactedCount <= 0) {
+    return {
+      value: t("workbench.context.routeToolResultTruncationNone"),
+      compactedCount,
+    };
+  }
+  const parts = [`${formatNumber(compactedCount)} ${t("workbench.context.routeCompactedShort")}`];
+  if (omittedChars > 0) {
+    parts.push(`${formatNumber(omittedChars)} ${t("workbench.context.routeOmittedCharsShort")}`);
+  }
+  if (omittedCount > 0) {
+    parts.push(`${formatNumber(omittedCount)} ${t("workbench.context.routeSkippedShort")}`);
+  }
+  return {
+    value: parts.join(" · "),
+    compactedCount,
+  };
+}
+
+function sumLineNumbers(text: string, pattern: RegExp): number {
+  return Array.from(text.matchAll(pattern))
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite)
+    .reduce((total, value) => total + value, 0);
+}
+
+function topRenderedNodesValue(metadata: Record<string, unknown>): string {
+  const rows = Array.isArray(metadata.top_rendered_nodes)
+    ? metadata.top_rendered_nodes
+    : [];
+  const labels = rows
+    .filter(isRecord)
+    .slice(0, 3)
+    .map((row) => {
+      const nodeId = shortId(textValue(row.node_id, ""), 24);
+      const tokens = formatOptionalNumber(row.text_tokens, "0");
+      return `${nodeId} ${tokens}`;
+    })
+    .filter((value) => value.trim());
+  return labels.length ? labels.join(" · ") : "-";
+}
+
+function snapshotRunPromptInputMetadata(snapshot: TraceContextRenderSnapshot): Record<string, unknown> {
+  const value = snapshot.provider_attachments.prompt_input;
+  return isRecord(value) ? value : {};
+}
+
+function snapshotRuntimeContractMetadata(snapshot: TraceContextRenderSnapshot): Record<string, unknown> {
+  const value = snapshot.metadata.runtime_contract;
+  return isRecord(value) ? value : {};
+}
+
+function snapshotLlmRequestMetadata(snapshot: TraceContextRenderSnapshot): Record<string, unknown> {
+  const contract = snapshotRuntimeContractMetadata(snapshot);
+  return {
+    prompt_input: snapshot.provider_attachments.prompt_input,
+    tree_schema_version: snapshot.metadata.tree_schema_version,
+    context_render_snapshot_id: snapshot.id,
+    context_history_delivery: snapshot.metadata.history_delivery,
+    mirrored_tool_schema_count: snapshot.metadata.mirrored_tool_schema_count,
+    mirrored_tool_schema_estimated_tokens: snapshot.metadata.mirrored_tool_schema_estimated_tokens,
+    tool_schema_mirror_budget_status: snapshot.metadata.tool_schema_mirror_budget_status,
+    tool_schema_mirror_skipped_count: snapshot.metadata.tool_schema_mirror_skipped_count,
+    tool_schema_mirror_max_count: snapshot.metadata.tool_schema_mirror_max_count,
+    tool_schema_mirror_max_estimated_tokens: snapshot.metadata.tool_schema_mirror_max_estimated_tokens,
+    rendered_prompt_estimated_tokens: snapshot.metadata.rendered_prompt_estimated_tokens,
+    direct_transcript_estimated_tokens: snapshot.metadata.direct_transcript_estimated_tokens,
+    estimated_provider_prompt_tokens: snapshot.metadata.estimated_provider_prompt_tokens,
+    duplicate_tool_delivery_risk: snapshot.metadata.duplicate_tool_delivery_risk,
+    session_budget_status: snapshot.metadata.session_budget_status,
+    mirrored_node_count: snapshot.metadata.mirrored_node_count,
+    runtime_contract: contract,
+    runtime_contract_version: snapshot.metadata.runtime_contract_version ?? contract.contract_version,
+    runtime_contract_hash: snapshot.metadata.runtime_contract_hash ?? contract.content_hash,
+  };
+}
+
+function previewRunPromptInputMetadata(preview: RunPromptInputPreview | null): Record<string, unknown> {
+  const value = preview?.provider_attachments?.prompt_input;
+  return isRecord(value) ? value : {};
+}
+
+function previewLlmRequestMetadata(preview: RunPromptInputPreview | null): Record<string, unknown> {
+  const metadata = preview?.context_render_metadata ?? {};
+  const requestMetadata = isRecord(preview?.provider_request_options?.request_metadata)
+    ? preview.provider_request_options.request_metadata
+    : {};
+  const contract = isRecord(metadata.runtime_contract) ? metadata.runtime_contract : {};
+  return {
+    prompt_input: preview?.provider_attachments?.prompt_input,
+    tree_schema_version: metadata.tree_schema_version,
+    context_render_snapshot_id: preview?.context_render_snapshot_id,
+    context_history_delivery: metadata.history_delivery,
+    mirrored_tool_schema_count: metadata.mirrored_tool_schema_count,
+    mirrored_node_count: metadata.mirrored_node_count,
+    runtime_contract: contract,
+    runtime_contract_version: metadata.runtime_contract_version ?? contract.contract_version,
+    runtime_contract_hash: metadata.runtime_contract_hash ?? contract.content_hash,
+    ...requestMetadata,
+  };
+}
+
+function contextRouteMetadata(): Record<string, unknown> {
+  const snapshot = contextRenderSnapshot.value;
+  const preview = contextPromptPreview.value;
+  if (!snapshot && !preview) return {};
+  const requestMetadata = snapshot ? snapshotLlmRequestMetadata(snapshot) : previewLlmRequestMetadata(preview);
+  return {
+    ...requestMetadata,
+    ...(snapshot?.metadata ?? preview?.context_render_metadata ?? {}),
+  };
+}
+
+function titleize(value: unknown, fallback = "-"): string {
+  const text = textValue(value, fallback);
+  if (text === "-") return text;
+  return text
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function firstNonEmptyRecord(
+  primary: Record<string, unknown> | null | undefined,
+  fallback: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  if (primary && Object.keys(primary).length > 0) return primary;
+  if (fallback && Object.keys(fallback).length > 0) return fallback;
+  return {};
 }
 
 function linkedEntity(type: string): TraceLinkedEntity | null {
@@ -526,6 +1531,10 @@ function selectOffset(offset: number): void {
           <strong>{{ turnId ?? '-' }}</strong>
         </div>
         <div>
+          <span>{{ t("trace.summary.step") }}</span>
+          <strong class="mono">{{ shortId(activeStepId) }}</strong>
+        </div>
+        <div>
           <span>{{ t("trace.summary.result") }}</span>
           <strong>
             <StatusDot :tone="toneForStatus(displaySummaryStatus)" />
@@ -562,6 +1571,10 @@ function selectOffset(offset: number): void {
         <div>
           <span>{{ t("trace.summary.turn") }}</span>
           <strong>{{ turnId ?? '-' }}</strong>
+        </div>
+        <div>
+          <span>{{ t("trace.summary.step") }}</span>
+          <strong class="mono">{{ shortId(activeStepId) }}</strong>
         </div>
         <div>
           <span>{{ t("trace.summary.status") }}</span>
@@ -760,7 +1773,7 @@ function selectOffset(offset: number): void {
           </div>
           <div>
             <dt>{{ t("trace.detail.eventName") }}</dt>
-            <dd>{{ eventDisplayName(selectedEvent).toLowerCase().replace(/\s+/g, '.') }}</dd>
+            <dd>{{ eventDisplayName(selectedEvent) }}</dd>
           </div>
           <div>
             <dt>{{ t("trace.detail.eventFamily") }}</dt>
@@ -858,6 +1871,205 @@ function selectOffset(offset: number): void {
       <UiCard v-else class="event-card event-card--empty">
         {{ t("trace.emptySelection") }}
       </UiCard>
+
+      <UiCard v-if="contextRenderSnapshot || contextPromptPreview || loadingContextSnapshot" class="event-card trace-context-snapshot-card">
+        <div class="trace-context-snapshot-head">
+          <div>
+            <h2>{{ t("trace.contextSnapshot.title") }}</h2>
+            <p>{{ t("trace.contextSnapshot.subtitle") }}</p>
+          </div>
+          <UiBadge :tone="contextRenderSnapshot || contextPromptPreview ? 'success' : 'info'">
+            {{ contextRenderSnapshot || contextPromptPreview ? t("workbench.context.historyDelivery") : t("common.loading") }}
+          </UiBadge>
+        </div>
+
+        <div v-if="loadingContextSnapshot && !contextRenderSnapshot" class="trace-context-snapshot-loading">
+          {{ t("trace.contextSnapshot.loading") }}
+        </div>
+
+        <template v-if="contextRenderSnapshot || contextPromptPreview">
+          <dl v-if="contextSnapshotRows.length" class="trace-context-snapshot-summary">
+            <div v-for="row in contextSnapshotRows" :key="row.label">
+              <dt>{{ row.label }}</dt>
+              <dd :title="row.value">{{ row.value }}</dd>
+            </div>
+          </dl>
+
+          <div v-if="contextSnapshotRiskRows.length" class="trace-context-snapshot-risk-strip" :aria-label="t('workbench.context.sessionBudgetStatus')">
+            <div
+              v-for="row in contextSnapshotRiskRows"
+              :key="row.label"
+              class="trace-context-snapshot-risk"
+              :class="`trace-context-snapshot-risk--${row.tone}`"
+              :title="row.detail"
+            >
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
+          </div>
+
+          <div v-if="contextRouteDiagnosticRows.length" class="context-route-diagnostics" :aria-label="t('workbench.context.routeDiagnostics')">
+            <div
+              v-for="row in contextRouteDiagnosticRows"
+              :key="row.label"
+              class="context-route-diagnostic"
+              :class="`context-route-diagnostic--${row.tone}`"
+              :title="row.detail"
+            >
+              <span>{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
+          </div>
+
+          <div v-if="contextBrowserEvidencePathRows.length" class="context-route-schemas" role="table" :aria-label="t('workbench.context.routeEvidencePathLadder')">
+            <div class="context-route-schemas__head" role="row">
+              <span role="columnheader">{{ t("workbench.context.routeEvidencePath") }}</span>
+              <span role="columnheader">{{ t("common.status") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeSchemas") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeFunctions") }}</span>
+            </div>
+            <div
+              v-for="row in contextBrowserEvidencePathRows"
+              :key="row.id"
+              class="context-route-schemas__row"
+              :class="`context-route-schemas__row--${row.tone}`"
+              role="row"
+            >
+              <span role="cell" :title="row.path">{{ row.path }}</span>
+              <span role="cell">{{ row.status }}</span>
+              <span role="cell" :title="row.schemas">{{ row.schemas }}</span>
+              <span role="cell">{{ row.count }}</span>
+            </div>
+          </div>
+
+          <div v-if="contextBrowserWarningRows.length" class="context-route-schemas" role="table" :aria-label="t('workbench.context.routeBrowserWarnings')">
+            <div class="context-route-schemas__head context-route-schemas__head--wide" role="row">
+              <span role="columnheader">{{ t("workbench.context.routeWarningType") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeCode") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeLatestTool") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeSummary") }}</span>
+            </div>
+            <div
+              v-for="row in contextBrowserWarningRows"
+              :key="row.id"
+              class="context-route-schemas__row context-route-schemas__row--wide"
+              :class="`context-route-schemas__row--${row.tone}`"
+              role="row"
+            >
+              <span role="cell" :title="row.warningType">{{ row.warningType }}</span>
+              <span role="cell" :title="row.code">{{ row.code }}</span>
+              <span role="cell" :title="row.latestTool">{{ row.latestTool }}</span>
+              <span role="cell" :title="row.summary">{{ row.summary }}</span>
+            </div>
+          </div>
+
+          <div v-if="contextRouteGroupRows.length" class="context-route-groups" role="table" :aria-label="t('workbench.context.routeGroups')">
+            <div class="context-route-groups__head" role="row">
+              <span role="columnheader">{{ t("workbench.context.routeGroup") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeSource") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeFunctions") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeDefaultSchemas") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeVisibility") }}</span>
+            </div>
+            <div
+              v-for="row in contextRouteGroupRows"
+              :key="row.id"
+              class="context-route-groups__row"
+              :class="`context-route-groups__row--${row.tone}`"
+              role="row"
+            >
+              <span role="cell" :title="row.group">{{ row.group }}</span>
+              <span role="cell" :title="row.source">{{ row.source }}</span>
+              <span role="cell">{{ row.functions }}</span>
+              <span role="cell">{{ row.defaultSchemas }}</span>
+              <span role="cell">{{ row.visibility }}</span>
+            </div>
+          </div>
+
+          <div v-if="contextRouteSchemaRows.length" class="context-route-schemas" role="table" :aria-label="t('workbench.context.routeSchemas')">
+            <div class="context-route-schemas__head" role="row">
+              <span role="columnheader">{{ t("workbench.context.routeSchema") }}</span>
+              <span role="columnheader">{{ t("common.status") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routeReason") }}</span>
+              <span role="columnheader">{{ t("workbench.context.routePriority") }}</span>
+            </div>
+            <div
+              v-for="row in contextRouteSchemaRows"
+              :key="row.id"
+              class="context-route-schemas__row"
+              :class="`context-route-schemas__row--${row.tone}`"
+              role="row"
+            >
+              <span role="cell" :title="row.schema">{{ row.schema }}</span>
+              <span role="cell">{{ row.status }}</span>
+              <span role="cell" :title="row.reason">{{ row.reason }}</span>
+              <span role="cell">{{ row.priority }}</span>
+            </div>
+          </div>
+
+          <div v-if="contextSnapshotDiagnosticRows.length" class="trace-context-snapshot-diagnostics" :aria-label="t('workbench.context.renderDiagnostics')">
+            <div
+              v-for="row in contextSnapshotDiagnosticRows"
+              :key="row.label"
+              class="trace-context-snapshot-diagnostic"
+            >
+              <span>{{ row.label }}</span>
+              <strong :title="row.value">{{ row.value }}</strong>
+            </div>
+          </div>
+
+          <div v-if="contextSnapshotSessionNodeRows.length" class="trace-context-snapshot-node-refs">
+            <div class="trace-context-snapshot-node-refs__head">
+              <span>{{ t("trace.contextSnapshot.sessionNodes") }}</span>
+              <small>
+                {{ t("trace.contextSnapshot.sessionNodeCount", { count: formatNumber(contextSnapshotSessionNodeRows.length) }) }}
+              </small>
+            </div>
+            <div
+              v-for="row in contextSnapshotSessionNodePreviewRows"
+              :key="row.nodeId"
+              class="trace-context-snapshot-node-ref"
+            >
+              <span>{{ t("trace.contextSnapshot.sequence", { sequence: row.sequence }) }}</span>
+              <code :title="`${row.nodeId} · ${row.sessionId}`">{{ shortId(row.nodeId, 34) }}</code>
+            </div>
+            <small v-if="contextSnapshotHiddenSessionNodeCount > 0" class="trace-context-snapshot-node-refs__more">
+              {{ t("trace.contextSnapshot.moreSessionNodes", { count: formatNumber(contextSnapshotHiddenSessionNodeCount) }) }}
+            </small>
+          </div>
+
+          <div class="context-request-tabs" role="tablist" :aria-label="t('trace.contextSnapshot.title')">
+            <button
+              v-for="tab in contextActualRequestTabs"
+              :key="tab.id"
+              type="button"
+              role="tab"
+              :aria-selected="contextActualRequestTab === tab.id"
+              :class="{ active: contextActualRequestTab === tab.id }"
+              @click="contextActualRequestTab = tab.id"
+            >
+              <span>{{ tab.label }}</span>
+              <small>{{ tab.count }}</small>
+            </button>
+          </div>
+          <div class="context-request-panel">
+            <template v-if="contextActualRequestTab === 'xml'">
+              <div class="trace-context-snapshot-preview-head">
+                <span>{{ t("workbench.context.promptXml") }}</span>
+                <small>{{ t("workbench.context.promptChars", { count: formatNumber(contextSnapshotPromptCharCount) }) }}</small>
+              </div>
+              <XmlSourceViewer
+                v-if="contextActualRequestXmlSource"
+                class="trace-context-snapshot-preview"
+                :source="contextActualRequestXmlSource"
+                max-height="min(42vh, 460px)"
+              />
+              <p v-else class="trace-context-snapshot-loading context-request-empty">{{ t("workbench.context.requestEmpty") }}</p>
+            </template>
+            <pre v-else class="context-request-json">{{ contextActualRequestJson }}</pre>
+          </div>
+        </template>
+      </UiCard>
     </aside>
   </div>
 </template>
@@ -865,14 +2077,14 @@ function selectOffset(offset: number): void {
 <style scoped>
 .trace-page {
   display: grid;
-  grid-template-columns: 262px minmax(0, 1fr) 342px;
+  grid-template-columns: 252px minmax(0, 1fr) minmax(430px, 30vw);
   height: calc(100dvh - var(--shell-topbar-height));
   overflow: hidden;
   background: var(--surface-page);
 }
 
 .trace-page--graph {
-  grid-template-columns: 290px minmax(0, 1fr) 360px;
+  grid-template-columns: 270px minmax(0, 1fr) minmax(430px, 30vw);
 }
 
 .trace-filters,
@@ -1447,6 +2659,442 @@ code {
   min-height: 180px;
   place-items: center;
   color: var(--text-muted);
+}
+
+.trace-context-snapshot-card {
+  margin-top: 12px;
+}
+
+.trace-context-snapshot-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trace-context-snapshot-head p {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.trace-context-snapshot-summary,
+.trace-context-snapshot-diagnostics {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.trace-context-snapshot-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-raised);
+}
+
+.trace-context-snapshot-summary div,
+.trace-context-snapshot-diagnostic {
+  min-width: 0;
+}
+
+.trace-context-snapshot-summary dt,
+.trace-context-snapshot-diagnostic span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.trace-context-snapshot-summary dd,
+.trace-context-snapshot-diagnostic strong {
+  display: block;
+  min-width: 0;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-context-snapshot-risk-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.trace-context-snapshot-risk {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+}
+
+.trace-context-snapshot-risk span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-context-snapshot-risk strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-context-snapshot-risk--success strong {
+  color: var(--color-success);
+}
+
+.trace-context-snapshot-risk--warning {
+  border-color: color-mix(in srgb, var(--color-warning) 44%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--surface-raised));
+}
+
+.trace-context-snapshot-risk--warning strong {
+  color: var(--color-warning);
+}
+
+.trace-context-snapshot-risk--danger {
+  border-color: color-mix(in srgb, var(--color-danger) 48%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-danger) 8%, var(--surface-raised));
+}
+
+.trace-context-snapshot-risk--danger strong {
+  color: var(--color-danger);
+}
+
+.trace-context-snapshot-diagnostics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.trace-context-snapshot-diagnostic {
+  padding: 8px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+}
+
+.context-route-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 6px;
+}
+
+.context-route-diagnostic {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-route-diagnostic--success {
+  border-color: color-mix(in srgb, var(--color-success) 28%, var(--border-subtle));
+}
+
+.context-route-diagnostic--warning {
+  border-color: color-mix(in srgb, var(--color-warning) 34%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-warning) 6%, var(--surface-inset));
+}
+
+.context-route-diagnostic--danger {
+  border-color: color-mix(in srgb, var(--color-danger) 36%, var(--border-subtle));
+  background: color-mix(in srgb, var(--color-danger) 6%, var(--surface-inset));
+}
+
+.context-route-diagnostic--info {
+  border-color: color-mix(in srgb, var(--color-accent) 30%, var(--border-subtle));
+}
+
+.context-route-diagnostic span {
+  display: block;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-route-diagnostic strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-route-groups {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-route-groups__head,
+.context-route-groups__row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.45fr) minmax(86px, 0.95fr) minmax(44px, 0.4fr) minmax(76px, 0.75fr) minmax(76px, 0.75fr);
+  min-width: 0;
+}
+
+.context-route-groups__head {
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.context-route-groups__row {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.context-route-groups__row + .context-route-groups__row {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+}
+
+.context-route-groups__row--info {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.context-route-groups__row--warning {
+  background: color-mix(in srgb, var(--color-warning) 6%, transparent);
+}
+
+.context-route-groups__row--success {
+  background: color-mix(in srgb, var(--color-success) 4%, transparent);
+}
+
+.context-route-groups span {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-route-schemas {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+}
+
+.context-route-schemas__head,
+.context-route-schemas__row {
+  display: grid;
+  grid-template-columns: minmax(145px, 1.2fr) minmax(58px, 0.45fr) minmax(110px, 1fr) minmax(42px, 0.35fr);
+  min-width: 0;
+}
+
+.context-route-schemas__head {
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.context-route-schemas__row {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.context-route-schemas__row--wide {
+  grid-template-columns: minmax(110px, 0.9fr) minmax(96px, 0.85fr) minmax(118px, 0.95fr) minmax(150px, 1.25fr);
+}
+
+.context-route-schemas__head--wide {
+  grid-template-columns: minmax(110px, 0.9fr) minmax(96px, 0.85fr) minmax(118px, 0.95fr) minmax(150px, 1.25fr);
+}
+
+.context-route-schemas__row + .context-route-schemas__row {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+}
+
+.context-route-schemas__row--success {
+  background: color-mix(in srgb, var(--color-success) 4%, transparent);
+}
+
+.context-route-schemas__row--warning {
+  background: color-mix(in srgb, var(--color-warning) 6%, transparent);
+}
+
+.context-route-schemas span {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-request-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.context-request-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.context-request-tabs button.active {
+  border-color: color-mix(in srgb, var(--color-accent) 58%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--surface-raised));
+  color: var(--color-accent);
+}
+
+.context-request-tabs span,
+.context-request-tabs small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-request-tabs small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.context-request-panel {
+  display: grid;
+  min-height: 240px;
+  min-width: 0;
+}
+
+.context-request-json {
+  min-height: 240px;
+  max-height: min(42vh, 460px);
+  margin: 0;
+  overflow: auto;
+  padding: 10px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.context-request-empty {
+  min-height: 220px;
+}
+
+.trace-context-snapshot-node-refs {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-panel-soft);
+}
+
+.trace-context-snapshot-node-refs__head,
+.trace-context-snapshot-node-ref {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.trace-context-snapshot-node-refs__head {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.trace-context-snapshot-node-refs__head small,
+.trace-context-snapshot-node-refs__more {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-context-snapshot-node-ref {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.trace-context-snapshot-node-ref code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-context-snapshot-node-refs__more {
+  display: block;
+}
+
+.trace-context-snapshot-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.trace-context-snapshot-preview-head small {
+  color: var(--text-muted);
+}
+
+.trace-context-snapshot-preview {
+  min-height: 240px;
+}
+
+.trace-context-snapshot-loading {
+  display: grid;
+  min-height: 96px;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .event-card__hero {

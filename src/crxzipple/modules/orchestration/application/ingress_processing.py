@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from crxzipple.modules.orchestration.application.coordinators import (
         RunIngressCoordinator,
     )
-    from crxzipple.modules.orchestration.application.ports import RunDispatchPort
+    from crxzipple.modules.orchestration.application.ports import OrchestrationDispatchPort
     from crxzipple.modules.orchestration.application.ports.runtime import (
         OrchestrationSchedulerIntakePort,
     )
@@ -161,7 +161,7 @@ def fail_assignment_input_from_ingress_error(
 def fail_ingress_backed_run_record(
     *,
     uow_factory,
-    dispatch_port: "RunDispatchPort",
+    dispatch_port: "OrchestrationDispatchPort",
     request: OrchestrationIngressRequest,
     worker_id: str,
     exc: Exception,

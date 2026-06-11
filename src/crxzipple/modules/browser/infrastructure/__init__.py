@@ -1,4 +1,5 @@
 from .action_engines import CdpBackedPlaywrightActionEngine
+from .action_trace import BrowserActionTraceService
 from .cdp_urls import (
     append_cdp_path,
     browser_ref_to_cdp_http_base,
@@ -9,6 +10,8 @@ from .cdp_urls import (
     normalize_cdp_ws_url,
 )
 from .cdp_sessions import BrowserCdpSessionBroker, BrowserCdpSessionLease
+from .devtools import BrowserDevToolsAdapter
+from .dom_inspection import BrowserDomInspectionService
 from .engines import (
     CdpControlEngine,
     InMemoryCdpBackedPlaywrightActionEngine,
@@ -21,8 +24,11 @@ from .network_capture import (
     DefaultBrowserNetworkRedactor,
     InMemoryBrowserNetworkCaptureStore,
 )
+from .network_actions import BrowserNetworkActionService
 from .network_cdp_capture import CdpNetworkCaptureController
+from .network_insight import BrowserNetworkInsightService
 from .network_page_fetch import BrowserPageNetworkFetchService
+from .peripheral_actions import BrowserPeripheralActionService
 from .playwright import PlaywrightCdpSessionPool
 from .proxy_adapter import (
     BasicProxyCredential,
@@ -35,6 +41,7 @@ from .proxy_adapter import (
 )
 from .profile_probe import BrowserProfileProbeService
 from .registry import StaticBrowserEngineRegistry
+from .script_insight import BrowserScriptInsightService
 from .storage_inspection import BrowserStorageInspectionService
 from .state_root import (
     BrowserStateRoot,
@@ -61,10 +68,17 @@ __all__ = [
     "BrowserStateRoot",
     "BrowserCdpSessionBroker",
     "BrowserCdpSessionLease",
+    "BrowserActionTraceService",
+    "BrowserDevToolsAdapter",
     "BrowserProfileProbeService",
     "BrowserPageNetworkFetchService",
+    "BrowserNetworkActionService",
+    "BrowserNetworkInsightService",
+    "BrowserPeripheralActionService",
     "BrowserDiagnosticsService",
+    "BrowserDomInspectionService",
     "BrowserEnvironmentControlService",
+    "BrowserScriptInsightService",
     "BrowserStorageInspectionService",
     "CdpBackedPlaywrightActionEngine",
     "CdpControlEngine",

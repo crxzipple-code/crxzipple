@@ -78,8 +78,16 @@ class BrowserToolHttpRuntimeTestCase(HttpModuleTestCase):
             self.assertEqual(list_response.status_code, 200)
             tool_ids = [item["id"] for item in list_response.json()]
             self.assertIn("browser.navigate", tool_ids)
+            self.assertIn("browser.observe", tool_ids)
+            self.assertIn("browser.action.trace", tool_ids)
             self.assertIn("browser.snapshot", tool_ids)
             self.assertIn("browser.click", tool_ids)
+            self.assertIn("browser.code.search", tool_ids)
+            self.assertIn("browser.runtime.inspect", tool_ids)
+            self.assertIn("browser.script.list", tool_ids)
+            self.assertIn("browser.script.find_request", tool_ids)
+            self.assertIn("browser.script.inspect", tool_ids)
+            self.assertIn("browser.network.inspect", tool_ids)
             self.assertNotIn("browser_profile", tool_ids)
             self.assertNotIn("browser_control", tool_ids)
             self.assertNotIn("browser_snapshot", tool_ids)
@@ -118,6 +126,14 @@ class BrowserToolHttpRuntimeTestCase(HttpModuleTestCase):
             self.assertEqual(payload["output_payload"]["command"]["kind"], "open-tab")
             self.assertTrue(
                 payload["output_payload"]["value"]["url"].startswith("https://example.com")
+            )
+            navigate_envelope = payload["output_payload"]["value"]["action_envelope"]
+            self.assertTrue(navigate_envelope["tool_ok"])
+            self.assertTrue(navigate_envelope["page_effect_ok"])
+            self.assertEqual(navigate_envelope["page_effect_status"], "observed_change")
+            self.assertEqual(navigate_envelope["after"]["target_id"], target_id)
+            self.assertTrue(
+                navigate_envelope["after"]["url"].startswith("https://example.com"),
             )
             self.assertEqual(
                 payload["output_payload"]["value"]["ws_url"],

@@ -271,6 +271,56 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(artifact.mime_type, "image/png")
         self.assertEqual(artifact.name, "generated.png")
 
+    def test_execute_externalizes_large_text_result_to_artifact_ref_metadata(self) -> None:
+        tool = self.seed_tool(
+            tool_id="large_text_tool",
+            name="Large Text Tool",
+            description="Returns a large text payload.",
+            runtime_key="large_text_tool",
+        )
+        large_text = "header\n" + ("x" * 24_000)
+
+        async def large_text_tool(_arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(large_text)
+
+        self.local_runtime_registry.register(tool, large_text_tool)
+
+        tool_run = asyncio.run(
+            self.tool_service.execute(
+                ExecuteToolInput(
+                    tool_id="large_text_tool",
+                    arguments={},
+                ),
+            ),
+        )
+
+        assert tool_run.result is not None
+        result_text = tool_run.result.blocks[0]["text"]
+        self.assertIn("[large tool result externalized]", result_text)
+        self.assertLess(len(result_text), len(large_text))
+        artifact_ids = tool_run.result.metadata.get("artifact_ids")
+        self.assertIsInstance(artifact_ids, list)
+        assert isinstance(artifact_ids, list)
+        self.assertEqual(tool_run.result.metadata.get("large_text_artifact_ids"), artifact_ids)
+        envelope = tool_run.result.metadata.get("tool_result_envelope")
+        self.assertIsInstance(envelope, dict)
+        assert isinstance(envelope, dict)
+        self.assertEqual(envelope["status"], "ok")
+        self.assertTrue(envelope["truncated"])
+        self.assertEqual(envelope["evidence_refs"], artifact_ids)
+        self.assertEqual(envelope["omitted_count"], 1)
+        self.assertGreater(envelope["omitted_chars"], 0)
+        self.assertEqual(
+            envelope["key_facts"]["externalized_text_block_count"],
+            1,
+        )
+        self.assertEqual(envelope["read_handles"][0]["kind"], "artifact")
+        artifact = self.artifact_service.get_artifact(str(artifact_ids[0]))
+        self.assertEqual(artifact.mime_type, "text/plain")
+        self.assertEqual(artifact.metadata["source"], "tool.large_text_result")
+        resolved = self.artifact_service.resolve_variant(artifact.id)
+        self.assertEqual(resolved.path.read_text(), large_text)
+
     def test_execute_fails_when_tool_result_details_exceed_budget(self) -> None:
         self.tool_service.details_max_chars = 128
 
@@ -338,7 +388,7 @@ class ToolExecutionTestCase(ToolTestCaseBase):
 
         event_names = [
             event.event_name
-            for event in self.event_bus.published_events
+            for event in self.published_event_bus_events()
             if isinstance(event, Event) and bool(event.name)
         ]
         self.assertIn("tool.run.created", event_names)
@@ -382,15 +432,15 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         )
 
         self.assertEqual(tool_run.status, ToolRunStatus.SUCCEEDED)
+        execution_context_payload = tool_run.output_payload["execution_context"]
+        self.assertEqual(execution_context_payload["run_id"], "run-123")
+        self.assertEqual(execution_context_payload["agent_id"], "assistant")
         self.assertEqual(
-            tool_run.output_payload["execution_context"],
-            {
-                "run_id": "run-123",
-                "agent_id": "assistant",
-                "session_key": "agent:assistant:main",
-                "surface": "interactive",
-            },
+            execution_context_payload["session_key"],
+            "agent:assistant:main",
         )
+        self.assertEqual(execution_context_payload["surface"], "interactive")
+        self.assertEqual(execution_context_payload["tool_run_id"], tool_run.id)
 
         with self.uow_factory() as uow:
             persisted = uow.tool_runs.get(tool_run.id)
@@ -525,22 +575,21 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertIsNotNone(persisted)
         assert persisted is not None
         self.assertEqual(persisted.status, ToolRunStatus.SUCCEEDED)
+        execution_context_payload = persisted.output_payload["execution_context"]
+        self.assertEqual(execution_context_payload["run_id"], "run-background-123")
+        self.assertEqual(execution_context_payload["agent_id"], "assistant")
         self.assertEqual(
-            persisted.output_payload["execution_context"],
-            {
-                "run_id": "run-background-123",
-                "agent_id": "assistant",
-                "session_key": "agent:assistant:main",
-            },
+            execution_context_payload["session_key"],
+            "agent:assistant:main",
         )
+        self.assertEqual(execution_context_payload["tool_run_id"], persisted.id)
+        self.assertEqual(persisted.invocation_context_payload["run_id"], "run-background-123")
+        self.assertEqual(persisted.invocation_context_payload["agent_id"], "assistant")
         self.assertEqual(
-            persisted.invocation_context_payload,
-            {
-                "run_id": "run-background-123",
-                "agent_id": "assistant",
-                "session_key": "agent:assistant:main",
-            },
+            persisted.invocation_context_payload["session_key"],
+            "agent:assistant:main",
         )
+        self.assertEqual(persisted.invocation_context_payload["tool_run_id"], persisted.id)
 
     def test_executes_sandbox_inline_async_tool_via_runtime_router(self) -> None:
         self.seed_tool(

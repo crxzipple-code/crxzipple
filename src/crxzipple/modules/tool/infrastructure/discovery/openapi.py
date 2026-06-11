@@ -476,12 +476,17 @@ def _parse_operations(
             if isinstance(request_body, dict):
                 body_required = bool(request_body.get("required", False))
                 if _supports_json_request_body(request_body):
+                    request_body_schema = _request_body_schema(request_body)
                     parameters.append(
                         ToolParameter(
                             name="body",
-                            data_type=_request_body_data_type(request_body),
+                            data_type=_schema_type(request_body_schema),
                             description="JSON request body payload.",
                             required=body_required,
+                            json_schema=_tool_parameter_json_schema(
+                                request_body_schema,
+                                description="JSON request body payload.",
+                            ),
                         ),
                     )
 
@@ -604,12 +609,27 @@ def _normalize_operation_id(raw: Any, *, method: str, path: str) -> str:
 
 def _parameter_to_tool_parameter(parameter: dict[str, Any]) -> ToolParameter:
     schema = parameter.get("schema") if isinstance(parameter.get("schema"), dict) else {}
+    description = str(parameter.get("description", "")).strip()
     return ToolParameter(
         name=str(parameter["name"]),
         data_type=_schema_type(schema),
-        description=str(parameter.get("description", "")).strip(),
+        description=description,
         required=bool(parameter.get("required", False)),
+        json_schema=_tool_parameter_json_schema(schema, description=description),
     )
+
+
+def _tool_parameter_json_schema(
+    schema: dict[str, Any],
+    *,
+    description: str,
+) -> dict[str, Any]:
+    payload = dict(schema)
+    if not payload:
+        payload["type"] = _schema_type(schema)
+    if description and not payload.get("description"):
+        payload["description"] = description
+    return payload
 
 
 def _schema_type(schema: dict[str, Any]) -> str:
@@ -633,14 +653,18 @@ def _supports_json_request_body(request_body: dict[str, Any]) -> bool:
 
 
 def _request_body_data_type(request_body: dict[str, Any]) -> str:
+    return _schema_type(_request_body_schema(request_body))
+
+
+def _request_body_schema(request_body: dict[str, Any]) -> dict[str, Any]:
     content = request_body.get("content")
     if not isinstance(content, dict):
-        return "object"
+        return {"type": "object"}
     media = content.get("application/json")
     if not isinstance(media, dict):
-        return "object"
+        return {"type": "object"}
     schema = media.get("schema") if isinstance(media.get("schema"), dict) else {}
-    return _schema_type(schema)
+    return schema or {"type": "object"}
 
 
 def _parse_security_schemes(

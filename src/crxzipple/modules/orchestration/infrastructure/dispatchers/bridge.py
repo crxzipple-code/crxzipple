@@ -5,25 +5,35 @@ from crxzipple.modules.dispatch.domain import (
     DispatchTask,
     DispatchTaskRepository,
 )
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+)
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationRun,
 )
 from crxzipple.shared.domain.aggregates import AggregateRoot
 
-DISPATCH_OWNER_KIND = "orchestration_run"
+DISPATCH_OWNER_KIND = ORCHESTRATION_STEP_DISPATCH_OWNER_KIND
 
 
 class OrchestrationDispatchBridge:
-    """Maps orchestration run queue transitions onto the dispatch domain."""
+    """Maps orchestration execution-step transitions onto dispatch tasks."""
 
     def enqueue(
         self,
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> DispatchTask:
-        task = self._ensure_task(dispatch_tasks, collector, run)
+        task = self._ensure_task(
+            dispatch_tasks,
+            collector,
+            run,
+            dispatch_task_id=dispatch_task_id,
+        )
         task.enqueue(
             lane_key=run.lane_key,
             policy=self._to_dispatch_policy(run.queue_policy),
@@ -40,11 +50,12 @@ class OrchestrationDispatchBridge:
         collector: "_AggregateCollector",
         run: OrchestrationRun,
         *,
+        dispatch_task_id: str,
         worker_id: str,
         lease_seconds: int | None = None,
     ) -> DispatchTask | None:
         task = dispatch_tasks.claim_queued(
-            task_id=run.id,
+            task_id=dispatch_task_id,
             owner_kind=DISPATCH_OWNER_KIND,
             worker_id=worker_id,
             claim_token=self._claim_token_for_worker(worker_id),
@@ -68,10 +79,11 @@ class OrchestrationDispatchBridge:
         collector: "_AggregateCollector",
         run: OrchestrationRun,
         *,
+        dispatch_task_id: str,
         worker_id: str,
         lease_seconds: int,
     ) -> DispatchTask | None:
-        task = dispatch_tasks.get(run.id)
+        task = dispatch_tasks.get(dispatch_task_id)
         if task is None:
             return None
         task.heartbeat(
@@ -89,8 +101,10 @@ class OrchestrationDispatchBridge:
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> DispatchTask:
-        task = self._require_task(dispatch_tasks, run.id)
+        task = self._require_task(dispatch_tasks, dispatch_task_id)
         task.wait(reason=run.waiting_reason, now=run.updated_at)
         dispatch_tasks.add(task)
         collector.collect(task)
@@ -101,8 +115,10 @@ class OrchestrationDispatchBridge:
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> DispatchTask:
-        task = self._require_task(dispatch_tasks, run.id)
+        task = self._require_task(dispatch_tasks, dispatch_task_id)
         task.complete(now=run.completed_at)
         dispatch_tasks.add(task)
         collector.collect(task)
@@ -113,8 +129,10 @@ class OrchestrationDispatchBridge:
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> DispatchTask:
-        task = self._require_task(dispatch_tasks, run.id)
+        task = self._require_task(dispatch_tasks, dispatch_task_id)
         error = run.error
         task.fail(
             message=error.message if error is not None else "orchestration failed",
@@ -131,8 +149,10 @@ class OrchestrationDispatchBridge:
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> DispatchTask | None:
-        task = dispatch_tasks.get(run.id)
+        task = dispatch_tasks.get(dispatch_task_id)
         if task is None:
             return None
         task.cancel(reason=run.waiting_reason, now=run.completed_at)
@@ -145,21 +165,42 @@ class OrchestrationDispatchBridge:
         dispatch_tasks: DispatchTaskRepository,
         collector: "_AggregateCollector",
         run: OrchestrationRun,
+        *,
+        dispatch_task_id: str,
     ) -> DispatchTask:
-        task = dispatch_tasks.get(run.id)
+        normalized_dispatch_task_id = dispatch_task_id.strip()
+        if not normalized_dispatch_task_id:
+            raise RuntimeError("Orchestration dispatch task id cannot be empty.")
+        task = dispatch_tasks.get(normalized_dispatch_task_id)
         if task is not None:
+            if (
+                task.owner_kind != DISPATCH_OWNER_KIND
+                or task.owner_id != normalized_dispatch_task_id
+                or task.payload_ref != run.id
+            ):
+                raise RuntimeError(
+                    "Dispatch task is not owned by the expected orchestration step.",
+                )
+            task.metadata.update(
+                {
+                    "agent_id": run.agent_id,
+                    "run_id": run.id,
+                    "session_key": run.session_key,
+                },
+            )
             return task
         task = DispatchTask.create(
-            task_id=run.id,
+            task_id=normalized_dispatch_task_id,
             owner_kind=DISPATCH_OWNER_KIND,
-            owner_id=run.id,
+            owner_id=normalized_dispatch_task_id,
             lane_key=run.lane_key,
             policy=self._to_dispatch_policy(run.queue_policy),
             priority=run.priority,
             payload_ref=run.id,
             metadata={
-                "session_key": run.session_key,
                 "agent_id": run.agent_id,
+                "run_id": run.id,
+                "session_key": run.session_key,
             },
         )
         collector.collect(task)
@@ -173,7 +214,7 @@ class OrchestrationDispatchBridge:
         task = dispatch_tasks.get(task_id)
         if task is None:
             raise RuntimeError(
-                f"Dispatch task '{task_id}' was not found for orchestration run.",
+                f"Dispatch task '{task_id}' was not found for orchestration step.",
             )
         return task
 

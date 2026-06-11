@@ -7,6 +7,7 @@ from crxzipple.app import AppKey
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_ROOT = REPO_ROOT / "frontend" / "src"
 PRODUCTION_SCAN_ROOTS = (
     REPO_ROOT / "src" / "crxzipple" / "app",
     REPO_ROOT / "src" / "crxzipple" / "interfaces",
@@ -24,6 +25,56 @@ def _production_python_files(*roots: Path) -> list[Path]:
         for root in roots
         for path in ((root,) if root.is_file() and root.suffix == ".py" else root.rglob("*.py"))
     )
+
+
+def _frontend_source_files() -> list[Path]:
+    return sorted(
+        path
+        for path in FRONTEND_ROOT.rglob("*")
+        if path.suffix in {".ts", ".vue"}
+    )
+
+
+def _forbidden_import_violations(
+    roots: tuple[Path, ...],
+    forbidden_modules: tuple[str, ...],
+) -> list[str]:
+    violations: list[str] = []
+    for path in _production_python_files(*roots):
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            stripped = line.strip()
+            if stripped.startswith("from ") and " import " in stripped:
+                imported_module = stripped.removeprefix("from ").split(" import ", 1)[
+                    0
+                ].strip()
+                for forbidden_module in forbidden_modules:
+                    if (
+                        imported_module == forbidden_module
+                        or imported_module.startswith(f"{forbidden_module}.")
+                    ):
+                        violations.append(
+                            f"{path.relative_to(REPO_ROOT)}:{line_number}: {stripped}",
+                        )
+            if stripped.startswith("import "):
+                imported_modules = [
+                    item.strip().split(" as ", 1)[0]
+                    for item in stripped.removeprefix("import ").split(",")
+                ]
+                for imported_module in imported_modules:
+                    for forbidden_module in forbidden_modules:
+                        if (
+                            imported_module == forbidden_module
+                            or imported_module.startswith(f"{forbidden_module}.")
+                        ):
+                            violations.append(
+                                f"{path.relative_to(REPO_ROOT)}:{line_number}: "
+                                f"{stripped}",
+                            )
+
+    return violations
 
 
 def test_production_entrypoints_do_not_import_old_bootstrap_container() -> None:
@@ -78,6 +129,63 @@ def test_runtime_container_has_no_attribute_compatibility_surface() -> None:
     assert "def __getattr__(" not in registry_text
     assert "setattr(" not in container_text
     assert "setattr(" not in registry_text
+
+
+def test_orchestration_uses_prompt_input_collector_not_legacy_surface_builder() -> None:
+    violations: list[str] = []
+    for path in _production_python_files(
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration",
+        REPO_ROOT / "src" / "crxzipple" / "app" / "assembly" / "orchestration.py",
+    ):
+        text = path.read_text(encoding="utf-8")
+        if "RunPromptInputBuilder" in text:
+            violations.append(str(path.relative_to(REPO_ROOT)))
+
+    assert violations == []
+
+
+def test_prompt_engine_retired_legacy_import_paths_do_not_return() -> None:
+    retired_paths = (
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "modules"
+        / "orchestration"
+        / "application"
+        / "prompt_surface.py",
+        REPO_ROOT
+        / "src"
+        / "crxzipple"
+        / "app"
+        / "integration"
+        / "context_workspace_orchestration.py",
+    )
+    violations = [
+        f"{path.relative_to(REPO_ROOT)}: retired file"
+        for path in retired_paths
+        if path.exists()
+    ]
+
+    violations.extend(
+        _forbidden_import_violations(
+            PRODUCTION_SCAN_ROOTS,
+            ("crxzipple.modules.orchestration.application.prompt_surface",),
+        ),
+    )
+    exact_retired_adapter_import = re.compile(
+        r"^\s*from\s+crxzipple\.app\.integration\.context_workspace_orchestration\s+"
+        r"import\b"
+        r"|^\s*import\s+crxzipple\.app\.integration\.context_workspace_orchestration\s*$",
+        flags=re.MULTILINE,
+    )
+    for path in _production_python_files(*PRODUCTION_SCAN_ROOTS):
+        text = path.read_text(encoding="utf-8")
+        if exact_retired_adapter_import.search(text):
+            violations.append(
+                f"{path.relative_to(REPO_ROOT)}: retired exact adapter import",
+            )
+
+    assert violations == []
 
 
 def test_app_container_close_uses_only_registered_lifecycle_tasks() -> None:
@@ -228,6 +336,79 @@ def test_orchestration_does_not_own_skill_prompt_resolution() -> None:
         for name in forbidden[1:]:
             if name in text:
                 violations.append(f"{path.relative_to(REPO_ROOT)}: {name}")
+
+    assert violations == []
+
+
+def test_session_module_does_not_depend_on_context_workspace() -> None:
+    violations = _forbidden_import_violations(
+        roots=(REPO_ROOT / "src" / "crxzipple" / "modules" / "session",),
+        forbidden_modules=("crxzipple.modules.context_workspace",),
+    )
+
+    assert violations == []
+
+
+def test_context_workspace_module_does_not_depend_on_session_truth() -> None:
+    violations = _forbidden_import_violations(
+        roots=(REPO_ROOT / "src" / "crxzipple" / "modules" / "context_workspace",),
+        forbidden_modules=("crxzipple.modules.session",),
+    )
+
+    assert violations == []
+
+
+def test_orchestration_module_uses_context_workspace_port_not_module_imports() -> None:
+    violations = _forbidden_import_violations(
+        roots=(REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration",),
+        forbidden_modules=("crxzipple.modules.context_workspace",),
+    )
+
+    assert violations == []
+
+
+def test_orchestration_has_no_legacy_full_history_transcript_builder() -> None:
+    orchestration_root = (
+        REPO_ROOT / "src" / "crxzipple" / "modules" / "orchestration"
+    )
+    violations: list[str] = []
+    for path in _production_python_files(orchestration_root):
+        text = path.read_text(encoding="utf-8")
+        if "build_prompt_transcript" in text:
+            violations.append(f"{path.relative_to(REPO_ROOT)}: build_prompt_transcript")
+
+    assert violations == []
+
+
+def test_frontend_prompt_snapshot_uses_context_workspace_surface_only() -> None:
+    allowed_prompt_body_files = {
+        FRONTEND_ROOT / "pages" / "trace" / "api.ts",
+        FRONTEND_ROOT / "pages" / "trace" / "TracePage.vue",
+        FRONTEND_ROOT / "pages" / "workbench" / "api.ts",
+        FRONTEND_ROOT / "pages" / "workbench" / "WorkbenchPage.vue",
+    }
+    forbidden_prompt_api_markers = (
+        "/sessions",
+        "/orchestration",
+        "/llms",
+        "/tools",
+    )
+    violations: list[str] = []
+
+    for path in _frontend_source_files():
+        text = path.read_text(encoding="utf-8")
+        if "prompt_body" in text and path not in allowed_prompt_body_files:
+            violations.append(f"{path.relative_to(REPO_ROOT)}: prompt_body")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            lower_line = line.lower()
+            if "prompt" not in lower_line:
+                continue
+            for marker in forbidden_prompt_api_markers:
+                if marker in line:
+                    violations.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line_number}: "
+                        f"{line.strip()}",
+                    )
 
     assert violations == []
 

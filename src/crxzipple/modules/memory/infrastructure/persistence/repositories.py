@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.memory.domain import MemoryPolicy, MemorySpace
@@ -52,6 +53,26 @@ class SqlAlchemyMemorySpaceRepository:
                 session.add(_space_model(stored))
             else:
                 _apply_space(existing, stored)
+            try:
+                session.commit()
+                return stored
+            except IntegrityError:
+                session.rollback()
+                if existing is not None:
+                    raise
+
+        with self._session_factory() as session:
+            existing = session.get(MemorySpaceModel, space.scope_ref)
+            if existing is None:
+                raise RuntimeError(
+                    f"Memory space '{space.scope_ref}' conflicted during upsert but could not be reloaded.",
+                )
+            stored = replace(
+                space,
+                created_at=coerce_utc_datetime(existing.created_at),
+                updated_at=coerce_utc_datetime(space.updated_at),
+            )
+            _apply_space(existing, stored)
             session.commit()
             return stored
 

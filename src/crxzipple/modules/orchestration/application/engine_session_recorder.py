@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
 
 from crxzipple.modules.llm.domain import ToolCallIntent
 from crxzipple.modules.orchestration.domain import (
+    ExecutionOwnerReference,
     OrchestrationRun,
     OrchestrationValidationError,
 )
@@ -13,16 +15,33 @@ from crxzipple.modules.session.application import (
     AppendSessionMessagesInput,
 )
 from crxzipple.modules.session.domain import SessionMessageKind
-from crxzipple.modules.tool.domain import ToolRun
+from crxzipple.modules.tool.domain import ToolRun, ToolRunStatus
 from crxzipple.shared.content_blocks import (
     normalize_content_blocks,
     text_content_block,
 )
 
+if TYPE_CHECKING:
+    from crxzipple.modules.orchestration.domain import (
+        ExecutionStepItem,
+        ExecutionStepItemStatus,
+    )
+
+
+class ExecutionStepItemLookupPort(Protocol):
+    def find_execution_step_items_by_owner(
+        self,
+        owner: ExecutionOwnerReference,
+        *,
+        status: "ExecutionStepItemStatus | None" = None,
+    ) -> list["ExecutionStepItem"]:
+        ...
+
 
 @dataclass(slots=True)
 class OrchestrationSessionRecorder:
     session_service: SessionRecorderPort
+    execution_item_lookup: ExecutionStepItemLookupPort | None = None
 
     def ensure_inbound_message(
         self,
@@ -237,9 +256,17 @@ class OrchestrationSessionRecorder:
             payload["content"] = content_blocks
         if tool_result is not None and tool_result.details is not None:
             payload["details"] = tool_result.details
+        if tool_result is not None and tool_result.metadata:
+            result_metadata = _session_tool_result_metadata(tool_result.metadata)
+            if result_metadata:
+                payload["metadata"] = result_metadata
         if tool_run.error is not None:
             payload["error"] = tool_run.error.to_storage()
             payload["content"] = [text_content_block(tool_run.error.message)]
+        elif tool_run.status in {ToolRunStatus.CANCELLED, ToolRunStatus.TIMED_OUT}:
+            payload["content"] = [
+                text_content_block(_terminal_tool_run_status_message(tool_run)),
+            ]
         return payload
 
     def append_completed_background_tool_results(
@@ -257,7 +284,6 @@ class OrchestrationSessionRecorder:
             raise OrchestrationValidationError(
                 "Orchestration run active_session_id is required to append tool results.",
             )
-        pending_mapping = self._pending_background_tool_mapping(run)
         message_ids: list[str] = []
         for tool_run in tool_runs:
             existing = self.session_service.get_message_by_source(
@@ -267,13 +293,11 @@ class OrchestrationSessionRecorder:
                 source_id=tool_run.id,
             )
             if existing is not None:
+                message_ids.append(existing.id)
                 continue
-            tool_metadata = pending_mapping.get(
-                tool_run.id,
-                {
-                    "tool_call_id": tool_run.id,
-                    "tool_name": tool_run.tool_id,
-                },
+            tool_metadata = self._background_tool_result_reference(
+                run=run,
+                tool_run=tool_run,
             )
             message_id = self.append_tool_result_message(
                 session_key=session_key,
@@ -290,28 +314,111 @@ class OrchestrationSessionRecorder:
             message_ids.append(message_id)
         return tuple(message_ids)
 
-    @staticmethod
-    def _pending_background_tool_mapping(
+    def _background_tool_result_reference(
+        self,
+        *,
         run: OrchestrationRun,
-    ) -> dict[str, dict[str, str]]:
-        raw_items = run.metadata.get("pending_background_tools")
-        if not isinstance(raw_items, list):
-            return {}
-        mapping: dict[str, dict[str, str]] = {}
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            tool_run_id = item.get("tool_run_id")
-            tool_call_id = item.get("tool_call_id")
-            tool_name = item.get("tool_name")
-            if not isinstance(tool_run_id, str) or not tool_run_id.strip():
-                continue
-            if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-                continue
-            if not isinstance(tool_name, str) or not tool_name.strip():
-                continue
-            mapping[tool_run_id] = {
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-            }
-        return mapping
+        tool_run: ToolRun,
+    ) -> dict[str, str]:
+        if self.execution_item_lookup is None:
+            raise OrchestrationValidationError(
+                "Execution step item lookup is required to append background tool "
+                "results.",
+            )
+        items = self.execution_item_lookup.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(owner_kind="tool_run", owner_id=tool_run.id),
+        )
+        item = next(
+            (candidate for candidate in reversed(items) if candidate.turn_id == run.id),
+            None,
+        )
+        if item is None:
+            raise OrchestrationValidationError(
+                "Execution step item for background tool run "
+                f"'{tool_run.id}' was not found.",
+            )
+        summary = item.summary_payload if isinstance(item.summary_payload, dict) else {}
+        tool_call_id = _non_empty_text(summary.get("tool_call_id")) or _non_empty_text(
+            item.correlation_key,
+        )
+        tool_name = _non_empty_text(summary.get("tool_name"))
+        if tool_call_id is None or tool_name is None:
+            raise OrchestrationValidationError(
+                "Execution step item for background tool run "
+                f"'{tool_run.id}' is missing tool call reference metadata.",
+            )
+        return {"tool_call_id": tool_call_id, "tool_name": tool_name}
+
+
+def _non_empty_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _session_tool_result_metadata(metadata: dict[str, Any]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in metadata.items():
+        normalized_key = str(key)
+        if not _keeps_session_tool_result_metadata_key(normalized_key):
+            continue
+        normalized_value = _json_safe_session_metadata(value)
+        if normalized_value is not None:
+            result[normalized_key] = normalized_value
+    return result
+
+
+def _keeps_session_tool_result_metadata_key(key: str) -> bool:
+    if key.startswith("browser_") or key.startswith("artifact_"):
+        return True
+    return key in {
+        "artifact_ids",
+        "family",
+        "kind",
+        "post_state_summary",
+        "profile_name",
+        "profile_source",
+        "tool",
+    }
+
+
+def _json_safe_session_metadata(value: Any, *, depth: int = 0) -> object | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:512]
+    if depth >= 2:
+        return None
+    if isinstance(value, (list, tuple)):
+        items: list[object] = []
+        for item in list(value)[:20]:
+            normalized = _json_safe_session_metadata(item, depth=depth + 1)
+            if normalized is not None:
+                items.append(normalized)
+        return items
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for index, (item_key, item_value) in enumerate(value.items()):
+            if index >= 40:
+                break
+            normalized_value = _json_safe_session_metadata(
+                item_value,
+                depth=depth + 1,
+            )
+            if normalized_value is not None:
+                result[str(item_key)[:120]] = normalized_value
+        return result
+    return str(value)[:512]
+
+
+def _terminal_tool_run_status_message(tool_run: ToolRun) -> str:
+    if tool_run.status is ToolRunStatus.CANCELLED:
+        return f"Tool run '{tool_run.tool_id}' was cancelled before completion."
+    if tool_run.status is ToolRunStatus.TIMED_OUT:
+        return f"Tool run '{tool_run.tool_id}' timed out before completion."
+    return f"Tool run '{tool_run.tool_id}' ended with status '{tool_run.status.value}'."

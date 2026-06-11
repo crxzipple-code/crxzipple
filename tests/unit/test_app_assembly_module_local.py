@@ -232,6 +232,7 @@ def test_context_workspace_factory_builds_tree_services() -> None:
         assert tree.workspace.id == workspace.id
         assert {node.id for node in tree.nodes} >= {
             "agent.identity",
+            "agent.home",
             "session.current",
             "tools.available",
             "memory.visible",
@@ -378,7 +379,12 @@ def test_skills_factory_builds_owner_manager_without_settings_materializer() -> 
 def test_browser_factory_builds_profile_runtime_infrastructure() -> None:
     with _assembly_harness() as harness:
         container = build_app_container(
-            _module_local_plan(events_factories() + daemon_factories() + browser_factories()),
+            _module_local_plan(
+                database_factories()
+                + events_factories()
+                + daemon_factories()
+                + browser_factories(),
+            ),
             target=AssemblyTarget.TEST,
             overrides={AppKey.CORE_SETTINGS: harness.settings},
         )
@@ -643,6 +649,7 @@ def test_runtime_plan_builds_executable_orchestration_and_tool_runtime() -> None
             assert container.has(AppKey.SESSION_RUNTIME_CONTROL)
             assert container.has(AppKey.CONTEXT_TREE_SERVICE)
             assert container.has(AppKey.CONTEXT_SESSION_NODE_PROVIDER)
+            assert container.has(AppKey.CONTEXT_AGENT_HOME_NODE_PROVIDER)
             assert container.has(AppKey.CONTEXT_SKILL_NODE_PROVIDER)
             assert container.has(AppKey.CONTEXT_TOOL_NODE_PROVIDER)
             assert container.has(AppKey.CONTEXT_MEMORY_NODE_PROVIDER)

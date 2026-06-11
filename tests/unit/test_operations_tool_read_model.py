@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from crxzipple.app.assembly.tool import (
+from tests.unit.browser_tool_package_support import (
     browser_function_catalog_candidates,
-    browser_source_records_from_system_config,
+    browser_source_records_from_package,
 )
 from crxzipple.modules.operations.application.read_models.tool import (
     ToolOperationsReadModelProvider,
@@ -78,23 +78,10 @@ class _ReadinessPoisonedToolService(_ToolService):
 
 
 def test_tool_operations_source_health_exposes_single_browser_source() -> None:
-    source = browser_source_records_from_system_config(
-        SimpleNamespace(
-            cdp_host="127.0.0.1",
-            cdp_port_range_start=18800,
-            profiles=(
-                SimpleNamespace(
-                    name="work",
-                    driver="managed",
-                    cdp_url=None,
-                    cdp_port=18800,
-                ),
-            ),
-        ),
-    )[0]
+    source = browser_source_records_from_package()[0]
     functions = tuple(
         ToolFunctionCatalogRecord.from_candidate(candidate)
-        for candidate in browser_function_catalog_candidates(source_id=source.source_id)
+        for candidate in browser_function_catalog_candidates()
     )
 
     page = ToolOperationsReadModelProvider(
@@ -104,7 +91,7 @@ def test_tool_operations_source_health_exposes_single_browser_source() -> None:
     column_keys = {column.key for column in page.source_health.columns}
     assert {"endpoint", "runtime", "tools_list"}.issubset(column_keys)
     row = page.source_health.rows[0]
-    assert row.id == "configured.browser"
+    assert row.id == "bundled.local_package.browser"
     assert row.cells["endpoint"] == "-"
     assert row.cells["runtime"] == "Browser profile context"
     assert row.cells["tools_list"] == "-"
@@ -112,16 +99,14 @@ def test_tool_operations_source_health_exposes_single_browser_source() -> None:
 
 
 def test_browser_source_health_is_not_downgraded_by_runtime_readiness() -> None:
-    source = browser_source_records_from_system_config(
-        SimpleNamespace(cdp_host="127.0.0.1", cdp_port_range_start=18800, profiles=()),
-    )[0]
+    source = browser_source_records_from_package()[0]
 
     page = ToolOperationsReadModelProvider(
         tool_service=_ReadinessPoisonedToolService(sources=(source,)),
     ).page()
 
     row = page.source_health.rows[0]
-    assert row.id == "configured.browser"
+    assert row.id == "bundled.local_package.browser"
     assert row.status == "active"
     assert row.tone == "success"
     assert row.cells["runtime"] == "Browser profile context"
@@ -132,7 +117,7 @@ def test_tool_run_detail_exposes_browser_profile_resolution() -> None:
         run_id="run-browser-1",
         tool_id="browser.navigate",
         function_id="browser.navigate",
-        source_id="configured.browser",
+        source_id="bundled.local_package.browser",
         input_payload={"url": "https://example.com"},
         target=ToolExecutionTarget(
             mode=ToolMode.INLINE,

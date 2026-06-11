@@ -15,7 +15,6 @@ from crxzipple.modules.context_workspace.domain import (
 )
 from crxzipple.modules.skills.application import (
     SkillPackage,
-    SkillReadResult,
 )
 from crxzipple.modules.skills.domain import SkillError
 
@@ -38,16 +37,6 @@ class SkillContextService(Protocol):
         surface: str,
         include_disabled: bool = False,
     ) -> SkillPackage:
-        ...
-
-    def read(
-        self,
-        *,
-        workspace_dir: str | None,
-        skill_name: str,
-        path: str | None,
-        surface: str,
-    ) -> SkillReadResult:
         ...
 
 
@@ -96,20 +85,15 @@ class SkillContextNodeProvider:
         skill_name = _optional_text(request.node.owner_ref.get("skill_name"))
         if skill_name is None:
             return ()
-        workspace_dir = _workspace_dir(request)
-        surface = _surface(request)
-        try:
-            result = self._skill_service.read(
-                workspace_dir=workspace_dir,
-                skill_name=skill_name,
-                path=None,
-                surface=surface,
-            )
-        except SkillError:
-            return ()
         return (
             _skill_instructions_node_seed(
-                result,
+                skill_name=skill_name,
+                requested_path=_optional_text(
+                    request.node.owner_ref.get("instructions_path"),
+                ),
+                resolved_path=_optional_text(
+                    request.node.owner_ref.get("instructions_path"),
+                ),
                 parent_id=request.node.id,
             ),
         )
@@ -148,7 +132,6 @@ _SKILL_ACTIONS = (
     ContextAction.COLLAPSE,
     ContextAction.PIN,
     ContextAction.UNPIN,
-    ContextAction.READ_SKILL,
     ContextAction.ESTIMATE,
 )
 
@@ -197,31 +180,36 @@ def _skill_node_seed(
 
 
 def _skill_instructions_node_seed(
-    result: SkillReadResult,
     *,
+    skill_name: str,
+    requested_path: str | None,
+    resolved_path: str | None,
     parent_id: str,
 ) -> ContextNodeSeed:
-    content = result.content.strip()
-    summary = _truncate(content, 1600)
+    title = requested_path.rsplit("/", 1)[-1] if requested_path else "SKILL.md"
+    summary = (
+        f"Skill instructions file '{title}' is available through the skill_read "
+        f"tool. Read it with skill='{skill_name}' "
+        "when the task needs the full instructions."
+    )
     return ContextNodeSeed(
         node_id=f"{parent_id}.instructions",
         parent_id=parent_id,
         owner="skills",
         kind="skill_instructions",
-        title=result.requested_path or "SKILL.md",
+        title=title,
         summary=summary,
-        state=ContextNodeState(collapsed=False, loaded=True),
+        state=ContextNodeState(collapsed=True, loaded=True),
         actions=(ContextAction.PIN, ContextAction.UNPIN, ContextAction.ESTIMATE),
         owner_ref={
-            "skill_name": result.package.name,
-            "requested_path": result.requested_path,
-            "resolved_path": result.resolved_path,
+            "skill_name": skill_name,
+            "requested_path": requested_path,
+            "resolved_path": resolved_path,
         },
         estimate=_text_estimate(summary),
         display_order=10,
         metadata={
-            "content_chars": len(content),
-            "truncated": len(content) > len(summary),
+            "content_available_via": "skill_read",
         },
     )
 
@@ -231,7 +219,7 @@ def _workspace_dir(request: ContextChildrenRequest) -> str | None:
 
 
 def _surface(request: ContextChildrenRequest) -> str:
-    return _optional_text(request.workspace.metadata.get("prompt_surface")) or "interactive"
+    return _optional_text(request.workspace.metadata.get("prompt_input")) or "interactive"
 
 
 def _available_skill_names(metadata: dict[str, object]) -> tuple[str, ...]:

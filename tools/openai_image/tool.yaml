@@ -1,5 +1,8 @@
 kind: local_package
 namespace: openai_image
+prompt:
+  title: Image Generation
+  summary: Generate and edit images through configured provider credentials and artifact outputs.
 capabilities:
   - credential.read
   - access.readiness

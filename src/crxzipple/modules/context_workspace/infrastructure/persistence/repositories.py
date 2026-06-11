@@ -98,8 +98,14 @@ class SqlAlchemyContextNodeRepository:
     def save_many(self, nodes: tuple[ContextNode, ...]) -> None:
         if not nodes:
             return
+        deduped_nodes = tuple(
+            {
+                (node.workspace_id, node.id): node
+                for node in nodes
+            }.values(),
+        )
         with self._session_factory() as session:
-            for node in nodes:
+            for node in deduped_nodes:
                 model = _get_node_model(
                     session,
                     workspace_id=node.workspace_id,
@@ -109,6 +115,46 @@ class SqlAlchemyContextNodeRepository:
                     session.add(_node_model(node))
                 else:
                     _apply_node(model, node)
+            session.commit()
+
+    def delete_subtrees(
+        self,
+        *,
+        workspace_id: str,
+        root_node_ids: tuple[str, ...],
+    ) -> None:
+        normalized_workspace_id = workspace_id.strip()
+        root_ids = {
+            node_id.strip()
+            for node_id in root_node_ids
+            if isinstance(node_id, str) and node_id.strip()
+        }
+        if not normalized_workspace_id or not root_ids:
+            return
+        with self._session_factory() as session:
+            models = session.scalars(
+                select(ContextNodeStateModel).where(
+                    ContextNodeStateModel.workspace_id == normalized_workspace_id,
+                ),
+            ).all()
+            by_parent: dict[str | None, list[ContextNodeStateModel]] = {}
+            by_id: dict[str, ContextNodeStateModel] = {}
+            for model in models:
+                by_id[model.node_id] = model
+                by_parent.setdefault(model.parent_id, []).append(model)
+            delete_ids = set(root_ids)
+            queue = list(root_ids)
+            while queue:
+                parent_id = queue.pop()
+                for child in by_parent.get(parent_id, ()):
+                    if child.node_id in delete_ids:
+                        continue
+                    delete_ids.add(child.node_id)
+                    queue.append(child.node_id)
+            for node_id in delete_ids:
+                model = by_id.get(node_id)
+                if model is not None:
+                    session.delete(model)
             session.commit()
 
     def get(self, *, workspace_id: str, node_id: str) -> ContextNode | None:
@@ -168,11 +214,7 @@ class SqlAlchemyContextRenderSnapshotRepository:
 
     def add(self, snapshot: ContextRenderSnapshot) -> None:
         with self._session_factory() as session:
-            existing = session.scalar(
-                select(ContextRenderSnapshotModel).where(
-                    ContextRenderSnapshotModel.run_id == snapshot.run_id,
-                ),
-            )
+            existing = session.get(ContextRenderSnapshotModel, snapshot.id)
             if existing is None:
                 session.add(_snapshot_model(snapshot))
             else:
@@ -189,8 +231,11 @@ class SqlAlchemyContextRenderSnapshotRepository:
     def get_by_run(self, run_id: str) -> ContextRenderSnapshot | None:
         with self._session_factory() as session:
             model = session.scalar(
-                select(ContextRenderSnapshotModel).where(
-                    ContextRenderSnapshotModel.run_id == run_id.strip(),
+                select(ContextRenderSnapshotModel)
+                .where(ContextRenderSnapshotModel.run_id == run_id.strip())
+                .order_by(
+                    ContextRenderSnapshotModel.created_at.desc(),
+                    ContextRenderSnapshotModel.snapshot_id.desc(),
                 ),
             )
             if model is None:

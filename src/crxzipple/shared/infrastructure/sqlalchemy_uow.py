@@ -9,15 +9,21 @@ from crxzipple.core.logger import get_logger
 from crxzipple.modules.dispatch.infrastructure.persistence.repositories import (
     SqlAlchemyDispatchTaskRepository,
 )
+from crxzipple.modules.events.domain import EventOutboxRecord
+from crxzipple.modules.events.infrastructure.persistence.repositories import (
+    SqlAlchemyEventOutboxRepository,
+)
 from crxzipple.modules.llm.infrastructure.persistence.repositories import (
     SqlAlchemyLlmInvocationRepository,
     SqlAlchemyLlmProfileRepository,
 )
 from crxzipple.modules.orchestration.infrastructure.persistence.repositories import (
+    SqlAlchemyExecutionChainRepository,
+    SqlAlchemyExecutionStepItemRepository,
+    SqlAlchemyExecutionStepRepository,
     SqlAlchemyOrchestrationExecutorLeaseRepository,
     SqlAlchemyOrchestrationIngressRequestRepository,
     SqlAlchemyOrchestrationRunRepository,
-    SqlAlchemyOrchestrationSchedulerSignalRepository,
     SqlAlchemyOrchestrationRunWaitRepository,
 )
 from crxzipple.modules.session.infrastructure.persistence.repositories import (
@@ -37,21 +43,20 @@ from crxzipple.modules.tool.infrastructure.persistence.repositories import (
 )
 from crxzipple.shared.application.unit_of_work import UnitOfWork
 from crxzipple.shared.domain.aggregates import AggregateRoot
-from crxzipple.shared.infrastructure.event_bus import EventBus
 
 logger = get_logger(__name__)
 
 
 class SqlAlchemyUnitOfWork(UnitOfWork):
-    def __init__(self, session_factory: SessionFactory, event_bus: EventBus) -> None:
+    def __init__(self, session_factory: SessionFactory) -> None:
         self._session_factory = session_factory
-        self._event_bus = event_bus
         self._session: Session | None = None
         self._seen: list[AggregateRoot[Any]] = []
 
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
         self._session = self._session_factory()
         self.dispatch_tasks = SqlAlchemyDispatchTaskRepository(self.session)
+        self.event_outbox = SqlAlchemyEventOutboxRepository(self.session)
         self.tool_sources = SqlAlchemyToolSourceRepository(self.session)
         self.tool_source_discovery_runs = SqlAlchemyToolSourceDiscoveryRunRepository(
             self.session,
@@ -74,12 +79,14 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.llm_profiles = SqlAlchemyLlmProfileRepository(self.session)
         self.llm_invocations = SqlAlchemyLlmInvocationRepository(self.session)
         self.llms = self.llm_profiles
+        self.execution_chains = SqlAlchemyExecutionChainRepository(self.session)
+        self.execution_steps = SqlAlchemyExecutionStepRepository(self.session)
+        self.execution_step_items = SqlAlchemyExecutionStepItemRepository(
+            self.session,
+        )
         self.orchestration_runs = SqlAlchemyOrchestrationRunRepository(self.session)
         self.orchestration_ingress_requests = (
             SqlAlchemyOrchestrationIngressRequestRepository(self.session)
-        )
-        self.orchestration_scheduler_signals = (
-            SqlAlchemyOrchestrationSchedulerSignalRepository(self.session)
         )
         self.orchestration_executor_leases = (
             SqlAlchemyOrchestrationExecutorLeaseRepository(self.session)
@@ -128,14 +135,16 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
 
     def commit(self) -> None:
         logger.debug("committing unit of work", extra={"aggregate_count": len(self._seen)})
-        self.session.commit()
         events = tuple(
             event
             for aggregate in self._seen
-            for event in aggregate.pull_events()
+            for event in aggregate.pending_events()
         )
-        if events:
-            self._event_bus.publish_many(events)
+        for event in events:
+            self.event_outbox.add(EventOutboxRecord.from_event(event))
+        self.session.commit()
+        for aggregate in self._seen:
+            aggregate.clear_events()
         self._seen.clear()
 
     def rollback(self) -> None:

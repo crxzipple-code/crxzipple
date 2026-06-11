@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from crxzipple.app.keys import AppKey
-from crxzipple.app.plan import ApplicationFactory
+from crxzipple.app.plan import ApplicationFactory, AssemblyTarget
 from crxzipple.core.config import Settings
 from crxzipple.modules.browser.application.event_contracts import (
     browser_event_definitions,
@@ -35,6 +35,9 @@ from crxzipple.modules.events import (
     events_event_definitions,
     events_event_surfaces,
     events_event_topic_contracts,
+)
+from crxzipple.modules.events.infrastructure.outbox_publisher import (
+    EventOutboxPublisherService,
 )
 from crxzipple.modules.memory.application.event_contracts import (
     memory_event_definitions,
@@ -84,6 +87,16 @@ def events_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.EVENT_CONTRACT_REGISTRY: build_event_contract_registry(),
                 AppKey.EVENT_DEFINITION_REGISTRY: build_event_definition_registry(),
             },
+        ),
+        ApplicationFactory(
+            key="events.outbox_publisher",
+            provides=(AppKey.EVENT_OUTBOX_PUBLISHER_SERVICE,),
+            requires=(AppKey.DATABASE_SESSION_FACTORY, AppKey.EVENTS_BUS),
+            build=lambda ctx: EventOutboxPublisherService(
+                session_factory=ctx.require(AppKey.DATABASE_SESSION_FACTORY),
+                event_bus=ctx.require(AppKey.EVENTS_BUS),
+            ),
+            targets=(AssemblyTarget.EVENT_OUTBOX_PUBLISHER, AssemblyTarget.TEST),
         ),
     )
 

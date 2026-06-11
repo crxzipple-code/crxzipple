@@ -6,6 +6,9 @@ from dataclasses import dataclass, replace
 from crxzipple.modules.llm.domain import LlmMessage, LlmMessageRole
 from crxzipple.modules.orchestration.application.prompting import estimate_text_tokens
 from crxzipple.modules.session.domain import SessionMessage
+from crxzipple.modules.tool.application.result_envelope import (
+    TOOL_RESULT_ENVELOPE_METADATA_KEY,
+)
 from crxzipple.shared.content_blocks import (
     content_blocks_from_payload,
     describe_content_for_text_fallback,
@@ -20,20 +23,53 @@ class PromptTranscript:
     message_count: int
     chars: int
     estimated_tokens: int
+    tool_result_stats: dict[str, object]
 
 
-def build_prompt_transcript(
+def build_current_run_prompt_window(
+    messages: tuple[SessionMessage, ...],
+    *,
+    completed_tool_call_ids: tuple[str, ...] | None = None,
+    consumed_through_sequence_no: int | None = None,
+    preserve_message_ids: tuple[str, ...] = (),
+) -> PromptTranscript:
+    return _build_session_message_prompt_window(
+        messages,
+        completed_tool_call_ids=completed_tool_call_ids,
+        consumed_through_sequence_no=consumed_through_sequence_no,
+        preserve_message_ids=preserve_message_ids,
+    )
+
+
+def build_memory_flush_prompt_transcript(
+    messages: tuple[SessionMessage, ...],
+    *,
+    max_chars: int,
+) -> PromptTranscript:
+    return _build_session_message_prompt_window(messages, max_chars=max_chars)
+
+
+def _build_session_message_prompt_window(
     messages: tuple[SessionMessage, ...],
     *,
     max_chars: int | None = None,
+    completed_tool_call_ids: tuple[str, ...] | None = None,
+    consumed_through_sequence_no: int | None = None,
+    preserve_message_ids: tuple[str, ...] = (),
 ) -> PromptTranscript:
     filtered_messages = _prune_processed_history_attachments(
-        _filter_transcript_messages(messages),
+        _filter_transcript_messages(
+            messages,
+            completed_tool_call_ids=completed_tool_call_ids,
+            consumed_through_sequence_no=consumed_through_sequence_no,
+            preserve_message_ids=preserve_message_ids,
+        ),
     )
     filtered_messages = _truncate_messages_to_recent_budget(
         filtered_messages,
         max_chars=max_chars,
     )
+    tool_result_stats = _tool_result_stats(filtered_messages)
     llm_messages = tuple(_to_llm_message(message) for message in filtered_messages)
     return PromptTranscript(
         messages=llm_messages,
@@ -43,6 +79,7 @@ def build_prompt_transcript(
             _message_content_tokens(message.content)
             for message in llm_messages
         ),
+        tool_result_stats=tool_result_stats,
     )
 
 
@@ -63,6 +100,8 @@ def _to_llm_message(message: SessionMessage) -> LlmMessage:
             tool_name = None
     metadata = {
         "session_message_id": message.id,
+        "session_id": message.session_id,
+        "sequence_no": message.sequence_no,
         "kind": message.kind.value,
         "source_kind": message.source_kind,
         "source_id": message.source_id,
@@ -93,6 +132,9 @@ def _extract_content(
     ):
         return dict(message.content_payload)
     if role is LlmMessageRole.TOOL:
+        compact_result = _compact_tool_result_content(message)
+        if compact_result is not None:
+            return compact_result
         blocks = content_blocks_from_payload(message.content_payload)
         if blocks:
             return blocks
@@ -113,6 +155,202 @@ def _extract_content(
     ]
 
 
+def _compact_tool_result_content(message: SessionMessage) -> list[dict[str, object]] | None:
+    metadata = message.content_payload.get("metadata")
+    details = message.content_payload.get("details")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if not isinstance(details, dict):
+        details = {}
+    envelope = metadata.get(TOOL_RESULT_ENVELOPE_METADATA_KEY)
+    if isinstance(envelope, dict):
+        content = _compact_tool_result_envelope_text(
+            envelope,
+            artifact_ids=_metadata_artifact_ids(metadata),
+            body_removed=details.get("body_removed_from_details") is True,
+            browser_evidence=_metadata_browser_evidence(metadata),
+        )
+        if content is not None:
+            return [text_content_block(content)]
+    artifact_ids = _metadata_artifact_ids(metadata)
+    if not artifact_ids and details.get("body_removed_from_details") is not True:
+        return None
+    lines = ["result_body: omitted_from_provider_transcript"]
+    endpoint = _optional_text(details.get("endpoint"))
+    method = _optional_text(details.get("method"))
+    if endpoint is not None:
+        lines.append(f"endpoint: {endpoint}")
+    if method is not None:
+        lines.append(f"method: {method}")
+    evidence_path = _browser_evidence_path_summary(_metadata_browser_evidence(metadata))
+    if evidence_path is not None:
+        lines.append(f"evidence_path: {evidence_path}")
+    if artifact_ids:
+        lines.append(f"artifact_refs: {', '.join(artifact_ids)}")
+    lines.append("read_full_result: use owner refs or evidence read_hints")
+    return [text_content_block("\n".join(lines))]
+
+
+def _compact_tool_result_envelope_text(
+    envelope: dict[str, object],
+    *,
+    artifact_ids: tuple[str, ...],
+    body_removed: bool,
+    browser_evidence: dict[str, object],
+) -> str | None:
+    if envelope.get("truncated") is not True and not artifact_ids and not body_removed:
+        return None
+    lines = ["result_body: omitted_from_provider_transcript"]
+    status = _optional_text(envelope.get("status"))
+    summary = _optional_text(envelope.get("summary"))
+    if status is not None:
+        lines.append(f"status: {status}")
+    if summary is not None:
+        lines.append(f"summary: {summary}")
+    key_facts = envelope.get("key_facts")
+    if isinstance(key_facts, dict) and key_facts:
+        lines.append(
+            "key_facts: "
+            + json.dumps(key_facts, ensure_ascii=True, sort_keys=True),
+        )
+    evidence_path = _browser_evidence_path_summary(browser_evidence)
+    if evidence_path is not None:
+        lines.append(f"evidence_path: {evidence_path}")
+    refs = _text_list(envelope.get("evidence_refs"))
+    if artifact_ids:
+        refs = tuple(dict.fromkeys((*refs, *artifact_ids)))
+    if refs:
+        lines.append(f"artifact_refs: {', '.join(refs)}")
+    omitted_count = _optional_int(envelope.get("omitted_count"))
+    omitted_chars = _optional_int(envelope.get("omitted_chars"))
+    if omitted_count is not None:
+        lines.append(f"omitted_count: {omitted_count}")
+    if omitted_chars is not None:
+        lines.append(f"omitted_chars: {omitted_chars}")
+    read_handles = envelope.get("read_handles")
+    if isinstance(read_handles, list) and read_handles:
+        lines.append(
+            "read_handles: "
+            + json.dumps(read_handles[:8], ensure_ascii=True, sort_keys=True),
+        )
+    warnings = _text_list(envelope.get("warnings"))
+    if warnings:
+        lines.append(f"warnings: {'; '.join(warnings)}")
+    lines.append("read_full_result: use owner refs or evidence read_hints")
+    return "\n".join(lines)
+
+
+def _tool_result_stats(messages: tuple[SessionMessage, ...]) -> dict[str, object]:
+    stats: dict[str, object] = {
+        "tool_result_message_count": 0,
+        "compacted_result_count": 0,
+        "omitted_chars": 0,
+        "omitted_count": 0,
+        "artifact_ref_count": 0,
+        "read_handle_count": 0,
+    }
+    artifact_refs: set[str] = set()
+    for message in messages:
+        if message.role != "tool":
+            continue
+        stats["tool_result_message_count"] = (
+            int(stats["tool_result_message_count"]) + 1
+        )
+        metadata = message.content_payload.get("metadata")
+        details = message.content_payload.get("details")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if not isinstance(details, dict):
+            details = {}
+        envelope = metadata.get(TOOL_RESULT_ENVELOPE_METADATA_KEY)
+        artifact_ids = _metadata_artifact_ids(metadata)
+        for artifact_id in artifact_ids:
+            artifact_refs.add(artifact_id)
+        if not isinstance(envelope, dict):
+            if artifact_ids or details.get("body_removed_from_details") is True:
+                stats["compacted_result_count"] = (
+                    int(stats["compacted_result_count"]) + 1
+                )
+            continue
+        if (
+            envelope.get("truncated") is True
+            or artifact_ids
+            or details.get("body_removed_from_details") is True
+        ):
+            stats["compacted_result_count"] = (
+                int(stats["compacted_result_count"]) + 1
+            )
+        stats["omitted_chars"] = int(stats["omitted_chars"]) + (
+            _optional_int(envelope.get("omitted_chars")) or 0
+        )
+        stats["omitted_count"] = int(stats["omitted_count"]) + (
+            _optional_int(envelope.get("omitted_count")) or 0
+        )
+        for artifact_id in _text_list(envelope.get("evidence_refs")):
+            artifact_refs.add(artifact_id)
+        read_handles = envelope.get("read_handles")
+        if isinstance(read_handles, list):
+            stats["read_handle_count"] = (
+                int(stats["read_handle_count"]) + len(read_handles)
+            )
+    stats["artifact_ref_count"] = len(artifact_refs)
+    return stats
+
+
+def _metadata_artifact_ids(metadata: dict[str, object]) -> tuple[str, ...]:
+    raw = metadata.get("artifact_ids")
+    if not isinstance(raw, list):
+        raw = metadata.get("browser_artifact_ids")
+    if not isinstance(raw, list):
+        return ()
+    values = [_optional_text(item) for item in raw]
+    return tuple(dict.fromkeys(value for value in values if value is not None))
+
+
+def _metadata_browser_evidence(metadata: dict[str, object]) -> dict[str, object]:
+    value = metadata.get("browser_evidence")
+    if not isinstance(value, dict):
+        return {}
+    return dict(value)
+
+
+def _browser_evidence_path_summary(evidence: dict[str, object]) -> str | None:
+    key = _optional_text(evidence.get("evidence_path_key"))
+    title = _optional_text(evidence.get("evidence_path_title"))
+    tools = _text_list(evidence.get("evidence_path_tools"))
+    if key is None and title is None and not tools:
+        return None
+    label = key or title or "browser_evidence"
+    if key is not None and title is not None:
+        label = f"{key} ({title})"
+    if tools:
+        label += ": " + ", ".join(tools[:4])
+    return label
+
+
+def _text_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    values = [_optional_text(item) for item in value]
+    return tuple(dict.fromkeys(item for item in values if item is not None))
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _message_content_chars(content: object) -> int:
     text_content = extract_text_content(content)
     if text_content is not None:
@@ -129,16 +367,47 @@ def _message_content_tokens(content: object) -> int:
 
 def _filter_transcript_messages(
     messages: tuple[SessionMessage, ...],
+    *,
+    completed_tool_call_ids: tuple[str, ...] | None = None,
+    consumed_through_sequence_no: int | None = None,
+    preserve_message_ids: tuple[str, ...] = (),
 ) -> tuple[SessionMessage, ...]:
-    completed_tool_call_ids = {
+    visible_messages = _messages_after_consumed_frontier(
+        messages,
+        consumed_through_sequence_no=consumed_through_sequence_no,
+        preserve_message_ids=preserve_message_ids,
+    )
+    explicit_completed_tool_call_ids = (
+        _normalized_tool_call_ids(completed_tool_call_ids)
+        if completed_tool_call_ids is not None
+        else None
+    )
+    visible_completed_tool_call_ids = {
         tool_call_id.strip()
-        for message in messages
+        for message in visible_messages
         if message.role == "tool"
         for tool_call_id in (message.metadata.get("tool_call_id"),)
         if isinstance(tool_call_id, str) and tool_call_id.strip()
     }
+    completed_tool_call_id_set = (
+        visible_completed_tool_call_ids
+        if explicit_completed_tool_call_ids is None
+        else explicit_completed_tool_call_ids & visible_completed_tool_call_ids
+    )
     filtered: list[SessionMessage] = []
-    for message in messages:
+    for message in visible_messages:
+        tool_call_id = message.metadata.get("tool_call_id")
+        normalized_tool_call_id = (
+            tool_call_id.strip()
+            if isinstance(tool_call_id, str) and tool_call_id.strip()
+            else None
+        )
+        if (
+            explicit_completed_tool_call_ids is not None
+            and message.role == "tool"
+            and normalized_tool_call_id not in explicit_completed_tool_call_ids
+        ):
+            continue
         is_function_call = (
             message.role == "assistant"
             and message.content_payload.get("type") == "function_call"
@@ -146,14 +415,37 @@ def _filter_transcript_messages(
         if not is_function_call:
             filtered.append(message)
             continue
-        tool_call_id = message.metadata.get("tool_call_id")
-        if (
-            isinstance(tool_call_id, str)
-            and tool_call_id.strip()
-            and tool_call_id.strip() in completed_tool_call_ids
-        ):
+        if normalized_tool_call_id in completed_tool_call_id_set:
             filtered.append(message)
     return tuple(filtered)
+
+
+def _messages_after_consumed_frontier(
+    messages: tuple[SessionMessage, ...],
+    *,
+    consumed_through_sequence_no: int | None,
+    preserve_message_ids: tuple[str, ...],
+) -> tuple[SessionMessage, ...]:
+    if consumed_through_sequence_no is None:
+        return messages
+    preserved = {
+        value.strip()
+        for value in preserve_message_ids
+        if isinstance(value, str) and value.strip()
+    }
+    return tuple(
+        message
+        for message in messages
+        if message.sequence_no > consumed_through_sequence_no or message.id in preserved
+    )
+
+
+def _normalized_tool_call_ids(values: tuple[str, ...] | None) -> set[str]:
+    return {
+        value.strip()
+        for value in values or ()
+        if isinstance(value, str) and value.strip()
+    }
 
 
 def _prune_processed_history_attachments(

@@ -1,0 +1,104 @@
+kind: local_package
+namespace: web
+prompt:
+  title: Public Web Fetch
+  summary: Fetch public HTTP/HTTPS resources as evidence when the model knows or discovers a source URL. Use this for open JSON APIs, public text/HTML pages, and source verification; keep source URLs and extracted fields tied to the answer.
+  default_tool_schema_policy:
+    priority: 40
+  default_tool_schema_group_refs:
+    - source_id: bundled.local_package.web
+      group_key: public_fetch
+  groups:
+    public_fetch:
+      order: 10
+      title: Public Fetch
+      summary: Cite the source URL and extracted fields when reporting facts. Retrieve public URLs without credentials; prefer JSON fetch for public APIs and text fetch for source pages. Use bounded max_bytes/max_chars.
+      function_ids:
+        - web.fetch_json
+        - web.fetch_text
+      default_tool_schema_ids:
+        - web.fetch_json
+        - web.fetch_text
+      default_tool_schema_max_count: 2
+      default_tool_schema_source: bundled.local_package.web.prompt_group.public_fetch
+capabilities:
+  - bounded_network.http
+local_tools:
+  - id: web.fetch_json
+    name: Fetch JSON URL
+    description: Fetch a public HTTP/HTTPS JSON URL and optionally extract a field using a simple JSON path such as rates.JPY or data.items[0].price. Use this when a public API URL is known or can be inferred from reliable public API conventions; report the source URL and extracted field. Do not use for localhost, private network URLs, or credentialed APIs.
+    provider_name: local_system
+    entrypoint: tools.web.local:fetch_json
+    tool_kind: function
+    parameters:
+      - name: url
+        data_type: string
+        description: Public HTTP/HTTPS URL returning JSON.
+        required: true
+      - name: json_path
+        data_type: string
+        description: Optional simple JSON path to extract from the response, for example rates.JPY or data.items[0].value.
+        required: false
+      - name: timeout_seconds
+        data_type: integer
+        description: Optional timeout in seconds. Defaults to 12 and caps at 30.
+        required: false
+      - name: max_bytes
+        data_type: integer
+        description: Optional maximum response bytes to read. Defaults to 262144 and caps at 1048576.
+        required: false
+    tags:
+      - web
+      - http
+      - json
+      - public-data
+      - builtin
+      - surface:interactive
+    required_effect_ids:
+      - network_search
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: web.fetch_json
+  - id: web.fetch_text
+    name: Fetch Text URL
+    description: Fetch a public HTTP/HTTPS text or HTML URL for evidence and return a bounded text preview with source metadata. Use this for public pages, documentation, and source verification; cite the source URL and avoid treating snippets as complete evidence. Do not use for localhost, private network URLs, or credentialed APIs.
+    provider_name: local_system
+    entrypoint: tools.web.local:fetch_text
+    tool_kind: function
+    parameters:
+      - name: url
+        data_type: string
+        description: Public HTTP/HTTPS URL returning text or HTML.
+        required: true
+      - name: timeout_seconds
+        data_type: integer
+        description: Optional timeout in seconds. Defaults to 12 and caps at 30.
+        required: false
+      - name: max_bytes
+        data_type: integer
+        description: Optional maximum response bytes to read. Defaults to 262144 and caps at 1048576.
+        required: false
+      - name: max_chars
+        data_type: integer
+        description: Optional maximum text characters to render. Defaults to 4000 and caps at 12000.
+        required: false
+    tags:
+      - web
+      - http
+      - text
+      - public-data
+      - builtin
+      - surface:interactive
+    required_effect_ids:
+      - network_search
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: web.fetch_text

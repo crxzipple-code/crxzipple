@@ -1,5 +1,8 @@
 kind: local_package
 namespace: memory
+prompt:
+  title: Memory
+  summary: Recall, inspect, write, and maintain governed memory scopes visible to the current agent.
 capabilities:
   - memory.context_lookup
   - memory.search

@@ -1,5 +1,37 @@
 kind: local_package
 namespace: sessions
+prompt:
+  title: Session Runtime
+  summary: Inspect session state, transcript, run flow, follow-up routing, and session-tree activity.
+  groups:
+    state_history:
+      order: 10
+      title: Session State & History
+      summary: Inspect the exact current session bucket, active instance, recent buckets, and transcript facts. Use this for session-local execution history, not durable memory recall.
+      function_ids:
+        - session_status
+        - sessions_list
+        - sessions_history
+    delegation:
+      order: 20
+      title: Delegation & Follow-up
+      summary: Send exact text into a target session or spawn child background work when a task should be delegated without blocking the current execution chain.
+      function_ids:
+        - sessions_send
+        - sessions_spawn
+    session_tree:
+      order: 30
+      title: Session Tree Control
+      summary: Inspect spawned child sessions and stop a requester session tree cleanly when delegated work should be cancelled.
+      function_ids:
+        - subagents
+        - sessions_stop
+    run_control:
+      order: 40
+      title: Run Control
+      summary: Yield the current orchestration run after handoff or when the session should pause at a clean boundary for a later follow-up.
+      function_ids:
+        - sessions_yield
 capabilities:
   - session.read
   - session.write

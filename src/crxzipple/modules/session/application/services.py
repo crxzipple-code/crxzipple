@@ -131,6 +131,27 @@ class ArchiveSessionMessagesInput:
 
 
 @dataclass(frozen=True, slots=True)
+class CompactSessionSegmentInput:
+    session_key: str
+    session_id: str
+    summary_message_id: str
+    summary_text: str
+    compaction_run_id: str
+    archived_through_sequence_no: int | None = None
+    reason: str | None = "compaction"
+
+
+@dataclass(frozen=True, slots=True)
+class CompactSessionSegmentResult:
+    session: Session
+    compacted_session_id: str
+    active_session_id: str
+    archived_message_count: int
+    archived_through_sequence_no: int | None = None
+    compacted_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ListSessionInstancesInput:
     session_key: str
 
@@ -708,6 +729,144 @@ class SessionApplicationService:
                 uow.collect(session)
             uow.commit()
             return archived_count
+
+    def compact_active_segment(
+        self,
+        data: CompactSessionSegmentInput,
+    ) -> CompactSessionSegmentResult:
+        normalized_session_id = data.session_id.strip()
+        normalized_summary_message_id = data.summary_message_id.strip()
+        normalized_summary_text = data.summary_text.strip()
+        normalized_compaction_run_id = data.compaction_run_id.strip()
+        normalized_reason = (data.reason or "compaction").strip() or "compaction"
+        if not normalized_session_id:
+            raise SessionValidationError("Compaction session_id cannot be empty.")
+        if not normalized_summary_message_id:
+            raise SessionValidationError(
+                "Compaction summary_message_id cannot be empty.",
+            )
+        if not normalized_summary_text:
+            raise SessionValidationError("Compaction summary_text cannot be empty.")
+        if not normalized_compaction_run_id:
+            raise SessionValidationError("Compaction run id cannot be empty.")
+        if (
+            data.archived_through_sequence_no is not None
+            and data.archived_through_sequence_no < 0
+        ):
+            raise SessionValidationError(
+                "Compaction archived_through_sequence_no cannot be negative.",
+            )
+
+        with self.uow_factory() as uow:
+            session = uow.sessions.get(data.session_key)
+            if session is None:
+                raise SessionNotFoundError(
+                    f"Session '{data.session_key}' was not found.",
+                )
+            if normalized_session_id != session.active_session_id:
+                raise SessionValidationError(
+                    "Session segment compaction requires the current active session_id.",
+                )
+            current_instance = uow.session_instances.get(normalized_session_id)
+            if current_instance is None:
+                raise SessionInstanceNotFoundError(
+                    f"Session instance '{normalized_session_id}' was not found.",
+                )
+            summary_message = uow.session_messages.get(normalized_summary_message_id)
+            if summary_message is None:
+                raise SessionMessageNotFoundError(
+                    f"Session message '{normalized_summary_message_id}' was not found.",
+                )
+            if (
+                summary_message.session_key != session.id
+                or summary_message.session_id != normalized_session_id
+            ):
+                raise SessionValidationError(
+                    "Compaction summary message must belong to the active session segment.",
+                )
+
+            archive_through = (
+                data.archived_through_sequence_no
+                if data.archived_through_sequence_no is not None
+                else max(summary_message.sequence_no - 1, 0)
+            )
+            messages = uow.session_messages.list(
+                session_key=session.id,
+                session_id=normalized_session_id,
+            )
+            archived_count = 0
+            for message in messages:
+                if message.id == summary_message.id:
+                    continue
+                if message.sequence_no > archive_through:
+                    continue
+                if message.visibility is SessionMessageVisibility.ARCHIVED:
+                    continue
+                metadata = dict(message.metadata)
+                metadata["archived_reason"] = normalized_reason
+                metadata["archived_by_compaction_run_id"] = normalized_compaction_run_id
+                archived = replace(
+                    message,
+                    visibility=SessionMessageVisibility.ARCHIVED,
+                    metadata=metadata,
+                )
+                uow.session_messages.add(archived)
+                archived_count += 1
+
+            compacted_at = utcnow()
+            current_instance.close(
+                reason=normalized_reason,
+                closed_at=compacted_at,
+            )
+            instance_metadata = dict(current_instance.metadata)
+            instance_metadata["segment"] = {
+                "kind": "compacted",
+                "summary_message_id": summary_message.id,
+                "summary_text": normalized_summary_text,
+                "compaction_run_id": normalized_compaction_run_id,
+                "archived_message_count": archived_count,
+                "archived_through_sequence_no": archive_through,
+                "compacted_at": _format_datetime_utc(compacted_at),
+                "reason": normalized_reason,
+            }
+            current_instance.metadata = instance_metadata
+            uow.session_instances.add(current_instance)
+
+            session.reset(
+                status=session.status,
+                happened_at=compacted_at,
+            )
+            next_instance = self._build_instance(
+                session=session,
+                sequence_no=self._next_instance_sequence(uow, session.id),
+                kind=current_instance.kind,
+                instance_id=session.active_session_id,
+                opened_at=session.last_reset_at,
+            )
+            uow.session_instances.add(next_instance)
+            session.record_event(
+                Event(
+                    name="session.segment.compacted",
+                    payload={
+                        "session_key": session.id,
+                        "closed_session_id": normalized_session_id,
+                        "active_session_id": session.active_session_id,
+                        "archived_message_count": archived_count,
+                        "compaction_run_id": normalized_compaction_run_id,
+                    },
+                ),
+            )
+            uow.sessions.add(session)
+            uow.collect(session)
+            uow.commit()
+            return CompactSessionSegmentResult(
+                session=session,
+                compacted_session_id=normalized_session_id,
+                active_session_id=session.active_session_id,
+                archived_message_count=archived_count,
+                archived_through_sequence_no=archive_through,
+                compacted_at=_format_datetime_utc(compacted_at),
+            )
 
     def get_message_by_source(
         self,

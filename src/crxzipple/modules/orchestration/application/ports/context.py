@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Event as ThreadEvent
 from typing import TYPE_CHECKING, Protocol
 
@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from crxzipple.modules.agent.domain.entities import AgentProfile
     from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
     from crxzipple.modules.llm.domain import ToolSchema
-    from crxzipple.modules.orchestration.application.prompt_surface import (
-        PromptSurface,
+    from crxzipple.modules.orchestration.application.prompt_input import (
+        RunPromptInput,
     )
     from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
     from crxzipple.modules.session.domain.entities import Session
@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from crxzipple.modules.session.application.services import (
         AppendSessionMessageInput,
         AppendSessionMessagesInput,
-        ArchiveSessionMessagesInput,
+        CompactSessionSegmentInput,
+        CompactSessionSegmentResult,
         ListSessionMessagesInput,
         MergeSessionMessageMetadataInput,
         SessionMessagesBundle,
@@ -131,16 +132,10 @@ class SessionMaintenancePort(
     ) -> "SessionMessage":
         ...
 
-    def archive_messages(self, data: "ArchiveSessionMessagesInput") -> int:
-        ...
-
-    def merge_session_metadata(
+    def compact_active_segment(
         self,
-        session_key: str,
-        *,
-        metadata: dict[str, object],
-        touch_activity: bool = True,
-    ) -> "Session":
+        data: "CompactSessionSegmentInput",
+    ) -> "CompactSessionSegmentResult":
         ...
 
 
@@ -174,17 +169,27 @@ class ContextRenderSnapshotRecord:
     estimate: dict[str, object] | None = None
     included_node_ids: tuple[str, ...] = ()
     mirrored_node_ids: tuple[str, ...] = ()
+    metadata: dict[str, object] = field(default_factory=dict)
+    provider_attachments: dict[str, object] = field(default_factory=dict)
     tool_schemas: tuple["ToolSchema", ...] | None = None
     tool_schema_mirror_available: bool = False
     artifact_content_blocks: tuple[dict[str, object], ...] = ()
 
 
 class ContextRenderSnapshotPort(Protocol):
+    def get_recorded_run_prompt_snapshot(
+        self,
+        *,
+        run: "OrchestrationRun",
+        prompt: "RunPromptInput",
+    ) -> ContextRenderSnapshotRecord | None:
+        ...
+
     def preview_run_prompt_snapshot(
         self,
         *,
         run: "OrchestrationRun",
-        prompt: "PromptSurface",
+        prompt: "RunPromptInput",
     ) -> ContextRenderSnapshotRecord | None:
         ...
 
@@ -192,7 +197,7 @@ class ContextRenderSnapshotPort(Protocol):
         self,
         *,
         run: "OrchestrationRun",
-        prompt: "PromptSurface",
+        prompt: "RunPromptInput",
     ) -> ContextRenderSnapshotRecord | None:
         ...
 

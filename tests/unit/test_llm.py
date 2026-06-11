@@ -31,7 +31,7 @@ from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
 from crxzipple.modules.llm.interfaces.dto import LlmInvocationDTO, LlmProfileDTO
 from crxzipple.modules.llm.infrastructure import LlmAdapterRegistry
 from crxzipple.interfaces.runtime_container import AppKey
-from tests.unit.support import SqliteTestHarness
+from tests.unit.support import SqliteTestHarness, published_event_bus_events
 
 
 class _FakeLlmAdapter:
@@ -249,6 +249,12 @@ class LlmServiceTestCase(unittest.TestCase):
                 ),
                 response_format={"type": "json_object"},
                 overrides={"reasoning_effort": "medium"},
+                request_metadata={
+                    "context_render_snapshot_id": "ctxsnap_run_1",
+                    "runtime_contract_version": "2026-06-09",
+                    "runtime_contract_hash": "abc123",
+                    "mirrored_tool_schema_count": 1,
+                },
             ),
         )
 
@@ -257,6 +263,10 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(invocation.result.text, "hello from fake adapter")
         self.assertEqual(invocation.provider_request_id, "fake-request-123")
         self.assertEqual(invocation.result.tool_calls[0].name, "search_docs")
+        self.assertEqual(
+            invocation.request_metadata["runtime_contract_version"],
+            "2026-06-09",
+        )
         self.assertEqual(self.adapter.last_profile.id, "writer")
         self.assertEqual(self.adapter.last_request.response_format, {"type": "json_object"})
 
@@ -273,8 +283,55 @@ class LlmServiceTestCase(unittest.TestCase):
             fetched_profile.default_params.extra_body,
             {"chat_template_kwargs": {"enable_thinking": False}},
         )
+        self.assertEqual(
+            fetched_invocation.request_metadata,
+            {
+                "context_render_snapshot_id": "ctxsnap_run_1",
+                "runtime_contract_version": "2026-06-09",
+                "runtime_contract_hash": "abc123",
+                "mirrored_tool_schema_count": 1,
+            },
+        )
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
         self.assertEqual([item.id for item in invocation_list], [invocation.id])
+
+    def test_invocation_succeeded_event_exposes_text_and_tool_diagnostics(self) -> None:
+        profile = self.service.register_profile(
+            RegisterLlmProfileInput(
+                id="diagnostic-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        invocation = self.service.invoke(
+            InvokeLlmInput(
+                llm_id=profile.id,
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="inspect tool diagnostics",
+                    ),
+                ),
+            ),
+        )
+
+        events = [
+            event
+            for event in published_event_bus_events(self.container)
+            if event.name == "llm.invocation_succeeded"
+            and event.payload.get("invocation_id") == invocation.id
+        ]
+
+        self.assertEqual(len(events), 1)
+        payload = events[0].payload
+        self.assertEqual(payload["finish_reason"], "stop")
+        self.assertTrue(payload["text_present"])
+        self.assertEqual(payload["text_chars"], len("hello from fake adapter"))
+        self.assertEqual(payload["tool_call_count"], 1)
+        self.assertEqual(payload["tool_call_names"], ["search_docs"])
+        self.assertEqual(payload["usage"]["total_tokens"], 20)
 
     def test_profile_update_enable_disable_and_delete_use_llm_repository(self) -> None:
         self.service.register_profile(

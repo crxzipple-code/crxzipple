@@ -7,8 +7,8 @@ from crxzipple.modules.dispatch.application import (
     RecoverAbandonedDispatchTasksInput,
 )
 from crxzipple.modules.tool.application.ports import (
-    ToolRunDispatchClaim,
-    ToolRunDispatchPort,
+    ToolOrchestrationDispatchClaim,
+    ToolOrchestrationDispatchPort,
 )
 from crxzipple.modules.tool.infrastructure.dispatchers import ToolDispatchBridge
 
@@ -16,7 +16,7 @@ DISPATCH_OWNER_KIND = "tool_run"
 
 
 @dataclass(slots=True)
-class ToolRunDispatchAdapter(ToolRunDispatchPort):
+class ToolRunDispatchAdapter(ToolOrchestrationDispatchPort):
     bridge: ToolDispatchBridge = field(default_factory=ToolDispatchBridge)
     dispatch_service: DispatchApplicationService | None = None
 
@@ -30,7 +30,7 @@ class ToolRunDispatchAdapter(ToolRunDispatchPort):
         *,
         worker_id: str,
         lease_seconds: int | None = None,
-    ) -> ToolRunDispatchClaim | None:
+    ) -> ToolOrchestrationDispatchClaim | None:
         task = self.bridge.claim_next_queued(
             dispatch_tasks,
             collector,
@@ -39,7 +39,7 @@ class ToolRunDispatchAdapter(ToolRunDispatchPort):
         )
         if task is None:
             return None
-        return ToolRunDispatchClaim(
+        return ToolOrchestrationDispatchClaim(
             run_id=task.owner_id,
             claimed_at=task.claimed_at,
         )
@@ -52,7 +52,7 @@ class ToolRunDispatchAdapter(ToolRunDispatchPort):
         run_id: str,
         worker_id: str,
         lease_seconds: int | None = None,
-    ) -> ToolRunDispatchClaim | None:
+    ) -> ToolOrchestrationDispatchClaim | None:
         task = self.bridge.claim_queued(
             dispatch_tasks,
             collector,
@@ -62,7 +62,7 @@ class ToolRunDispatchAdapter(ToolRunDispatchPort):
         )
         if task is None:
             return None
-        return ToolRunDispatchClaim(
+        return ToolOrchestrationDispatchClaim(
             run_id=task.owner_id,
             claimed_at=task.claimed_at,
         )

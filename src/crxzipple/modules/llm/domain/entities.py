@@ -86,6 +86,7 @@ class LlmInvocation(AggregateRoot[str]):
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, object] | None = None
     request_overrides: dict[str, object] = field(default_factory=dict)
+    request_metadata: dict[str, object] = field(default_factory=dict)
     status: LlmInvocationStatus = LlmInvocationStatus.CREATED
     result: LlmResult | None = None
     error: LlmErrorPayload | None = None
@@ -102,6 +103,7 @@ class LlmInvocation(AggregateRoot[str]):
         self.messages = tuple(self.messages)
         self.tool_schemas = tuple(self.tool_schemas)
         self.request_overrides = dict(self.request_overrides)
+        self.request_metadata = dict(self.request_metadata)
         if self.response_format is not None:
             self.response_format = dict(self.response_format)
 

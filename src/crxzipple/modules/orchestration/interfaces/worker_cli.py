@@ -2198,8 +2198,8 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
     ) -> None:
         _process_next_request(worker_id=worker_id)
 
-    @app.command("process-next-signal")
-    def process_next_signal(
+    @app.command("process-next-continuation")
+    def process_next_continuation(
         worker_id: str | None = typer.Option(
             None,
             "--worker-id",
@@ -2210,17 +2210,17 @@ def _register_scheduler_commands(app: typer.Typer) -> None:
         with _scheduler_container() as container:
             try:
                 scheduler_service = _scheduler_port(container)
-                signal = scheduler_service.process_next_signal(
+                continuation = scheduler_service.process_next_continuation(
                     worker_id=resolved_worker_id,
                 )
-                if signal is None:
+                if continuation is None:
                     echo_data({"status": "idle", "worker_id": resolved_worker_id})
                     return
                 echo_data(
                     {
-                        "signal_id": signal.id,
-                        "signal_kind": signal.signal_kind.value,
-                        "status": signal.status.value,
+                        "continuation_id": continuation.id,
+                        "continuation_kind": continuation.continuation_kind.value,
+                        "status": continuation.status.value,
                         "worker_id": resolved_worker_id,
                     },
                 )

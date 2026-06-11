@@ -240,7 +240,7 @@ class AgentRuntimePreferences:
 
     @property
     def resolved_home_dir(self) -> str | None:
-        return self.home_dir or self.workspace
+        return self.home_dir
 
     @property
     def resolved_workdir(self) -> str | None:

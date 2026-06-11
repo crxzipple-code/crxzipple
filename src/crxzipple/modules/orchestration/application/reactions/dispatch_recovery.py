@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from crxzipple.core.logger import get_logger
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
+)
 from crxzipple.modules.orchestration.application.scheduler_service import (
     OrchestrationSchedulerService,
 )
@@ -16,17 +19,17 @@ class OrchestrationDispatchRecoveryReaction:
     scheduler_service: OrchestrationSchedulerService
 
     def react_to_recovered_dispatch_task(self, event: Event) -> None:
-        if event.payload.get("owner_kind") != "orchestration_run":
+        if event.payload.get("owner_kind") != ORCHESTRATION_STEP_DISPATCH_OWNER_KIND:
             return
-        orchestration_run_id = event.payload.get("owner_id")
+        dispatch_task_id = event.payload.get("owner_id")
         reason = event.payload.get("reason")
-        if not isinstance(orchestration_run_id, str) or not orchestration_run_id.strip():
+        if not isinstance(dispatch_task_id, str) or not dispatch_task_id.strip():
             return
         if not isinstance(reason, str) or not reason.strip():
             return
         try:
             self.scheduler_service.handle_recovered_dispatch_task(
-                orchestration_run_id=orchestration_run_id,
+                dispatch_task_id=dispatch_task_id,
                 reason=reason,
             )
         except Exception:
@@ -34,6 +37,6 @@ class OrchestrationDispatchRecoveryReaction:
                 "failed to reconcile recovered dispatch task for orchestration run",
                 extra={
                     "event_name": event.name,
-                    "orchestration_run_id": orchestration_run_id,
+                    "dispatch_task_id": dispatch_task_id,
                 },
             )

@@ -5,11 +5,20 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from uuid import uuid4
 
 from crxzipple.modules.dispatch.domain import DispatchTaskRepository
-from crxzipple.modules.orchestration.application.ports import RunDispatchPort
+from crxzipple.modules.orchestration.application.execution_chain_lifecycle import (
+    ORCHESTRATION_RUN_INTAKE_OWNER_KIND,
+    ensure_intake_execution_chain,
+    prepare_dispatch_execution_step,
+)
+from crxzipple.modules.orchestration.application.ports import OrchestrationDispatchPort
 from crxzipple.modules.orchestration.application.scheduler import (
     OrchestrationScheduler,
 )
 from crxzipple.modules.orchestration.domain import (
+    ExecutionChainRepository,
+    ExecutionOwnerReference,
+    ExecutionStepItemRepository,
+    ExecutionStepRepository,
     OrchestrationRun,
     OrchestrationRunRepository,
 )
@@ -32,6 +41,9 @@ if TYPE_CHECKING:
 
 
 class IntakeCoordinatorUnitOfWork(Protocol):
+    execution_chains: ExecutionChainRepository
+    execution_steps: ExecutionStepRepository
+    execution_step_items: ExecutionStepItemRepository
     orchestration_runs: OrchestrationRunRepository
     dispatch_tasks: DispatchTaskRepository
 
@@ -49,6 +61,9 @@ class IntakeCoordinatorUnitOfWork(Protocol):
     def collect(self, aggregate: AggregateRoot[Any]) -> None:
         ...
 
+    def flush(self) -> None:
+        ...
+
     def commit(self) -> None:
         ...
 
@@ -57,7 +72,7 @@ class IntakeCoordinatorUnitOfWork(Protocol):
 class RunIntakeCoordinator:
     uow_factory: Callable[[], IntakeCoordinatorUnitOfWork]
     scheduler: OrchestrationScheduler
-    dispatch_port: RunDispatchPort
+    dispatch_port: OrchestrationDispatchPort
     plan_prepared_session_run: Callable[
         ["PrepareSessionRunInput"],
         "PreparedSessionRunPlan",
@@ -75,6 +90,15 @@ class RunIntakeCoordinator:
         )
         with self.uow_factory() as uow:
             uow.orchestration_runs.add(run)
+            uow.flush()
+            ensure_intake_execution_chain(
+                uow,
+                run=run,
+                owner=ExecutionOwnerReference(
+                    owner_kind=ORCHESTRATION_RUN_INTAKE_OWNER_KIND,
+                    owner_id=run.id,
+                ),
+            )
             uow.collect(run)
             uow.commit()
             return run
@@ -116,7 +140,17 @@ class RunIntakeCoordinator:
                 queue_policy=data.queue_policy,
                 priority=data.priority,
             )
-            self.dispatch_port.enqueue(uow.dispatch_tasks, uow, run)
+            dispatch_step = prepare_dispatch_execution_step(
+                uow,
+                run=run,
+            )
+            self.dispatch_port.enqueue(
+                uow.dispatch_tasks,
+                uow,
+                run,
+                dispatch_task_id=dispatch_step.step.dispatch_task_id
+                or dispatch_step.step.id,
+            )
             uow.orchestration_runs.add(run)
             uow.collect(run)
             uow.commit()

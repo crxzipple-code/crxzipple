@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -280,6 +281,9 @@ class ToolFunctionCandidate:
                         spec.execution_policy.requires_confirmation
                     ),
                     "mutates_state": spec.execution_policy.mutates_state,
+                    "supports_parallel": spec.execution_policy.supports_parallel,
+                    "resource_scope": spec.execution_policy.resource_scope,
+                    "serial_group_key": spec.execution_policy.serial_group_key,
                 },
                 "execution_support": {
                     "supported_modes": tuple(
@@ -837,9 +841,9 @@ def _input_schema_from_tool_spec(spec: ToolSpec) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for parameter in spec.parameters:
-        parameter_schema = _json_schema_for_data_type(parameter.data_type)
+        parameter_schema = _json_schema_for_tool_parameter(parameter)
         if parameter.description:
-            parameter_schema["description"] = parameter.description
+            parameter_schema.setdefault("description", parameter.description)
         properties[parameter.name] = parameter_schema
         if parameter.required:
             required.append(parameter.name)
@@ -850,6 +854,26 @@ def _input_schema_from_tool_spec(spec: ToolSpec) -> dict[str, Any]:
     }
     if required:
         schema["required"] = required
+    return schema
+
+
+def _json_schema_for_tool_parameter(parameter: Any) -> dict[str, Any]:
+    if parameter.json_schema is None:
+        return _json_schema_for_data_type(parameter.data_type)
+    schema = deepcopy(parameter.json_schema)
+    if not schema:
+        return _json_schema_for_data_type(parameter.data_type)
+    if (
+        "type" not in schema
+        and "properties" not in schema
+        and "items" not in schema
+        and "enum" not in schema
+        and "oneOf" not in schema
+        and "anyOf" not in schema
+        and "allOf" not in schema
+        and "$ref" not in schema
+    ):
+        schema["type"] = parameter.data_type.strip().lower() or "string"
     return schema
 
 

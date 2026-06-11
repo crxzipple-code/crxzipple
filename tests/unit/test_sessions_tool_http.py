@@ -844,17 +844,17 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(child_completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(child_completed.session_key, child_session_key)
 
-        processed_signal = None
+        processed_continuation = None
         for _ in range(4):
-            candidate = self.orchestration_scheduler_service.process_next_signal(
+            candidate = self.orchestration_scheduler_service.process_next_continuation(
                 worker_id="scheduler-1",
             )
             self.assertIsNotNone(candidate)
             assert candidate is not None
-            if candidate.signal_kind.value == "sessions_spawn_followup":
-                processed_signal = candidate
+            if candidate.continuation_kind.value == "sessions_spawn_followup":
+                processed_continuation = candidate
                 break
-        self.assertIsNotNone(processed_signal)
+        self.assertIsNotNone(processed_continuation)
 
         requester_followup = process_next_orchestration_assignment(self.container,
             worker_id="worker-1",
@@ -936,17 +936,17 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         assert child_completed is not None
         self.assertEqual(child_completed.status, OrchestrationRunStatus.COMPLETED)
 
-        processed_signal = None
+        processed_continuation = None
         for _ in range(4):
-            candidate = self.orchestration_scheduler_service.process_next_signal(
+            candidate = self.orchestration_scheduler_service.process_next_continuation(
                 worker_id="scheduler-1",
             )
             self.assertIsNotNone(candidate)
             assert candidate is not None
-            if candidate.signal_kind.value == "sessions_spawn_followup":
-                processed_signal = candidate
+            if candidate.continuation_kind.value == "sessions_spawn_followup":
+                processed_continuation = candidate
                 break
-        self.assertIsNotNone(processed_signal)
+        self.assertIsNotNone(processed_continuation)
 
         tool_run = asyncio.run(
             self.tool_service.execute(

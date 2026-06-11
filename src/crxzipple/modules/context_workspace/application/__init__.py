@@ -15,6 +15,12 @@ from crxzipple.modules.context_workspace.application.ports import (
     ContextNodeProvider,
     ContextOwnerRegistry,
 )
+from crxzipple.modules.context_workspace.application.root_nodes import (
+    CONTEXT_INSTRUCTIONS_NODE_ID,
+    CONTEXT_TREE_SCHEMA_VERSION,
+    EXECUTION_CURRENT_NODE_ID,
+    SESSION_CURRENT_NODE_ID,
+)
 from crxzipple.modules.context_workspace.application.services import (
     ContextRenderService,
     ContextTreeService,
@@ -31,11 +37,15 @@ __all__ = [
     "ContextOwnerRegistry",
     "ContextRenderService",
     "ContextTreeService",
+    "CONTEXT_INSTRUCTIONS_NODE_ID",
+    "CONTEXT_TREE_SCHEMA_VERSION",
     "ContextTreeView",
     "ContextWorkspaceService",
     "ContextWorkspaceServices",
+    "EXECUTION_CURRENT_NODE_ID",
     "EnsureContextWorkspaceInput",
     "RecordContextRenderSnapshotInput",
     "RenderContextPromptInput",
     "RenderContextPromptResult",
+    "SESSION_CURRENT_NODE_ID",
 ]

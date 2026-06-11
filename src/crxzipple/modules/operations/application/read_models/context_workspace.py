@@ -77,7 +77,13 @@ class ContextWorkspaceOperationsReadModelProvider:
         )
         workspace_rows = _workspace_rows(visible, tree_views)
         node_rows = _node_rows(tree_views, query.limit)
+        warning_rows = _investigation_warning_rows(
+            tree_views,
+            query.search,
+            query.limit,
+        )
         snapshot_rows = _snapshot_rows(snapshots, query.search, query.limit)
+        prompt_budget_rows = _prompt_budget_rows(snapshots, query.search, query.limit)
         diagnostic_rows = _diagnostic_rows(
             workspace_error=workspace_error,
             tree_error=tree_error,
@@ -105,11 +111,25 @@ class ContextWorkspaceOperationsReadModelProvider:
                 empty_state="No context nodes.",
             ),
             _table_section(
+                section_id="investigation_warnings",
+                title="Investigation Warnings",
+                rows=warning_rows,
+                total=_investigation_warning_total(tree_views, query.search),
+                empty_state="No investigation warnings.",
+            ),
+            _table_section(
                 section_id="render_snapshots",
                 title="Render Snapshots",
                 rows=snapshot_rows,
                 total=len(_filter_snapshots(snapshots, query.search)),
                 empty_state="No context render snapshots.",
+            ),
+            _table_section(
+                section_id="prompt_budget",
+                title="Prompt Budget",
+                rows=prompt_budget_rows,
+                total=len(_filter_snapshots(snapshots, query.search)),
+                empty_state="No prompt budget snapshots.",
             ),
             _table_section(
                 section_id="diagnostics",
@@ -317,26 +337,181 @@ def _node_rows(
     return tuple(rows)
 
 
+def _investigation_warning_rows(
+    tree_views: tuple[Any, ...],
+    search: str,
+    limit: int,
+) -> tuple[dict[str, str], ...]:
+    rows: list[dict[str, str]] = []
+    for view in tree_views:
+        workspace = getattr(view, "workspace", None)
+        session_key = _text(getattr(workspace, "session_key", ""))
+        for node in _nodes_from_view(view):
+            if _text(getattr(node, "kind", "")) != "investigation_warning":
+                continue
+            metadata = _metadata(getattr(node, "metadata", None))
+            owner_ref = _metadata(getattr(node, "owner_ref", None))
+            warning_types = _text_list(
+                metadata.get("warning_types") or owner_ref.get("warning_types"),
+            )
+            row = {
+                "id": f"{session_key}:{_text(getattr(node, 'id', ''))}",
+                "session": session_key,
+                "warning_type": ", ".join(warning_types) or "-",
+                "code": _text(
+                    metadata.get("code") or owner_ref.get("code"),
+                    "browser_investigation_warning",
+                ),
+                "status": _text(
+                    metadata.get("severity") or owner_ref.get("severity"),
+                    "warning",
+                ),
+                "latest_tool": _text(
+                    metadata.get("latest_tool") or owner_ref.get("latest_tool"),
+                    "-",
+                ),
+                "latest_sequence": str(
+                    metadata.get("latest_sequence_no")
+                    or owner_ref.get("latest_sequence_no")
+                    or 0,
+                ),
+                "summary": _short_text(
+                    _text(getattr(node, "summary", "")),
+                    max_length=96,
+                ),
+                "updated": _format_time(getattr(node, "updated_at", None)),
+            }
+            if _row_matches_search(row, search):
+                rows.append(row)
+            if len(rows) >= limit:
+                return tuple(rows)
+    return tuple(rows)
+
+
+def _investigation_warning_total(
+    tree_views: tuple[Any, ...],
+    search: str,
+) -> int:
+    return len(_investigation_warning_rows(tree_views, search, 10_000))
+
+
 def _snapshot_rows(
     snapshots: tuple[Any, ...],
     search: str,
     limit: int,
 ) -> tuple[dict[str, str], ...]:
     filtered = _filter_snapshots(snapshots, search)
-    return tuple(
-        {
-            "id": _text(getattr(snapshot, "id", "")),
-            "run": _text(getattr(snapshot, "run_id", "")),
-            "session": _text(getattr(snapshot, "session_key", "")),
-            "revision": str(getattr(snapshot, "tree_revision", "")),
-            "included_nodes": str(len(tuple(getattr(snapshot, "included_node_ids", ())))),
-            "mirrored_nodes": str(len(tuple(getattr(snapshot, "mirrored_node_ids", ())))),
-            "tokens": str(_estimate_tokens(getattr(snapshot, "estimate", None))),
-            "prompt_chars": str(len(_text(getattr(snapshot, "prompt_body", "")))),
-            "created": _format_time(getattr(snapshot, "created_at", None)),
-        }
-        for snapshot in filtered[:limit]
-    )
+    rows: list[dict[str, str]] = []
+    for snapshot in filtered[:limit]:
+        metadata = _metadata(getattr(snapshot, "metadata", None))
+        session_message_refs = _metadata_list(
+            metadata,
+            "session_message_node_refs",
+        )
+        rows.append(
+            {
+                "id": _text(getattr(snapshot, "id", "")),
+                "run": _text(getattr(snapshot, "run_id", "")),
+                "session": _text(getattr(snapshot, "session_key", "")),
+                "revision": str(getattr(snapshot, "tree_revision", "")),
+                "history": _text(metadata.get("history_delivery") or "-"),
+                "provider_messages": str(
+                    _metadata_int(metadata, "direct_transcript_message_count"),
+                ),
+                "tree_messages": str(
+                    _metadata_int(metadata, "tree_session_message_count"),
+                ),
+                "tool_interactions": str(
+                    _metadata_int(metadata, "tree_tool_interaction_count"),
+                ),
+                "evidence": str(
+                    _metadata_int(metadata, "tree_evidence_item_count"),
+                ),
+                "browser_warnings": str(
+                    _metadata_int(metadata, "browser_investigation_warning_count"),
+                ),
+                "browser_warning_types": _short_text(
+                    ", ".join(
+                        _text_list(
+                            metadata.get("browser_investigation_warning_types"),
+                        ),
+                    ),
+                    max_length=80,
+                ),
+                "terminal_fact_gap": "yes"
+                if bool(metadata.get("browser_evidence_path_no_terminal_fact"))
+                else "no",
+                "folded": str(_metadata_int(metadata, "folded_history_node_count")),
+                "session_tokens": str(
+                    _metadata_int(metadata, "session_estimated_text_tokens"),
+                ),
+                "range_warnings": str(
+                    _metadata_int(metadata, "session_range_warning_count"),
+                ),
+                "range_blocked": str(
+                    _metadata_int(metadata, "session_range_blocked_count"),
+                ),
+                "range_limited": str(
+                    _metadata_int(metadata, "session_range_limited_count"),
+                ),
+                "session_refs": str(len(session_message_refs)),
+                "current_node": _short_text(
+                    _text(metadata.get("current_inbound_node_id")),
+                ),
+                "included_nodes": str(
+                    len(tuple(getattr(snapshot, "included_node_ids", ()))),
+                ),
+                "mirrored_nodes": str(
+                    len(tuple(getattr(snapshot, "mirrored_node_ids", ()))),
+                ),
+                "tokens": str(_estimate_tokens(getattr(snapshot, "estimate", None))),
+                "prompt_chars": str(len(_text(getattr(snapshot, "prompt_body", "")))),
+                "created": _format_time(getattr(snapshot, "created_at", None)),
+            },
+        )
+    return tuple(rows)
+
+
+def _prompt_budget_rows(
+    snapshots: tuple[Any, ...],
+    search: str,
+    limit: int,
+) -> tuple[dict[str, str], ...]:
+    rows: list[dict[str, str]] = []
+    for snapshot in _filter_snapshots(snapshots, search)[:limit]:
+        metadata = _metadata(getattr(snapshot, "metadata", None))
+        rows.append(
+            {
+                "id": _text(getattr(snapshot, "id", "")),
+                "run": _text(getattr(snapshot, "run_id", "")),
+                "session": _text(getattr(snapshot, "session_key", "")),
+                "provider_tokens": str(_snapshot_provider_tokens(snapshot)),
+                "tree_tokens": str(_snapshot_rendered_tokens(snapshot)),
+                "direct_tokens": str(
+                    _metadata_int(metadata, "direct_transcript_estimated_tokens"),
+                ),
+                "schema_tokens": str(
+                    _metadata_int(metadata, "mirrored_tool_schema_estimated_tokens"),
+                ),
+                "schema_budget_status": _text(
+                    metadata.get("tool_schema_mirror_budget_status") or "ok",
+                ),
+                "schema_budget_skipped": str(
+                    _metadata_int(metadata, "tool_schema_mirror_skipped_count"),
+                ),
+                "provider_messages": str(
+                    _metadata_int(metadata, "direct_transcript_message_count"),
+                ),
+                "mirrored_schemas": str(
+                    len(tuple(getattr(snapshot, "mirrored_node_ids", ()))),
+                ),
+                "duplicate_risk": "yes"
+                if bool(metadata.get("duplicate_tool_delivery_risk"))
+                else "no",
+                "created": _format_time(getattr(snapshot, "created_at", None)),
+            },
+        )
+    return tuple(rows)
 
 
 def _diagnostic_rows(
@@ -375,8 +550,14 @@ def _metrics(
         node for node in nodes if bool(getattr(node.state, "prompt_visible", False))
     )
     pinned_nodes = tuple(node for node in nodes if bool(getattr(node.state, "pinned", False)))
-    token_total = sum(
-        _estimate_tokens(getattr(snapshot, "estimate", None))
+    investigation_warnings = tuple(
+        node
+        for node in nodes
+        if _text(getattr(node, "kind", "")) == "investigation_warning"
+    )
+    token_total = sum(_snapshot_provider_tokens(snapshot) for snapshot in snapshots[:20])
+    range_risk_count = sum(
+        _snapshot_session_range_risk_count(snapshot)
         for snapshot in snapshots[:20]
     )
     return (
@@ -403,6 +584,13 @@ def _metrics(
             "success" if pinned_nodes else "neutral",
         ),
         MetricCardModel(
+            "investigation_warnings",
+            "Investigation Warnings",
+            str(len(investigation_warnings)),
+            "browser no-gain signals",
+            "warning" if investigation_warnings else "success",
+        ),
+        MetricCardModel(
             "snapshots",
             "Render Snapshots",
             str(len(snapshots)),
@@ -411,10 +599,17 @@ def _metrics(
         ),
         MetricCardModel(
             "snapshot_tokens",
-            "Snapshot Tokens",
+            "Provider Prompt Tokens",
             str(token_total),
-            "recent estimated tokens",
+            "recent provider estimate",
             "info",
+        ),
+        MetricCardModel(
+            "session_range_risks",
+            "Session Range Risks",
+            str(range_risk_count),
+            "recent hidden/split/blocked ranges",
+            "warning" if range_risk_count else "success",
         ),
     )
 
@@ -532,6 +727,82 @@ def _text(value: Any, default: str = "") -> str:
     if value is None:
         return default
     return str(value).strip()
+
+
+def _short_text(value: str, *, max_length: int = 40) -> str:
+    if not value:
+        return "-"
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 3]}..."
+
+
+def _metadata(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _metadata_int(metadata: dict[str, Any], key: str) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return 0
+
+
+def _snapshot_session_range_risk_count(snapshot: Any) -> int:
+    metadata = _metadata(getattr(snapshot, "metadata", None))
+    return (
+        _metadata_int(metadata, "session_range_warning_count")
+        + _metadata_int(metadata, "session_range_blocked_count")
+        + _metadata_int(metadata, "session_range_limited_count")
+    )
+
+
+def _snapshot_provider_tokens(snapshot: Any) -> int:
+    metadata = _metadata(getattr(snapshot, "metadata", None))
+    value = _metadata_int(metadata, "estimated_provider_prompt_tokens")
+    if value:
+        return value
+    return _estimate_tokens(getattr(snapshot, "estimate", None))
+
+
+def _snapshot_rendered_tokens(snapshot: Any) -> int:
+    metadata = _metadata(getattr(snapshot, "metadata", None))
+    value = _metadata_int(metadata, "rendered_prompt_estimated_tokens")
+    if value:
+        return value
+    rendered_estimate = metadata.get("rendered_prompt_estimate")
+    if isinstance(rendered_estimate, dict):
+        return _metadata_int(rendered_estimate, "text_tokens")
+    return _estimate_tokens(getattr(snapshot, "estimate", None))
+
+
+def _metadata_list(metadata: dict[str, Any], key: str) -> tuple[Any, ...]:
+    value = metadata.get(key)
+    if isinstance(value, list):
+        return tuple(value)
+    if isinstance(value, tuple):
+        return value
+    return ()
+
+
+def _text_list(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(item for item in (_text(item) for item in value) if item)
+    text = _text(value)
+    return (text,) if text else ()
+
+
+def _row_matches_search(row: dict[str, str], search: str) -> bool:
+    if not search:
+        return True
+    needle = search.lower()
+    return needle in " ".join(str(value) for value in row.values()).lower()
 
 
 def _tone(health: str) -> str:

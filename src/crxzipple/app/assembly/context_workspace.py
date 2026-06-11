@@ -19,6 +19,9 @@ from crxzipple.app.integration.context_workspace_tool import (
 from crxzipple.app.integration.context_workspace_artifacts import (
     ArtifactContextNodeProvider,
 )
+from crxzipple.app.integration.context_workspace_agent import (
+    AgentHomeContextNodeProvider,
+)
 from crxzipple.app.integration.context_workspace_workspace import (
     WorkspaceContextNodeProvider,
 )
@@ -69,8 +72,17 @@ def context_workspace_integration_factories() -> tuple[ApplicationFactory, ...]:
         ApplicationFactory(
             key="context_workspace.session_provider",
             provides=(AppKey.CONTEXT_SESSION_NODE_PROVIDER,),
-            requires=(AppKey.CONTEXT_OWNER_REGISTRY, AppKey.SESSION_SERVICE),
+            requires=(
+                AppKey.CONTEXT_OWNER_REGISTRY,
+                AppKey.SESSION_SERVICE,
+            ),
             build=_build_session_node_provider,
+        ),
+        ApplicationFactory(
+            key="context_workspace.agent_home_provider",
+            provides=(AppKey.CONTEXT_AGENT_HOME_NODE_PROVIDER,),
+            requires=(AppKey.CONTEXT_OWNER_REGISTRY, AppKey.AGENT_SERVICE),
+            build=_build_agent_home_node_provider,
         ),
         ApplicationFactory(
             key="context_workspace.skill_provider",
@@ -81,7 +93,11 @@ def context_workspace_integration_factories() -> tuple[ApplicationFactory, ...]:
         ApplicationFactory(
             key="context_workspace.tool_provider",
             provides=(AppKey.CONTEXT_TOOL_NODE_PROVIDER,),
-            requires=(AppKey.CONTEXT_OWNER_REGISTRY, AppKey.TOOL_SERVICE),
+            requires=(
+                AppKey.CONTEXT_OWNER_REGISTRY,
+                AppKey.TOOL_SERVICE,
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
+            ),
             build=_build_tool_node_provider,
             targets=CONTEXT_TOOL_PROVIDER_TARGETS,
         ),
@@ -132,6 +148,7 @@ def _build_context_workspace_services(ctx) -> dict[str, object]:
         workspace_repository=workspace_repository,
         node_repository=node_repository,
         snapshot_repository=snapshot_repository,
+        owner_registry=owner_registry,
     )
     services = ContextWorkspaceServices(
         workspaces=workspace_service,
@@ -150,6 +167,16 @@ def _build_session_node_provider(ctx) -> SessionContextNodeProvider:
     registry = ctx.require(AppKey.CONTEXT_OWNER_REGISTRY)
     provider = SessionContextNodeProvider(
         session_service=ctx.require(AppKey.SESSION_SERVICE),
+        execution_query=ctx.registry.get(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
+    )
+    registry.register(provider)
+    return provider
+
+
+def _build_agent_home_node_provider(ctx) -> AgentHomeContextNodeProvider:
+    registry = ctx.require(AppKey.CONTEXT_OWNER_REGISTRY)
+    provider = AgentHomeContextNodeProvider(
+        agent_service=ctx.require(AppKey.AGENT_SERVICE),
     )
     registry.register(provider)
     return provider
@@ -168,6 +195,7 @@ def _build_tool_node_provider(ctx) -> ToolContextNodeProvider:
     registry = ctx.require(AppKey.CONTEXT_OWNER_REGISTRY)
     provider = ToolContextNodeProvider(
         tool_service=ctx.require(AppKey.TOOL_SERVICE),
+        prompt_catalog=ctx.require(AppKey.TOOL_SOURCE_QUERY_SERVICE),
     )
     registry.register(provider)
     return provider

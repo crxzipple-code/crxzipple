@@ -35,8 +35,8 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         self.assertEqual(tree_response.status_code, 200)
         nodes = tree_response.json()["nodes"]
 
-        self.assertTrue(any(node["id"] == "session.instance.current" for node in nodes))
-        self.assertTrue(any(node["id"] == "session.messages.recent" for node in nodes))
+        self.assertTrue(any(node["id"] == "session.segment.current" for node in nodes))
+        self.assertTrue(any(node["id"] == "session.messages.current" for node in nodes))
 
     def test_context_workspace_tree_action_and_render_snapshot(self) -> None:
         ensure_response = self.client.post(
@@ -67,20 +67,32 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
             "/context-workspaces/by-session/session:http/render",
         )
         self.assertEqual(render_response.status_code, 200)
-        prompt_body = render_response.json()["prompt_body"]
+        render_payload = render_response.json()
+        prompt_body = render_payload["prompt_body"]
         self.assertIn("<context_tree", prompt_body)
+        self.assertIn("rendered_prompt", render_payload["estimate_breakdown"])
+        self.assertIn("node_visible", render_payload["estimate_breakdown"])
+        self.assertTrue(render_payload["estimate_breakdown"]["top_rendered_nodes"])
+        self.assertIn(
+            "tool_schema_mirror_budget",
+            render_payload["provider_attachment_report"],
+        )
+        self.assertIn("contract_version", render_payload["runtime_contract"])
+        self.assertIsInstance(render_payload["mirrored_node_ids"], list)
+        self.assertIsInstance(render_payload["provider_attachments"], dict)
 
         snapshot_response = self.client.post(
             "/context-workspaces/by-session/session:http/render-snapshots",
             json={
                 "run_id": "run-http",
                 "prompt_body": prompt_body,
-                "estimate": render_response.json()["estimate"],
-                "included_node_ids": render_response.json()["included_node_ids"],
+                "estimate": render_payload["estimate"],
+                "included_node_ids": render_payload["included_node_ids"],
             },
         )
         self.assertEqual(snapshot_response.status_code, 200)
         self.assertEqual(snapshot_response.json()["snapshot"]["run_id"], "run-http")
+        snapshot_id = snapshot_response.json()["snapshot"]["id"]
 
         get_snapshot_response = self.client.get(
             "/context-workspaces/runs/run-http/render-snapshot",
@@ -89,4 +101,13 @@ class ContextWorkspaceHttpTestCase(HttpModuleTestCase):
         self.assertEqual(
             get_snapshot_response.json()["snapshot"]["prompt_body"],
             prompt_body,
+        )
+
+        get_snapshot_by_id_response = self.client.get(
+            f"/context-workspaces/render-snapshots/{snapshot_id}",
+        )
+        self.assertEqual(get_snapshot_by_id_response.status_code, 200)
+        self.assertEqual(
+            get_snapshot_by_id_response.json()["snapshot"]["id"],
+            snapshot_id,
         )

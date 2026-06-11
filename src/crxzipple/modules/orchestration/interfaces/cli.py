@@ -9,6 +9,9 @@ from crxzipple.modules.orchestration.application.ports import (
     OrchestrationRunQueryPort,
     OrchestrationSubmissionPort,
 )
+from crxzipple.modules.orchestration.application.loop_regression_baseline import (
+    build_loop_regression_baseline,
+)
 from crxzipple.modules.orchestration.domain import (
     OrchestrationQueuePolicy,
     OrchestrationRunNotFoundError,
@@ -16,7 +19,7 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.orchestration.interfaces.dto import (
     OrchestrationRunDTO,
-    PromptSurfacePreviewDTO,
+    RunPromptInputPreviewDTO,
 )
 from crxzipple.modules.orchestration.interfaces.shared import (
     build_reset_policy,
@@ -240,11 +243,32 @@ def build_cli() -> typer.Typer:
             typer.secho(str(exc), err=True, fg=typer.colors.RED)
             raise typer.Exit(code=1) from None
         echo_data(
-            PromptSurfacePreviewDTO.from_value(
+            RunPromptInputPreviewDTO.from_value(
                 run_id=run_id,
                 preview=preview,
             ),
         )
+
+    @app.command("baseline")
+    def regression_baseline(
+        ctx: typer.Context,
+        run_id: str = typer.Argument(..., help="Orchestration run identifier."),
+        task_label: str | None = typer.Option(
+            None,
+            help="Optional human-readable regression task label.",
+        ),
+    ) -> None:
+        container = ensure_container(ctx)
+        run_query = _run_query_port(container)
+        try:
+            baseline = build_loop_regression_baseline(
+                run_query,
+                run_id=run_id,
+                task_label=task_label,
+            )
+        except OrchestrationRunNotFoundError as exc:
+            _exit_not_found(exc)
+        echo_data(baseline)
 
     @app.command("list")
     def list_runs(
@@ -253,19 +277,27 @@ def build_cli() -> typer.Typer:
             None,
             help="Optional run status filter.",
         ),
+        limit: int | None = typer.Option(
+            None,
+            min=1,
+            help="Optional maximum number of runs to print.",
+        ),
     ) -> None:
         container = ensure_container(ctx)
         run_query = _run_query_port(container)
+        runs = run_query.list_runs(
+            status=parse_run_status(
+                status,
+                option_name="--status",
+                error_factory=_bad_parameter,
+            ),
+        )
+        if limit is not None:
+            runs = runs[:limit]
         echo_data(
             [
                 OrchestrationRunDTO.from_entity(run)
-                for run in run_query.list_runs(
-                    status=parse_run_status(
-                        status,
-                        option_name="--status",
-                        error_factory=_bad_parameter,
-                    ),
-                )
+                for run in runs
             ],
         )
 

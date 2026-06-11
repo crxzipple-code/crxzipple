@@ -46,6 +46,70 @@ class _StreamingTextAdapter:
         )
 
 
+class _ToolThenFollowupAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(
+        self,
+        _profile: object,
+        request: LlmAdapterRequest,
+    ) -> LlmAdapterResponse:
+        self.requests.append(request)
+        request_number = len(self.requests)
+        if request_number == 1:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _expand_tool_bundle_call(
+                            call_id="call-expand-echo",
+                            source_id="test.local_package.echo",
+                        ),
+                    ),
+                ),
+            )
+        if request_number == 2:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-expand-echo-group",
+                            name="context_tree.expand",
+                            arguments={
+                                "node_id": "tools.bundle.test.local_package.echo.group.source",
+                            },
+                        ),
+                    ),
+                ),
+            )
+        if request_number == 3:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        _enable_tool_schema_call(
+                            call_id="call-enable-echo-history",
+                            tool_id="echo",
+                        ),
+                    ),
+                ),
+            )
+        if request_number == 4:
+            return LlmAdapterResponse(
+                result=LlmResult(
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-echo-history-1",
+                            name="echo",
+                            arguments={"message": "first tool hello"},
+                        ),
+                    ),
+                ),
+            )
+        if request_number == 5:
+            return LlmAdapterResponse(result=LlmResult(text="first tool answer"))
+        return LlmAdapterResponse(result=LlmResult(text="second answer"))
+
+
 class _BlockingStreamingAdapter:
     def __init__(self) -> None:
         self.requests: list[LlmAdapterRequest] = []
@@ -177,6 +241,15 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         preview = self.orchestration_inspection_service.preview_prompt(run.id)
         self.assertEqual(preview.llm_id, "image-special")
+        self.assertEqual(preview.provider_request_options["response_format"], None)
+        self.assertEqual(preview.provider_request_options["output_schema"], None)
+        self.assertEqual(preview.provider_request_options["overrides"], {})
+        self.assertEqual(
+            preview.provider_request_options["request_metadata"][
+                "context_render_snapshot_id"
+            ],
+            preview.context_render_snapshot_id,
+        )
         events_service = self.events_service
         assert events_service is not None
         records = events_service.read_event_topic(
@@ -690,15 +763,211 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(processed.current_step, 1)
         schema_names = sorted(schema.name for schema in adapter.requests[0].tool_schemas)
-        self.assertIn("echo", schema_names)
-        self.assertIn("read", schema_names)
-        self.assertIn("session_status", schema_names)
+        self.assertIn("context_tree.expand", schema_names)
+        self.assertIn("context_tree.enable_tool_schema", schema_names)
+        self.assertIn("context_tree.list", schema_names)
         assert processed.result_payload is not None
         self.assertEqual(processed.result_payload["output_text"], "hello from fake llm")
         self.assertEqual(
             processed.result_payload["llm_id"],
             "openai.gpt-5.4-mini",
         )
+
+    def test_normal_turn_delivers_history_through_context_tree_not_direct_transcript(
+        self,
+    ) -> None:
+        adapter = _SequentialTextAdapter("first answer", "second answer")
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        first = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-history-tree-first",
+                inbound_instruction=InboundInstruction(source="cli", content="first"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=first.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=first.id),
+        )
+        first_processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+        self.assertIsNotNone(first_processed)
+
+        second = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-history-tree-followup",
+                inbound_instruction=InboundInstruction(
+                    source="cli",
+                    content="continue please",
+                ),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=second.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=second.id),
+        )
+
+        second_processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(second_processed)
+        assert second_processed is not None
+        self.assertEqual(second_processed.metadata["prompt_mode"], "normal_turn")
+        self.assertEqual(len(adapter.requests), 2)
+        request = adapter.requests[1]
+        direct_messages = [
+            message for message in request.messages if message.role is not LlmMessageRole.SYSTEM
+        ]
+        self.assertEqual(len(direct_messages), 1)
+        self.assertEqual(direct_messages[0].role, LlmMessageRole.USER)
+        self.assertEqual(
+            direct_messages[0].content,
+            [{"type": "text", "text": "continue please"}],
+        )
+        context_tree_message = next(
+            message
+            for message in request.messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        context_body = str(context_tree_message.content)
+        self.assertIn("first answer", context_body)
+        self.assertIn("Delivered as provider user message for this turn.", context_body)
+        self.assertNotIn("<content>\n          continue please\n        </content>", context_body)
+
+    def test_followup_turn_delivers_prior_tool_history_as_context_tree_interaction(
+        self,
+    ) -> None:
+        adapter = _ToolThenFollowupAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Returns the input payload for local inline execution tests.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
+        )
+
+        async def echo(arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(
+                str(arguments.get("message") or ""),
+                details={"echo": arguments.get("message")},
+            )
+
+        self.local_runtime_registry.register(tool, echo)
+
+        first = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-history-tool-first",
+                inbound_instruction=InboundInstruction(source="cli", content="use echo"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=first.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=first.id),
+        )
+        first_processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+        self.assertIsNotNone(first_processed)
+        assert first_processed is not None
+        self.assertEqual(first_processed.status, OrchestrationRunStatus.COMPLETED)
+
+        second = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-history-tool-followup",
+                inbound_instruction=InboundInstruction(
+                    source="cli",
+                    content="what happened?",
+                ),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=second.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=second.id),
+        )
+
+        second_processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(second_processed)
+        assert second_processed is not None
+        self.assertEqual(second_processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(len(adapter.requests), 6)
+        followup_request = adapter.requests[5]
+        direct_messages = [
+            message
+            for message in followup_request.messages
+            if message.role is not LlmMessageRole.SYSTEM
+        ]
+        self.assertEqual(len(direct_messages), 1)
+        self.assertEqual(direct_messages[0].role, LlmMessageRole.USER)
+        self.assertEqual(
+            direct_messages[0].content,
+            [{"type": "text", "text": "what happened?"}],
+        )
+        self.assertFalse(
+            any(message.role is LlmMessageRole.TOOL for message in followup_request.messages),
+        )
+        context_tree_message = next(
+            message
+            for message in followup_request.messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        )
+        context_body = str(context_tree_message.content)
+        self.assertIn('<tool_interaction tool_name="echo"', context_body)
+        self.assertIn("call-echo-history-1", context_body)
+        self.assertIn("first tool hello", context_body)
 
     def test_process_next_orchestration_assignment_downgrades_image_history_for_explicit_non_vision_model(
         self,
@@ -967,28 +1236,42 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 any("# Session Start" in str(message.content) for message in system_messages),
             )
             tool_schema_names = {schema.name for schema in adapter.requests[0].tool_schemas}
-            self.assertIn("read", tool_schema_names)
-            self.assertIn("memory_search", tool_schema_names)
-            self.assertIn("sessions_send", tool_schema_names)
+            self.assertIn("context_tree.expand", tool_schema_names)
+            self.assertNotIn("context_tree.recall_memory", tool_schema_names)
+            self.assertNotIn("memory_search", tool_schema_names)
+            self.assertIn("context_tree.enable_tool_schema", tool_schema_names)
             context_tree_message = next(
                 message
                 for message in system_messages
                 if message.metadata.get("prompt_block_kind") == "context_workspace"
             )
-            self.assertIn("<context_tree", str(context_tree_message.content))
-            self.assertIn("Be helpful and concise.", str(context_tree_message.content))
-            self.assertIn("# Runtime Context", str(context_tree_message.content))
-            self.assertIn("- Agent: assistant", str(context_tree_message.content))
-            self.assertIn("- Model: openai.gpt-5.4-mini", str(context_tree_message.content))
-            self.assertIn("run.flow", str(context_tree_message.content))
-            self.assertIn("Flow: Session Start", str(context_tree_message.content))
-            self.assertIn("workspace.bootstrap", str(context_tree_message.content))
-            self.assertNotIn("Follow workspace conventions.", str(context_tree_message.content))
+            context_tree_content = str(context_tree_message.content)
+            self.assertIn("<context_tree", context_tree_content)
+            self.assertIn("Be helpful and concise.", context_tree_content)
+            self.assertIn("# Runtime Context", context_tree_content)
+            self.assertIn("- Agent: assistant", context_tree_content)
+            self.assertIn("- Model: openai.gpt-5.4-mini", context_tree_content)
+            self.assertIn("run.flow", context_tree_content)
+            self.assertIn("Flow: Session Start", context_tree_content)
+            self.assertIn("workspace.resources", context_tree_content)
+            self.assertIn(
+                "Collapsed nodes are actionable handles",
+                context_tree_content,
+            )
+            self.assertIn(
+                "Before saying a file, skill, memory, artifact, data source, or tool",
+                context_tree_content,
+            )
+            self.assertIn(
+                "Tool function nodes with `schema_enabled=true`",
+                context_tree_content,
+            )
+            self.assertNotIn("Follow workspace conventions.", context_tree_content)
             self.assertFalse(
                 any("# Workspace Context" in str(message.content) for message in system_messages),
             )
             self.assertIn(
-                f"- Agent home / workspace: {workspace}",
+                f"- Workspace: {workspace}",
                 str(context_tree_message.content),
             )
             self.assertEqual(processed.metadata["prompt_mode"], "session_start")

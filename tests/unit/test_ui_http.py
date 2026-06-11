@@ -40,14 +40,25 @@ from crxzipple.modules.llm.domain import (
     LlmMessageRole,
     LlmResult,
     LlmUsage,
+    ToolCallIntent,
 )
 from crxzipple.modules.orchestration.domain import (
+    ExecutionChain,
+    ExecutionOwnerReference,
+    ExecutionStep,
+    ExecutionStepItem,
+    ExecutionStepItemKind,
+    ExecutionStepKind,
     InboundInstruction,
     OrchestrationErrorPayload,
     OrchestrationRun,
     OrchestrationRunStage,
     OrchestrationRunStatus,
     PendingApprovalRequest,
+)
+from crxzipple.modules.session.application import (
+    AppendSessionMessageInput,
+    EnsureSessionInput,
 )
 from crxzipple.modules.tool.application import (
     ExecuteToolInput,
@@ -163,6 +174,13 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
 
     def _process_operations_events(self) -> None:
+        outbox_container = self._target_container(AssemblyTarget.EVENT_OUTBOX_PUBLISHER)
+        try:
+            outbox_container.require(
+                AppKey.EVENT_OUTBOX_PUBLISHER_SERVICE,
+            ).publish_available(limit=500)
+        finally:
+            outbox_container.close()
         observer_container = self._target_container(AssemblyTarget.OPERATIONS_OBSERVER)
         try:
             observer_container.require(
@@ -409,6 +427,57 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual([item["type"] for item in steps_payload], ["user_input", "agent_thinking"])
         self.assertEqual(steps_payload[0]["summary"], "生成一份运行台摘要")
         self.assertEqual(steps_payload[1]["status"], "queued")
+
+    def test_ui_workbench_home_does_not_reuse_latest_thread_for_accepted_run_without_session(
+        self,
+    ) -> None:
+        container = self.client.app.state.container
+        timestamp = datetime.now(timezone.utc)
+        latest_thread_run = OrchestrationRun(
+            id="run-ui-latest-thread",
+            inbound_instruction=InboundInstruction(
+                source="ui.workbench",
+                content="latest thread title",
+            ),
+            status=OrchestrationRunStatus.COMPLETED,
+            stage=OrchestrationRunStage.COMPLETED,
+            agent_id="assistant",
+            active_session_id="session-main",
+            metadata={
+                "session_key": "agent:assistant:main",
+                "thread_title": "Latest Thread",
+            },
+            created_at=timestamp - timedelta(minutes=1),
+            updated_at=timestamp,
+            completed_at=timestamp,
+        )
+        accepted_run = OrchestrationRun(
+            id="run-ui-new-accepted",
+            inbound_instruction=InboundInstruction(
+                source="ui.workbench",
+                content="new accepted content",
+            ),
+            status=OrchestrationRunStatus.ACCEPTED,
+            stage=OrchestrationRunStage.ACCEPTED,
+            agent_id="assistant",
+            metadata={"trace_id": "trace-ui-new-accepted"},
+            created_at=timestamp + timedelta(seconds=1),
+            updated_at=timestamp + timedelta(seconds=1),
+        )
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(latest_thread_run)
+            uow.orchestration_runs.add(accepted_run)
+            uow.commit()
+
+        response = self.client.get(
+            "/ui/workbench/home?run_id=run-ui-new-accepted",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["active_run_id"], "run-ui-new-accepted")
+        self.assertIsNone(payload["active_thread_id"])
+        self.assertEqual(payload["threads"][0]["title"], "Latest Thread")
 
     def test_ui_workbench_followup_run_includes_child_run_tool_steps(self) -> None:
         container = self.client.app.state.container
@@ -733,7 +802,6 @@ class UiHttpTestCase(HttpModuleTestCase):
             metadata={
                 "session_key": "agent:assistant:main",
                 "trace_id": "trace-ui-llm-usage",
-                "llm_invocation_id": invocation.id,
                 "requested_llm_id": "openai.gpt-5.4-mini",
             },
             created_at=timestamp,
@@ -741,9 +809,46 @@ class UiHttpTestCase(HttpModuleTestCase):
             started_at=timestamp,
             completed_at=timestamp + timedelta(seconds=2),
         )
+        chain = ExecutionChain.create(
+            chain_id="chain-ui-llm-usage",
+            turn_id=run.id,
+        )
+        llm_step = ExecutionStep.create(
+            step_id="step-ui-llm-usage",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=1,
+            kind=ExecutionStepKind.LLM,
+        )
+        llm_step.start()
+        llm_step.complete()
+        chain.increment_step_count()
+        llm_item = ExecutionStepItem.create(
+            item_id="item-ui-llm-usage",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=invocation.id,
+            ),
+        )
+        llm_item.complete(
+            summary_payload={
+                "llm_invocation_id": invocation.id,
+                "llm_id": "openai.gpt-5.4-mini",
+                "tool_call_message_ids": ["message-function-call-ui-chain-only"],
+            },
+        )
+        chain.complete()
 
         with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(run)
+            uow.execution_chains.add(chain)
+            uow.execution_steps.add(llm_step)
+            uow.execution_step_items.add(llm_item)
             uow.commit()
 
         run_response = self.client.get("/ui/workbench/runs/run-ui-llm-usage")
@@ -772,6 +877,450 @@ class UiHttpTestCase(HttpModuleTestCase):
             },
         )
         self.assertIn("14 tokens", llm_steps[0]["summary"])
+
+    def test_ui_workbench_reads_llm_trace_from_execution_chain_without_run_metadata(
+        self,
+    ) -> None:
+        container = self.client.app.state.container
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _SequentialResultAdapter(
+                LlmResult(
+                    text="我先检查页面状态。",
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-ui-progress",
+                            name="browser.snapshot",
+                            arguments={},
+                        ),
+                    ),
+                    usage=LlmUsage(input_tokens=7, output_tokens=6, total_tokens=13),
+                    finish_reason="stop",
+                ),
+            ),
+        )
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "openai.gpt-5.4-mini",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-mini",
+                "credential_binding_id": "openai-api-key",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        invocation = container.require(AppKey.LLM_SERVICE).invoke(
+            InvokeLlmInput(
+                llm_id="openai.gpt-5.4-mini",
+                invocation_id="llm-invocation-ui-chain-only",
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="Summarize.",
+                    ),
+                ),
+            ),
+        )
+        timestamp = datetime.now(timezone.utc)
+        session_service = container.require(AppKey.SESSION_SERVICE)
+        session_service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+                workspace="workspace-ui",
+            ),
+        )
+        progress_message = session_service.append_message(
+            AppendSessionMessageInput(
+                session_key="agent:assistant:main",
+                role="assistant",
+                content_payload={
+                    "text": "我看到已有 query service 能列 execution chains/steps/items。"
+                },
+                source_kind="llm_invocation",
+                source_id=invocation.id,
+            ),
+        )
+        run = OrchestrationRun(
+            id="run-ui-chain-only",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="从执行链读取 LLM",
+            ),
+            status=OrchestrationRunStatus.COMPLETED,
+            stage=OrchestrationRunStage.COMPLETED,
+            agent_id="assistant",
+            current_step=1,
+            result_payload={"output_text": "done"},
+            metadata={
+                "session_key": "agent:assistant:main",
+                "trace_id": "trace-ui-chain-only",
+            },
+            created_at=timestamp,
+            updated_at=timestamp + timedelta(seconds=2),
+            started_at=timestamp,
+            completed_at=timestamp + timedelta(seconds=2),
+        )
+        chain = ExecutionChain.create(
+            chain_id="chain-ui-chain-only",
+            turn_id=run.id,
+        )
+        intake_step = ExecutionStep.create(
+            step_id="step-ui-chain-only-intake",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=0,
+            kind=ExecutionStepKind.INTAKE,
+        )
+        intake_step.complete()
+        chain.increment_step_count()
+        llm_step = ExecutionStep.create(
+            step_id="step-ui-chain-only-llm",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=1,
+            kind=ExecutionStepKind.LLM,
+        )
+        llm_step.start()
+        llm_step.complete()
+        chain.increment_step_count()
+        llm_item = ExecutionStepItem.create(
+            item_id="item-ui-chain-only-llm",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=invocation.id,
+            ),
+        )
+        llm_item.complete(
+            summary_payload={
+                "llm_invocation_id": invocation.id,
+                "llm_id": "openai.gpt-5.4-mini",
+                "tool_call_message_ids": ["message-function-call-ui-chain-only"],
+            },
+        )
+        progress_item = ExecutionStepItem.create(
+            item_id="item-ui-chain-only-progress",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=1,
+            kind=ExecutionStepItemKind.SESSION_MESSAGE,
+            owner=ExecutionOwnerReference(
+                owner_kind="session_message",
+                owner_id=progress_message.id,
+            ),
+        )
+        progress_item.complete(
+            summary_payload={
+                "session_message_id": progress_message.id,
+                "message_role": "assistant",
+                "message_kind": "assistant_progress",
+                "llm_invocation_id": invocation.id,
+            },
+        )
+        final_step = ExecutionStep.create(
+            step_id="step-ui-chain-only-final",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=2,
+            kind=ExecutionStepKind.FINAL_RESPONSE,
+        )
+        final_step.complete()
+        chain.increment_step_count()
+        chain.complete()
+
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(run)
+            uow.execution_chains.add(chain)
+            uow.execution_steps.add(intake_step)
+            uow.execution_steps.add(llm_step)
+            uow.execution_step_items.add(llm_item)
+            uow.execution_step_items.add(progress_item)
+            uow.execution_steps.add(final_step)
+            uow.commit()
+
+        run_response = self.client.get("/ui/workbench/runs/run-ui-chain-only")
+        steps_response = self.client.get("/ui/workbench/runs/run-ui-chain-only/steps")
+
+        self.assertEqual(run_response.status_code, 200)
+        self.assertEqual(steps_response.status_code, 200)
+        payload = run_response.json()
+        self.assertEqual(payload["metrics"]["tokens"], 13)
+        self.assertEqual(payload["metrics"]["llm_calls"], 1)
+        self.assertEqual(payload["model"]["id"], "openai.gpt-5.4-mini")
+        self.assertIn(
+            ("llm_invocation", invocation.id),
+            {
+                (item["type"], item["id"])
+                for item in payload["inspector"]["linked_assets"]
+            },
+        )
+        steps_payload = steps_response.json()
+        self.assertEqual(
+            [step["type"] for step in steps_payload],
+            ["user_input", "agent_progress", "llm", "final_response"],
+        )
+        self.assertEqual(
+            [step["step_id"] for step in steps_payload],
+            [
+                f"{run.id}:execution:{intake_step.id}",
+                f"{run.id}:execution:{llm_step.id}:progress:1",
+                f"{run.id}:execution:{llm_step.id}",
+                f"{run.id}:execution:{final_step.id}",
+            ],
+        )
+        self.assertEqual(
+            [step["trace"]["step_id"] for step in steps_payload],
+            [intake_step.id, llm_step.id, llm_step.id, final_step.id],
+        )
+        progress_steps = [
+            step for step in steps_payload if step["type"] == "agent_progress"
+        ]
+        self.assertEqual(progress_steps[0]["title"], "Agent Progress")
+        self.assertEqual(
+            progress_steps[0]["markdown"],
+            "我看到已有 query service 能列 execution chains/steps/items。",
+        )
+        self.assertEqual(
+            progress_steps[0]["trace"]["llm_invocation_id"],
+            invocation.id,
+        )
+        llm_steps = [step for step in steps_payload if step["type"] == "llm"]
+        self.assertEqual(llm_steps[0]["trace"]["llm_invocation_id"], invocation.id)
+        self.assertEqual(llm_steps[0]["actions"][0]["target"]["route"], f"/trace/{run.metadata['trace_id']}?step_id={llm_step.id}")
+        self.assertIn("13 tokens", llm_steps[0]["summary"])
+        self.assertIn("text:", llm_steps[0]["summary"])
+        self.assertIn("tool calls: 1", llm_steps[0]["summary"])
+        self.assertIn("tool call messages: 1", llm_steps[0]["summary"])
+        self.assertIn("progress recorded: 1", llm_steps[0]["summary"])
+        self.assertIn(
+            "Text + tools",
+            {badge["label"] for badge in llm_steps[0]["badges"]},
+        )
+        self.assertIn(
+            "Tool messages: 1",
+            {badge["label"] for badge in llm_steps[0]["badges"]},
+        )
+
+    def test_ui_workbench_marks_consecutive_tool_only_llm_steps(self) -> None:
+        container = self.client.app.state.container
+        timestamp = datetime.now(timezone.utc)
+        run = OrchestrationRun(
+            id="run-ui-tool-only-streak",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="连续工具调用",
+            ),
+            status=OrchestrationRunStatus.RUNNING,
+            stage=OrchestrationRunStage.LLM,
+            agent_id="assistant",
+            current_step=3,
+            metadata={
+                "session_key": "agent:assistant:main",
+                "trace_id": "trace-ui-tool-only-streak",
+                "requested_llm_id": "openai.gpt-5.4-mini",
+            },
+            created_at=timestamp,
+            updated_at=timestamp + timedelta(seconds=3),
+            started_at=timestamp,
+        )
+        chain = ExecutionChain.create(
+            chain_id="chain-ui-tool-only-streak",
+            turn_id=run.id,
+        )
+        steps: list[ExecutionStep] = []
+        items: list[ExecutionStepItem] = []
+        for index in range(1, 4):
+            step = ExecutionStep.create(
+                step_id=f"step-ui-tool-only-streak-{index}",
+                chain_id=chain.id,
+                turn_id=run.id,
+                step_index=index,
+                kind=ExecutionStepKind.LLM,
+            )
+            step.start()
+            step.complete()
+            item = ExecutionStepItem.create(
+                item_id=f"item-ui-tool-only-streak-{index}",
+                step_id=step.id,
+                chain_id=chain.id,
+                turn_id=run.id,
+                item_index=0,
+                kind=ExecutionStepItemKind.LLM_INVOCATION,
+                owner=ExecutionOwnerReference(
+                    owner_kind="llm_invocation",
+                    owner_id=f"llm-ui-tool-only-streak-{index}",
+                ),
+            )
+            item.complete(
+                summary_payload={
+                    "llm_invocation_id": f"llm-ui-tool-only-streak-{index}",
+                    "llm_id": "openai.gpt-5.4-mini",
+                    "tool_call_names": ["exec"],
+                    "tool_call_message_ids": [f"message-tool-call-{index}"],
+                },
+            )
+            chain.increment_step_count()
+            steps.append(step)
+            items.append(item)
+
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(run)
+            uow.execution_chains.add(chain)
+            for step in steps:
+                uow.execution_steps.add(step)
+            for item in items:
+                uow.execution_step_items.add(item)
+            uow.commit()
+
+        response = self.client.get("/ui/workbench/runs/run-ui-tool-only-streak/steps")
+
+        self.assertEqual(response.status_code, 200)
+        llm_steps = [step for step in response.json() if step["type"] == "llm"]
+        self.assertEqual(len(llm_steps), 3)
+        self.assertIn(
+            "Tool only",
+            {badge["label"] for badge in llm_steps[2]["badges"]},
+        )
+        self.assertNotIn(
+            "Tool-only streak: 2",
+            {badge["label"] for badge in llm_steps[1]["badges"]},
+        )
+        self.assertIn(
+            "Tool-only streak: 3",
+            {badge["label"] for badge in llm_steps[2]["badges"]},
+        )
+        self.assertIn("Tool-only streak: 3 LLM steps.", llm_steps[2]["summary"])
+
+    def test_ui_workbench_reads_tool_runs_from_execution_chain_without_run_metadata(
+        self,
+    ) -> None:
+        container = self.client.app.state.container
+        timestamp = datetime.now(timezone.utc)
+        run = OrchestrationRun(
+            id="run-ui-tool-chain-only",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="运行工具",
+            ),
+            status=OrchestrationRunStatus.COMPLETED,
+            stage=OrchestrationRunStage.COMPLETED,
+            agent_id="assistant",
+            current_step=1,
+            result_payload={"output_text": "工具已完成。"},
+            metadata={
+                "session_key": "agent:assistant:main",
+                "trace_id": "trace-ui-tool-chain-only",
+            },
+            created_at=timestamp,
+            updated_at=timestamp + timedelta(seconds=2),
+            started_at=timestamp,
+            completed_at=timestamp + timedelta(seconds=2),
+        )
+        tool_run = ToolRun.create(
+            run_id="tool-run-ui-chain-only",
+            tool_id="browser.snapshot",
+            input_payload={"format": "text"},
+            metadata={},
+            invocation_context_payload={},
+            target=ToolExecutionTarget(mode=ToolMode.INLINE),
+        )
+        tool_run.start()
+        tool_run.succeed(ToolRunResult.text("Captured browser snapshot."))
+        chain = ExecutionChain.create(
+            chain_id="chain-ui-tool-chain-only",
+            turn_id=run.id,
+        )
+        intake_step = ExecutionStep.create(
+            step_id="step-ui-tool-chain-only-intake",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=0,
+            kind=ExecutionStepKind.INTAKE,
+        )
+        intake_step.complete()
+        chain.increment_step_count()
+        tool_step = ExecutionStep.create(
+            step_id="step-ui-tool-chain-only-tool",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=1,
+            kind=ExecutionStepKind.TOOL_BATCH,
+        )
+        tool_step.complete()
+        chain.increment_step_count()
+        tool_item = ExecutionStepItem.create(
+            item_id="item-ui-tool-chain-only-tool",
+            step_id=tool_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.TOOL_RUN,
+            owner=ExecutionOwnerReference(
+                owner_kind="tool_run",
+                owner_id=tool_run.id,
+            ),
+        )
+        tool_item.complete(
+            summary_payload={
+                "tool_run_id": tool_run.id,
+                "tool_name": "browser.snapshot",
+                "tool_id": "browser.snapshot",
+                "status": "succeeded",
+            },
+        )
+        final_step = ExecutionStep.create(
+            step_id="step-ui-tool-chain-only-final",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=2,
+            kind=ExecutionStepKind.FINAL_RESPONSE,
+        )
+        final_step.complete()
+        chain.increment_step_count()
+        chain.complete()
+
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(run)
+            uow.tool_runs.add(tool_run)
+            uow.execution_chains.add(chain)
+            uow.execution_steps.add(intake_step)
+            uow.execution_steps.add(tool_step)
+            uow.execution_step_items.add(tool_item)
+            uow.execution_steps.add(final_step)
+            uow.commit()
+
+        run_response = self.client.get("/ui/workbench/runs/run-ui-tool-chain-only")
+        steps_response = self.client.get("/ui/workbench/runs/run-ui-tool-chain-only/steps")
+
+        self.assertEqual(run_response.status_code, 200)
+        self.assertEqual(steps_response.status_code, 200)
+        self.assertEqual(run_response.json()["metrics"]["tool_calls"], 1)
+        steps_payload = steps_response.json()
+        self.assertEqual(
+            [step["type"] for step in steps_payload],
+            ["user_input", "tool_call", "final_response"],
+        )
+        tool_step_payload = [
+            step for step in steps_payload if step["type"] == "tool_call"
+        ][0]
+        self.assertEqual(
+            tool_step_payload["step_id"],
+            f"{run.id}:execution:{tool_step.id}:{tool_item.id}",
+        )
+        self.assertEqual(tool_step_payload["trace"]["step_id"], tool_step.id)
+        self.assertEqual(tool_step_payload["trace"]["tool_run_id"], tool_run.id)
+        self.assertEqual(
+            tool_step_payload["actions"][0]["target"]["route"],
+            f"/trace/{run.metadata['trace_id']}?step_id={tool_step.id}",
+        )
+        self.assertIn("Captured browser snapshot.", tool_step_payload["summary"])
 
     def test_ui_workbench_access_not_ready_projects_missing_access_step(self) -> None:
         container = self.client.app.state.container
@@ -867,10 +1416,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             status=OrchestrationRunStatus.CANCELLED,
             stage=OrchestrationRunStage.CANCELLED,
             agent_id="assistant",
+            pending_approval_request_payload=approval.to_payload(),
             metadata={
                 "trace_id": "trace-ui-cancelled-approval",
                 "session_key": "agent:assistant:main",
-                "pending_approval_request": approval.to_payload(),
             },
             created_at=timestamp - timedelta(seconds=3),
             updated_at=timestamp,
@@ -924,10 +1473,10 @@ class UiHttpTestCase(HttpModuleTestCase):
             stage=OrchestrationRunStage.WAITING_FOR_CONFIRMATION,
             agent_id="assistant",
             active_session_id="session-approval",
+            pending_approval_request_payload=approval.to_payload(),
             metadata={
                 "trace_id": "trace-ui-skill-draft-approval",
                 "session_key": "agent:assistant:main",
-                "pending_approval_request": approval.to_payload(),
             },
             created_at=timestamp - timedelta(seconds=3),
             updated_at=timestamp,
@@ -977,8 +1526,8 @@ class UiHttpTestCase(HttpModuleTestCase):
             status=OrchestrationRunStatus.WAITING,
             stage=OrchestrationRunStage.WAITING_FOR_CONFIRMATION,
             pending_tool_run_ids=("tool-run-1",),
+            pending_approval_request_payload=approval.to_payload(),
             worker_id="worker-1",
-            metadata={"pending_approval_request": approval.to_payload()},
         )
 
         run.cancel(reason="user cancelled")
@@ -1950,11 +2499,58 @@ class UiHttpTestCase(HttpModuleTestCase):
         artifact_run.completed_at = timestamp + timedelta(seconds=30)
         artifact_run.heartbeat_at = artifact_run.completed_at
 
+        source_run = OrchestrationRun(
+            id="run-tool-source",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="Run UI tool.",
+            ),
+            status=OrchestrationRunStatus.RUNNING,
+            stage=OrchestrationRunStage.TOOL,
+            agent_id="assistant",
+            metadata={
+                "session_key": "agent:assistant:tool",
+                "trace_id": "trace-tool-page",
+                "turn_id": "turn-tool-source",
+            },
+        )
+        tool_chain = ExecutionChain.create(
+            chain_id="chain-ui-tool-ops-page",
+            turn_id=source_run.id,
+        )
+        tool_step = ExecutionStep.create(
+            step_id="step-ui-tool-ops-page",
+            chain_id=tool_chain.id,
+            turn_id=source_run.id,
+            step_index=0,
+            kind=ExecutionStepKind.TOOL_BATCH,
+        )
+        tool_step.start()
+        tool_chain.increment_step_count()
+        tool_item = ExecutionStepItem.create(
+            item_id="item-ui-tool-ops-page-running",
+            step_id=tool_step.id,
+            chain_id=tool_chain.id,
+            turn_id=source_run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.TOOL_RUN,
+            owner=ExecutionOwnerReference(
+                owner_kind="tool_run",
+                owner_id=running_run.id,
+            ),
+            correlation_key="call-ui-tool-running",
+        )
+        tool_item.start()
+
         with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(source_run)
             uow.tool_runs.add(queued_run)
             uow.tool_runs.add(running_run)
             uow.tool_runs.add(failed_run)
             uow.tool_runs.add(artifact_run)
+            uow.execution_chains.add(tool_chain)
+            uow.execution_steps.add(tool_step)
+            uow.execution_step_items.add(tool_item)
             uow.tool_workers.add(worker)
             uow.tool_run_assignments.add(assignment)
             uow.commit()
@@ -2075,6 +2671,22 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(
             run_rows["tool-run-ui-page-queued"]["cells"]["trace"],
             "trace-tool-page",
+        )
+        self.assertEqual(
+            run_rows["tool-run-ui-page-running"]["cells"]["source"],
+            "run-tool-source / call-ui-tool-running",
+        )
+        self.assertEqual(
+            run_rows["tool-run-ui-page-running"]["cells"]["chain_id"],
+            tool_chain.id,
+        )
+        self.assertEqual(
+            run_rows["tool-run-ui-page-running"]["cells"]["step_id"],
+            tool_step.id,
+        )
+        self.assertEqual(
+            run_rows["tool-run-ui-page-running"]["cells"]["trace_route"],
+            f"/ui/trace/trace-tool-page?step_id={tool_step.id}",
         )
         self.assertEqual(
             run_rows["tool-run-ui-page-running"]["cells"]["assignment_status"],
@@ -2233,15 +2845,20 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(access_row["cells"]["missing_access"], "browser_profile")
         self.assertIn(access_row["cells"]["status"], {"setup_needed", "unsupported"})
-        runtime_row = next(
+        runtime_rows = [
             item
             for item in payload["auth_missing"]["rows"]
             if item["cells"]["tool"] == "browser.snapshot"
-        )
-        self.assertEqual(runtime_row["cells"]["category"], "Runtime")
-        self.assertEqual(runtime_row["cells"]["missing_access"], "browser-profile-runtime")
-        self.assertEqual(runtime_row["cells"]["action"], "Open Daemon")
-        self.assertEqual(runtime_row["cells"]["route"], "/operations/daemon")
+        ]
+        if runtime_rows:
+            runtime_row = runtime_rows[0]
+            self.assertEqual(runtime_row["cells"]["category"], "Runtime")
+            self.assertEqual(
+                runtime_row["cells"]["missing_access"],
+                "browser-profile-runtime",
+            )
+            self.assertEqual(runtime_row["cells"]["action"], "Open Daemon")
+            self.assertEqual(runtime_row["cells"]["route"], "/operations/daemon")
         self.assertIn(
             stored_artifact.id,
             {
@@ -2348,6 +2965,14 @@ class UiHttpTestCase(HttpModuleTestCase):
         }
         self.assertIn("tool-run-ui-page-running", details)
         self.assertEqual(running_detail["input_payload"], {"prompt": "run"})
+        running_summary = {
+            item["label"]: item["value"]
+            for item in running_detail["summary"]
+        }
+        self.assertEqual(running_summary["Turn ID"], source_run.id)
+        self.assertEqual(running_summary["Chain ID"], tool_chain.id)
+        self.assertEqual(running_summary["Step ID"], tool_step.id)
+        self.assertEqual(running_summary["Step Kind"], "tool_batch")
         self.assertEqual(
             {
                 item["label"]: item["value"]
@@ -2732,7 +3357,6 @@ class UiHttpTestCase(HttpModuleTestCase):
             agent_id="assistant",
             result_payload={
                 "llm_id": "openai.gpt-ops-page",
-                "llm_invocation_id": succeeded.id,
                 "output_text": "hello from llm ops page",
             },
             metadata={
@@ -2741,8 +3365,43 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "turn_id": "turn-llm-ops-page",
             },
         )
+        llm_chain = ExecutionChain.create(
+            chain_id="chain-ui-llm-ops-page",
+            turn_id=linked_run.id,
+        )
+        llm_step = ExecutionStep.create(
+            step_id="step-ui-llm-ops-page",
+            chain_id=llm_chain.id,
+            turn_id=linked_run.id,
+            step_index=0,
+            kind=ExecutionStepKind.LLM,
+        )
+        llm_step.complete()
+        llm_chain.increment_step_count()
+        llm_item = ExecutionStepItem.create(
+            item_id="item-ui-llm-ops-page",
+            step_id=llm_step.id,
+            chain_id=llm_chain.id,
+            turn_id=linked_run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=succeeded.id,
+            ),
+        )
+        llm_item.complete(
+            summary_payload={
+                "llm_invocation_id": succeeded.id,
+                "llm_id": "openai.gpt-ops-page",
+            },
+        )
+        llm_chain.complete()
         with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
             uow.orchestration_runs.add(linked_run)
+            uow.execution_chains.add(llm_chain)
+            uow.execution_steps.add(llm_step)
+            uow.execution_step_items.add(llm_item)
             uow.commit()
         container.require(AppKey.EVENTS_SERVICE).publish(
             Event(
@@ -2813,7 +3472,15 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(
             recent_rows[succeeded.id]["cells"]["trace_route"],
-            "/ui/trace/trace-llm-ops-page",
+            f"/ui/trace/trace-llm-ops-page?step_id={llm_step.id}",
+        )
+        self.assertEqual(
+            recent_rows[succeeded.id]["cells"]["chain_id"],
+            llm_chain.id,
+        )
+        self.assertEqual(
+            recent_rows[succeeded.id]["cells"]["step_id"],
+            llm_step.id,
         )
         self.assertEqual(payload["failed_invocations"]["total"], 1)
         self.assertEqual(
@@ -2872,6 +3539,13 @@ class UiHttpTestCase(HttpModuleTestCase):
         }
         self.assertIn(succeeded.id, details_by_id)
         self.assertIn(failed.id, details_by_id)
+        succeeded_summary = {
+            item["label"]: item["value"]
+            for item in details_by_id[succeeded.id]["summary"]
+        }
+        self.assertEqual(succeeded_summary["Chain ID"], llm_chain.id)
+        self.assertEqual(succeeded_summary["Step ID"], llm_step.id)
+        self.assertEqual(succeeded_summary["Step Kind"], "llm")
         resolver_items = {
             item["label"]: item["value"]
             for item in details_by_id[succeeded.id]["resolver"]["items"]
@@ -3180,12 +3854,17 @@ class UiHttpTestCase(HttpModuleTestCase):
                 payload={
                     "event_name": "orchestration.run.queued",
                     "run_id": "run-ui-trace",
+                    "step_id": "step-ui-trace-intake",
                     "session_key": "agent:assistant:trace-ui",
                     "status": "queued",
                     "stage": "queued",
                     "summary": "queued for trace ui",
                 },
-                trace={"trace_id": "trace-ui-events", "correlation_id": "corr-ui"},
+                trace={
+                    "trace_id": "trace-ui-events",
+                    "correlation_id": "corr-ui",
+                    "step_id": "step-ui-trace-intake",
+                },
             ),
         )
         container.require(AppKey.EVENTS_SERVICE).publish(
@@ -3196,35 +3875,144 @@ class UiHttpTestCase(HttpModuleTestCase):
                 payload={
                     "event_name": "orchestration.run.llm_text_delta",
                     "run_id": "run-ui-trace",
+                    "step_id": "step-ui-trace-llm",
                     "session_key": "agent:assistant:trace-ui",
                     "invocation_id": "llm-ui-trace",
                     "text_delta": "hello trace",
                 },
-                trace={"trace_id": "trace-ui-events", "correlation_id": "corr-ui"},
+                trace={
+                    "trace_id": "trace-ui-events",
+                    "correlation_id": "corr-ui",
+                    "step_id": "step-ui-trace-llm",
+                },
+            ),
+        )
+        container.require(AppKey.EVENTS_SERVICE).publish(
+            Event(
+                topic="events.named.llm.invocation_succeeded",
+                kind="fact",
+                occurred_at=base_time + timedelta(seconds=4),
+                payload={
+                    "event_name": "llm.invocation_succeeded",
+                    "run_id": "run-ui-trace",
+                    "step_id": "step-ui-trace-llm",
+                    "invocation_id": "llm-ui-trace",
+                    "finish_reason": "tool_calls",
+                    "text_present": True,
+                    "text_chars": 8,
+                    "tool_call_count": 1,
+                    "tool_call_names": ["browser.snapshot"],
+                },
+                trace={
+                    "trace_id": "trace-ui-events",
+                    "correlation_id": "corr-ui",
+                    "step_id": "step-ui-trace-llm",
+                    "llm_invocation_id": "llm-ui-trace",
+                },
+            ),
+        )
+        container.require(AppKey.EVENTS_SERVICE).publish(
+            Event(
+                topic="events.named.orchestration.execution.llm_step_completed",
+                kind="fact",
+                occurred_at=base_time + timedelta(seconds=6),
+                payload={
+                    "event_name": "orchestration.execution.llm_step_completed",
+                    "run_id": "run-ui-trace",
+                    "step_id": "step-ui-trace-llm",
+                    "llm_invocation_id": "llm-ui-trace",
+                    "assistant_progress_message_ids": ["msg-progress-ui-trace"],
+                    "tool_call_message_ids": ["msg-tool-call-ui-trace"],
+                    "assistant_message_ids": [
+                        "msg-progress-ui-trace",
+                        "msg-tool-call-ui-trace",
+                    ],
+                    "tool_call_names": ["browser.snapshot"],
+                    "text_present": True,
+                    "text_chars": 8,
+                },
+                trace={
+                    "trace_id": "trace-ui-events",
+                    "correlation_id": "corr-ui",
+                    "step_id": "step-ui-trace-llm",
+                    "llm_invocation_id": "llm-ui-trace",
+                },
             ),
         )
 
         events_response = self.client.get("/ui/trace/trace-ui-events/events")
         summary_response = self.client.get("/ui/trace/trace-ui-events")
+        step_events_response = self.client.get(
+            "/ui/trace/trace-ui-events/events?step_id=step-ui-trace-llm",
+        )
+        step_summary_response = self.client.get(
+            "/ui/trace/trace-ui-events?step_id=step-ui-trace-llm",
+        )
 
         self.assertEqual(events_response.status_code, 200)
         events_payload = events_response.json()
         self.assertEqual(
             [item["name"] for item in events_payload],
-            ["orchestration.run.queued", "orchestration.run.llm_text_delta"],
+            [
+                "orchestration.run.queued",
+                "orchestration.run.llm_text_delta",
+                "llm.invocation_succeeded",
+                "orchestration.execution.llm_step_completed",
+            ],
         )
         self.assertEqual(events_payload[0]["family"], "orchestration")
         self.assertEqual(events_payload[0]["summary"], "queued for trace ui")
         self.assertEqual(events_payload[1]["trace"]["llm_invocation_id"], "llm-ui-trace")
+        self.assertEqual(events_payload[1]["trace"]["step_id"], "step-ui-trace-llm")
         self.assertEqual(events_payload[1]["relative_ms"], 2000)
+        self.assertEqual(events_payload[2]["family"], "llm")
+        self.assertTrue(events_payload[2]["payload"]["text_present"])
+        self.assertEqual(events_payload[2]["payload"]["text_chars"], 8)
+        self.assertEqual(events_payload[2]["payload"]["tool_call_count"], 1)
+        self.assertEqual(
+            events_payload[2]["payload"]["tool_call_names"],
+            ["browser.snapshot"],
+        )
+        self.assertEqual(events_payload[3]["family"], "orchestration")
+        self.assertEqual(
+            events_payload[3]["payload"]["assistant_progress_message_ids"],
+            ["msg-progress-ui-trace"],
+        )
+        self.assertEqual(
+            events_payload[3]["payload"]["tool_call_message_ids"],
+            ["msg-tool-call-ui-trace"],
+        )
 
         self.assertEqual(summary_response.status_code, 200)
         summary_payload = summary_response.json()
         self.assertEqual(summary_payload["trace_id"], "trace-ui-events")
-        self.assertEqual(summary_payload["event_count"], 2)
-        self.assertEqual(summary_payload["key_event_count"], 1)
+        self.assertEqual(summary_payload["event_count"], 4)
+        self.assertEqual(summary_payload["key_event_count"], 3)
         self.assertEqual(summary_payload["status"], "running")
         self.assertIn("orchestration", summary_payload["owners"])
+        self.assertIn("llm", summary_payload["owners"])
+
+        self.assertEqual(step_events_response.status_code, 200)
+        step_events_payload = step_events_response.json()
+        self.assertEqual(
+            [item["name"] for item in step_events_payload],
+            [
+                "orchestration.run.llm_text_delta",
+                "llm.invocation_succeeded",
+                "orchestration.execution.llm_step_completed",
+            ],
+        )
+        self.assertEqual(
+            step_events_payload[0]["trace"]["step_id"],
+            "step-ui-trace-llm",
+        )
+        self.assertEqual(step_summary_response.status_code, 200)
+        step_summary_payload = step_summary_response.json()
+        self.assertEqual(step_summary_payload["event_count"], 3)
+        self.assertIn(
+            {"type": "step_id", "id": "step-ui-trace-llm"},
+            step_summary_payload["linked_entities"],
+        )
 
     def test_ui_trace_aliases_run_metadata_to_session_events(self) -> None:
         llm_response = self.client.post(

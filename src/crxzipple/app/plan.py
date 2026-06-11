@@ -26,6 +26,7 @@ class AssemblyTarget(StrEnum):
     TOOL_WORKER = "tool-worker"
     OPERATIONS_OBSERVER = "operations-observer"
     EVENT_RELAY_WORKER = "event-relay-worker"
+    EVENT_OUTBOX_PUBLISHER = "event-outbox-publisher"
     CHANNEL_RUNTIME = "channel-runtime"
     CLI_ADMIN = "cli-admin"
     TEST = "test"

@@ -34,17 +34,17 @@ class SessionsSpawnFollowupService:
     session_service: SessionLookupPort | None
     get_run: Callable[[str], OrchestrationRun]
     submit_bound_turn: SubmitBoundTurnPort
-    queue_followup_signal: Callable[[str], object]
+    queue_followup_continuation: Callable[[str], object]
 
-    def queue_child_completion_signal(self, run: OrchestrationRun) -> None:
+    def queue_child_completion_continuation(self, run: OrchestrationRun) -> None:
         spawn_payload = run.metadata.get("sessions_spawn")
         if not isinstance(spawn_payload, dict):
             return
         try:
-            self.queue_followup_signal(run.id)
+            self.queue_followup_continuation(run.id)
         except Exception:
             logger.exception(
-                "failed to queue sessions_spawn follow-up signal",
+                "failed to queue sessions_spawn follow-up continuation",
                 extra={"child_run_id": run.id},
             )
 

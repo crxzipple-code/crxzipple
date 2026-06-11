@@ -3,13 +3,21 @@ from __future__ import annotations
 from inspect import signature
 from types import SimpleNamespace
 
+from sqlalchemy import delete
+
 from crxzipple.interfaces.runtime_container import build_runtime_container
+from crxzipple.modules.dispatch.infrastructure.persistence.models import DispatchTaskModel
 from crxzipple.modules.orchestration.application.turn_submission import (
     build_submission_options,
     submit_turn,
 )
-from crxzipple.modules.orchestration.application.coordinators.scheduler_signals import (
-    RunSchedulerSignalCoordinator,
+from crxzipple.modules.orchestration.application.coordinators.continuation_tasks import (
+    RunContinuationCoordinator,
+)
+from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
+    ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+    ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
 )
 from crxzipple.modules.orchestration.application.lane import session_lane_key
 from crxzipple.modules.orchestration.application import (
@@ -17,6 +25,7 @@ from crxzipple.modules.orchestration.application import (
     SubmitBoundOrchestrationTurnInput,
     SubmitOrchestrationTurnInput,
 )
+from crxzipple.modules.orchestration.domain import OrchestrationRun
 from crxzipple.modules.channels import (
     ChannelAccountRuntimeBinding,
     ChannelInteraction,
@@ -36,25 +45,79 @@ def _legacy_runtime_outbound_topic(runtime_id: str) -> str:
     return f"delivery.runtime.{runtime_id.strip()}"
 
 
+def _latest_dispatch_task_id(orchestration_run_query_service, run_id: str) -> str:
+    chain = orchestration_run_query_service.get_active_execution_chain(run_id)
+    if chain is None:
+        chains = orchestration_run_query_service.list_execution_chains(run_id)
+        assert chains
+        chain = chains[-1]
+    for step in reversed(orchestration_run_query_service.list_execution_steps(chain.id)):
+        if step.dispatch_task_id is not None and step.dispatch_task_id.strip():
+            return step.dispatch_task_id
+    raise AssertionError(f"Run '{run_id}' has no dispatch execution step.")
+
+
 class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
-    def test_scheduler_signal_queue_is_idempotent_when_duplicate_insert_races(self) -> None:
-        class _SignalRepository:
+    def test_run_repository_persists_explicit_wait_state_fields(self) -> None:
+        pending_request = {
+            "request_id": "approval-persisted",
+            "effect_id": "workspace_search",
+            "label": "Workspace Search",
+            "tool_ids": ["workspace_search"],
+            "created_at": "2026-06-02T00:00:00+00:00",
+        }
+        last_resolution = {
+            "request_id": "approval-persisted",
+            "decision": "allow_once",
+            "resolved_at": "2026-06-02T00:00:01+00:00",
+        }
+        recovery_contract = {
+            "kind": "approval",
+            "state": "resolved_allow_pending_replay",
+            "llm_invocation_id": "llm-persisted",
+        }
+        run = OrchestrationRun(
+            id="run-explicit-wait-state",
+            inbound_instruction=InboundInstruction(source="cli", content="hello"),
+            status=OrchestrationRunStatus.WAITING,
+            stage=OrchestrationRunStage.WAITING_FOR_CONFIRMATION,
+            pending_approval_request_payload=pending_request,
+            last_approval_resolution_payload=last_resolution,
+            recovery_contract_payload=recovery_contract,
+            metadata={"session_key": "agent:assistant:main"},
+        )
+
+        with self.uow_factory() as uow:
+            uow.orchestration_runs.add(run)
+            uow.commit()
+
+        loaded = self.orchestration_run_query_service.get_run(run.id)
+
+        self.assertEqual(loaded.pending_approval_request_payload, pending_request)
+        self.assertEqual(loaded.last_approval_resolution_payload, last_resolution)
+        self.assertEqual(loaded.recovery_contract_payload, recovery_contract)
+        self.assertNotIn("pending_approval_request", loaded.metadata)
+        self.assertNotIn("last_approval_resolution", loaded.metadata)
+        self.assertNotIn("recovery_contract", loaded.metadata)
+
+    def test_continuation_queue_is_idempotent_when_duplicate_insert_races(self) -> None:
+        class _DispatchTaskRepository:
             def __init__(self, state: dict[str, object]) -> None:
                 self.state = state
 
-            def add(self, signal):  # noqa: ANN001, ANN201
-                self.state["signal"] = signal
+            def add(self, task):  # noqa: ANN001, ANN201
+                self.state["task"] = task
 
-            def get(self, signal_id: str):  # noqa: ANN201
-                signal = self.state.get("signal")
-                if signal is not None and signal.id == signal_id:
-                    return signal
+            def get(self, task_id: str):  # noqa: ANN201
+                task = self.state.get("task")
+                if task is not None and task.id == task_id:
+                    return task
                 return None
 
         class _RaceUnitOfWork:
             def __init__(self, state: dict[str, object]) -> None:
                 self.state = state
-                self.orchestration_scheduler_signals = _SignalRepository(state)
+                self.dispatch_tasks = _DispatchTaskRepository(state)
 
             def __enter__(self):
                 return self
@@ -70,14 +133,17 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                     raise RuntimeError("simulated duplicate insert race")
 
         state: dict[str, object] = {"raise_on_commit": True}
-        coordinator = RunSchedulerSignalCoordinator(
+        coordinator = RunContinuationCoordinator(
             uow_factory=lambda: _RaceUnitOfWork(state),
         )
 
-        signal = coordinator.queue_tool_terminal_signal(tool_run_id="tool-runtime-1")
+        continuation = coordinator.queue_tool_terminal_continuation(
+            tool_run_id="tool-runtime-1",
+        )
 
-        self.assertEqual(signal.id, "tool-terminal:tool-runtime-1")
-        self.assertIs(signal, state["signal"])
+        self.assertEqual(continuation.id, "tool-terminal:tool-runtime-1")
+        self.assertIsNotNone(state["task"])
+        self.assertEqual(continuation.payload["tool_run_id"], "tool-runtime-1")
 
     def test_runtime_container_has_no_implicit_runtime_event_subscriber_switch(self) -> None:
         parameters = signature(build_runtime_container).parameters
@@ -124,7 +190,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             operations_subscription_ids,
         )
 
-    def test_scheduler_runtime_event_service_queues_tool_signal_without_background_subscribers(
+    def test_scheduler_runtime_event_service_queues_tool_continuation_without_background_subscribers(
         self,
     ) -> None:
         custom_harness = SqliteTestHarness()
@@ -157,12 +223,18 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             )
             self.assertIsNotNone(cursor)
             with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
-                signal = uow.orchestration_scheduler_signals.get(
-                    "tool-terminal:tool-runtime-1",
-                )
-            self.assertIsNotNone(signal)
-            assert signal is not None
-            self.assertEqual(signal.signal_payload["tool_run_id"], "tool-runtime-1")
+                task = uow.dispatch_tasks.get("tool-terminal:tool-runtime-1")
+            self.assertIsNotNone(task)
+            assert task is not None
+            self.assertEqual(
+                task.owner_kind,
+                ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND,
+            )
+            self.assertEqual(task.metadata["continuation_kind"], "tool_terminal")
+            self.assertEqual(
+                task.metadata["continuation_payload"],
+                {"tool_run_id": "tool-runtime-1"},
+            )
         finally:
             custom_harness.close()
 
@@ -191,10 +263,8 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
 
             self.assertGreaterEqual(processed_count, 1)
             with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
-                signal = uow.orchestration_scheduler_signals.get(
-                    "tool-terminal:inline-tool-runtime-1",
-                )
-            self.assertIsNone(signal)
+                task = uow.dispatch_tasks.get("tool-terminal:inline-tool-runtime-1")
+            self.assertIsNone(task)
         finally:
             custom_harness.close()
 
@@ -205,7 +275,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             def __init__(self) -> None:
                 self.queued_tool_run_ids: list[str] = []
 
-            def queue_tool_terminal_signal(self, *, tool_run_id: str):  # noqa: ANN201
+            def queue_tool_terminal_continuation(self, *, tool_run_id: str):  # noqa: ANN201
                 self.queued_tool_run_ids.append(tool_run_id)
                 return SimpleNamespace(id=f"tool-terminal:{tool_run_id}")
 
@@ -284,7 +354,9 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             "agent:writer:main",
         )
         self.assertEqual(claimed_assignment.metadata["session_kind"], "main")
-        dispatch_task = self.dispatch_service.get_task(run.id)
+        dispatch_task = self.dispatch_service.get_task(
+            _latest_dispatch_task_id(self.orchestration_run_query_service, run.id),
+        )
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.CLAIMED)
         self.assertEqual(dispatch_task.policy, DispatchPolicy.FIFO)
         self.assertEqual(dispatch_task.claimed_by, "worker-1")
@@ -583,6 +655,106 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         still_queued = self.dispatch_service.get_task(foreign_task.id)
         self.assertEqual(still_queued.status, DispatchTaskStatus.QUEUED)
 
+    def test_dispatch_owner_kind_selection_is_explicit_by_orchestration_entrypoint(
+        self,
+    ) -> None:
+        self._register_agent_and_llm()
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-owner-kind-selected",
+                inbound_instruction=InboundInstruction(source="cli", content="hello"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        step_dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            run.id,
+        )
+        step_task = self.dispatch_service.get_task(step_dispatch_task_id)
+        self.assertEqual(step_task.owner_kind, ORCHESTRATION_STEP_DISPATCH_OWNER_KIND)
+        self.assertEqual(step_task.owner_id, step_dispatch_task_id)
+        self.assertEqual(step_task.payload_ref, run.id)
+
+        profile = self.agent_service.get_profile("assistant")
+        options = build_submission_options(
+            profile=profile,
+            llm_id=None,
+            channel="webhook",
+            chat_type="direct",
+            peer_id="user-owner-kind",
+            conversation_id=None,
+            thread_id=None,
+            account_id=None,
+            main_key="main",
+            direct_scope=DirectSessionScope.MAIN,
+            source="webhook",
+            queue_policy=OrchestrationQueuePolicy.FIFO,
+            priority=50,
+            max_steps=None,
+        )
+        ingress_run = self.orchestration_scheduler_service.ingress_coordinator.submit_turn(
+            SubmitOrchestrationTurnInput(
+                accept_input=build_accept_run_input(
+                    source=options.source,
+                    content="pending ingress owner kind",
+                    queue_policy=options.queue_policy,
+                    priority=options.priority,
+                    max_steps=options.max_steps,
+                ),
+                context=build_session_route_context(
+                    agent_id=options.agent_id,
+                    channel=options.channel,
+                    chat_type=options.chat_type,
+                    peer_id=options.peer_id,
+                    conversation_id=options.conversation_id,
+                    thread_id=options.thread_id,
+                    account_id=options.account_id,
+                    main_key=options.main_key,
+                    direct_scope=options.direct_scope,
+                ),
+                requested_llm_id=options.llm_id,
+                enqueue_queue_policy=options.queue_policy,
+                enqueue_priority=options.priority,
+            ),
+        )
+        with self.uow_factory() as uow:
+            ingress_request = uow.orchestration_ingress_requests.get_by_run_id(
+                ingress_run.id,
+            )
+
+        self.assertIsNotNone(ingress_request)
+        assert ingress_request is not None
+        ingress_task = self.dispatch_service.get_task(f"ingress:{ingress_request.id}")
+        self.assertEqual(
+            ingress_task.owner_kind,
+            ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+        )
+        self.assertEqual(ingress_task.owner_id, ingress_request.id)
+
+        continuation = self.orchestration_scheduler_service.queue_tool_terminal_continuation(
+            tool_run_id="tool-owner-kind",
+        )
+        continuation_task = self.dispatch_service.get_task(continuation.id)
+        self.assertEqual(
+            continuation_task.owner_kind,
+            ORCHESTRATION_CONTINUATION_DISPATCH_OWNER_KIND,
+        )
+        self.assertEqual(continuation_task.owner_id, continuation.id)
+
     def test_heartbeat_assignment_extends_dispatch_lease(self) -> None:
         self._register_agent_and_llm()
 
@@ -609,7 +781,11 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-1",
         )
         assert claimed is not None
-        first_task = self.dispatch_service.get_task(run.id)
+        dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            run.id,
+        )
+        first_task = self.dispatch_service.get_task(dispatch_task_id)
         assert first_task.lease_expires_at is not None
 
         time.sleep(0.01)
@@ -617,13 +793,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             run_id=run.id,
             worker_id="worker-1",
         )
-        updated_task = self.dispatch_service.get_task(run.id)
+        updated_task = self.dispatch_service.get_task(dispatch_task_id)
 
         self.assertEqual(heartbeated.status, OrchestrationRunStatus.RUNNING)
         assert updated_task.lease_expires_at is not None
         self.assertGreater(updated_task.lease_expires_at, first_task.lease_expires_at)
 
-    def test_recovered_dispatch_task_fails_running_orchestration_run(self) -> None:
+    def test_recovered_dispatch_task_requeues_running_orchestration_run(self) -> None:
         self._register_agent_and_llm()
 
         run = self.orchestration_intake_service.accept(
@@ -649,30 +825,42 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-1",
         )
         assert claimed is not None
+        chain = self.orchestration_run_query_service.get_active_execution_chain(run.id)
+        assert chain is not None
+        [*_, active_step_before] = self.orchestration_run_query_service.list_execution_steps(
+            chain.id,
+        )
 
-        dispatch_task = self.dispatch_service.get_task(run.id)
+        dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            run.id,
+        )
+        dispatch_task = self.dispatch_service.get_task(dispatch_task_id)
         assert dispatch_task.lease_expires_at is not None
         recovered = self.dispatch_service.recover_abandoned_tasks(
             RecoverAbandonedDispatchTasksInput(
-                owner_kind="orchestration_run",
+                owner_kind=ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
                 reason="Orchestration worker lease expired before completion.",
                 now=dispatch_task.lease_expires_at + timedelta(seconds=1),
             ),
         )
 
-        self.assertEqual([task.id for task in recovered], [run.id])
+        self.assertEqual([task.id for task in recovered], [dispatch_task_id])
+        self.publish_outbox_events()
         processed_events = self.orchestration_scheduler_service.process_runtime_events(
             limit_per_subscription=10,
         )
-        failed_run = self.orchestration_run_query_service.get_run(run.id)
-        failed_task = self.dispatch_service.get_task(run.id)
+        recovered_run = self.orchestration_run_query_service.get_run(run.id)
+        recovered_task = self.dispatch_service.get_task(dispatch_task_id)
+        steps_after = self.orchestration_run_query_service.list_execution_steps(chain.id)
 
         self.assertGreaterEqual(processed_events, 1)
-        self.assertEqual(failed_run.status, OrchestrationRunStatus.FAILED)
-        assert failed_run.error is not None
-        self.assertEqual(failed_run.error.code, "worker_lease_expired")
-        self.assertIn("failed for safety", failed_run.error.message)
-        self.assertEqual(failed_task.status, DispatchTaskStatus.FAILED)
+        self.assertEqual(recovered_run.status, OrchestrationRunStatus.QUEUED)
+        self.assertIsNone(recovered_run.error)
+        self.assertIsNone(recovered_run.worker_id)
+        self.assertEqual(recovered_task.status, DispatchTaskStatus.QUEUED)
+        self.assertEqual(steps_after[-1].id, active_step_before.id)
+        self.assertEqual(steps_after[-1].dispatch_task_id, dispatch_task_id)
 
     def test_run_lifecycle_can_advance_wait_resume_and_complete(self) -> None:
         run = self.orchestration_intake_service.accept(
@@ -742,7 +930,9 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(completed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(completed.result_payload, {"output": "done"})
-        dispatch_task = self.dispatch_service.get_task(run.id)
+        dispatch_task = self.dispatch_service.get_task(
+            _latest_dispatch_task_id(self.orchestration_run_query_service, run.id),
+        )
         self.assertEqual(dispatch_task.status, DispatchTaskStatus.COMPLETED)
 
     def test_complete_run_skips_lark_legacy_runtime_topic_publication(self) -> None:
@@ -958,7 +1148,8 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
 
         self.assertEqual(run.status, OrchestrationRunStatus.ACCEPTED)
-        self.assertIsNone(run.session_key)
+        self.assertEqual(run.session_key, "agent:assistant:main")
+        self.assertIsNone(run.active_session_id)
 
         with self.uow_factory() as uow:
             pending = uow.orchestration_ingress_requests.get_by_run_id(run.id)
@@ -983,6 +1174,87 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(completed)
         assert completed is not None
         self.assertEqual(completed.status.value, "completed")
+
+    def test_scheduler_recovers_missing_ingress_dispatch_task(self) -> None:
+        self._register_agent_and_llm()
+        profile = self.agent_service.get_profile("assistant")
+        options = build_submission_options(
+            profile=profile,
+            llm_id=None,
+            channel="webhook",
+            chat_type="direct",
+            peer_id="user-ingress-recover",
+            conversation_id=None,
+            thread_id=None,
+            account_id=None,
+            main_key="main",
+            direct_scope=DirectSessionScope.MAIN,
+            source="webhook",
+            queue_policy=OrchestrationQueuePolicy.JUMP_QUEUE,
+            priority=50,
+            max_steps=None,
+        )
+        run = self.orchestration_scheduler_service.ingress_coordinator.submit_turn(
+            SubmitOrchestrationTurnInput(
+                accept_input=build_accept_run_input(
+                    source=options.source,
+                    content="hello missing ingress dispatch",
+                    queue_policy=options.queue_policy,
+                    priority=options.priority,
+                    max_steps=options.max_steps,
+                ),
+                context=build_session_route_context(
+                    agent_id=options.agent_id,
+                    channel=options.channel,
+                    chat_type=options.chat_type,
+                    peer_id=options.peer_id,
+                    conversation_id=options.conversation_id,
+                    thread_id=options.thread_id,
+                    account_id=options.account_id,
+                    main_key=options.main_key,
+                    direct_scope=options.direct_scope,
+                ),
+                requested_llm_id=options.llm_id,
+                enqueue_queue_policy=options.queue_policy,
+                enqueue_priority=options.priority,
+            ),
+        )
+
+        with self.uow_factory() as uow:
+            request = uow.orchestration_ingress_requests.get_by_run_id(run.id)
+            self.assertIsNotNone(request)
+            assert request is not None
+            ingress_task_id = f"ingress:{request.id}"
+            uow.session.execute(
+                delete(DispatchTaskModel).where(DispatchTaskModel.id == ingress_task_id),
+            )
+            uow.commit()
+
+        processed = self.orchestration_scheduler_service.process_next_request(
+            worker_id="scheduler-recover-missing-ingress-dispatch",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.id, run.id)
+        self.assertEqual(processed.status, OrchestrationRunStatus.QUEUED)
+        self.assertEqual(processed.session_key, "agent:assistant:main")
+
+        with self.uow_factory() as uow:
+            completed = uow.orchestration_ingress_requests.get_by_run_id(run.id)
+            recovered_task = uow.dispatch_tasks.get(ingress_task_id)
+
+        self.assertIsNotNone(completed)
+        assert completed is not None
+        self.assertEqual(completed.status.value, "completed")
+        self.assertIsNotNone(recovered_task)
+        assert recovered_task is not None
+        self.assertEqual(
+            recovered_task.owner_kind,
+            ORCHESTRATION_INGRESS_DISPATCH_OWNER_KIND,
+        )
+        self.assertEqual(recovered_task.owner_id, completed.id)
+        self.assertEqual(recovered_task.status, DispatchTaskStatus.COMPLETED)
 
     def test_inline_ingress_submission_reserves_request_from_background_scheduler(
         self,
@@ -1029,8 +1301,14 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 enqueue_queue_policy=options.queue_policy,
                 enqueue_priority=options.priority,
             ),
-            claimed_worker_id="inline-ingress-reserved",
         )
+        claimed = (
+            self.orchestration_scheduler_service.ingress_coordinator.claim_dispatch_request_for_run(
+                run_id=run.id,
+                worker_id="inline-ingress-reserved",
+            )
+        )
+        self.assertIsNotNone(claimed)
 
         with self.uow_factory() as uow:
             request = uow.orchestration_ingress_requests.get_by_run_id(run.id)
@@ -1046,7 +1324,7 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             ),
         )
 
-    def test_claim_for_run_returns_none_once_request_is_already_processing(self) -> None:
+    def test_dispatch_request_for_run_returns_none_once_already_processing(self) -> None:
         self._register_agent_and_llm()
         profile = self.agent_service.get_profile("assistant")
         options = build_submission_options(
@@ -1089,11 +1367,17 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 enqueue_queue_policy=options.queue_policy,
                 enqueue_priority=options.priority,
             ),
-            claimed_worker_id="inline-ingress-claimed",
         )
+        claimed = (
+            self.orchestration_scheduler_service.ingress_coordinator.claim_dispatch_request_for_run(
+                run_id=run.id,
+                worker_id="inline-ingress-claimed",
+            )
+        )
+        self.assertIsNotNone(claimed)
 
         claimed_again = (
-            self.orchestration_scheduler_service.ingress_coordinator.claim_request_for_run(
+            self.orchestration_scheduler_service.ingress_coordinator.claim_dispatch_request_for_run(
                 run_id=run.id,
                 worker_id="scheduler-daemon-claimed",
             )
@@ -1130,7 +1414,8 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
         )
 
         self.assertEqual(run.status, OrchestrationRunStatus.ACCEPTED)
-        self.assertIsNone(run.session_key)
+        self.assertEqual(run.session_key, target.id)
+        self.assertIsNone(run.active_session_id)
         self.assertIsNone(
             assign_next_orchestration_assignment(
                 self.container,
@@ -1438,6 +1723,12 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
             worker_id="worker-1",
             pending_tool_run_ids=("tool-run-1",),
         )
+        waiting_dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            waiting.id,
+        )
+        waiting_dispatch_task = self.dispatch_service.get_task(waiting_dispatch_task_id)
+        self.assertEqual(waiting_dispatch_task.status, DispatchTaskStatus.WAITING)
 
         self.orchestration_intake_service.enqueue(
             EnqueueOrchestrationRunInput(run_id=fifo.id),
@@ -1449,6 +1740,13 @@ class OrchestrationQueueTestCase(OrchestrationTestCaseBase):
                 reason="tool_results_ready",
             ),
         )
+        completed_waiting_task = self.dispatch_service.get_task(waiting_dispatch_task_id)
+        self.assertEqual(completed_waiting_task.status, DispatchTaskStatus.COMPLETED)
+        resumed_dispatch_task_id = _latest_dispatch_task_id(
+            self.orchestration_run_query_service,
+            waiting.id,
+        )
+        self.assertNotEqual(resumed_dispatch_task_id, waiting_dispatch_task_id)
         next_claimed = assign_next_orchestration_assignment(self.container,
             worker_id="worker-2",
         )

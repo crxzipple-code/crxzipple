@@ -48,7 +48,7 @@ from crxzipple.shared.access import (
 )
 from crxzipple.shared.domain.events import named_event_topic
 from crxzipple.shared.event_contracts import TOOL_CLI_EVENT_NAMES
-from tests.unit.support import SqliteTestHarness
+from tests.unit.support import SqliteTestHarness, published_event_bus_events
 
 
 class ToolSourceServiceTestCase(unittest.TestCase):
@@ -62,7 +62,6 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         )
         self.query_service = self.container.require(AppKey.TOOL_SOURCE_QUERY_SERVICE)
         self.uow_factory = self.container.require(AppKey.UNIT_OF_WORK_FACTORY)
-        self.event_bus = self.container.require(AppKey.EVENTS_BUS)
 
     def tearDown(self) -> None:
         self.harness.close()
@@ -93,7 +92,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         self.assertEqual(result.function_count, 1)
         self.assertEqual(result.error_count, 0)
         self.assertEqual(result.changed_count, 1)
-        event_names = _published_event_names(self.event_bus)
+        event_names = _published_event_names(self.container)
         self.assertIn("tool.source.created", event_names)
         self.assertIn("tool.source.discovery_completed", event_names)
         self.assertIn("tool.function.created", event_names)
@@ -122,6 +121,107 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             self.assertEqual(function.stable_key, "local_package.demo.demo_echo")
             self.assertEqual(function.handler_ref["ref"], "demo_echo")
             self.assertEqual(function.capability_ids, ("bounded_network.http",))
+
+    def test_query_service_lists_prompt_bundles_by_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_demo_tool_package(root)
+
+            plans = discover_tool_package_plans(root)
+            sources = tool_source_records_from_package_plans(plans)
+            discovery = ToolDiscoveryService(
+                ToolDiscoveryAdapterRegistry(
+                    {
+                        ToolSourceCatalogKind.LOCAL_PACKAGE: (
+                            ToolPackageDiscoveryAdapter(plans)
+                        ),
+                    },
+                ),
+            )
+            self.command_service.sync_sources(sources, discovery_service=discovery)
+
+        bundles = self.query_service.list_prompt_bundles(
+            ("missing", "demo_echo", "demo_echo"),
+        )
+
+        self.assertEqual(len(bundles), 1)
+        bundle = bundles[0]
+        self.assertEqual(bundle.source_id, "bundled.local_package.demo")
+        self.assertEqual(bundle.source_kind, "local_package")
+        self.assertEqual(bundle.title, "Demo Tools")
+        self.assertEqual(bundle.summary, "Echo and inspect demo tool behavior.")
+        self.assertEqual(bundle.function_ids, ("demo_echo",))
+        self.assertEqual(bundle.function_count, 1)
+        self.assertEqual(len(bundle.groups), 1)
+        self.assertEqual(bundle.groups[0].group_key, "echo")
+        self.assertEqual(bundle.groups[0].title, "Echo")
+        self.assertEqual(bundle.groups[0].function_ids, ("demo_echo",))
+        self.assertEqual(bundle.capability_ids, ("bounded_network.http",))
+        self.assertEqual(bundle.metadata["source_id"], "bundled.local_package.demo")
+
+        disabled = self.container.require(
+            AppKey.TOOL_FUNCTION_COMMAND_SERVICE,
+        ).set_function_enabled("demo_echo", enabled=False)
+        self.assertTrue(disabled.changed)
+
+        self.assertEqual(self.query_service.list_prompt_bundles(("demo_echo",)), ())
+
+    def test_query_service_uses_openapi_source_prompt_metadata(self) -> None:
+        source = ToolSourceCatalogRecord(
+            source_id="configured.openapi.flight_search",
+            kind=ToolSourceCatalogKind.OPENAPI,
+            display_name="Configured OpenAPI",
+            config={
+                "source": "configured_tool_provider",
+                "package_kind": "openapi",
+                "prompt": {
+                    "title": "Flight Search",
+                    "summary": "Search routes, prices, and availability.",
+                    "groups": {
+                        "search": {
+                            "title": "Search",
+                            "summary": "Query flight inventory and prices.",
+                            "function_ids": ["flight_search.query"],
+                            "default_tool_schema_ids": ["flight_search.query"],
+                            "default_tool_schema_max_count": 1,
+                            "default_tool_schema_source": (
+                                "configured.openapi.flight_search.prompt_group.search"
+                            ),
+                        },
+                    },
+                },
+            },
+        )
+        discovery = ToolDiscoveryService(
+            ToolDiscoveryAdapterRegistry(
+                {ToolSourceCatalogKind.OPENAPI: _PromptBundleDiscoveryAdapter()},
+            ),
+        )
+
+        result = self.command_service.sync_source(source, discovery_service=discovery)
+
+        self.assertIsNone(result.error_message)
+        bundles = self.query_service.list_prompt_bundles(("flight_search.query",))
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(bundles[0].source_id, source.source_id)
+        self.assertEqual(bundles[0].source_kind, "openapi")
+        self.assertEqual(bundles[0].title, "Flight Search")
+        self.assertEqual(bundles[0].summary, "Search routes, prices, and availability.")
+        self.assertEqual(len(bundles[0].groups), 1)
+        self.assertEqual(bundles[0].groups[0].group_key, "search")
+        self.assertEqual(bundles[0].groups[0].title, "Search")
+        self.assertEqual(bundles[0].groups[0].function_ids, ("flight_search.query",))
+        self.assertFalse(bundles[0].groups[0].metadata.get("auto_source_group", False))
+        self.assertEqual(
+            bundles[0].groups[0].metadata["default_tool_schema_ids"],
+            ["flight_search.query"],
+        )
+        self.assertEqual(bundles[0].groups[0].metadata["default_tool_schema_max_count"], 1)
+        self.assertEqual(
+            bundles[0].groups[0].metadata["default_tool_schema_source"],
+            "configured.openapi.flight_search.prompt_group.search",
+        )
+        self.assertIn("Query flight inventory", bundles[0].groups[0].summary)
 
     def test_create_and_update_configured_source_do_not_discover(self) -> None:
         created = self.command_service.create_source(
@@ -596,7 +696,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             )
 
         self.assertTrue(result.results[0].skipped)
-        self.assertIn("tool.source.disabled", _published_event_names(self.event_bus))
+        self.assertIn("tool.source.disabled", _published_event_names(self.container))
         with self.uow_factory() as uow:
             source = uow.tool_sources.get("bundled.local_package.demo")
             assert source is not None
@@ -629,7 +729,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             self.assertFalse(function_result.function.enabled)
             self.assertIn(
                 "tool.function.disabled",
-                _published_event_names(self.event_bus),
+                _published_event_names(self.container),
             )
 
             self.command_service.sync_sources(sources, discovery_service=discovery)
@@ -670,7 +770,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             self.assertEqual(function_result.function.trust_policy["level"], "trusted")
             self.assertIn(
                 "tool.function.policy_updated",
-                _published_event_names(self.event_bus),
+                _published_event_names(self.container),
             )
 
             self.command_service.sync_sources(sources, discovery_service=discovery)
@@ -781,7 +881,7 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         assert source is not None
         self.assertEqual(source.status.value, "error")
         self.assertEqual(source.last_discovery_status.value, "failed")
-        self.assertIn("tool.source.discovery_failed", _published_event_names(self.event_bus))
+        self.assertIn("tool.source.discovery_failed", _published_event_names(self.container))
         history = self.query_service.list_discovery_runs(source.source_id)
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].status.value, "failed")
@@ -789,10 +889,10 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         self.assertIn("boom", history[0].error_message or "")
 
 
-def _published_event_names(event_bus: object) -> tuple[str, ...]:
+def _published_event_names(container: object) -> tuple[str, ...]:
     return tuple(
         event.name
-        for event in getattr(event_bus, "published_events", ())
+        for event in published_event_bus_events(container)
         if isinstance(getattr(event, "name", None), str) and event.name
     )
 
@@ -849,6 +949,26 @@ class _CredentialRequirementDiscoveryAdapter(ToolDiscoveryAdapter):
         )
 
 
+class _PromptBundleDiscoveryAdapter(ToolDiscoveryAdapter):
+    def discover(self, source):  # noqa: ANN001, ANN201
+        return ToolSourceDiscoveryResult.completed(
+            source_id=source.source_id,
+            candidates=(
+                ToolFunctionCandidate(
+                    stable_key="openapi.flight_search.query",
+                    source_id=source.source_id,
+                    function_id="flight_search.query",
+                    name="Query Flights",
+                    description="Query flight route availability.",
+                    input_schema={"type": "object", "properties": {}},
+                    runtime_kind=ToolFunctionRuntimeKind.OPENAPI,
+                    handler_ref="openapi.flight_search.query",
+                    capabilities=("bounded_network.http",),
+                ),
+            ),
+        )
+
+
 def _write_demo_tool_package(root: Path) -> None:
     package_dir = root / "demo"
     package_dir.mkdir()
@@ -856,6 +976,16 @@ def _write_demo_tool_package(root: Path) -> None:
         """
 kind: local_package
 namespace: demo
+prompt:
+  title: Demo Tools
+  summary: Echo and inspect demo tool behavior.
+  groups:
+    echo:
+      order: 10
+      title: Echo
+      summary: Echo utilities.
+      function_ids:
+        - demo_echo
 capabilities:
   - bounded_network.http
 dependencies:

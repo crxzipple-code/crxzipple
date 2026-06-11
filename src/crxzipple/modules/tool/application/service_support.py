@@ -10,7 +10,7 @@ from crxzipple.modules.tool.application.ports import (
     ToolAccessReadinessPort,
     ToolArtifactWritePort,
     ToolRuntimeReadinessPort,
-    ToolRunDispatchPort,
+    ToolOrchestrationDispatchPort,
 )
 from crxzipple.modules.tool.domain.entities import Tool
 from crxzipple.modules.tool.domain.entities import ToolFunction
@@ -134,7 +134,7 @@ class ToolServiceDependencies:
     uow_factory: Callable[[], ToolUnitOfWork]
     runtime_gateway: ToolRuntimeGateway
     runtime_registry: Any | None
-    dispatch_port: ToolRunDispatchPort
+    dispatch_port: ToolOrchestrationDispatchPort
     access_readiness: ToolAccessReadinessPort | None
     runtime_readiness: ToolRuntimeReadinessPort | None
     artifact_service: ToolArtifactWritePort | None
@@ -161,7 +161,7 @@ class ToolServiceBase:
         return self.deps.runtime_gateway
 
     @property
-    def dispatch_port(self) -> ToolRunDispatchPort:
+    def dispatch_port(self) -> ToolOrchestrationDispatchPort:
         return self.deps.dispatch_port
 
     @property
@@ -259,6 +259,9 @@ def _execution_policy_from_metadata(metadata: Mapping[str, Any]) -> ToolExecutio
         timeout_seconds=max(int(policy.get("timeout_seconds") or 30), 1),
         requires_confirmation=bool(policy.get("requires_confirmation", False)),
         mutates_state=bool(policy.get("mutates_state", False)),
+        supports_parallel=bool(policy.get("supports_parallel", True)),
+        resource_scope=_optional_policy_text(policy.get("resource_scope")),
+        serial_group_key=_optional_policy_text(policy.get("serial_group_key")),
     )
 
 
@@ -520,6 +523,13 @@ def _consumer_ref_from_payload(payload: object | None) -> AccessConsumerRef:
 
 def _mapping_payload(value: object | None) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _optional_policy_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def decode_tool_attachment_bytes(data: str) -> bytes | None:

@@ -207,6 +207,78 @@ def build_turn_options(
     )
 
 
+def prompt_bootstrap_metadata_for_content(
+    content: Any,
+    *,
+    metadata: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    payload = dict(metadata or {})
+    if _has_explicit_prompt_bootstrap(payload):
+        explicit_policy = _explicit_prompt_bootstrap_policy(payload)
+        payload["prompt_bootstrap_policy"] = _normalize_prompt_bootstrap_policy(
+            explicit_policy,
+        )
+        return payload
+    del content
+    return payload
+
+
+def _normalize_prompt_bootstrap_policy(
+    policy: Mapping[str, object],
+) -> dict[str, object]:
+    payload = dict(policy)
+    schema_ids: list[str] = []
+    raw_schema_ids = payload.get("default_tool_schema_ids")
+    if isinstance(raw_schema_ids, list | tuple):
+        schema_ids.extend(
+            item.strip()
+            for item in raw_schema_ids
+            if isinstance(item, str) and item.strip()
+        )
+    if schema_ids:
+        payload["default_tool_schema_ids"] = _dedupe_preserving_order(tuple(schema_ids))
+    else:
+        payload.pop("default_tool_schema_ids", None)
+    if "default_tool_schema_source" not in payload and payload:
+        payload["default_tool_schema_source"] = "prompt_bootstrap_policy"
+    return payload
+
+
+def _dedupe_preserving_order(values: tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _has_explicit_prompt_bootstrap(metadata: Mapping[str, object]) -> bool:
+    if isinstance(metadata.get("prompt_bootstrap_policy"), Mapping):
+        return True
+    runtime_task_policy = metadata.get("runtime_task_policy")
+    if not isinstance(runtime_task_policy, Mapping):
+        return False
+    return isinstance(runtime_task_policy.get("prompt_bootstrap"), Mapping)
+
+
+def _explicit_prompt_bootstrap_policy(
+    metadata: Mapping[str, object],
+) -> dict[str, object]:
+    runtime_task_policy = metadata.get("runtime_task_policy")
+    runtime_prompt_bootstrap: Mapping[str, object] = {}
+    if isinstance(runtime_task_policy, Mapping):
+        raw_runtime_prompt_bootstrap = runtime_task_policy.get("prompt_bootstrap")
+        if isinstance(raw_runtime_prompt_bootstrap, Mapping):
+            runtime_prompt_bootstrap = raw_runtime_prompt_bootstrap
+    prompt_bootstrap = metadata.get("prompt_bootstrap_policy")
+    if isinstance(prompt_bootstrap, Mapping):
+        return {**dict(runtime_prompt_bootstrap), **dict(prompt_bootstrap)}
+    return dict(runtime_prompt_bootstrap)
+
+
 def build_inbound_instruction(
     *,
     source: str,
@@ -289,6 +361,10 @@ def build_accept_run_input(
     max_steps: int = 99,
     metadata: Mapping[str, object] | None = None,
 ) -> AcceptOrchestrationRunInput:
+    normalized_metadata = prompt_bootstrap_metadata_for_content(
+        content,
+        metadata=metadata,
+    )
     return AcceptOrchestrationRunInput(
         run_id=run_id,
         inbound_instruction=build_inbound_instruction(
@@ -305,7 +381,7 @@ def build_accept_run_input(
         queue_policy=queue_policy,
         priority=priority,
         max_steps=max_steps,
-        metadata=dict(metadata or {}),
+        metadata=normalized_metadata,
     )
 
 
@@ -340,6 +416,10 @@ def build_submit_turn_input(
     reset_policy: SessionResetPolicy | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> SubmitOrchestrationTurnInput:
+    normalized_metadata = prompt_bootstrap_metadata_for_content(
+        content,
+        metadata=metadata,
+    )
     return SubmitOrchestrationTurnInput(
         accept_input=build_accept_run_input(
             source=source,
@@ -353,7 +433,7 @@ def build_submit_turn_input(
             queue_policy=queue_policy,
             priority=priority,
             max_steps=max_steps,
-            metadata=metadata,
+            metadata=normalized_metadata,
         ),
         context=build_session_route_context(
             agent_id=agent_id,
@@ -373,7 +453,7 @@ def build_submit_turn_input(
         requested_llm_id=llm_id,
         touch_activity=touch_activity,
         reset_policy=reset_policy,
-        prepare_metadata=dict(metadata or {}),
+        prepare_metadata=normalized_metadata,
         enqueue_queue_policy=queue_policy,
         enqueue_priority=priority,
     )
@@ -390,7 +470,12 @@ def submit_turn(
     reply_address: str | None = None,
     reply_to: str | None = None,
     reply_metadata: dict[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
 ) -> OrchestrationRun:
+    normalized_metadata = prompt_bootstrap_metadata_for_content(
+        content,
+        metadata=metadata,
+    )
     return scheduler_service.submit_turn(
         SubmitOrchestrationTurnInput(
             accept_input=build_accept_run_input(
@@ -404,6 +489,7 @@ def submit_turn(
                 queue_policy=options.queue_policy,
                 priority=options.priority,
                 max_steps=options.max_steps,
+                metadata=normalized_metadata,
             ),
             context=build_session_route_context(
                 agent_id=options.agent_id,
@@ -417,6 +503,7 @@ def submit_turn(
                 direct_scope=options.direct_scope,
             ),
             requested_llm_id=options.llm_id,
+            prepare_metadata=normalized_metadata,
             enqueue_queue_policy=options.queue_policy,
             enqueue_priority=options.priority,
         ),

@@ -17,6 +17,9 @@ from crxzipple.modules.browser.application import (
     BrowserToolApplicationError,
     BrowserToolExecutionError,
 )
+from crxzipple.modules.browser.application.evidence_paths import (
+    browser_evidence_path_payload,
+)
 from crxzipple.modules.browser.interfaces.profile_payloads import build_profile_diagnostics_payload
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.shared.content_blocks import (
@@ -29,6 +32,7 @@ _CONTROL_KINDS = frozenset(get_args(BrowserControlKind))
 _PAGE_ACTION_KINDS = frozenset(get_args(BrowserPageActionKind))
 _NETWORK_PAGE_ACTION_KINDS = frozenset(
     {
+        "network-inspect",
         "network-start-capture",
         "network-stop-capture",
         "network-list-requests",
@@ -82,6 +86,18 @@ _DIAGNOSTIC_PAGE_ACTION_KINDS = frozenset(
         "page-errors",
     }
 )
+_CODE_PAGE_ACTION_KINDS = frozenset(
+    {
+        "runtime-inspect",
+        "script-list",
+        "script-find-request",
+        "code-search",
+        "script-inspect",
+        "script-extract-request",
+        "runtime-probe-client",
+        "runtime-call-client",
+    }
+)
 _LOCAL_PAGE_ACTION_KINDS = (
     (_PAGE_ACTION_KINDS - {"cdp-raw"})
     | _NETWORK_PAGE_ACTION_KINDS
@@ -89,6 +105,7 @@ _LOCAL_PAGE_ACTION_KINDS = (
     | _DOM_PAGE_ACTION_KINDS
     | _ENVIRONMENT_PAGE_ACTION_KINDS
     | _DIAGNOSTIC_PAGE_ACTION_KINDS
+    | _CODE_PAGE_ACTION_KINDS
 )
 _ADVANCED_PAGE_ACTION_KINDS = frozenset(
     {
@@ -137,9 +154,19 @@ _ADVANCED_PAGE_ACTION_KINDS = frozenset(
         "download",
         "wait-download",
         "network-inspect",
+        "action-trace",
+        "runtime-inspect",
+        "script-list",
+        "script-find-request",
+        "code-search",
+        "script-inspect",
+        "script-extract-request",
+        "runtime-probe-client",
+        "runtime-call-client",
     }
 )
 _NETWORK_TOOL_KIND_BY_TOOL_ID = {
+    "browser.network.inspect": "network-inspect",
     "browser.network.start_capture": "network-start-capture",
     "browser.network.stop_capture": "network-stop-capture",
     "browser.network.list_requests": "network-list-requests",
@@ -222,12 +249,18 @@ _NETWORK_BOOL_PAYLOAD_ARGUMENTS = frozenset(
         "include_timing",
         "include_initiator",
         "include_body_preview",
+        "include_body",
         "redact",
         "allow_cross_origin",
         "allow_mutating",
     }
 )
 _NETWORK_TOP_LEVEL_BODY_PREVIEW_LIMIT = 1200
+_SCRIPT_TOP_LEVEL_PREVIEW_LIMIT = 4000
+_BROWSER_DETAILS_MAX_CHARS = 120_000
+_BROWSER_DETAILS_COMPACT_STRING_LIMIT = 2000
+_BROWSER_DETAILS_COMPACT_LIST_LIMIT = 40
+_BROWSER_DETAILS_COMPACT_DICT_LIMIT = 80
 _ACTION_TOOL_PAGE_ACTION_KINDS = frozenset(
     kind for kind in _PAGE_ACTION_KINDS if kind not in {"snapshot", "network-inspect", "cdp-raw"}
 )
@@ -270,6 +303,7 @@ class BrowserToolDeps:
     browser_system_config_store: Any
     browser_profile_resolver: Any
     browser_capabilities_resolver: Any
+    browser_observation_service: Any | None = None
     settings: Any | None = None
     artifact_service: Any | None = None
     browser_runtime_state_store: Any | None = None
@@ -557,27 +591,46 @@ def _tool_result(
     guidance: dict[str, Any] | None = None,
 ) -> ToolRunResult:
     content_blocks = _browser_content_blocks(deps, content)
+    details = _browser_result_details(content)
     browser_runtime_metadata = _coerce_browser_runtime_metadata(runtime_metadata)
     browser_audit_metadata = _browser_audit_metadata(content, content_blocks)
+    browser_evidence = _browser_evidence_metadata(
+        tool_id=tool_id,
+        family=family,
+        kind=kind,
+        profile_name=profile_name,
+        profile_source=profile_source,
+        content=content,
+        details=details,
+        runtime_metadata=browser_runtime_metadata,
+    )
+    if browser_evidence:
+        content_blocks = _browser_content_blocks_with_evidence_path(
+            content_blocks,
+            browser_evidence,
+        )
+    metadata = {
+        "tool": tool_id,
+        "family": family,
+        "profile_name": profile_name,
+        "profile_source": profile_source,
+        **_browser_execution_context_metadata(execution_context),
+        **browser_runtime_metadata,
+        "kind": kind,
+        "execution_context": (
+            execution_context.to_payload()
+            if execution_context is not None
+            else None
+        ),
+        "guidance": dict(guidance) if isinstance(guidance, dict) else None,
+        **browser_audit_metadata,
+    }
+    if browser_evidence:
+        metadata["browser_evidence"] = browser_evidence
     return ToolRunResult.structured(
-        details=_browser_result_details(content),
+        details=details,
         content=[dict(block) for block in content_blocks],
-        metadata={
-            "tool": tool_id,
-            "family": family,
-            "profile_name": profile_name,
-            "profile_source": profile_source,
-            **_browser_execution_context_metadata(execution_context),
-            **browser_runtime_metadata,
-            "kind": kind,
-            "execution_context": (
-                execution_context.to_payload()
-                if execution_context is not None
-                else None
-            ),
-            "guidance": dict(guidance) if isinstance(guidance, dict) else None,
-            **browser_audit_metadata,
-        },
+        metadata=metadata,
     )
 
 
@@ -601,6 +654,605 @@ def _browser_audit_metadata(
         metadata["browser_artifact_ids"] = list(artifact_ids)
         metadata["artifact_ids"] = list(artifact_ids)
     return metadata
+
+
+def _browser_evidence_metadata(
+    *,
+    tool_id: str,
+    family: str | None,
+    kind: str | None,
+    profile_name: str | None,
+    profile_source: str | None,
+    content: Any,
+    details: Any,
+    runtime_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {"tool": tool_id}
+    evidence.update(_browser_evidence_path_metadata(tool_id=tool_id, kind=kind))
+    for key, value in (
+        ("family", family),
+        ("kind", kind),
+        ("profile", profile_name),
+        ("profile_source", profile_source),
+    ):
+        normalized = _normalize_text(value)
+        if normalized is not None:
+            evidence[key] = normalized
+
+    target_url = _browser_target_url_from_content(content)
+    if target_url is not None:
+        safe_url = _safe_browser_url_metadata(target_url)
+        url = _normalize_text(safe_url.get("browser_target_url"))
+        origin = _normalize_text(safe_url.get("browser_target_origin"))
+        if url is not None:
+            evidence["url"] = url
+        if origin is not None:
+            evidence["origin"] = origin
+
+    scalar_sources = (details, content, runtime_metadata)
+    for fact_key, source_keys in (
+        ("title", ("title", "page_title")),
+        ("target_id", ("target_id", "targetId", "browser_target_id")),
+        ("allocation_id", ("browser_allocation_id", "browser_context_lease_id")),
+        ("host_service_key", ("browser_host_service_key",)),
+        ("endpoint", ("endpoint", "api_endpoint", "request_url", "path")),
+        ("method", ("method", "request_method")),
+        ("http_status", ("status_code", "http_status", "response_status")),
+        ("request_id", ("request_id", "requestId")),
+        ("body_ref", ("body_ref", "response_body_ref")),
+        ("request_body_ref", ("request_body_ref",)),
+        ("verified_selector", ("verified_selector", "matched_selector", "selector")),
+        ("verified_ref", ("verified_ref", "target_ref", "element_ref", "ref")),
+    ):
+        if fact_key in evidence:
+            continue
+        value = _browser_evidence_first_scalar(scalar_sources, source_keys)
+        if value is not None:
+            evidence[fact_key] = _truncate_text(value, 180)
+
+    if "target_id" not in evidence:
+        target_id = _extract_browser_target_id(content)
+        if target_id is not None:
+            evidence["target_id"] = target_id
+
+    payload_shape_source = _browser_evidence_first_value(
+        (details, content),
+        (
+            "request_payload",
+            "requestPayload",
+            "request_body",
+            "requestBody",
+            "post_data",
+            "postData",
+            "payload",
+            "arguments",
+        ),
+    )
+    payload_shape = _browser_evidence_shape(payload_shape_source)
+    if payload_shape is not None:
+        evidence["payload_shape"] = payload_shape
+
+    result_shape_source = _browser_evidence_first_value(
+        (details, content),
+        (
+            "result_shape",
+            "response_shape",
+            "result",
+            "response",
+            "data",
+            "value",
+            "body",
+        ),
+    )
+    result_shape = _browser_evidence_shape(result_shape_source)
+    if result_shape is not None:
+        evidence["result_shape"] = result_shape
+
+    runtime_globals = _browser_evidence_runtime_globals((details, content))
+    if runtime_globals:
+        evidence["runtime_globals"] = runtime_globals
+
+    evidence.update(
+        _browser_action_evidence(
+            content=content,
+            details=details,
+            kind=kind,
+        ),
+    )
+    evidence.update(
+        _browser_network_replay_evidence(
+            content=content,
+            details=details,
+        ),
+    )
+    evidence.update(
+        _browser_script_insight_evidence(
+            content=content,
+            details=details,
+        ),
+    )
+
+    return {
+        key: value
+        for key, value in evidence.items()
+        if value is not None and value != "" and value != [] and value != {}
+    }
+
+
+def _browser_evidence_path_metadata(
+    *,
+    tool_id: str,
+    kind: str | None,
+) -> dict[str, Any]:
+    key = _browser_evidence_path_key(tool_id=tool_id, kind=kind)
+    payload = browser_evidence_path_payload(key)
+    if payload is None:
+        return {}
+    tool_ids = payload.get("tool_ids")
+    return {
+        "evidence_path_key": _normalize_text(payload.get("key")),
+        "evidence_path_title": _normalize_text(payload.get("title")),
+        "evidence_path_tools": [
+            item
+            for item in (
+                _normalize_text(entry)
+                for entry in (tool_ids if isinstance(tool_ids, list) else [])
+            )
+            if item is not None
+        ],
+    }
+
+
+def _browser_evidence_path_key(*, tool_id: str, kind: str | None) -> str | None:
+    normalized_tool = _normalize_text(tool_id)
+    normalized_kind = _normalize_text(kind)
+    runtime_code_tools = {
+        "browser.runtime.inspect",
+        "browser.script.list",
+        "browser.script.find_request",
+        "browser.code.search",
+        "browser.script.inspect",
+        "browser.script.extract_request",
+        "browser.runtime.probe_client",
+        "browser.runtime.call_client",
+    }
+    stateful_tools = {
+        "browser.action",
+        "browser.action.trace",
+        "browser.form.inspect",
+        "browser.form.fill",
+        "browser.overlay.observe",
+        "browser.overlay.select",
+        "browser.dom.inspect",
+        "browser.dom.clickability",
+    }
+    diagnostic_tools = {
+        "browser.page.errors",
+        "browser.performance.metrics",
+        "browser.diagnostics.collect",
+        "browser.trace.start",
+        "browser.trace.stop",
+        "browser.trace.export",
+    }
+    orient_tools = {"browser.observe", "browser.tabs.list", "browser.navigate"}
+    if normalized_kind in _CODE_PAGE_ACTION_KINDS or normalized_tool in runtime_code_tools:
+        return "runtime_and_code"
+    if normalized_kind in _NETWORK_PAGE_ACTION_KINDS or (
+        normalized_tool is not None and normalized_tool.startswith("browser.network.")
+    ):
+        return "network_truth"
+    if (
+        normalized_kind in _DOM_PAGE_ACTION_KINDS
+        or (normalized_kind is not None and _is_browser_interaction_kind(normalized_kind))
+        or normalized_tool in stateful_tools
+    ):
+        return "stateful_interaction"
+    if normalized_kind in (_DEEP_STORAGE_PAGE_ACTION_KINDS | _DIAGNOSTIC_PAGE_ACTION_KINDS) or (
+        normalized_tool is not None
+        and (
+            normalized_tool.startswith("browser.storage.")
+            or normalized_tool.startswith("browser.service_worker.")
+            or normalized_tool in diagnostic_tools
+        )
+    ):
+        return "diagnose_blockers"
+    if normalized_tool in orient_tools:
+        return "orient"
+    return None
+
+
+def _browser_action_evidence(
+    *,
+    content: Any,
+    details: Any,
+    kind: str | None,
+) -> dict[str, Any]:
+    action = _browser_evidence_first_mapping((details, content), ("action",))
+    command = _browser_evidence_first_mapping((content, details), ("command",))
+    result = _browser_evidence_first_mapping((details, content), ("result",))
+    target = _browser_evidence_first_mapping((command, action, result), ("target",))
+    action_kind = (
+        _browser_evidence_first_scalar((action,), ("kind", "action_kind"))
+        or _browser_evidence_first_scalar((command,), ("kind",))
+        or _normalize_text(kind)
+    )
+    if action_kind is None:
+        return {}
+    if not _is_browser_interaction_kind(action_kind):
+        return {}
+    evidence: dict[str, Any] = {"action_kind": _truncate_text(action_kind, 80)}
+    action_ok = _browser_evidence_first_value((action, result), ("ok", "success"))
+    if isinstance(action_ok, bool):
+        evidence["action_ok"] = action_ok
+    for fact_key, sources, source_keys in (
+        (
+            "verified_selector",
+            (action, result, target, command),
+            ("resolved_selector", "verified_selector", "matched_selector", "selector"),
+        ),
+        (
+            "verified_ref",
+            (action, result, target, command),
+            ("resolved_ref", "verified_ref", "target_ref", "element_ref", "ref"),
+        ),
+        (
+            "field_name",
+            (action, result, target, command),
+            ("field_name", "field", "name", "input_name"),
+        ),
+        (
+            "field_label",
+            (action, result, target, command),
+            ("field_label", "label", "aria_label"),
+        ),
+    ):
+        if fact_key in evidence:
+            continue
+        value = _browser_evidence_first_scalar(sources, source_keys)
+        if value is not None:
+            evidence[fact_key] = _truncate_text(value, 180)
+    return evidence
+
+
+def _browser_network_replay_evidence(
+    *,
+    content: Any,
+    details: Any,
+) -> dict[str, Any]:
+    result = _browser_network_like_result(content, details)
+    if not result:
+        return {}
+    kind = _normalize_text(result.get("kind"))
+    if kind != "network-replay-request" and "request_diff" not in result:
+        return {}
+    evidence: dict[str, Any] = {}
+    for fact_key, source_keys in (
+        ("source_request_id", ("source_request_id",)),
+        ("source_capture_id", ("source_capture_id",)),
+    ):
+        value = _browser_evidence_first_scalar((result,), source_keys)
+        if value is not None:
+            evidence[fact_key] = _truncate_text(value, 180)
+    diff = result.get("request_diff")
+    if isinstance(diff, dict):
+        changed_fields = diff.get("changed_fields")
+        if isinstance(changed_fields, list):
+            fields = [
+                _truncate_text(value, 80)
+                for value in (_normalize_text(item) for item in changed_fields)
+                if value is not None
+            ]
+            if fields:
+                evidence["request_diff_changed_fields"] = list(dict.fromkeys(fields))[:12]
+        body_source = _normalize_text(diff.get("body_source"))
+        if body_source is not None:
+            evidence["request_diff_body_source"] = _truncate_text(body_source, 80)
+        source = diff.get("source")
+        if isinstance(source, dict):
+            body = source.get("body")
+            if isinstance(body, dict):
+                state = _normalize_text(body.get("state"))
+                if state is not None:
+                    evidence["source_body_state"] = _truncate_text(state, 80)
+    response = result.get("response_summary")
+    if isinstance(response, dict):
+        evidence["response_summary"] = _small_browser_summary(
+            response,
+            keys=("ok", "status", "mime_type", "size_bytes", "truncated", "redacted"),
+        )
+    return evidence
+
+
+def _browser_script_insight_evidence(
+    *,
+    content: Any,
+    details: Any,
+) -> dict[str, Any]:
+    causality = _browser_evidence_first_mapping(
+        (details, content),
+        ("causality", "network_causality"),
+    )
+    evidence: dict[str, Any] = {}
+    if causality:
+        script_frames = _script_frame_evidence(causality.get("script_frames"))
+        if script_frames:
+            evidence["script_frames"] = script_frames
+        api_candidates = _api_candidate_evidence(causality.get("api_candidates"))
+        if api_candidates:
+            evidence["api_candidates"] = api_candidates
+    client_path = _browser_evidence_first_scalar(
+        (details, content),
+        ("api_client_path", "client_path", "script_path", "discovered_client_path"),
+    )
+    if client_path is not None:
+        evidence["api_client_path"] = _truncate_text(client_path, 180)
+    return evidence
+
+
+def _browser_evidence_first_mapping(
+    sources: tuple[Any, ...],
+    keys: tuple[str, ...],
+) -> dict[str, Any]:
+    value = _browser_evidence_first_value(sources, keys)
+    return value if isinstance(value, dict) else {}
+
+
+def _browser_network_like_result(content: Any, details: Any) -> dict[str, Any]:
+    for source in (details, content):
+        if not isinstance(source, dict):
+            continue
+        kind = _normalize_text(source.get("kind"))
+        if kind and kind.startswith("network-"):
+            return source
+        result = _browser_evidence_first_mapping((source,), ("result",))
+        result_kind = _normalize_text(result.get("kind"))
+        if result_kind and result_kind.startswith("network-"):
+            return result
+        if "request_diff" in source:
+            return source
+        if "request_diff" in result:
+            return result
+    return {}
+
+
+def _is_browser_interaction_kind(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized in {
+        "action-trace",
+        "click",
+        "type",
+        "press",
+        "select",
+        "hover",
+        "drag",
+        "upload",
+        "download",
+        "scroll-into-view",
+        "dom-clickability",
+        "dom-highlight",
+        "dom-mutation-wait",
+    }
+
+
+def _script_frame_evidence(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    frames: list[dict[str, Any]] = []
+    for item in value[:6]:
+        if not isinstance(item, dict):
+            continue
+        frame = _small_browser_summary(
+            item,
+            keys=("request_id", "function_name", "line_number", "column_number"),
+        )
+        script_url = _safe_evidence_url(_normalize_text(item.get("script_url")))
+        if script_url is not None:
+            frame["script_url"] = script_url
+        request_url = _safe_evidence_url(_normalize_text(item.get("url")))
+        if request_url is not None:
+            frame["url"] = request_url
+        if frame:
+            frames.append(frame)
+    return frames
+
+
+def _api_candidate_evidence(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for item in value[:8]:
+        if not isinstance(item, dict):
+            continue
+        candidate = _small_browser_summary(
+            item,
+            keys=("request_id", "method", "status", "resource_type"),
+        )
+        url = _safe_evidence_url(_normalize_text(item.get("url")))
+        if url is not None:
+            candidate["url"] = url
+        initiator = item.get("initiator")
+        if isinstance(initiator, dict):
+            initiator_type = _normalize_text(initiator.get("type"))
+            if initiator_type is not None:
+                candidate["initiator_type"] = _truncate_text(initiator_type, 80)
+            script_url = _safe_evidence_url(_normalize_text(initiator.get("script_url")))
+            if script_url is not None:
+                candidate["initiator_script_url"] = script_url
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
+def _small_browser_summary(
+    value: dict[str, Any],
+    *,
+    keys: tuple[str, ...],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in keys:
+        item = value.get(key)
+        if isinstance(item, bool):
+            summary[key] = item
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            summary[key] = item
+        else:
+            normalized = _normalize_text(item)
+            if normalized is not None:
+                summary[key] = _truncate_text(normalized, 180)
+    return summary
+
+
+def _safe_evidence_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    safe = _safe_browser_url_metadata(value)
+    return _normalize_text(safe.get("browser_target_url"))
+
+
+def _browser_evidence_first_scalar(
+    sources: tuple[Any, ...],
+    keys: tuple[str, ...],
+) -> str | None:
+    for source in sources:
+        value = _browser_evidence_find_first_value(source, keys, seen=set())
+        if not isinstance(value, (str, int, float, bool)):
+            continue
+        normalized = _normalize_text(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _browser_evidence_first_value(
+    sources: tuple[Any, ...],
+    keys: tuple[str, ...],
+) -> Any:
+    for source in sources:
+        value = _browser_evidence_find_first_value(source, keys, seen=set())
+        if value is not None:
+            return value
+    return None
+
+
+def _browser_evidence_find_first_value(
+    value: Any,
+    keys: tuple[str, ...],
+    *,
+    seen: set[int],
+) -> Any:
+    if isinstance(value, dict):
+        marker = id(value)
+        if marker in seen:
+            return None
+        seen.add(marker)
+        normalized = {str(key): item for key, item in value.items()}
+        for key in keys:
+            if key in normalized:
+                return normalized[key]
+        for item in normalized.values():
+            found = _browser_evidence_find_first_value(item, keys, seen=seen)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, list):
+        marker = id(value)
+        if marker in seen:
+            return None
+        seen.add(marker)
+        for item in value:
+            found = _browser_evidence_find_first_value(item, keys, seen=seen)
+            if found is not None:
+                return found
+    return None
+
+
+def _browser_evidence_shape(
+    value: Any,
+    *,
+    depth: int = 0,
+    seen: set[int] | None = None,
+) -> Any:
+    if value is None:
+        return None
+    if seen is None:
+        seen = set()
+    if isinstance(value, str):
+        parsed = _browser_evidence_parse_json_preview(value)
+        if parsed is not None:
+            return _browser_evidence_shape(parsed, depth=depth, seen=seen)
+        return f"str({len(value)})" if len(value) > 80 else "str"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, dict):
+        marker = id(value)
+        if marker in seen:
+            return {"type": "object", "cycle": True}
+        seen.add(marker)
+        if depth >= 3:
+            return {"type": "object", "keys": len(value)}
+        shaped: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 12:
+                shaped["_truncated_keys"] = max(len(value) - 12, 0)
+                break
+            shaped[str(key)] = _browser_evidence_shape(
+                item,
+                depth=depth + 1,
+                seen=seen,
+            )
+        return shaped
+    if isinstance(value, list):
+        marker = id(value)
+        if marker in seen:
+            return {"type": "list", "cycle": True}
+        seen.add(marker)
+        item_shape = None
+        for item in value:
+            if item is not None:
+                item_shape = _browser_evidence_shape(item, depth=depth + 1, seen=seen)
+                break
+        return {"type": "list", "count": len(value), "item": item_shape}
+    return type(value).__name__
+
+
+def _browser_evidence_parse_json_preview(value: str) -> Any:
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return None
+    if len(text.encode("utf-8")) > 200_000:
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _browser_evidence_runtime_globals(sources: tuple[Any, ...]) -> list[str]:
+    value = _browser_evidence_first_value(
+        sources,
+        (
+            "runtime_globals",
+            "global_names",
+            "globals",
+            "window_keys",
+            "windowGlobals",
+        ),
+    )
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        normalized = _normalize_text(item)
+        if normalized is None:
+            continue
+        names.append(_truncate_text(normalized, 80))
+        if len(names) >= 16:
+            break
+    return list(dict.fromkeys(names))
 
 
 def _browser_artifact_ids_from_blocks(
@@ -712,6 +1364,18 @@ def _browser_content_blocks(
     deps: BrowserToolDeps,
     content: Any,
 ) -> list[dict[str, Any]]:
+    observe_blocks = _browser_observe_blocks(content)
+    if observe_blocks:
+        return observe_blocks
+    batch_blocks = _browser_batch_blocks(content)
+    if batch_blocks:
+        return batch_blocks
+    action_trace_blocks = _browser_action_trace_blocks(deps, content)
+    if action_trace_blocks:
+        return action_trace_blocks
+    action_envelope_blocks = _browser_action_envelope_blocks(content)
+    if action_envelope_blocks:
+        return action_envelope_blocks
     attachment_blocks = _browser_attachment_blocks(deps, content)
     if attachment_blocks:
         return attachment_blocks
@@ -733,9 +1397,12 @@ def _browser_content_blocks(
     dom_blocks = _browser_dom_blocks(content)
     if dom_blocks:
         return dom_blocks
-    network_blocks = _browser_network_blocks(content)
+    network_blocks = _browser_network_blocks(deps, content)
     if network_blocks:
         return network_blocks
+    code_blocks = _browser_code_blocks(deps, content)
+    if code_blocks:
+        return code_blocks
     snapshot_blocks = _browser_snapshot_blocks(content)
     if snapshot_blocks:
         return snapshot_blocks
@@ -746,6 +1413,104 @@ def _browser_content_blocks(
     if summary is None:
         return []
     return [text_content_block(summary)]
+
+
+def _browser_content_blocks_with_evidence_path(
+    content_blocks: list[dict[str, Any]],
+    evidence: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    evidence_line = _browser_evidence_path_line(evidence)
+    if evidence_line is None:
+        return content_blocks
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") != "text":
+            continue
+        text = _normalize_text(block.get("text"))
+        if text is not None and "Evidence path:" in text:
+            return content_blocks
+    return [*content_blocks, text_content_block(evidence_line)]
+
+
+def _browser_batch_summary(content: Any) -> str | None:
+    result = _find_browser_batch_result_payload(content)
+    if result is None:
+        return None
+    raw_results = result.get("results")
+    actions = raw_results if isinstance(raw_results, list) else []
+    total = len(actions)
+    failed = sum(
+        1
+        for item in actions
+        if isinstance(item, dict) and item.get("ok") is False
+    )
+    if total == 0:
+        return "Browser native run completed with no reported step results."
+    if failed:
+        return f"Browser native run completed {total} step(s) with {failed} failure(s)."
+    return f"Browser native run completed {total} step(s)."
+
+
+def _browser_batch_blocks(content: Any) -> list[dict[str, Any]]:
+    result = _find_browser_batch_result_payload(content)
+    if result is None:
+        return []
+    lines = [_browser_batch_summary(content) or "Browser native run completed."]
+    stop_on_error = result.get("stop_on_error")
+    if isinstance(stop_on_error, bool):
+        lines.append(f"- Stop on error: {str(stop_on_error).lower()}")
+    raw_results = result.get("results")
+    if isinstance(raw_results, list) and raw_results:
+        lines.append("- Steps:")
+        for index, item in enumerate(raw_results[:20], start=1):
+            if not isinstance(item, dict):
+                continue
+            kind = _normalize_text(item.get("kind")) or "action"
+            ok = item.get("ok")
+            status = "ok" if ok is not False else "failed"
+            line = f"  {index}. {kind}: {status}"
+            error = _normalize_text(item.get("error"))
+            if error is not None:
+                line = f"{line} ({error})"
+            lines.append(line)
+        if len(raw_results) > 20:
+            lines.append(f"  ... {len(raw_results) - 20} more step(s)")
+    return [text_content_block("\n".join(lines))]
+
+
+def _find_browser_batch_result_payload(content: Any) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    command = content.get("command")
+    command_kind = _normalize_text(command.get("kind")) if isinstance(command, dict) else None
+    value = content.get("value")
+    if isinstance(value, dict):
+        if _normalize_text(value.get("kind")) == "batch":
+            return value
+        result = value.get("result")
+        if isinstance(result, dict) and _normalize_text(result.get("kind")) == "batch":
+            return result
+    if command_kind == "batch":
+        result = content.get("result")
+        if isinstance(result, dict) and _normalize_text(result.get("kind")) == "batch":
+            return result
+    return None
+
+
+def _browser_evidence_path_line(evidence: Mapping[str, Any]) -> str | None:
+    key = _normalize_text(evidence.get("evidence_path_key"))
+    title = _normalize_text(evidence.get("evidence_path_title"))
+    tools = evidence.get("evidence_path_tools")
+    payload = {
+        "key": key,
+        "title": title,
+        "tool_ids": list(tools) if isinstance(tools, list) else [],
+    }
+    formatted = _format_browser_observe_evidence_path_item(payload)
+    if formatted is None:
+        return None
+    return "Evidence path: " + formatted
 
 
 def _browser_result_summary(content: Any) -> str | None:
@@ -759,6 +1524,18 @@ def _browser_result_summary_inner(content: Any, *, seen: set[int]) -> str | None
     if marker in seen:
         return None
     seen.add(marker)
+    observe_summary = _browser_observe_summary(content)
+    if observe_summary is not None:
+        return observe_summary
+    batch_summary = _browser_batch_summary(content)
+    if batch_summary is not None:
+        return batch_summary
+    action_trace_summary = _browser_action_trace_summary(content)
+    if action_trace_summary is not None:
+        return action_trace_summary
+    action_envelope_summary = _browser_action_envelope_summary(content)
+    if action_envelope_summary is not None:
+        return action_envelope_summary
     console_summary = _browser_console_summary(content)
     if console_summary is not None:
         return console_summary
@@ -783,6 +1560,9 @@ def _browser_result_summary_inner(content: Any, *, seen: set[int]) -> str | None
     diagnostic_summary = _browser_diagnostic_summary(content)
     if diagnostic_summary is not None:
         return diagnostic_summary
+    code_summary = _browser_code_summary(content)
+    if code_summary is not None:
+        return code_summary
     network_summary = _browser_network_summary(content)
     if network_summary is not None:
         return network_summary
@@ -808,6 +1588,134 @@ def _browser_result_summary_inner(content: Any, *, seen: set[int]) -> str | None
         if summary is not None:
             return summary
     return None
+
+
+def _browser_action_envelope_summary(content: Any) -> str | None:
+    envelope = _find_browser_action_envelope(content)
+    if envelope is None:
+        return None
+    kind = _normalize_text(envelope.get("kind")) or "action"
+    return f"Browser {kind} completed; {_browser_action_effect_label(envelope)}."
+
+
+def _browser_action_envelope_blocks(content: Any) -> list[dict[str, Any]]:
+    envelope = _find_browser_action_envelope(content)
+    if envelope is None:
+        return []
+    return [text_content_block(_format_browser_action_envelope(envelope))]
+
+
+def _find_browser_action_envelope(content: Any) -> dict[str, Any] | None:
+    return _find_browser_action_envelope_inner(content, seen=set())
+
+
+def _find_browser_action_envelope_inner(
+    content: Any,
+    *,
+    seen: set[int],
+) -> dict[str, Any] | None:
+    if isinstance(content, dict):
+        marker = id(content)
+        if marker in seen:
+            return None
+        seen.add(marker)
+        envelope = content.get("action_envelope")
+        if isinstance(envelope, dict):
+            return envelope
+        for key in ("value", "result", "output_payload"):
+            nested = content.get(key)
+            found = _find_browser_action_envelope_inner(nested, seen=seen)
+            if found is not None:
+                return found
+        return None
+    if isinstance(content, list):
+        marker = id(content)
+        if marker in seen:
+            return None
+        seen.add(marker)
+        for item in content:
+            found = _find_browser_action_envelope_inner(item, seen=seen)
+            if found is not None:
+                return found
+    return None
+
+
+def _format_browser_action_envelope(envelope: dict[str, Any]) -> str:
+    kind = _normalize_text(envelope.get("kind")) or "action"
+    lines = [f"Browser {kind} completed."]
+    tool_ok = envelope.get("tool_ok")
+    if isinstance(tool_ok, bool):
+        lines.append(f"- Tool: {'ok' if tool_ok else 'failed'}")
+    else:
+        lines.append("- Tool: unknown")
+    lines.append(f"- Page effect: {_browser_action_effect_label(envelope)}")
+
+    before_text = _format_browser_action_state(envelope.get("before"))
+    if before_text is not None:
+        lines.append(f"- Before: {before_text}")
+    after_text = _format_browser_action_state(envelope.get("after"))
+    if after_text is not None:
+        lines.append(f"- After: {after_text}")
+
+    changes = envelope.get("changes")
+    if isinstance(changes, dict) and changes:
+        changed_keys = ", ".join(str(key) for key in list(changes)[:6])
+        if changed_keys:
+            lines.append(f"- Changes: {changed_keys}")
+
+    errors = envelope.get("errors")
+    if isinstance(errors, list) and errors:
+        error_text = "; ".join(str(item) for item in errors[:3])
+        lines.append(f"- Errors: {error_text}")
+
+    next_action = _format_browser_action_next(envelope.get("next_action"))
+    if next_action is not None:
+        lines.append(f"- Next: {next_action}")
+    if kind == "evaluate" and "result" in envelope:
+        lines.append("")
+        lines.append(_format_browser_evaluate_result(envelope.get("result")))
+    return "\n".join(lines)
+
+
+def _browser_action_effect_label(envelope: dict[str, Any]) -> str:
+    status = _normalize_text(envelope.get("page_effect_status"))
+    if status == "action_failed_with_observed_effect":
+        return "observed change (action reported failure)"
+    page_effect_ok = envelope.get("page_effect_ok")
+    if page_effect_ok is True:
+        return "observed change"
+    if page_effect_ok is False:
+        return "no observable change"
+    return status.replace("_", " ") if status is not None else "unknown"
+
+
+def _format_browser_action_state(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    parts: list[str] = []
+    for label, key in (
+        ("target", "target_id"),
+        ("url", "url"),
+        ("title", "title"),
+        ("type", "type"),
+    ):
+        text = _normalize_text(value.get(key))
+        if text is not None:
+            parts.append(f"{label}={text}")
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
+def _format_browser_action_next(value: Any) -> str | None:
+    next_action = _normalize_text(value)
+    if next_action is None:
+        return None
+    if next_action == "observe-current-state":
+        return "use browser.observe or browser.snapshot to inspect the current page state"
+    if next_action == "use-action-trace-or-observe":
+        return "use browser.action.trace or browser.observe to verify the next step"
+    return next_action.replace("_", " ")
 
 
 def _browser_evaluate_summary(content: dict[str, Any]) -> str | None:
@@ -1219,6 +2127,9 @@ def _format_browser_dom_result(kind: str, result: dict[str, Any]) -> str:
         )
         if blocker is not None:
             lines.append(f"- Blocked by: {blocker}")
+    event_line = _format_browser_event_summary(result.get("event_summary"))
+    if event_line is not None:
+        lines.append(f"- Event handlers: {event_line}")
     computed_style = result.get("computed_style")
     if kind == "dom-computed-style" and isinstance(computed_style, dict):
         preview = ", ".join(
@@ -1253,6 +2164,1711 @@ def _format_browser_dom_result(kind: str, result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_browser_event_summary(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    parts: list[str] = []
+    for label, key in (
+        ("inline", "inline_handlers"),
+        ("property", "property_handlers"),
+        ("listener", "listener_types"),
+    ):
+        raw_items = value.get(key)
+        if not isinstance(raw_items, list):
+            continue
+        items = [
+            item
+            for item in (_normalize_text(entry) for entry in raw_items[:8])
+            if item is not None
+        ]
+        if items:
+            parts.append(f"{label}: {', '.join(items)}")
+    if not parts:
+        return None
+    return "; ".join(parts)
+
+
+def _browser_code_summary(content: dict[str, Any]) -> str | None:
+    found = _find_browser_code_result_payload(content)
+    if found is None:
+        return None
+    kind, result = found
+    if kind == "runtime-inspect":
+        title = _normalize_text(result.get("title")) or "page"
+        frameworks = result.get("frameworks")
+        detected = frameworks.get("detected") if isinstance(frameworks, dict) else None
+        detected_count = len(detected) if isinstance(detected, list) else 0
+        return f"Browser runtime inspected {title}; detected {detected_count} framework signal(s)."
+    if kind == "script-list":
+        returned_scripts = (
+            _normalize_int(result.get("returned_scripts"), label="returned_scripts", minimum=0)
+            or 0
+        )
+        matched_scripts = (
+            _normalize_int(result.get("matched_scripts"), label="matched_scripts", minimum=0)
+            or returned_scripts
+        )
+        return (
+            "Browser script list returned "
+            f"{returned_scripts} of {matched_scripts} matching script(s)."
+        )
+    if kind == "script-find-request":
+        match_count = _normalize_int(result.get("match_count"), label="match_count", minimum=0) or 0
+        candidate_count = (
+            _normalize_int(result.get("candidate_count"), label="candidate_count", minimum=0)
+            or 0
+        )
+        return (
+            "Browser script request finder found "
+            f"{match_count} match(es) across {candidate_count} candidate script(s)."
+        )
+    if kind == "code-search":
+        match_count = _normalize_int(result.get("match_count"), label="match_count", minimum=0) or 0
+        matched_scripts = (
+            _normalize_int(result.get("matched_scripts"), label="matched_scripts", minimum=0)
+            or 0
+        )
+        return (
+            "Browser code search found "
+            f"{match_count} match(es) across {matched_scripts} script(s)."
+        )
+    if kind == "script-inspect":
+        script_id = _normalize_text(result.get("script_id")) or "script"
+        source_chars = _normalize_int(result.get("source_chars"), label="source_chars", minimum=0)
+        suffix = f" ({source_chars} chars)" if source_chars is not None else ""
+        return f"Browser script inspected {script_id}{suffix}."
+    if kind == "script-extract-request":
+        candidate_count = (
+            _normalize_int(result.get("candidate_count"), label="candidate_count", minimum=0)
+            or 0
+        )
+        script_id = _normalize_text(result.get("script_id")) or "script"
+        return (
+            "Browser script request extractor found "
+            f"{candidate_count} endpoint candidate(s) in {script_id}."
+        )
+    if kind == "runtime-probe-client":
+        object_path = _normalize_text(result.get("object_path")) or "client"
+        ok = result.get("ok") is True
+        status = "resolved" if ok else "did not resolve"
+        return f"Browser runtime client probe {status} {object_path}."
+    if kind == "runtime-call-client":
+        object_path = _normalize_text(result.get("object_path")) or "client"
+        method_name = _normalize_text(result.get("method_name"))
+        ok = result.get("ok") is True
+        status = "completed" if ok else "failed"
+        target = f"{object_path}.{method_name}" if method_name else object_path
+        return f"Browser runtime client call {status} {target}."
+    return None
+
+
+def _browser_code_blocks(deps: BrowserToolDeps, content: Any) -> list[dict[str, Any]]:
+    found = _find_browser_code_result_payload(content)
+    if found is None:
+        return []
+    kind, result = found
+    formatted = _format_browser_code_result(kind, result)
+    if formatted is None:
+        return []
+    blocks = [text_content_block(formatted)]
+    artifact_block = _browser_script_preview_artifact_block(
+        deps,
+        kind=kind,
+        result=result,
+    )
+    if artifact_block is not None:
+        blocks.append(artifact_block)
+    return blocks
+
+
+def _browser_script_preview_artifact_block(
+    deps: BrowserToolDeps,
+    *,
+    kind: str,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if kind != "script-inspect":
+        return None
+    artifact_service = deps.artifact_service
+    preview = result.get("source_preview")
+    if artifact_service is None or not isinstance(preview, str) or not preview:
+        return None
+    data = preview.encode("utf-8")
+    if len(data) <= _SCRIPT_TOP_LEVEL_PREVIEW_LIMIT:
+        return None
+    script = result.get("script")
+    script = script if isinstance(script, dict) else {}
+    script_id = _normalize_text(result.get("script_id")) or _normalize_text(
+        script.get("script_id"),
+    )
+    url = _normalize_text(script.get("url"))
+    label = url or script_id or "browser-script-preview"
+    artifact = artifact_service.create_artifact(
+        data=data,
+        mime_type="application/javascript",
+        name=f"{_safe_browser_artifact_name(label)}.js",
+        metadata={
+            "source": "browser",
+            "attachment_kind": "script-preview",
+            "browser_code_kind": kind,
+            "script_id": script_id,
+            "url": url,
+        },
+    )
+    return file_ref_content_block(
+        artifact_id=artifact.id,
+        mime_type=artifact.mime_type,
+        name=artifact.name,
+        download_url=f"/artifacts/{artifact.id}/download",
+    )
+
+
+def _find_browser_code_result_payload(content: Any) -> tuple[str, dict[str, Any]] | None:
+    if not isinstance(content, dict):
+        return None
+    command = content.get("command")
+    command_kind = _normalize_text(command.get("kind")) if isinstance(command, dict) else None
+    if command_kind not in _CODE_PAGE_ACTION_KINDS:
+        return None
+    value = content.get("value")
+    if not isinstance(value, dict):
+        return None
+    result = value.get("result")
+    if not isinstance(result, dict):
+        return None
+    kind = _normalize_text(result.get("kind")) or command_kind
+    if kind not in _CODE_PAGE_ACTION_KINDS:
+        return None
+    return kind, result
+
+
+def _format_browser_code_result(kind: str, result: dict[str, Any]) -> str | None:
+    if kind == "runtime-inspect":
+        return _format_browser_runtime_inspect_result(result)
+    if kind == "script-list":
+        return _format_browser_script_list_result(result)
+    if kind == "script-find-request":
+        return _format_browser_script_find_request_result(result)
+    if kind == "code-search":
+        return _format_browser_code_search_result(result)
+    if kind == "script-inspect":
+        return _format_browser_script_inspect_result(result)
+    if kind == "script-extract-request":
+        return _format_browser_script_extract_request_result(result)
+    if kind == "runtime-probe-client":
+        return _format_browser_runtime_probe_client_result(result)
+    if kind == "runtime-call-client":
+        return _format_browser_runtime_call_client_result(result)
+    return None
+
+
+def _format_browser_runtime_inspect_result(result: dict[str, Any]) -> str:
+    lines = ["Browser runtime inspect:"]
+    title = _normalize_text(result.get("title"))
+    url = _normalize_text(result.get("url"))
+    if title is not None:
+        lines.append(f"- Title: {title}")
+    if url is not None:
+        lines.append(f"- URL: {url}")
+    page_state = result.get("page_state")
+    if isinstance(page_state, dict):
+        ready_state = _normalize_text(page_state.get("ready_state"))
+        visibility_state = _normalize_text(page_state.get("visibility_state"))
+        focused = page_state.get("focused")
+        online = page_state.get("online")
+        state_parts: list[str] = []
+        if ready_state is not None:
+            state_parts.append(f"ready={ready_state}")
+        if visibility_state is not None:
+            state_parts.append(f"visible={visibility_state}")
+        if isinstance(focused, bool):
+            state_parts.append(f"focused={'yes' if focused else 'no'}")
+        if isinstance(online, bool):
+            state_parts.append(f"online={'yes' if online else 'no'}")
+        history_length = _normalize_int(
+            page_state.get("history_length"),
+            label="history_length",
+            minimum=0,
+        )
+        if history_length is not None:
+            state_parts.append(f"history={history_length}")
+        if state_parts:
+            lines.append(f"- Page state: {', '.join(state_parts)}")
+    frameworks = result.get("frameworks")
+    if isinstance(frameworks, dict):
+        detected = frameworks.get("detected")
+        detected_labels = [
+            item
+            for item in (_normalize_text(entry) for entry in detected)
+            if item is not None
+        ] if isinstance(detected, list) else []
+        lines.append(
+            "- Framework signals: "
+            + (", ".join(detected_labels) if detected_labels else "none")
+        )
+    route_hint_lines = _format_browser_route_hints(result.get("route_hints"))
+    if route_hint_lines:
+        lines.append("- Route hints:")
+        lines.extend(f"  - {line}" for line in route_hint_lines)
+    globals_list = result.get("globals")
+    if isinstance(globals_list, list):
+        existing = [
+            item
+            for item in globals_list
+            if isinstance(item, dict) and item.get("exists") is True
+        ]
+        lines.append(f"- Globals: {len(existing)} present")
+        for item in existing[:8]:
+            name = _normalize_text(item.get("name")) or "<global>"
+            value_type = _normalize_text(item.get("type")) or "unknown"
+            constructor_name = _normalize_text(item.get("constructor_name"))
+            keys = item.get("keys")
+            key_suffix = ""
+            if isinstance(keys, list) and keys:
+                rendered_keys = ", ".join(
+                    key
+                    for key in (_normalize_text(entry) for entry in keys[:5])
+                    if key is not None
+                )
+                if rendered_keys:
+                    key_suffix = f"; keys={rendered_keys}"
+            constructor_suffix = f"/{constructor_name}" if constructor_name is not None else ""
+            lines.append(f"  - {name}: {value_type}{constructor_suffix}{key_suffix}")
+    client_modules = result.get("client_modules")
+    if isinstance(client_modules, list):
+        module_lines: list[str] = []
+        for item in client_modules[:10]:
+            if not isinstance(item, dict):
+                continue
+            path = _normalize_text(item.get("path"))
+            if path is None:
+                continue
+            keys = item.get("keys")
+            rendered_keys = ""
+            if isinstance(keys, list) and keys:
+                rendered = ", ".join(
+                    key
+                    for key in (_normalize_text(entry) for entry in keys[:16])
+                    if key is not None
+                )
+                if rendered:
+                    key_count = _normalize_int(
+                        item.get("key_count"),
+                        label="key_count",
+                        minimum=0,
+                    )
+                    suffix = f" of {key_count}" if key_count is not None else ""
+                    rendered_keys = f"; keys={rendered}{suffix}"
+            methods = item.get("methods")
+            rendered_methods = ""
+            if isinstance(methods, list) and methods:
+                method_items: list[str] = []
+                for method in methods[:12]:
+                    if not isinstance(method, dict):
+                        continue
+                    method_name = _normalize_text(method.get("name"))
+                    arity = _normalize_int(method.get("arity"), label="arity", minimum=0)
+                    if method_name is None:
+                        continue
+                    method_items.append(f"{method_name}({arity if arity is not None else '?'})")
+                if method_items:
+                    method_count = _normalize_int(
+                        item.get("method_count"),
+                        label="method_count",
+                        minimum=0,
+                    )
+                    suffix = f" of {method_count}" if method_count is not None else ""
+                    rendered_methods = f"; methods={', '.join(method_items)}{suffix}"
+            module_lines.append(f"  - {path}{rendered_keys}{rendered_methods}")
+        if module_lines:
+            lines.append("- Client modules:")
+            lines.extend(module_lines)
+            lines.append(
+                "- Next: choose the most task-relevant client module/method shown "
+                "above, probe that method with browser.runtime.probe_client, then "
+                "call it with browser.runtime.call_client. Use browser.evaluate "
+                "only for a compact custom summary. Avoid repeating broad code "
+                "search when a relevant method is visible."
+            )
+    storage = result.get("storage")
+    if isinstance(storage, dict):
+        storage_parts: list[str] = []
+        for label, key in (("local", "local"), ("session", "session")):
+            store = storage.get(key)
+            if not isinstance(store, dict):
+                continue
+            count = _normalize_int(store.get("count"), label=f"{key}_count", minimum=0)
+            if count is not None:
+                storage_parts.append(f"{label}={count}")
+        if storage_parts:
+            lines.append(f"- Storage keys: {', '.join(storage_parts)}")
+    performance = result.get("performance")
+    if isinstance(performance, dict):
+        resource_count = _normalize_int(
+            performance.get("resource_count"),
+            label="resource_count",
+            minimum=0,
+        )
+        navigation_count = _normalize_int(
+            performance.get("navigation_count"),
+            label="navigation_count",
+            minimum=0,
+        )
+        perf_parts: list[str] = []
+        if navigation_count is not None:
+            perf_parts.append(f"navigation={navigation_count}")
+        if resource_count is not None:
+            perf_parts.append(f"resources={resource_count}")
+        if perf_parts:
+            lines.append(f"- Performance: {', '.join(perf_parts)}")
+    return "\n".join(lines)
+
+
+def _format_browser_route_hints(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    lines: list[str] = []
+    for raw_item in value[:8]:
+        if not isinstance(raw_item, dict):
+            continue
+        source = _normalize_text(raw_item.get("source")) or "route"
+        path = _normalize_text(raw_item.get("path"))
+        search = _normalize_text(raw_item.get("search"))
+        hash_value = _normalize_text(raw_item.get("hash"))
+        if path is not None:
+            route = path
+            if search is not None:
+                route += search
+            if hash_value is not None:
+                route += hash_value
+            lines.append(f"{source}: {route or '/'}")
+            continue
+        page = _normalize_text(raw_item.get("page"))
+        query = _normalize_text(raw_item.get("query"))
+        if page is not None or query is not None:
+            suffix = f" query={query}" if query is not None else ""
+            lines.append(f"{source}: {page or '<page>'}{suffix}")
+            continue
+        preview = _normalize_text(raw_item.get("preview"))
+        if preview is not None:
+            lines.append(f"{source}: {preview}")
+            continue
+        keys = raw_item.get("keys")
+        if isinstance(keys, list) and keys:
+            rendered_keys: list[str] = []
+            for entry in keys[:5]:
+                if not isinstance(entry, dict):
+                    continue
+                key = _normalize_text(entry.get("key"))
+                value_text = _normalize_text(entry.get("value"))
+                if key is None:
+                    continue
+                rendered_keys.append(f"{key}={value_text or '<object>'}")
+            if rendered_keys:
+                lines.append(f"{source}: {', '.join(rendered_keys)}")
+    return lines
+
+
+def _format_browser_script_list_result(result: dict[str, Any]) -> str:
+    scripts = result.get("scripts")
+    if not isinstance(scripts, list):
+        scripts = []
+    scripts_count = _normalize_int(result.get("scripts_count"), label="scripts_count", minimum=0) or 0
+    matched_scripts = (
+        _normalize_int(result.get("matched_scripts"), label="matched_scripts", minimum=0)
+        or len(scripts)
+    )
+    returned_scripts = (
+        _normalize_int(result.get("returned_scripts"), label="returned_scripts", minimum=0)
+        or len(scripts)
+    )
+    lines = [
+        "Browser script list:",
+        f"- Scripts: {returned_scripts} returned, {matched_scripts} matched, {scripts_count} total",
+    ]
+    if not scripts:
+        lines.append("- Results: none")
+        lines.extend(_format_browser_code_errors(result.get("errors")))
+        return "\n".join(lines)
+    for item in scripts[:20]:
+        if not isinstance(item, dict):
+            continue
+        script_id = _normalize_text(item.get("script_id")) or "unknown"
+        url = _normalize_text(item.get("url")) or "<anonymous>"
+        line_count = _normalize_int(item.get("line_count"), label="line_count", minimum=0)
+        context_id = _normalize_int(
+            item.get("execution_context_id"),
+            label="execution_context_id",
+            minimum=0,
+        )
+        suffixes: list[str] = [f"id={script_id}"]
+        if line_count is not None:
+            suffixes.append(f"{line_count} line{'s' if line_count != 1 else ''}")
+        if context_id is not None:
+            suffixes.append(f"context={context_id}")
+        if bool(item.get("is_module")):
+            suffixes.append("module")
+        source_map_url = _normalize_text(item.get("source_map_url"))
+        if source_map_url is not None:
+            suffixes.append("source-map")
+        lines.append(f"- {url} ({', '.join(suffixes)})")
+    hidden_count = max(0, matched_scripts - min(matched_scripts, len(scripts), 20))
+    if hidden_count > 0:
+        lines.append(f"... {hidden_count} more script(s) in details")
+    lines.extend(_format_browser_code_errors(result.get("errors")))
+    return "\n".join(lines)
+
+
+def _format_browser_script_find_request_result(result: dict[str, Any]) -> str:
+    request = result.get("request")
+    request = request if isinstance(request, dict) else {}
+    candidates = result.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    match_count = _normalize_int(result.get("match_count"), label="match_count", minimum=0) or 0
+    candidate_count = (
+        _normalize_int(result.get("candidate_count"), label="candidate_count", minimum=0)
+        or len(candidates)
+    )
+    request_url = _normalize_text(request.get("url"))
+    path = _normalize_text(request.get("path"))
+    label = request_url or path or ", ".join(
+        term
+        for term in (
+            _normalize_text(item)
+            for item in (
+                request.get("search_terms") if isinstance(request.get("search_terms"), list) else []
+            )
+        )
+        if term is not None
+    )
+    lines = [
+        "Browser script request finder:",
+        f"- Request: {label or '<unspecified>'}",
+        f"- Matches: {match_count} across {candidate_count} candidate script(s)",
+    ]
+    if not candidates:
+        lines.append("- Results: none")
+        lines.extend(_format_browser_code_errors(result.get("errors")))
+        return "\n".join(lines)
+    for item in candidates[:5]:
+        if not isinstance(item, dict):
+            continue
+        script = item.get("script")
+        script = script if isinstance(script, dict) else {}
+        script_id = _normalize_text(item.get("script_id")) or _normalize_text(script.get("script_id"))
+        url = _normalize_text(item.get("url")) or _normalize_text(script.get("url")) or "<anonymous>"
+        score = _normalize_int(item.get("score"), label="score", minimum=0)
+        source_chars = _normalize_int(item.get("source_chars"), label="source_chars", minimum=0)
+        suffixes: list[str] = []
+        if script_id is not None:
+            suffixes.append(f"id={script_id}")
+        if score is not None:
+            suffixes.append(f"score={score}")
+        if source_chars is not None:
+            suffixes.append(f"{source_chars} chars")
+        suffix = f" ({', '.join(suffixes)})" if suffixes else ""
+        lines.append(f"- Script: {url}{suffix}")
+        matches = item.get("matches")
+        if not isinstance(matches, list):
+            continue
+        for match in matches[:2]:
+            if not isinstance(match, dict):
+                continue
+            field = _normalize_text(match.get("field")) or "source"
+            term = _normalize_text(match.get("term"))
+            line_number = _normalize_int(match.get("line_number"), label="line_number", minimum=1)
+            column = _normalize_int(match.get("column"), label="column", minimum=1)
+            location = ""
+            if line_number is not None:
+                location = f" line {line_number}"
+                if column is not None:
+                    location += f", column {column}"
+            term_suffix = f" term={term}" if term is not None else ""
+            snippet = _normalize_text(match.get("snippet")) or ""
+            lines.append(f"  - {field}{location}{term_suffix}:")
+            if snippet:
+                for snippet_line in _bounded_browser_code_lines(snippet, line_limit=2):
+                    lines.append(f"    {snippet_line}")
+        if len(matches) > 2:
+            lines.append(
+                "  ... more matches in details; inspect the script_id or use page-context evaluate next."
+            )
+    if len(candidates) > 5:
+        lines.append(f"... {len(candidates) - 5} more candidate script(s) in details")
+    lines.append(
+        "- Next: if a candidate script is listed, stop broad searching and inspect "
+        "its script_id with start_line plus column, or run a focused "
+        "browser.evaluate probe."
+    )
+    lines.extend(_format_browser_code_errors(result.get("errors")))
+    return "\n".join(lines)
+
+
+def _format_browser_code_search_result(result: dict[str, Any]) -> str:
+    query = _normalize_text(result.get("query")) or ""
+    match_count = _normalize_int(result.get("match_count"), label="match_count", minimum=0) or 0
+    matched_scripts = (
+        _normalize_int(result.get("matched_scripts"), label="matched_scripts", minimum=0)
+        or 0
+    )
+    lines = [
+        "Browser code search:",
+        f"- Query: {query}",
+        f"- Matches: {match_count} across {matched_scripts} script(s)",
+    ]
+    matches = result.get("matches")
+    if not isinstance(matches, list) or not matches:
+        lines.append("- Results: none")
+        lines.extend(_format_browser_code_errors(result.get("errors")))
+        return "\n".join(lines)
+    for item in matches[:4]:
+        if not isinstance(item, dict):
+            continue
+        script = item.get("script")
+        script = script if isinstance(script, dict) else {}
+        script_id = _normalize_text(item.get("script_id")) or _normalize_text(script.get("script_id"))
+        url = _normalize_text(item.get("url")) or _normalize_text(script.get("url")) or "<anonymous>"
+        source_chars = _normalize_int(item.get("source_chars"), label="source_chars", minimum=0)
+        suffixes = [f"script_id={script_id or 'unknown'}"]
+        if source_chars is not None:
+            suffixes.append(f"{source_chars} chars")
+        lines.append(f"- Script: {url} ({', '.join(suffixes)})")
+        script_matches = item.get("matches")
+        if not isinstance(script_matches, list):
+            continue
+        for match in script_matches[:2]:
+            if not isinstance(match, dict):
+                continue
+            field = _normalize_text(match.get("field")) or "source"
+            line_number = _normalize_int(match.get("line_number"), label="line_number", minimum=1)
+            column = _normalize_int(match.get("column"), label="column", minimum=1)
+            location = ""
+            if line_number is not None:
+                location = f" line {line_number}"
+                if column is not None:
+                    location += f", column {column}"
+            snippet = _normalize_text(match.get("snippet")) or ""
+            lines.append(f"  - {field}{location}:")
+            if snippet:
+                for snippet_line in _bounded_browser_code_lines(snippet, line_limit=2):
+                    lines.append(f"    {snippet_line}")
+        if len(script_matches) > 2:
+            lines.append(
+                "  ... more matches in details; inspect this script_id or use browser.evaluate next."
+            )
+    if len(matches) > 4:
+        lines.append(f"... {len(matches) - 4} more matched script(s) in details")
+    lines.append(
+        "- Next: if a candidate script is listed, stop broad searching and inspect "
+        "its script_id with start_line plus column, or run a focused "
+        "browser.evaluate probe."
+    )
+    lines.extend(_format_browser_code_errors(result.get("errors")))
+    return "\n".join(lines)
+
+
+def _bounded_browser_code_lines(value: str, *, line_limit: int) -> list[str]:
+    lines: list[str] = []
+    for raw_line in value.splitlines()[:line_limit]:
+        line = raw_line.strip()
+        if len(line) > 220:
+            line = f"{line[:217].rstrip()}..."
+        lines.append(line)
+    return lines
+
+
+def _format_browser_script_inspect_result(result: dict[str, Any]) -> str:
+    script = result.get("script")
+    script = script if isinstance(script, dict) else {}
+    script_id = _normalize_text(result.get("script_id")) or _normalize_text(script.get("script_id"))
+    url = _normalize_text(script.get("url")) or "<anonymous>"
+    source_chars = _normalize_int(result.get("source_chars"), label="source_chars", minimum=0)
+    start_line = _normalize_int(result.get("start_line"), label="start_line", minimum=1)
+    end_line = _normalize_int(result.get("end_line"), label="end_line", minimum=1)
+    start_column = _normalize_int(
+        result.get("start_column"),
+        label="start_column",
+        minimum=1,
+    )
+    end_column = _normalize_int(
+        result.get("end_column"),
+        label="end_column",
+        minimum=1,
+    )
+    lines = [
+        "Browser script inspect:",
+        f"- Script: {url} [{script_id or 'unknown'}]",
+    ]
+    if source_chars is not None:
+        lines.append(f"- Source chars: {source_chars}")
+    if start_line is not None and end_line is not None:
+        lines.append(f"- Preview lines: {start_line}-{end_line}")
+    if start_column is not None and end_column is not None:
+        lines.append(f"- Preview columns: {start_column}-{end_column}")
+    if result.get("truncated"):
+        lines.append("- Truncated: yes")
+    preview = _normalize_text(result.get("source_preview"))
+    if preview is not None and len(preview.encode("utf-8")) > _SCRIPT_TOP_LEVEL_PREVIEW_LIMIT:
+        lines.append("- Source preview: omitted from top-level content; see artifact.")
+    elif preview is not None:
+        lines.append("```js")
+        lines.append(preview)
+        lines.append("```")
+    lines.extend(_format_browser_code_errors(result.get("errors")))
+    return "\n".join(lines)
+
+
+def _normalized_text_items(value: Any, *, limit: int) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    items = [
+        item
+        for item in (_normalize_text(entry) for entry in value)
+        if item is not None
+    ]
+    return items[:limit]
+
+
+def _format_browser_script_extract_request_result(result: dict[str, Any]) -> str:
+    script = result.get("script")
+    script = script if isinstance(script, dict) else {}
+    script_id = _normalize_text(result.get("script_id")) or _normalize_text(script.get("script_id"))
+    url = _normalize_text(script.get("url")) or "<anonymous>"
+    source_chars = _normalize_int(result.get("source_chars"), label="source_chars", minimum=0)
+    start_line = _normalize_int(result.get("start_line"), label="start_line", minimum=1)
+    end_line = _normalize_int(result.get("end_line"), label="end_line", minimum=1)
+    start_column = _normalize_int(
+        result.get("start_column"),
+        label="start_column",
+        minimum=1,
+    )
+    end_column = _normalize_int(
+        result.get("end_column"),
+        label="end_column",
+        minimum=1,
+    )
+    candidates = result.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    lines = [
+        "Browser script request extract:",
+        f"- Script: {url} [{script_id or 'unknown'}]",
+        f"- Endpoint candidates: {len(candidates)}",
+    ]
+    if source_chars is not None:
+        lines.append(f"- Source chars: {source_chars}")
+    if start_line is not None and end_line is not None:
+        lines.append(f"- Window lines: {start_line}-{end_line}")
+    if start_column is not None and end_column is not None:
+        lines.append(f"- Window columns: {start_column}-{end_column}")
+    focus_terms = result.get("focus_terms")
+    focus_labels = [
+        item
+        for item in (_normalize_text(entry) for entry in focus_terms)
+        if item is not None
+    ] if isinstance(focus_terms, list) else []
+    if focus_labels:
+        lines.append(f"- Focus terms: {', '.join(focus_labels[:6])}")
+    if not candidates:
+        payload_keys = _normalized_text_items(result.get("payload_key_candidates"), limit=10)
+        client_methods = _normalized_text_items(result.get("client_method_candidates"), limit=8)
+        if payload_keys:
+            lines.append(f"- Payload keys nearby: {', '.join(payload_keys)}")
+        if client_methods:
+            lines.append(f"- Client methods nearby: {', '.join(client_methods)}")
+        lines.append(
+            "- Next: no endpoint literal was extracted; if a client method is visible, "
+            "probe it with browser.runtime.probe_client and call it with "
+            "browser.runtime.call_client. Use browser.evaluate only for a compact "
+            "custom summary."
+        )
+        lines.extend(_format_browser_code_errors(result.get("errors")))
+        return "\n".join(lines)
+    for item in candidates[:5]:
+        if not isinstance(item, dict):
+            continue
+        endpoint = _normalize_text(item.get("endpoint")) or "<endpoint>"
+        endpoint_kind = _normalize_text(item.get("endpoint_kind"))
+        line_number = _normalize_int(item.get("line_number"), label="line_number", minimum=1)
+        column = _normalize_int(item.get("column"), label="column", minimum=1)
+        confidence = _normalize_text(item.get("confidence"))
+        suffixes: list[str] = []
+        if endpoint_kind is not None:
+            suffixes.append(endpoint_kind)
+        if confidence is not None:
+            suffixes.append(f"confidence={confidence}")
+        if line_number is not None:
+            location = f"line {line_number}"
+            if column is not None:
+                location += f", column {column}"
+            suffixes.append(location)
+        lines.append(f"- {endpoint}" + (f" ({'; '.join(suffixes)})" if suffixes else ""))
+        method_candidates = _normalized_text_items(item.get("method_candidates"), limit=6)
+        client_methods = _normalized_text_items(item.get("client_method_candidates"), limit=6)
+        payload_keys = _normalized_text_items(item.get("payload_key_candidates"), limit=12)
+        if method_candidates:
+            lines.append(f"  - Method hints: {', '.join(method_candidates)}")
+        if client_methods:
+            lines.append(f"  - Client/function hints: {', '.join(client_methods)}")
+        if payload_keys:
+            lines.append(f"  - Payload keys: {', '.join(payload_keys)}")
+            lines.append(
+                "  - Call hint: pass these keys as one JSON object argument when "
+                "using a page client method."
+            )
+        preview = _normalize_text(item.get("evidence_preview"))
+        if preview:
+            lines.append("  - Evidence:")
+            for preview_line in _bounded_browser_code_lines(preview, line_limit=2):
+                lines.append(f"    {preview_line}")
+    if len(candidates) > 5:
+        lines.append(f"... {len(candidates) - 5} more endpoint candidate(s) in details")
+    lines.append(
+        "- Next: if a matching page client method is known, call it with "
+        "browser.runtime.call_client using one JSON object argument. Otherwise verify "
+        "the endpoint with network capture/fetch/replay instead of repeating broad code search."
+    )
+    lines.extend(_format_browser_code_errors(result.get("errors")))
+    return "\n".join(lines)
+
+
+def _format_browser_runtime_probe_client_result(result: dict[str, Any]) -> str:
+    object_path = _normalize_text(result.get("object_path")) or "<client>"
+    method_name = _normalize_text(result.get("method_name"))
+    ok = result.get("ok") is True
+    lines = [
+        "Browser runtime client probe:",
+        f"- Object path: {object_path}",
+    ]
+    if method_name is not None:
+        lines.append(f"- Method name: {method_name}")
+    if not ok:
+        reason = _normalize_text(result.get("reason")) or "not available"
+        lines.append(f"- Status: not resolved ({reason})")
+        missing_segment = _normalize_text(result.get("missing_segment"))
+        if missing_segment is not None:
+            lines.append(f"- Missing segment: {missing_segment}")
+        traversed = _normalized_text_items(result.get("traversed"), limit=12)
+        if traversed:
+            lines.append(f"- Traversed: {'.'.join(traversed)}")
+        lines.append(
+            "- Next: inspect runtime globals or adjust object_path before evaluating "
+            "or replaying requests."
+        )
+        return "\n".join(lines)
+    lines.append("- Status: resolved")
+    object_description = result.get("object")
+    if isinstance(object_description, dict):
+        lines.extend(
+            _format_browser_client_probe_description(
+                object_description,
+                label="Object",
+            )
+        )
+    method_description = result.get("method")
+    if isinstance(method_description, dict):
+        lines.extend(
+            _format_browser_client_probe_description(
+                method_description,
+                label="Method",
+            )
+        )
+    if (
+        method_name is not None
+        and isinstance(method_description, dict)
+        and method_description.get("callable") is True
+    ):
+        payload_keys = _normalized_text_items(
+            method_description.get("payload_key_candidates"),
+            limit=12,
+        )
+        lines.append(
+            "- Next: call browser.runtime.call_client with "
+            f"object_path={object_path!r}, method_name={method_name!r}, and one JSON object argument."
+        )
+        if payload_keys:
+            lines.append(f"- Suggested argument keys: {', '.join(payload_keys)}")
+        lines.extend(
+            _browser_runtime_probe_client_method_hints(
+                object_path=object_path,
+                method_name=method_name,
+            )
+        )
+        lines.append(
+            "- Avoid repeating broad code search once this callable client method is resolved."
+        )
+    else:
+        lines.append(
+            "- Next: choose a callable method, then call it with browser.runtime.call_client. "
+            "Use browser.evaluate only for a compact custom summary."
+        )
+    return "\n".join(lines)
+
+
+def _browser_runtime_probe_client_method_hints(
+    *,
+    object_path: str,
+    method_name: str,
+) -> list[str]:
+    normalized_target = f"{object_path}.{method_name}".lower()
+    if normalized_target != "$nuxt.$http.shopping.getshopping":
+        return []
+    return [
+        (
+            "- Travel client guidance: this is the primary flight-shopping list "
+            "method. Call it before sibling methods such as getShoppingAll."
+        ),
+        (
+            "- Suggested travel payload keys: depCityCode, arrCityCode, depDate, "
+            "routeType, currencyCode, cabinRank, taxFeeFlag, lowestControl."
+        ),
+        (
+            "- If a thin payload returns empty data, retry this same method with "
+            "the full travel payload before widening the search."
+        ),
+    ]
+
+
+def _format_browser_runtime_call_client_result(result: dict[str, Any]) -> str:
+    object_path = _normalize_text(result.get("object_path")) or "<client>"
+    method_name = _normalize_text(result.get("method_name"))
+    ok = result.get("ok") is True
+    target = f"{object_path}.{method_name}" if method_name is not None else object_path
+    lines = [
+        "Browser runtime client call:",
+        f"- Target: {target}",
+    ]
+    argument_count = _normalize_int(
+        result.get("argument_count"),
+        label="argument_count",
+        minimum=0,
+    )
+    if argument_count is not None:
+        lines.append(f"- Arguments: {argument_count}")
+    argument_keys = _normalized_text_items(
+        result.get("argument_key_candidates"),
+        limit=20,
+    )
+    if argument_keys:
+        lines.append(f"- Argument keys: {', '.join(argument_keys)}")
+    if not ok:
+        reason = _normalize_text(result.get("reason")) or "not available"
+        lines.append(f"- Status: failed ({reason})")
+        missing_segment = _normalize_text(result.get("missing_segment"))
+        if missing_segment is not None:
+            lines.append(f"- Missing segment: {missing_segment}")
+        traversed = _normalized_text_items(result.get("traversed"), limit=12)
+        if traversed:
+            lines.append(f"- Traversed: {'.'.join(traversed)}")
+        stack_preview = _normalize_text(result.get("stack_preview"))
+        if stack_preview is not None:
+            lines.append("- Stack preview:")
+            for preview_line in _bounded_browser_code_lines(stack_preview, line_limit=3):
+                lines.append(f"  {preview_line}")
+        lines.append(
+            "- Next: probe the object path or method, then retry with corrected JSON arguments."
+        )
+        return "\n".join(lines)
+    lines.append("- Status: completed")
+    result_ref = _normalize_text(result.get("result_ref"))
+    if result_ref is not None:
+        lines.append(f"- Result ref: window.__crxzipple_client_call_results[{result_ref!r}]")
+    result_type = _normalize_text(result.get("result_type"))
+    result_chars = _normalize_int(
+        result.get("result_json_chars"),
+        label="result_json_chars",
+        minimum=0,
+    )
+    if result_type is not None or result_chars is not None:
+        detail_parts: list[str] = []
+        if result_type is not None:
+            detail_parts.append(f"type={result_type}")
+        if result_chars is not None:
+            detail_parts.append(f"json_chars={result_chars}")
+        lines.append(f"- Result: {', '.join(detail_parts)}")
+    result_overview = result.get("result_overview")
+    if isinstance(result_overview, dict):
+        lines.append("- Result overview:")
+        lines.extend(_format_browser_json_preview_lines(result_overview, indent="  ", limit=1200))
+    result_insight = result.get("result_insight")
+    if isinstance(result_insight, dict):
+        lines.extend(_format_browser_runtime_result_insight(result_insight))
+    if result.get("result_truncated") is True:
+        preview = _normalize_text(result.get("result_preview"))
+        if preview is not None:
+            lines.append("- Result preview:")
+            lines.extend(_format_browser_json_preview_lines(preview, indent="  ", limit=2400))
+        lines.extend(_browser_runtime_call_retry_hints(result))
+        lines.append(
+            "- Data extraction guard: preserve API numeric values as returned. "
+            "Do not divide, multiply, or rescale prices/totals unless the page source, "
+            "field metadata, or a visible label explicitly proves the unit."
+        )
+        if isinstance(result_insight, dict):
+            lines.append(
+                "- Next: answer from the result insight above. Do not call browser.evaluate "
+                "unless a required user-facing field is absent from the insight."
+            )
+        else:
+            lines.append(
+                "- Next: summarize the stored result with browser.evaluate using the result ref above."
+            )
+        return "\n".join(lines)
+    if "result" in result:
+        lines.append("- Result body:")
+        lines.extend(_format_browser_json_preview_lines(result.get("result"), indent="  ", limit=6000))
+    lines.extend(_browser_runtime_call_retry_hints(result))
+    if _browser_runtime_call_contains_pricing(result):
+        lines.append(
+            "- Data extraction guard: preserve API numeric values as returned. "
+            "Do not divide, multiply, or rescale prices/totals unless the page source, "
+            "field metadata, or a visible label explicitly proves the unit."
+        )
+    if _browser_runtime_call_suggests_retry(result):
+        lines.append(
+            "- Next: retry browser.runtime.call_client with the same object_path/method_name "
+            "and the suggested JSON argument before concluding there are no results."
+        )
+    else:
+        lines.append(
+            "- Next: answer from the returned data, or use browser.evaluate on the result ref "
+            "for a more compact custom summary."
+        )
+    return "\n".join(lines)
+
+
+def _format_browser_runtime_result_insight(insight: dict[str, Any]) -> list[str]:
+    kind = _normalize_text(insight.get("kind"))
+    if kind != "travel_shopping":
+        return []
+    lines = ["- Result insight: travel shopping data detected"]
+    result_code = _normalize_text(insight.get("result_code"))
+    result_message = _normalize_text(insight.get("result_message"))
+    currency_code = _normalize_text(insight.get("currency_code"))
+    total_items = _normalize_int(
+        insight.get("total_flight_items"),
+        label="total_flight_items",
+        minimum=0,
+    )
+    trip_count = _normalize_int(
+        insight.get("summarized_trip_count"),
+        label="summarized_trip_count",
+        minimum=0,
+    )
+    unique_trip_count = _normalize_int(
+        insight.get("unique_trip_count"),
+        label="unique_trip_count",
+        minimum=0,
+    )
+    facts: list[str] = []
+    if result_code is not None:
+        facts.append(f"result_code={result_code}")
+    if result_message is not None:
+        facts.append(f"result_message={result_message}")
+    if currency_code is not None:
+        facts.append(f"currency={currency_code}")
+    if total_items is not None:
+        facts.append(f"flight_items={total_items}")
+    if trip_count is not None:
+        facts.append(f"summarized_trips={trip_count}")
+    if unique_trip_count is not None:
+        facts.append(f"unique_trips={unique_trip_count}")
+    if facts:
+        lines.append("  - " + ", ".join(facts))
+    top_trips = insight.get("top_trips")
+    if isinstance(top_trips, list) and top_trips:
+        if insight.get("top_trips_policy") == "deduplicated_by_flight_route_time_price":
+            lines.append("  - Top unique trips by returned total/price:")
+        else:
+            lines.append("  - Top trips by returned total/price:")
+        for index, trip in enumerate(top_trips[:5], start=1):
+            if not isinstance(trip, dict):
+                continue
+            lines.append(
+                "    "
+                + _format_browser_runtime_travel_trip(index, trip)
+            )
+    policy = _normalize_text(insight.get("numeric_unit_policy"))
+    if policy == "preserve_api_values":
+        lines.append(
+            "  - Numeric unit policy: preserve API values exactly; do not rescale prices."
+        )
+    return lines
+
+
+def _format_browser_runtime_travel_trip(index: int, trip: dict[str, Any]) -> str:
+    route = trip.get("route") if isinstance(trip.get("route"), dict) else {}
+    flights = _normalized_text_items(trip.get("flights"), limit=6)
+    segments = trip.get("segments") if isinstance(trip.get("segments"), list) else []
+    cabin = (
+        trip.get("cheapest_cabin")
+        if isinstance(trip.get("cheapest_cabin"), dict)
+        else {}
+    )
+    route_text = (
+        f"{_normalize_text(route.get('dep_name')) or _normalize_text(route.get('dep_code')) or '?'}"
+        f"({_normalize_text(route.get('dep_code')) or '?'}) "
+        f"{_normalize_text(route.get('dep_date')) or ''} "
+        f"{_normalize_text(route.get('dep_time')) or '?'} -> "
+        f"{_normalize_text(route.get('arr_name')) or _normalize_text(route.get('arr_code')) or '?'}"
+        f"({_normalize_text(route.get('arr_code')) or '?'}) "
+        f"{_normalize_text(route.get('arr_date')) or ''} "
+        f"{_normalize_text(route.get('arr_time')) or '?'}"
+    )
+    price = _browser_price_text(trip.get("sort_price"), cabin.get("lprice"))
+    total = _browser_price_text(trip.get("sort_price_with_tax"), cabin.get("totalPrice"))
+    tax = _browser_price_text(None, cabin.get("taxPrice"))
+    segment_text = ""
+    if isinstance(segments, list) and len(segments) > 1:
+        segment_text = f", segments={len(segments)}"
+    cabin_text = _normalize_text(cabin.get("cabinLevelName"))
+    parts = [
+        f"{index}. {route_text}",
+        f"flights={'+'.join(flights) if flights else '-'}",
+        f"price={price}",
+        f"total={total}",
+    ]
+    if tax != "-":
+        parts.append(f"tax={tax}")
+    if cabin_text is not None:
+        parts.append(f"cabin={cabin_text}")
+    if segment_text:
+        parts.append(segment_text.lstrip(", "))
+    return "; ".join(parts)
+
+
+def _browser_price_text(primary: Any, fallback: Any) -> str:
+    value = primary if primary is not None else fallback
+    if value is None:
+        return "-"
+    return str(value)
+
+
+def _browser_runtime_call_retry_hints(result: dict[str, Any]) -> list[str]:
+    body = result.get("result")
+    if not isinstance(body, dict) or "data" not in body:
+        return []
+    data_value = body.get("data")
+    if data_value not in (None, {}, []):
+        return []
+    result_code = _normalize_text(body.get("resultCode"))
+    result_message = _normalize_text(body.get("resultMsg"))
+    target = ".".join(
+        item
+        for item in (
+            _normalize_text(result.get("object_path")),
+            _normalize_text(result.get("method_name")),
+        )
+        if item is not None
+    ).lower()
+    argument_keys = set(
+        _normalized_text_items(result.get("argument_key_candidates"), limit=32),
+    )
+    lines = ["- Result diagnosis: client returned empty data"]
+    details: list[str] = []
+    if result_code is not None:
+        details.append(f"resultCode={result_code}")
+    if result_message is not None:
+        details.append(f"resultMsg={result_message}")
+    if details:
+        lines[-1] += f" ({', '.join(details)})"
+    lines[-1] += "."
+    if any(term in target for term in ("shopping", "flight", "fare", "airport")):
+        default_keys = (
+            "routeType",
+            "currencyCode",
+            "cabinRank",
+            "taxFeeFlag",
+            "lowestControl",
+        )
+        missing_defaults = [key for key in default_keys if key not in argument_keys]
+        if missing_defaults:
+            lines.append(
+                "- Retry hint: the page client accepted the call, but the payload looks thin. "
+                "For travel shopping clients, preserve the city/date keys and add visible "
+                "UI/default controls when applicable: "
+                + ", ".join(missing_defaults)
+                + "."
+            )
+            retry_argument = _browser_runtime_call_travel_retry_argument(result)
+            if retry_argument:
+                lines.append("- Suggested retry argument JSON:")
+                lines.extend(
+                    _format_browser_json_preview_lines(
+                        retry_argument,
+                        indent="  ",
+                        limit=1400,
+                    )
+                )
+        lines.append(
+            "- Prefer a flat one-object payload for page client methods when the source "
+            "function forwards its argument directly to the endpoint."
+        )
+    else:
+        lines.append(
+            "- Retry hint: inspect page state or a recent successful network request to "
+            "fill missing default fields before concluding the record does not exist."
+        )
+    return lines
+
+
+def _browser_runtime_call_suggests_retry(result: dict[str, Any]) -> bool:
+    return _browser_runtime_call_travel_retry_argument(result) is not None
+
+
+def _browser_runtime_call_contains_pricing(result: dict[str, Any]) -> bool:
+    searchable: list[str] = []
+    for key in ("result", "result_preview", "result_overview"):
+        value = result.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            searchable.append(value[:4000])
+            continue
+        try:
+            searchable.append(json.dumps(value, ensure_ascii=False, default=str)[:4000])
+        except (TypeError, ValueError):
+            searchable.append(str(value)[:4000])
+    text = "\n".join(searchable).lower()
+    return any(term in text for term in ("price", "amount", "fare", "total", "currency"))
+
+
+def _browser_runtime_call_travel_retry_argument(result: dict[str, Any]) -> dict[str, Any] | None:
+    target = ".".join(
+        item
+        for item in (
+            _normalize_text(result.get("object_path")),
+            _normalize_text(result.get("method_name")),
+        )
+        if item is not None
+    ).lower()
+    if not any(term in target for term in ("shopping", "flight", "fare", "airport")):
+        return None
+    arguments = result.get("arguments")
+    if not isinstance(arguments, list) or not arguments:
+        return None
+    first_argument = arguments[0]
+    if not isinstance(first_argument, dict):
+        return None
+    base = dict(first_argument)
+    required_keys = ("depCityCode", "arrCityCode", "depDate")
+    if not all(key in base for key in required_keys):
+        return None
+    defaults: dict[str, Any] = {
+        "routeType": "OW",
+        "currencyCode": "CNY",
+        "cabinRank": "F,J,Y",
+        "taxFeeFlag": True,
+        "lowestControl": "1",
+    }
+    changed = False
+    for key, value in defaults.items():
+        if key not in base:
+            base[key] = value
+            changed = True
+    return base if changed else None
+
+
+def _format_browser_json_preview_lines(
+    value: Any,
+    *,
+    indent: str,
+    limit: int,
+) -> list[str]:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+    if len(text) > limit:
+        text = f"{text[: max(0, limit - 3)].rstrip()}..."
+    return [f"{indent}{line}" for line in text.splitlines()[:80]]
+
+
+def _format_browser_client_probe_description(
+    value: dict[str, Any],
+    *,
+    label: str,
+) -> list[str]:
+    path = _normalize_text(value.get("path")) or "<path>"
+    value_type = _normalize_text(value.get("type")) or "unknown"
+    constructor_name = _normalize_text(value.get("constructor_name"))
+    exists = value.get("exists")
+    status = "exists" if exists is not False else "missing"
+    suffix = f"/{constructor_name}" if constructor_name is not None else ""
+    lines = [f"- {label}: {path} ({status}; {value_type}{suffix})"]
+    if value.get("callable") is True:
+        arity = _normalize_int(value.get("arity"), label="arity", minimum=0)
+        function_name = _normalize_text(value.get("function_name"))
+        details: list[str] = ["callable"]
+        if arity is not None:
+            details.append(f"arity={arity}")
+        if function_name is not None:
+            details.append(f"name={function_name}")
+        if value.get("is_async") is True:
+            details.append("async")
+        lines.append(f"  - Function: {', '.join(details)}")
+        endpoint_hint = _normalize_text(value.get("endpoint_hint"))
+        if endpoint_hint is not None:
+            lines.append(f"  - Endpoint hint: {endpoint_hint}")
+        payload_keys = _normalized_text_items(
+            value.get("payload_key_candidates"),
+            limit=12,
+        )
+        if payload_keys:
+            lines.append(f"  - Payload key candidates: {', '.join(payload_keys)}")
+    keys = _normalized_text_items(value.get("keys"), limit=12)
+    if keys:
+        key_count = _normalize_int(value.get("key_count"), label="key_count", minimum=0)
+        suffix_text = f" of {key_count}" if key_count is not None else ""
+        lines.append(f"  - Keys: {', '.join(keys)}{suffix_text}")
+    methods = value.get("methods")
+    if isinstance(methods, list) and methods:
+        rendered: list[str] = []
+        for item in methods[:16]:
+            if not isinstance(item, dict):
+                continue
+            name = _normalize_text(item.get("name"))
+            arity = _normalize_int(item.get("arity"), label="arity", minimum=0)
+            if name is None:
+                continue
+            endpoint_hint = _normalize_text(item.get("endpoint_hint"))
+            suffix = f" -> {endpoint_hint}" if endpoint_hint is not None else ""
+            payload_keys = _normalized_text_items(
+                item.get("payload_key_candidates"),
+                limit=4,
+            )
+            if payload_keys:
+                suffix += f" keys={','.join(payload_keys)}"
+            rendered.append(f"{name}({arity if arity is not None else '?'}){suffix}")
+        if rendered:
+            method_count = _normalize_int(value.get("method_count"), label="method_count", minimum=0)
+            suffix_text = f" of {method_count}" if method_count is not None else ""
+            lines.append(f"  - Methods: {', '.join(rendered)}{suffix_text}")
+    preview = _normalize_text(value.get("source_preview"))
+    if preview is not None:
+        lines.append("  - Source preview:")
+        for preview_line in _bounded_browser_code_lines(preview, line_limit=3):
+            lines.append(f"    {preview_line}")
+    return lines
+
+
+def _format_browser_code_errors(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        return []
+    lines = [f"- Tool warnings: {len(value)}"]
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            lines.append(f"  - {item}")
+            continue
+        script_id = _normalize_text(item.get("script_id"))
+        message = _normalize_text(item.get("message")) or str(item)
+        prefix = f"script {script_id}: " if script_id is not None else ""
+        lines.append(f"  - {prefix}{message}")
+    if len(value) > 3:
+        lines.append(f"  - ... {len(value) - 3} more warning(s) in details")
+    return lines
+
+
+def _browser_action_trace_summary(content: dict[str, Any]) -> str | None:
+    result = _find_browser_action_trace_result_payload(content)
+    if result is None:
+        return None
+    action = result.get("action")
+    action = action if isinstance(action, dict) else {}
+    action_kind = _normalize_text(action.get("kind")) or "action"
+    ok = action.get("ok")
+    status = "completed" if ok is not False else "failed"
+    diff = result.get("diff")
+    diff = diff if isinstance(diff, dict) else {}
+    changed = diff.get("snapshot_changed")
+    changed_text = "changed" if changed is True else "unchanged" if changed is False else "unknown"
+    network = result.get("network")
+    network = network if isinstance(network, dict) else {}
+    request_count = _coerce_non_negative_int(network.get("request_count")) or 0
+    return (
+        f"Browser action trace {status}: {action_kind}; "
+        f"snapshot {changed_text}; {request_count} network request(s)."
+    )
+
+
+def _browser_action_trace_blocks(
+    deps: BrowserToolDeps,
+    content: Any,
+) -> list[dict[str, Any]]:
+    result = _find_browser_action_trace_result_payload(content)
+    if result is None:
+        return []
+    blocks = [text_content_block(_format_browser_action_trace_result(result))]
+    artifact_block = _browser_action_trace_artifact_block(deps, result)
+    if artifact_block is not None:
+        blocks.append(artifact_block)
+    return blocks
+
+
+def _browser_action_trace_artifact_block(
+    deps: BrowserToolDeps,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    artifact_service = deps.artifact_service
+    if artifact_service is None:
+        return None
+    trace_id = _normalize_text(result.get("trace_id")) or "browser-action-trace"
+    try:
+        data = json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        data = str(result).encode("utf-8")
+    artifact = artifact_service.create_artifact(
+        data=data,
+        mime_type="application/json",
+        name=f"{_safe_browser_artifact_name(trace_id)}.json",
+        metadata={
+            "source": "browser",
+            "attachment_kind": "action-trace",
+            "trace_id": trace_id,
+        },
+    )
+    return file_ref_content_block(
+        artifact_id=artifact.id,
+        mime_type=artifact.mime_type,
+        name=artifact.name,
+        download_url=f"/artifacts/{artifact.id}/download",
+    )
+
+
+def _find_browser_action_trace_result_payload(content: Any) -> dict[str, Any] | None:
+    if not isinstance(content, dict):
+        return None
+    command = content.get("command")
+    command_kind = _normalize_text(command.get("kind")) if isinstance(command, dict) else None
+    value = content.get("value")
+    if isinstance(value, dict):
+        result = value.get("result")
+        if isinstance(result, dict) and _normalize_text(result.get("kind")) == "action-trace":
+            return result
+    if command_kind == "action-trace":
+        result = content.get("result")
+        if isinstance(result, dict) and _normalize_text(result.get("kind")) == "action-trace":
+            return result
+    return None
+
+
+def _format_browser_action_trace_result(result: dict[str, Any]) -> str:
+    trace_id = _normalize_text(result.get("trace_id")) or "trace"
+    profile_name = _normalize_text(result.get("profile_name")) or "-"
+    target_id = _normalize_text(result.get("target_id")) or "-"
+    action = result.get("action")
+    action = action if isinstance(action, dict) else {}
+    action_kind = _normalize_text(action.get("kind")) or "action"
+    action_ok = action.get("ok") is not False
+    lines = [
+        "Browser action trace:",
+        f"- Trace: {trace_id}",
+        f"- Profile/Target: {profile_name} / {target_id}",
+        f"- Action: {action_kind} ({'ok' if action_ok else 'failed'})",
+    ]
+    envelope = result.get("action_envelope")
+    if isinstance(envelope, dict):
+        lines.append(f"- Page effect: {_browser_action_effect_label(envelope)}")
+    resolved_selector = _normalize_text(action.get("resolved_selector"))
+    if resolved_selector is not None:
+        lines.append(f"- Resolved selector: {resolved_selector}")
+    action_error = action.get("error")
+    if isinstance(action_error, dict):
+        error_message = _normalize_text(action_error.get("message"))
+        if error_message is not None:
+            lines.append(f"- Action error: {error_message}")
+    diff = result.get("diff")
+    if isinstance(diff, dict):
+        changed = diff.get("snapshot_changed")
+        changed_text = "yes" if changed is True else "no" if changed is False else "unknown"
+        ref_delta = _normalize_int(
+            diff.get("ref_count_delta"),
+            label="ref_count_delta",
+            minimum=-100000,
+        )
+        before_chars = _coerce_non_negative_int(diff.get("before_chars"))
+        after_chars = _coerce_non_negative_int(diff.get("after_chars"))
+        lines.append(f"- Snapshot changed: {changed_text}")
+        if ref_delta is not None:
+            lines.append(f"- Ref delta: {ref_delta:+d}")
+        if before_chars is not None and after_chars is not None:
+            lines.append(f"- Snapshot chars: {before_chars} -> {after_chars}")
+    recommendation = _browser_action_trace_recommendation(result)
+    if isinstance(recommendation, dict):
+        next_action = _normalize_text(recommendation.get("next_action"))
+        reason = _normalize_text(recommendation.get("reason"))
+        if next_action is not None:
+            recommendation_line = f"- Next: {next_action}"
+            if reason is not None:
+                recommendation_line += f" ({reason})"
+            lines.append(recommendation_line)
+            suggested_tools = _browser_action_trace_suggested_tools(next_action)
+            if suggested_tools:
+                lines.append("- Suggested tools: " + ", ".join(suggested_tools))
+            evidence_path = _browser_action_trace_evidence_path(next_action)
+            if evidence_path is not None:
+                lines.append("- Evidence path: " + evidence_path)
+    console = result.get("console")
+    if isinstance(console, dict):
+        new_console = _trace_preview_items(console.get("new"), limit=3)
+        lines.append(
+            "- Console delta: "
+            f"{len(new_console)} new message{'s' if len(new_console) != 1 else ''}"
+        )
+        for item in new_console:
+            level = _normalize_text(item.get("level")) or "log"
+            text = _normalize_text(item.get("text")) or ""
+            lines.append(f"  - [{level}] {text}")
+    page_errors = result.get("page_errors")
+    if isinstance(page_errors, dict):
+        new_errors = _trace_preview_items(page_errors.get("new"), limit=3)
+        lines.append(
+            "- Page error delta: "
+            f"{len(new_errors)} new error{'s' if len(new_errors) != 1 else ''}"
+        )
+        for item in new_errors:
+            text = _normalize_text(item.get("text")) or _normalize_text(item.get("message")) or ""
+            name = _normalize_text(item.get("name"))
+            prefix = f"{name}: " if name is not None else ""
+            lines.append(f"  - {prefix}{text}")
+    network = result.get("network")
+    if isinstance(network, dict):
+        capture_id = _normalize_text(network.get("capture_id")) or "-"
+        request_count = _coerce_non_negative_int(network.get("request_count")) or 0
+        lines.append(f"- Network: {request_count} request(s), capture {capture_id}")
+        causality = network.get("causality")
+        if isinstance(causality, dict):
+            initiator_counts = causality.get("initiator_counts")
+            if isinstance(initiator_counts, dict) and initiator_counts:
+                rendered_counts = ", ".join(
+                    f"{key}:{value}"
+                    for key, value in sorted(initiator_counts.items())
+                )
+                if rendered_counts:
+                    lines.append(f"  - Initiators: {rendered_counts}")
+            script_frames = _trace_preview_items(causality.get("script_frames"), limit=3)
+            for frame in script_frames:
+                script_url = _browser_network_url_label(_normalize_text(frame.get("script_url")))
+                function_name = _normalize_text(frame.get("function_name")) or "<anonymous>"
+                line_number = _coerce_non_negative_int(frame.get("line_number"))
+                column_number = _coerce_non_negative_int(frame.get("column_number"))
+                location = ""
+                if line_number is not None:
+                    location = f":{line_number}"
+                    if column_number is not None:
+                        location += f":{column_number}"
+                request_id = _normalize_text(frame.get("request_id")) or "-"
+                lines.append(
+                    f"  - Script initiator: {function_name} @ {script_url}{location} ({request_id})"
+                )
+        requests = _trace_preview_items(network.get("requests"), limit=5)
+        for item in requests:
+            method = _normalize_text(item.get("method")) or "-"
+            status = _normalize_text(item.get("status")) or "-"
+            url = _browser_network_url_label(_normalize_text(item.get("url")))
+            initiator = item.get("initiator_summary")
+            initiator = initiator if isinstance(initiator, dict) else {}
+            initiator_type = _normalize_text(initiator.get("type"))
+            initiator_suffix = f" via {initiator_type}" if initiator_type is not None else ""
+            lines.append(f"  - {method} {status} {url}{initiator_suffix}")
+    lifecycle = result.get("lifecycle")
+    if isinstance(lifecycle, dict):
+        changed_fields = lifecycle.get("changed_fields")
+        changed_count = len(changed_fields) if isinstance(changed_fields, dict) else 0
+        lines.append(f"- Lifecycle delta: {changed_count} changed field(s)")
+        if isinstance(changed_fields, dict):
+            for field_name, field_delta in list(changed_fields.items())[:5]:
+                if not isinstance(field_delta, dict):
+                    continue
+                before_value = _normalize_text(field_delta.get("before")) or "-"
+                after_value = _normalize_text(field_delta.get("after")) or "-"
+                lines.append(f"  - {field_name}: {before_value} -> {after_value}")
+    storage = result.get("storage")
+    if isinstance(storage, dict):
+        storage_parts: list[str] = []
+        for label in ("local", "session"):
+            bucket = storage.get(label)
+            if not isinstance(bucket, dict):
+                continue
+            added = bucket.get("added_keys")
+            removed = bucket.get("removed_keys")
+            added_count = len(added) if isinstance(added, list) else 0
+            removed_count = len(removed) if isinstance(removed, list) else 0
+            count_delta = _normalize_int(
+                bucket.get("count_delta"),
+                label=f"{label}_count_delta",
+                minimum=-100000,
+            )
+            storage_parts.append(
+                f"{label}: {added_count} added, {removed_count} removed, {count_delta or 0:+d} count"
+            )
+        if storage_parts:
+            lines.append("- Storage delta: " + "; ".join(storage_parts))
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        lines.append(f"- Trace warnings: {len(errors)}")
+        for item in errors[:3]:
+            if not isinstance(item, dict):
+                continue
+            source = _normalize_text(item.get("source")) or "trace"
+            message = _normalize_text(item.get("message")) or ""
+            lines.append(f"  - {source}: {message}")
+    before = result.get("before")
+    before_summary = _trace_snapshot_summary(before)
+    after = result.get("after")
+    after_summary = _trace_snapshot_summary(after)
+    if before_summary is not None:
+        lines.append(f"- Before snapshot: {before_summary}")
+    if after_summary is not None:
+        lines.append(f"- After snapshot: {after_summary}")
+    return "\n".join(lines)
+
+
+def _browser_action_trace_recommendation(result: dict[str, Any]) -> dict[str, Any] | None:
+    recommendation = result.get("recommendation")
+    if isinstance(recommendation, dict):
+        return recommendation
+    envelope = result.get("action_envelope")
+    if not isinstance(envelope, dict):
+        return None
+    nested_result = envelope.get("result")
+    if isinstance(nested_result, dict):
+        nested_recommendation = nested_result.get("recommendation")
+        if isinstance(nested_recommendation, dict):
+            return nested_recommendation
+    next_action = _normalize_text(envelope.get("next_action"))
+    if next_action is None:
+        return None
+    return {"next_action": next_action}
+
+
+def _trace_preview_items(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value[:limit] if isinstance(item, dict)]
+
+
+def _browser_action_trace_suggested_tools(next_action: str) -> list[str]:
+    if next_action == "inspect-target":
+        return ["browser.dom.clickability", "browser.dom.inspect", "browser.observe"]
+    if next_action == "inspect-page-errors":
+        return ["browser.page.errors", "browser.runtime.inspect", "browser.observe"]
+    if next_action == "inspect-script-initiator":
+        return [
+            "browser.script.extract_request",
+            "browser.runtime.probe_client",
+            "browser.runtime.call_client",
+            "browser.script.inspect",
+            "browser.network.get_response_body",
+            "browser.network.replay_request",
+        ]
+    if next_action == "inspect-network-delta":
+        return [
+            "browser.network.list_requests",
+            "browser.network.get_response_body",
+            "browser.script.find_request",
+            "browser.script.extract_request",
+            "browser.runtime.probe_client",
+            "browser.runtime.call_client",
+        ]
+    if next_action == "inspect-page-lifecycle":
+        return ["browser.page.lifecycle", "browser.observe", "browser.snapshot"]
+    if next_action == "inspect-storage-delta":
+        return [
+            "browser.storage.indexeddb.list",
+            "browser.storage.cache.list",
+            "browser.observe",
+        ]
+    if next_action == "continue-from-after-snapshot":
+        return ["browser.observe", "browser.snapshot", "browser.action.trace"]
+    if next_action == "inspect-console-delta":
+        return ["browser.runtime.inspect", "browser.page.errors", "browser.observe"]
+    if next_action == "observe-or-inspect-clickability":
+        return ["browser.observe", "browser.dom.clickability", "browser.dom.inspect"]
+    return []
+
+
+def _browser_action_trace_evidence_path(next_action: str) -> str | None:
+    if next_action == "inspect-target":
+        return "refresh the target, verify clickability/selector/ref, then retry with action trace."
+    if next_action == "inspect-page-errors":
+        return "read page errors first; retry only after the failing script or form state is understood."
+    if next_action == "inspect-script-initiator":
+        return "follow the initiating script to the request, then inspect or replay the captured API call."
+    if next_action == "inspect-network-delta":
+        return "inspect the captured request/response pair and replay only when headers/body are understood."
+    if next_action == "inspect-page-lifecycle":
+        return "observe the new page lifecycle and continue from the current tab state."
+    if next_action == "inspect-storage-delta":
+        return "check storage changes and infer hidden client state before making another page action."
+    if next_action == "continue-from-after-snapshot":
+        return "use the after snapshot as the new ground truth before selecting the next action."
+    if next_action == "inspect-console-delta":
+        return "read runtime/page error details before assuming the click failed."
+    if next_action == "observe-or-inspect-clickability":
+        return "observe again; if the target still looks wrong, inspect clickability or DOM before guessing."
+    return None
+
+
+def _trace_snapshot_summary(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    ref_count = _coerce_non_negative_int(value.get("ref_count"))
+    frame_count = _coerce_non_negative_int(value.get("frame_count"))
+    preview = _normalize_text(value.get("snapshot_preview"))
+    if preview is not None:
+        return _trace_snapshot_summary_text(
+            chars=len(preview),
+            ref_count=ref_count,
+            frame_count=frame_count,
+        )
+    nested = value.get("value")
+    if isinstance(nested, dict):
+        refs = nested.get("refs")
+        nested_ref_count = len(refs) if isinstance(refs, list) else ref_count
+        snapshot = _normalize_text(nested.get("snapshot"))
+        if snapshot is not None:
+            return _trace_snapshot_summary_text(
+                chars=len(snapshot),
+                ref_count=nested_ref_count,
+                frame_count=frame_count,
+            )
+    if isinstance(nested, str):
+        return _trace_snapshot_summary_text(
+            chars=len(nested),
+            ref_count=ref_count,
+            frame_count=frame_count,
+        )
+    return None
+
+
+def _trace_snapshot_summary_text(
+    *,
+    chars: int,
+    ref_count: int | None,
+    frame_count: int | None,
+) -> str:
+    parts = [f"{chars} chars omitted from text result"]
+    if ref_count is not None:
+        parts.append(f"{ref_count} ref(s)")
+    if frame_count is not None:
+        parts.append(f"{frame_count} frame(s)")
+    parts.append("see action trace artifact/details for full snapshot")
+    return ", ".join(parts)
+
+
 def _browser_network_summary(content: dict[str, Any]) -> str | None:
     found = _find_browser_network_result_payload(content)
     if found is None:
@@ -1283,17 +3899,20 @@ def _browser_network_summary(content: dict[str, Any]) -> str | None:
     if kind == "network-replay-request":
         status = _normalize_text(result.get("status")) or "unknown"
         source_request_id = _normalize_text(result.get("source_request_id")) or "captured request"
-        return f"Browser network replay returned {status} for {source_request_id}."
+        suitability = result.get("replay_suitability")
+        level = _normalize_text(suitability.get("level")) if isinstance(suitability, dict) else None
+        suffix = f" ({level})" if level is not None else ""
+        return f"Browser network replay returned {status} for {source_request_id}{suffix}."
     if kind == "network-start-capture":
-        capture_id = _normalize_text(result.get("capture_id"))
+        capture_id = _browser_network_capture_id(result)
         suffix = f" '{capture_id}'" if capture_id is not None else ""
         return f"Browser network capture{suffix} started."
     if kind == "network-stop-capture":
-        capture_id = _normalize_text(result.get("capture_id"))
+        capture_id = _browser_network_capture_id(result)
         suffix = f" '{capture_id}'" if capture_id is not None else ""
         return f"Browser network capture{suffix} stopped."
     if kind == "network-clear-capture":
-        capture_id = _normalize_text(result.get("capture_id"))
+        capture_id = _browser_network_capture_id(result)
         suffix = f" '{capture_id}'" if capture_id is not None else ""
         return f"Browser network capture{suffix} cleared."
     return None
@@ -1305,18 +3924,47 @@ def _browser_network_inspect_summary(result: dict[str, Any]) -> str | None:
     entry_count = len(entries) if isinstance(entries, list) else 0
     cdp = result.get("cdp")
     resource_tree = cdp.get("resource_tree") if isinstance(cdp, dict) else None
-    resources = None
-    if isinstance(resource_tree, dict):
-        frame_tree = resource_tree.get("frameTree")
-        if isinstance(frame_tree, dict):
-            raw_resources = frame_tree.get("resources")
-            if isinstance(raw_resources, list):
-                resources = len(raw_resources)
+    resources = _cdp_resource_tree_count(resource_tree)
+    if resources is None:
+        resources = _legacy_cdp_resource_tree_count(resource_tree)
     cdp_suffix = f", {resources} CDP resource(s)" if resources is not None else ""
     return f"Browser network inspection returned {entry_count} performance entr{'y' if entry_count == 1 else 'ies'}{cdp_suffix}."
 
 
-def _browser_network_blocks(content: Any) -> list[dict[str, Any]]:
+def _cdp_resource_tree_count(resource_tree: Any) -> int | None:
+    if isinstance(resource_tree, dict):
+        return _normalize_int(
+            resource_tree.get("resource_count"),
+            label="resource_count",
+            minimum=0,
+        )
+    return None
+
+
+def _legacy_cdp_resource_tree_count(resource_tree: Any) -> int | None:
+    if not isinstance(resource_tree, dict):
+        return None
+    frame_tree = resource_tree.get("frameTree")
+    if not isinstance(frame_tree, dict):
+        return None
+    resources = _legacy_cdp_resource_tree_resources(frame_tree)
+    return len(resources)
+
+
+def _legacy_cdp_resource_tree_resources(frame_tree: dict[str, Any]) -> list[dict[str, Any]]:
+    resources: list[dict[str, Any]] = []
+    raw_resources = frame_tree.get("resources")
+    if isinstance(raw_resources, list):
+        resources.extend(item for item in raw_resources if isinstance(item, dict))
+    children = frame_tree.get("childFrames")
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                resources.extend(_legacy_cdp_resource_tree_resources(child))
+    return resources
+
+
+def _browser_network_blocks(deps: BrowserToolDeps, content: Any) -> list[dict[str, Any]]:
     found = _find_browser_network_result_payload(content)
     if found is None:
         return []
@@ -1324,7 +3972,80 @@ def _browser_network_blocks(content: Any) -> list[dict[str, Any]]:
     formatted = _format_browser_network_result(kind, result)
     if formatted is None:
         return []
-    return [text_content_block(formatted)]
+    blocks = [text_content_block(formatted)]
+    artifact_block = _browser_network_body_artifact_block(
+        deps,
+        kind=kind,
+        result=result,
+    )
+    if artifact_block is not None:
+        blocks.append(artifact_block)
+    return blocks
+
+
+def _browser_network_body_artifact_block(
+    deps: BrowserToolDeps,
+    *,
+    kind: str,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if kind not in {
+        "network-fetch-as-page",
+        "network-replay-request",
+        "network-get-response-body",
+        "network-get-request-body",
+    }:
+        return None
+    artifact_service = deps.artifact_service
+    body = result.get("body")
+    if artifact_service is None or not isinstance(body, str) or not body:
+        return None
+    data = body.encode("utf-8")
+    if len(data) <= _NETWORK_TOP_LEVEL_BODY_PREVIEW_LIMIT:
+        return None
+    mime_type = (
+        _normalize_text(result.get("mime_type"))
+        or _normalize_text(result.get("content_type"))
+        or "text/plain"
+    )
+    request = result.get("request")
+    request = request if isinstance(request, dict) else {}
+    request_id = _normalize_text(result.get("request_id")) or _normalize_text(
+        request.get("request_id"),
+    )
+    url = _normalize_text(result.get("url")) or _normalize_text(request.get("url"))
+    label = request_id or url or kind
+    artifact = artifact_service.create_artifact(
+        data=data,
+        mime_type=mime_type,
+        name=f"{_safe_browser_artifact_name(label)}{_browser_body_extension(mime_type)}",
+        metadata={
+            "source": "browser",
+            "attachment_kind": "network-body",
+            "browser_network_kind": kind,
+            "request_id": request_id,
+            "url": url,
+        },
+    )
+    return file_ref_content_block(
+        artifact_id=artifact.id,
+        mime_type=artifact.mime_type,
+        name=artifact.name,
+        download_url=f"/artifacts/{artifact.id}/download",
+    )
+
+
+def _browser_body_extension(mime_type: str) -> str:
+    normalized = mime_type.lower()
+    if "json" in normalized:
+        return ".json"
+    if "html" in normalized:
+        return ".html"
+    if "xml" in normalized:
+        return ".xml"
+    if "javascript" in normalized or "ecmascript" in normalized:
+        return ".js"
+    return ".txt"
 
 
 def _find_browser_cookies_result(content: Any) -> dict[str, Any] | None:
@@ -1428,7 +4149,7 @@ def _format_browser_network_inspect_result(result: dict[str, Any]) -> str | None
     lines = ["Network inspection:"]
     url = _normalize_text(result.get("url")) or _normalize_text(performance.get("url"))
     if url is not None:
-        lines.append(f"- Page: {url}")
+        lines.append(f"- Page: {_browser_network_url_label(url)}")
     if not entries:
         lines.append("- Performance entries: none")
     else:
@@ -1436,7 +4157,7 @@ def _format_browser_network_inspect_result(result: dict[str, Any]) -> str | None
         for entry in entries[:10]:
             if not isinstance(entry, dict):
                 continue
-            name = _normalize_text(entry.get("name")) or "<unknown>"
+            name = _browser_network_url_label(_normalize_text(entry.get("name")))
             entry_type = _normalize_text(entry.get("entry_type")) or "entry"
             duration = entry.get("duration")
             duration_text = ""
@@ -1453,12 +4174,39 @@ def _format_browser_network_inspect_result(result: dict[str, Any]) -> str | None
             lines.append(f"- CDP metrics: {metric_count}")
         if "resource_tree" in cdp:
             resource_tree = cdp.get("resource_tree")
-            resource_count = 0
-            if isinstance(resource_tree, dict):
-                frame_tree = resource_tree.get("frameTree")
-                if isinstance(frame_tree, dict) and isinstance(frame_tree.get("resources"), list):
-                    resource_count = len(frame_tree["resources"])
+            resource_count = _cdp_resource_tree_count(resource_tree)
+            if resource_count is None:
+                resource_count = _legacy_cdp_resource_tree_count(resource_tree) or 0
             lines.append(f"- CDP resource tree: {resource_count} resource(s)")
+            if isinstance(resource_tree, dict):
+                frame_count = _normalize_int(
+                    resource_tree.get("frame_count"),
+                    label="frame_count",
+                    minimum=0,
+                )
+                if frame_count is not None:
+                    lines.append(f"  - Frames: {frame_count}")
+                resource_types = resource_tree.get("types")
+                if isinstance(resource_types, dict) and resource_types:
+                    type_parts = [
+                        f"{key}={value}"
+                        for key, value in resource_types.items()
+                        if isinstance(key, str) and isinstance(value, int)
+                    ]
+                    if type_parts:
+                        lines.append(f"  - Types: {', '.join(type_parts[:8])}")
+                resources = resource_tree.get("resources")
+                if isinstance(resources, list) and resources:
+                    for resource in resources[:5]:
+                        if not isinstance(resource, dict):
+                            continue
+                        resource_url = _browser_network_url_label(
+                            _normalize_text(resource.get("url")),
+                        )
+                        resource_type = _normalize_text(resource.get("type")) or "resource"
+                        lines.append(f"  - {resource_type}: {resource_url}")
+                if bool(resource_tree.get("truncated")):
+                    lines.append("  - Raw CDP resource tree omitted; samples truncated.")
     errors = result.get("errors")
     if isinstance(errors, list) and errors:
         lines.append(f"- Partial errors: {len(errors)}")
@@ -1473,10 +4221,20 @@ def _format_browser_network_capture_result(kind: str, result: dict[str, Any]) ->
     }
     label = labels.get(kind, "updated")
     lines = [f"Network capture {label}:"]
-    capture_id = _normalize_text(result.get("capture_id"))
+    capture_id = _browser_network_capture_id(result)
     if capture_id is not None:
         lines.append(f"- Capture: {capture_id}")
+        if kind == "network-start-capture":
+            lines.append(f"- Use capture_id: {capture_id}")
+            lines.append(
+                "- Next: trigger the page action or runtime probe, then pass this "
+                "capture_id to browser.network.list_requests"
+            )
     target_id = _normalize_text(result.get("target_id"))
+    if target_id is None:
+        capture = result.get("capture")
+        if isinstance(capture, dict):
+            target_id = _normalize_text(capture.get("target_id"))
     if target_id is not None:
         lines.append(f"- Target: {target_id}")
     request_count = _coerce_non_negative_int(result.get("request_count"))
@@ -1486,6 +4244,16 @@ def _format_browser_network_capture_result(kind: str, result: dict[str, Any]) ->
     if status is not None:
         lines.append(f"- Status: {status}")
     return "\n".join(lines)
+
+
+def _browser_network_capture_id(result: dict[str, Any]) -> str | None:
+    capture_id = _normalize_text(result.get("capture_id"))
+    if capture_id is not None:
+        return capture_id
+    capture = result.get("capture")
+    if isinstance(capture, dict):
+        return _normalize_text(capture.get("capture_id"))
+    return None
 
 
 def _format_browser_network_requests_result(result: dict[str, Any]) -> str:
@@ -1583,6 +4351,11 @@ def _format_browser_network_body_result(result: dict[str, Any]) -> str:
         size_bytes = _coerce_non_negative_int(result.get("body_size"))
     if size_bytes is not None:
         lines.append(f"- Size: {size_bytes} byte{'s' if size_bytes != 1 else ''}")
+    result_kind = _normalize_text(result.get("kind"))
+    if result_kind == "network-replay-request":
+        lines.extend(_format_browser_network_replay_diagnostics(result))
+    if result_kind == "network-fetch-as-page":
+        lines.extend(_format_browser_network_fetch_diagnostics(result))
     artifact_id = _normalize_text(result.get("artifact_id")) or _normalize_text(result.get("body_ref"))
     if artifact_id is not None:
         lines.append(f"- Body artifact: {artifact_id}")
@@ -1595,6 +4368,125 @@ def _format_browser_network_body_result(result: dict[str, Any]) -> str:
     if bool(result.get("truncated")):
         lines.append("- Truncated: true")
     return "\n".join(lines)
+
+
+def _format_browser_network_replay_diagnostics(result: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    suitability = result.get("replay_suitability")
+    if isinstance(suitability, dict):
+        level = _normalize_text(suitability.get("level")) or "unknown"
+        lines.append(f"- Replay suitability: {level}")
+        gates = suitability.get("gates")
+        if isinstance(gates, dict):
+            gate_parts: list[str] = []
+            cross_origin = gates.get("cross_origin")
+            if isinstance(cross_origin, dict) and bool(cross_origin.get("required")):
+                allowed = "allowed" if bool(cross_origin.get("allowed")) else "not allowed"
+                gate_parts.append(f"cross-origin {allowed}")
+            mutating = gates.get("mutating_method")
+            if isinstance(mutating, dict) and bool(mutating.get("required")):
+                method = _normalize_text(mutating.get("method")) or "mutating"
+                allowed = "allowed" if bool(mutating.get("allowed")) else "not allowed"
+                gate_parts.append(f"{method} {allowed}")
+            captured_body = gates.get("captured_body")
+            if isinstance(captured_body, dict):
+                source = _normalize_text(captured_body.get("source"))
+                if source is not None:
+                    gate_parts.append(f"body={source}")
+            if gate_parts:
+                lines.append(f"  - Gates: {', '.join(gate_parts)}")
+        warnings = suitability.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            for item in warnings[:3]:
+                warning = _normalize_text(item)
+                if warning is not None:
+                    lines.append(f"  - Warning: {warning}")
+
+    diff = result.get("request_diff")
+    if isinstance(diff, dict):
+        changed_fields = diff.get("changed_fields")
+        if isinstance(changed_fields, list):
+            fields = [
+                field
+                for field in (_normalize_text(item) for item in changed_fields)
+                if field is not None
+            ]
+        else:
+            fields = []
+        label = ", ".join(fields) if fields else "none"
+        body_source = _normalize_text(diff.get("body_source"))
+        suffix = f"; body={body_source}" if body_source is not None else ""
+        lines.append(f"- Request diff: {label}{suffix}")
+
+    response = result.get("response_summary")
+    if isinstance(response, dict):
+        ok_label = "ok" if bool(response.get("ok")) else "not ok"
+        status = _normalize_text(response.get("status")) or "-"
+        mime_type = _normalize_text(response.get("mime_type"))
+        size_bytes = _coerce_non_negative_int(response.get("size_bytes"))
+        details = [ok_label, f"status={status}"]
+        if mime_type is not None:
+            details.append(f"type={mime_type}")
+        if size_bytes is not None:
+            details.append(f"size={size_bytes} bytes")
+        if bool(response.get("truncated")):
+            details.append("truncated")
+        if bool(response.get("redacted")):
+            details.append("redacted")
+        lines.append(f"- Response summary: {', '.join(details)}")
+    return lines
+
+
+def _format_browser_network_fetch_diagnostics(result: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    safety = result.get("fetch_safety")
+    if isinstance(safety, dict):
+        level = _normalize_text(safety.get("level")) or "unknown"
+        lines.append(f"- Fetch safety: {level}")
+        gates = safety.get("gates")
+        if isinstance(gates, dict):
+            gate_parts: list[str] = []
+            cross_origin = gates.get("cross_origin")
+            if isinstance(cross_origin, dict) and bool(cross_origin.get("required")):
+                allowed = "allowed" if bool(cross_origin.get("allowed")) else "not allowed"
+                gate_parts.append(f"cross-origin {allowed}")
+            mutating = gates.get("mutating_method")
+            if isinstance(mutating, dict) and bool(mutating.get("required")):
+                method = _normalize_text(mutating.get("method")) or "mutating"
+                allowed = "allowed" if bool(mutating.get("allowed")) else "not allowed"
+                gate_parts.append(f"{method} {allowed}")
+            body = gates.get("body")
+            if isinstance(body, dict) and bool(body.get("present")):
+                size_bytes = _coerce_non_negative_int(body.get("size_bytes"))
+                gate_parts.append(
+                    f"body={size_bytes} bytes" if size_bytes is not None else "body=present",
+                )
+            credentials = gates.get("credentials")
+            if isinstance(credentials, dict) and bool(credentials.get("included")):
+                gate_parts.append("credentials=browser-page")
+            if gate_parts:
+                lines.append(f"  - Gates: {', '.join(gate_parts)}")
+        warnings = safety.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            for item in warnings[:3]:
+                warning = _normalize_text(item)
+                if warning is not None:
+                    lines.append(f"  - Warning: {warning}")
+    response = result.get("response_summary")
+    if isinstance(response, dict):
+        ok = response.get("ok")
+        status = _normalize_text(response.get("status"))
+        mime_type = _normalize_text(response.get("mime_type"))
+        summary_parts = []
+        if status is not None:
+            summary_parts.append(f"status={status}")
+        if mime_type is not None:
+            summary_parts.append(f"type={mime_type}")
+        if ok is not None:
+            summary_parts.append(f"ok={bool(ok)}")
+        if summary_parts:
+            lines.append(f"- Response summary: {', '.join(summary_parts)}")
+    return lines
 
 
 def _browser_network_requests(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1642,6 +4534,13 @@ def _browser_network_body_preview(result: dict[str, Any]) -> str | None:
 def _browser_network_url_label(value: str | None) -> str:
     if value is None:
         return "<unknown>"
+    if value.startswith("data:"):
+        header, separator, payload = value.partition(",")
+        if separator:
+            if payload.startswith("[omitted "):
+                return value
+            return f"{header},[omitted {len(payload)} chars]"
+        return "data:[omitted]"
     try:
         parsed = urlsplit(value)
     except ValueError:
@@ -1887,6 +4786,468 @@ def _browser_snapshot_blocks(content: Any) -> list[dict[str, Any]]:
     return [text_content_block(formatted)]
 
 
+def _browser_observe_blocks(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, dict) or _normalize_text(content.get("kind")) != "observe":
+        return []
+    lines: list[str] = []
+    summary = _browser_observe_summary(content)
+    if summary is not None:
+        lines.append(summary)
+    page = content.get("page")
+    if isinstance(page, dict):
+        title = _normalize_text(page.get("title")) or "(untitled)"
+        url = _normalize_text(page.get("url")) or "(no url)"
+        target_id = _normalize_text(page.get("target_id")) or "current"
+        lines.append(f"Page: [{target_id}] {title}\n{url}")
+    tabs = content.get("tabs")
+    if isinstance(tabs, dict):
+        tab_count = tabs.get("count")
+        if isinstance(tab_count, int):
+            lines.append(f"Tabs: {tab_count}")
+    frames = content.get("frames")
+    if isinstance(frames, dict):
+        frame_count = frames.get("count")
+        if isinstance(frame_count, int):
+            lines.append(f"Frames: {frame_count}")
+    interaction = content.get("interaction")
+    if isinstance(interaction, dict):
+        ref_count = interaction.get("ref_count")
+        frame_count = interaction.get("frame_count")
+        lines.append(f"Interaction: {ref_count or 0} refs across {frame_count or 0} frame(s)")
+        evidence = interaction.get("evidence")
+        if isinstance(evidence, dict) and evidence:
+            rendered_evidence = ", ".join(
+                f"{key}:{value}"
+                for key, value in sorted(evidence.items())
+                if isinstance(value, int)
+            )
+            if rendered_evidence:
+                lines.append(f"Evidence: {rendered_evidence}")
+    form = content.get("form")
+    if isinstance(form, dict):
+        form_line = _format_browser_observe_form(form)
+        if form_line is not None:
+            lines.append(form_line)
+    overlay = content.get("overlay")
+    if isinstance(overlay, dict):
+        overlay_line = _format_browser_observe_overlay(overlay)
+        if overlay_line is not None:
+            lines.append(overlay_line)
+    guidance = content.get("guidance")
+    if isinstance(guidance, dict):
+        guidance_line = _format_browser_observe_guidance(guidance)
+        if guidance_line is not None:
+            lines.append(guidance_line)
+    runtime = content.get("runtime")
+    if isinstance(runtime, dict):
+        runtime_line = _format_browser_observe_runtime(runtime)
+        if runtime_line is not None:
+            lines.append(runtime_line)
+    network = content.get("network")
+    if isinstance(network, dict):
+        network_line = _format_browser_observe_network(network)
+        if network_line is not None:
+            lines.append(network_line)
+    code = content.get("code")
+    if isinstance(code, dict):
+        code_line = _format_browser_observe_code(code)
+        if code_line is not None:
+            lines.append(code_line)
+    snapshot = content.get("snapshot")
+    formatted_snapshot = (
+        _format_browser_snapshot_result(snapshot)
+        if isinstance(snapshot, dict)
+        else None
+    )
+    if formatted_snapshot is not None:
+        lines.append(formatted_snapshot)
+    console = content.get("console")
+    if isinstance(console, dict):
+        formatted_console = _format_browser_console_result(console)
+        if formatted_console:
+            lines.append("Console:\n" + formatted_console)
+    errors = content.get("errors")
+    if isinstance(errors, list | tuple) and errors:
+        lines.append(f"Observation warnings: {len(errors)} section(s) failed.")
+    if not lines:
+        return []
+    return [text_content_block("\n\n".join(lines))]
+
+
+def _format_browser_observe_form(form: dict[str, Any]) -> str | None:
+    field_count = _normalize_int(form.get("field_count"), label="field_count", minimum=0) or 0
+    action_count = _normalize_int(form.get("action_count"), label="action_count", minimum=0) or 0
+    candidate_count = (
+        _normalize_int(form.get("candidate_count"), label="candidate_count", minimum=0)
+        or 0
+    )
+    if field_count == 0 and action_count == 0 and candidate_count == 0:
+        return None
+    lines = [
+        "Form:",
+        f"- Fields/actions/candidates: {field_count}/{action_count}/{candidate_count}",
+    ]
+    fields = form.get("fields")
+    if isinstance(fields, list) and fields:
+        lines.append("- Fields:")
+        for item in fields[:8]:
+            if isinstance(item, dict):
+                lines.append(f"  - {_browser_ref_label(item)}")
+    actions = form.get("actions")
+    if isinstance(actions, list) and actions:
+        lines.append("- Actions:")
+        for item in actions[:6]:
+            if isinstance(item, dict):
+                lines.append(f"  - {_browser_ref_label(item)}")
+    guidance = form.get("guidance")
+    if isinstance(guidance, dict):
+        next_action = _normalize_text(guidance.get("next_action"))
+        if next_action is not None:
+            lines.append(f"- Next: {next_action}")
+        tool_line = _format_browser_suggested_tools(guidance.get("suggested_tools"), limit=3)
+        if tool_line is not None:
+            lines.append(f"- {tool_line}")
+    return "\n".join(lines)
+
+
+def _format_browser_observe_overlay(overlay: dict[str, Any]) -> str | None:
+    active = overlay.get("active") is True
+    selector = _normalize_text(overlay.get("selector"))
+    candidate_count = (
+        _normalize_int(overlay.get("candidate_count"), label="candidate_count", minimum=0)
+        or 0
+    )
+    if not active and candidate_count == 0:
+        return None
+    lines = [
+        "Overlay:",
+        f"- Active: {'yes' if active else 'no'}",
+    ]
+    if selector is not None:
+        lines.append(f"- Selector: {selector}")
+    candidates = overlay.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        lines.append(f"- Candidates ({candidate_count}):")
+        for item in candidates[:10]:
+            if isinstance(item, dict):
+                lines.append(f"  - {_browser_ref_label(item)}")
+    guidance = overlay.get("guidance")
+    if isinstance(guidance, dict):
+        next_action = _normalize_text(guidance.get("next_action"))
+        if next_action is not None:
+            lines.append(f"- Next: {next_action}")
+        tool_line = _format_browser_suggested_tools(guidance.get("suggested_tools"), limit=3)
+        if tool_line is not None:
+            lines.append(f"- {tool_line}")
+    return "\n".join(lines)
+
+
+def _browser_ref_label(item: dict[str, Any]) -> str:
+    ref = _normalize_text(item.get("ref")) or "-"
+    label = _normalize_text(item.get("label")) or _normalize_text(item.get("text")) or "-"
+    role = _normalize_text(item.get("role")) or _normalize_text(item.get("tag")) or "element"
+    selector = _normalize_text(item.get("selector"))
+    suffix = f" ({selector})" if selector is not None else ""
+    return f"{ref}: {role} \"{label}\"{suffix}"
+
+
+def _format_browser_observe_guidance(guidance: dict[str, Any]) -> str | None:
+    next_action = _normalize_text(guidance.get("next_action"))
+    reason = _normalize_text(guidance.get("reason"))
+    tools = guidance.get("suggested_tools")
+    tool_labels = [
+        item
+        for item in (_normalize_text(entry) for entry in (tools if isinstance(tools, list) else []))
+        if item is not None
+    ][:4]
+    evidence_lines = _format_browser_observe_evidence_paths(guidance)
+    if next_action is None and reason is None and not tool_labels and not evidence_lines:
+        return None
+    lines: list[str] = []
+    if next_action is not None:
+        line = f"Next: {next_action}"
+        if reason is not None:
+            line += f" ({reason})"
+        lines.append(line)
+    elif reason is not None:
+        lines.append(f"Next: {reason}")
+    if tool_labels:
+        lines.append("Suggested tools: " + ", ".join(tool_labels))
+    if evidence_lines:
+        lines.extend(evidence_lines)
+    elif tool_labels:
+        evidence_path = _browser_observe_evidence_path(tool_labels)
+        if evidence_path is not None:
+            lines.append("Evidence path: " + evidence_path)
+    return "\n".join(lines)
+
+
+def _format_browser_observe_evidence_paths(guidance: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    primary = guidance.get("primary_evidence_path")
+    primary_line = _format_browser_observe_evidence_path_item(primary)
+    if primary_line is not None:
+        lines.append("Evidence path: " + primary_line)
+    alternatives = guidance.get("alternative_evidence_paths")
+    alternative_lines = [
+        line
+        for line in (
+            _format_browser_observe_evidence_path_item(item)
+            for item in (alternatives if isinstance(alternatives, list) else [])
+        )
+        if line is not None
+    ][:3]
+    if alternative_lines:
+        lines.append("Alternative paths: " + " | ".join(alternative_lines))
+    return lines
+
+
+def _format_browser_observe_evidence_path_item(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    key = _normalize_text(value.get("key"))
+    title = _normalize_text(value.get("title"))
+    tools = value.get("tool_ids")
+    tool_labels = [
+        item
+        for item in (
+            _normalize_text(entry)
+            for entry in (tools if isinstance(tools, list) else [])
+        )
+        if item is not None
+    ][:4]
+    if key is None and title is None and not tool_labels:
+        return None
+    label = key or title or "browser_evidence"
+    if title is not None and key is not None:
+        label = f"{key} ({title})"
+    if tool_labels:
+        label += ": " + ", ".join(tool_labels)
+    return label
+
+
+def _format_browser_suggested_tools(value: Any, *, limit: int) -> str | None:
+    if not isinstance(value, list):
+        return None
+    tool_labels = [
+        item
+        for item in (_normalize_text(entry) for entry in value)
+        if item is not None
+    ][:limit]
+    if not tool_labels:
+        return None
+    return "Suggested tools: " + ", ".join(tool_labels)
+
+
+def _browser_observe_evidence_path(tool_labels: list[str]) -> str | None:
+    tools = set(tool_labels)
+    if "browser.action.trace" in tools:
+        return (
+            "trace the next page action, then use the before/after snapshot and "
+            "network/console delta to decide whether to continue through UI, DOM, "
+            "or request analysis."
+        )
+    if "browser.network.list_requests" in tools or "browser.network.get_response_body" in tools:
+        return (
+            "inspect captured requests and response bodies before trying more UI clicks."
+        )
+    if (
+        "browser.script.extract_request" in tools
+        or "browser.runtime.probe_client" in tools
+        or "browser.runtime.call_client" in tools
+        or "browser.script.inspect" in tools
+        or "browser.script.find_request" in tools
+    ):
+        return "inspect the initiating script or endpoint candidate before retrying the UI."
+    if "browser.runtime.inspect" in tools or "browser.script.list" in tools:
+        return "inspect runtime and live scripts when the interactive tree is incomplete."
+    return None
+
+
+def _format_browser_observe_runtime(runtime: dict[str, Any]) -> str | None:
+    page_state = runtime.get("page_state")
+    frameworks = runtime.get("frameworks")
+    resources = runtime.get("resources")
+    performance = runtime.get("performance")
+    errors = runtime.get("errors")
+    parts: list[str] = []
+    if isinstance(page_state, dict):
+        state_parts: list[str] = []
+        ready_state = _normalize_text(page_state.get("ready_state"))
+        visibility_state = _normalize_text(page_state.get("visibility_state"))
+        if ready_state is not None:
+            state_parts.append(f"ready={ready_state}")
+        if visibility_state is not None:
+            state_parts.append(f"visible={visibility_state}")
+        if isinstance(page_state.get("focused"), bool):
+            state_parts.append(f"focused={'yes' if page_state.get('focused') else 'no'}")
+        if state_parts:
+            parts.append("page " + ", ".join(state_parts))
+    if isinstance(frameworks, dict):
+        detected = frameworks.get("detected")
+        detected_labels = [
+            item
+            for item in (_normalize_text(entry) for entry in detected)
+            if item is not None
+        ] if isinstance(detected, list) else []
+        if detected_labels:
+            parts.append("frameworks=" + ", ".join(detected_labels))
+    route_lines = _format_browser_route_hints(runtime.get("route_hints"))
+    if route_lines:
+        parts.append("routes=" + " | ".join(route_lines[:3]))
+    globals_list = runtime.get("globals")
+    if isinstance(globals_list, list):
+        present_count = sum(
+            1
+            for item in globals_list
+            if isinstance(item, dict) and item.get("exists") is True
+        )
+        if present_count:
+            parts.append(f"{present_count} runtime global(s)")
+    if isinstance(resources, dict):
+        resource_count = _normalize_int(
+            resources.get("resource_count"),
+            label="resource_count",
+            minimum=0,
+        )
+        frame_count = _normalize_int(
+            resources.get("frame_count"),
+            label="frame_count",
+            minimum=0,
+        )
+        parts.append(f"{resource_count or 0} resource(s), {frame_count or 0} runtime frame(s)")
+    if isinstance(performance, dict):
+        metric_count = _normalize_int(
+            performance.get("metric_count"),
+            label="metric_count",
+            minimum=0,
+        )
+        parts.append(f"{metric_count or 0} performance metric(s)")
+    if isinstance(errors, list) and errors:
+        parts.append(f"{len(errors)} runtime warning(s)")
+    if not parts:
+        return None
+    return "Runtime: " + "; ".join(parts)
+
+
+def _format_browser_observe_network(network: dict[str, Any]) -> str | None:
+    performance = network.get("performance")
+    capture = network.get("capture")
+    parts: list[str] = []
+    if isinstance(performance, dict):
+        resource_count = _normalize_int(
+            performance.get("resource_count"),
+            label="resource_count",
+            minimum=0,
+        )
+        navigation_count = _normalize_int(
+            performance.get("navigation_count"),
+            label="navigation_count",
+            minimum=0,
+        )
+        parts.append(f"{navigation_count or 0} navigation entry, {resource_count or 0} resource entry")
+    if isinstance(capture, dict) and capture.get("enabled") is True:
+        request_count = _normalize_int(
+            capture.get("request_count"),
+            label="request_count",
+            minimum=0,
+        )
+        total_count = _normalize_int(
+            capture.get("total_count"),
+            label="total_count",
+            minimum=0,
+        )
+        parts.append(f"{request_count or 0}/{total_count or 0} captured request(s)")
+    if not parts:
+        return None
+    return "Network: " + "; ".join(parts)
+
+
+def _format_browser_observe_code(code: dict[str, Any]) -> str | None:
+    scripts = code.get("scripts")
+    search = code.get("search")
+    request_matches = code.get("request_matches")
+    parts: list[str] = []
+    if isinstance(scripts, dict):
+        returned_scripts = _normalize_int(
+            scripts.get("returned_scripts"),
+            label="returned_scripts",
+            minimum=0,
+        )
+        scripts_count = _normalize_int(
+            scripts.get("scripts_count"),
+            label="scripts_count",
+            minimum=0,
+        )
+        if returned_scripts is not None or scripts_count is not None:
+            parts.append(f"{returned_scripts or 0}/{scripts_count or 0} script(s)")
+        script_items = scripts.get("scripts")
+        if isinstance(script_items, list) and script_items:
+            labels = [
+                label
+                for label in (
+                    _browser_script_label(item)
+                    for item in script_items[:4]
+                    if isinstance(item, dict)
+                )
+                if label is not None
+            ]
+            if labels:
+                parts.append("top=" + ", ".join(labels))
+    if isinstance(search, dict):
+        query = _normalize_text(search.get("query"))
+        match_count = _normalize_int(
+            search.get("match_count"),
+            label="match_count",
+            minimum=0,
+        )
+        if query is not None or match_count is not None:
+            parts.append(f"search {query or '<query>'}: {match_count or 0} match(es)")
+    if isinstance(request_matches, dict):
+        match_count = _normalize_int(
+            request_matches.get("match_count"),
+            label="request_match_count",
+            minimum=0,
+        )
+        candidate_count = _normalize_int(
+            request_matches.get("candidate_count"),
+            label="candidate_count",
+            minimum=0,
+        )
+        parts.append(f"request refs: {match_count or 0} match(es), {candidate_count or 0} candidate(s)")
+    if not parts:
+        return None
+    return "Code: " + "; ".join(parts)
+
+
+def _browser_script_label(item: dict[str, Any]) -> str | None:
+    url = _normalize_text(item.get("url"))
+    script_id = _normalize_text(item.get("script_id"))
+    if url is not None:
+        try:
+            parsed = urlsplit(url)
+            path = parsed.path.rsplit("/", 1)[-1] if parsed.path else parsed.netloc
+            return path or url
+        except ValueError:
+            return url
+    return script_id
+
+
+def _browser_observe_summary(content: dict[str, Any]) -> str | None:
+    if _normalize_text(content.get("kind")) != "observe":
+        return None
+    message = _normalize_text(content.get("message"))
+    if message is not None:
+        return message
+    page = content.get("page")
+    if not isinstance(page, dict):
+        return "Observed browser page."
+    title = _normalize_text(page.get("title"))
+    url = _normalize_text(page.get("url"))
+    label = title or url or "current page"
+    return f"Observed {label}."
+
+
 def _find_browser_snapshot_result(content: Any) -> dict[str, Any] | None:
     if not isinstance(content, dict):
         return None
@@ -1982,7 +5343,18 @@ def _format_browser_evaluate_result(result: Any) -> str:
 def _browser_result_details(content: Any) -> Any:
     if not isinstance(content, dict):
         return content
-    return _sanitize_browser_result_details(content)
+    sanitized = _sanitize_browser_result_details(content)
+    if _browser_details_char_count(sanitized) <= _BROWSER_DETAILS_MAX_CHARS:
+        return sanitized
+    compacted = _compact_browser_result_details(sanitized)
+    if _browser_details_char_count(compacted) <= _BROWSER_DETAILS_MAX_CHARS:
+        if isinstance(compacted, dict):
+            compacted = {
+                **compacted,
+                "details_compacted": True,
+            }
+        return compacted
+    return _fallback_browser_result_details(sanitized)
 
 
 def _sanitize_browser_result_details(value: Any) -> Any:
@@ -1998,10 +5370,86 @@ def _sanitize_browser_result_details(value: Any) -> Any:
             if isinstance(data, str) and data:
                 sanitized.pop("data", None)
                 sanitized["attachment_in_content"] = True
+        if kind in {"network-fetch-as-page", "network-replay-request"}:
+            body = sanitized.get("body")
+            if isinstance(body, str) and body:
+                sanitized.pop("body", None)
+                sanitized["body_removed_from_details"] = True
+                sanitized["body_removed_size_bytes"] = len(body.encode("utf-8"))
+        if kind == "script-inspect":
+            source_preview = sanitized.get("source_preview")
+            if (
+                isinstance(source_preview, str)
+                and len(source_preview.encode("utf-8")) > _SCRIPT_TOP_LEVEL_PREVIEW_LIMIT
+            ):
+                sanitized.pop("source_preview", None)
+                sanitized["source_preview_removed_from_details"] = True
+                sanitized["source_preview_removed_size_bytes"] = len(
+                    source_preview.encode("utf-8"),
+                )
         return sanitized
     if isinstance(value, list):
         return [_sanitize_browser_result_details(item) for item in value]
     return value
+
+
+def _browser_details_char_count(value: Any) -> int:
+    try:
+        return len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+    except TypeError:
+        return len(str(value))
+
+
+def _compact_browser_result_details(value: Any) -> Any:
+    if isinstance(value, str):
+        return _truncate_text(value, _BROWSER_DETAILS_COMPACT_STRING_LIMIT)
+    if isinstance(value, list):
+        compacted = [
+            _compact_browser_result_details(item)
+            for item in value[:_BROWSER_DETAILS_COMPACT_LIST_LIMIT]
+        ]
+        hidden_count = len(value) - len(compacted)
+        if hidden_count > 0:
+            compacted.append({"items_omitted_from_details": hidden_count})
+        return compacted
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _BROWSER_DETAILS_COMPACT_DICT_LIMIT:
+                compacted["keys_omitted_from_details"] = len(value) - index
+                break
+            compacted[str(key)] = _compact_browser_result_details(item)
+        return compacted
+    return value
+
+
+def _fallback_browser_result_details(value: dict[str, Any]) -> dict[str, Any]:
+    summary = _browser_result_summary(value)
+    fallback: dict[str, Any] = {
+        "details_compacted": True,
+        "details_truncated": True,
+    }
+    kind = _normalize_text(value.get("kind"))
+    if kind is not None:
+        fallback["kind"] = kind
+    target_id = _extract_browser_target_id(value)
+    if target_id is not None:
+        fallback["target_id"] = target_id
+    target_url = _browser_target_url_from_content(value)
+    if target_url is not None:
+        fallback.update(_safe_browser_url_metadata(target_url))
+    if summary is not None:
+        fallback["summary"] = _truncate_text(summary, 4000)
+    fallback["top_level_keys"] = list(value.keys())[:_BROWSER_DETAILS_COMPACT_DICT_LIMIT]
+    fallback["original_details_chars"] = _browser_details_char_count(value)
+    return fallback
 
 
 def _browser_attachment_blocks(
@@ -2171,6 +5619,14 @@ def _default_browser_attachment_name(*, kind: str, content_type: str) -> str:
     return "browser-screenshot.png"
 
 
+def _safe_browser_artifact_name(value: str) -> str:
+    normalized = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "-"
+        for char in value.strip()
+    ).strip("-.")
+    return normalized[:120] or "browser-artifact"
+
+
 def _augment_browser_error_with_guidance(
     *,
     deps: BrowserToolDeps,
@@ -2178,6 +5634,27 @@ def _augment_browser_error_with_guidance(
     exc: BrowserValidationError,
 ) -> BrowserValidationError:
     message = str(exc).strip().lower()
+    if _is_browser_ref_resolution_error(message):
+        augmented_message = (
+            f"{exc} Next: run browser.observe for the current tab to refresh "
+            "interactive refs, then retry browser.action.trace with a fresh ref. "
+            "If the target is still missing, use browser.dom.clickability or "
+            "browser.dom.inspect before guessing. Reason: browser refs are "
+            "ephemeral and scoped to the latest observed tab snapshot."
+        )
+        if isinstance(exc, BrowserToolApplicationError):
+            return exc.with_message(augmented_message)
+        return BrowserValidationError(augmented_message)
+    if "profile" in message and "not configured" in message:
+        missing_profile_guidance = _missing_browser_profile_guidance(
+            deps=deps,
+            profile_name=profile_name,
+        )
+        if missing_profile_guidance is not None:
+            augmented_message = f"{exc} {missing_profile_guidance}"
+            if isinstance(exc, BrowserToolApplicationError):
+                return exc.with_message(augmented_message)
+            return BrowserValidationError(augmented_message)
     if (
         "handshake status 403" in message
         or "rejected an incoming websocket connection" in message
@@ -2242,6 +5719,74 @@ def _augment_browser_error_with_guidance(
     if isinstance(exc, BrowserToolApplicationError):
         return exc.with_message(augmented_message)
     return BrowserValidationError(augmented_message)
+
+
+def _is_browser_ref_resolution_error(message: str) -> bool:
+    return (
+        "browser ref" in message
+        and (
+            "was not found" in message
+            or "is stale" in message
+            or "does not expose a supported locator" in message
+            or "frame path" in message
+            or "requires nth" in message
+        )
+    )
+
+
+def _missing_browser_profile_guidance(
+    *,
+    deps: BrowserToolDeps,
+    profile_name: str,
+) -> str | None:
+    try:
+        system_config = deps.browser_system_config_store.load()
+    except Exception:  # noqa: BLE001
+        system_config = None
+    default_profile = _normalize_text(getattr(system_config, "default_profile", None))
+    configured_profiles = _configured_browser_profile_names(system_config)
+    if default_profile is not None and default_profile not in configured_profiles:
+        configured_profiles = (default_profile, *configured_profiles)
+    configured_text = ""
+    if configured_profiles:
+        configured_text = " Configured profiles: " + ", ".join(configured_profiles[:8]) + "."
+    if profile_name.strip().lower() == "default":
+        if default_profile is None:
+            return (
+                "Next: omit the profile argument for normal browser work or choose a "
+                "configured profile name. Reason: 'default' is not a Browser profile name."
+                f"{configured_text}"
+            )
+        return (
+            "Next: omit the profile argument for normal browser work so the configured "
+            f"browser default profile '{default_profile}' is used, or pass a concrete "
+            "configured profile name. Reason: 'default' is not a Browser profile name."
+            f"{configured_text}"
+        )
+    if default_profile is not None:
+        return (
+            "Next: omit the profile argument to use the configured browser default "
+            f"profile '{default_profile}', or pass one of the configured profile names."
+            f"{configured_text}"
+        )
+    if configured_profiles:
+        return (
+            "Next: pass one of the configured browser profile names."
+            f"{configured_text}"
+        )
+    return None
+
+
+def _configured_browser_profile_names(system_config: Any) -> tuple[str, ...]:
+    profiles = getattr(system_config, "profiles", None)
+    if profiles is None:
+        return ()
+    names: list[str] = []
+    for profile in profiles:
+        name = _normalize_text(getattr(profile, "name", None))
+        if name is not None:
+            names.append(name)
+    return tuple(dict.fromkeys(names))
 
 
 def _resolve_profile_selection(
@@ -2744,6 +6289,60 @@ def _run_page_action_content(
     return content, profile_name, {**resolved_profile.allocation_metadata, **runtime_metadata}
 
 
+def _execute_observe(
+    *,
+    deps: BrowserToolDeps,
+    tool_id: str,
+    arguments: dict[str, Any],
+    execution_context: ToolExecutionContext | None,
+) -> ToolRunResult:
+    _ensure_browser_enabled(deps.settings)
+    observation_service = deps.browser_observation_service
+    if observation_service is None:
+        raise BrowserValidationError(
+            "browser.observe requires the Browser observation service.",
+        )
+    resolved_profile = _resolve_browser_profile_for_execution(
+        deps=deps,
+        arguments=arguments,
+        execution_context=execution_context,
+    )
+    profile_name = resolved_profile.name
+    target_id = _normalize_browser_target_id(arguments.get("target_id"))
+    timeout_ms = _normalize_timeout(arguments.get("timeout_ms"))
+    payload = _normalize_observe_payload(arguments)
+    try:
+        result = observation_service.observe(
+            profile_name=profile_name,
+            target_id=target_id,
+            payload=payload,
+            timeout_ms=timeout_ms,
+        )
+    except BrowserValidationError as exc:
+        raise _augment_browser_error_with_guidance(
+            deps=deps,
+            profile_name=profile_name,
+            exc=exc,
+        ) from exc
+    return _tool_result(
+        deps=deps,
+        tool_id=tool_id,
+        content=result.payload,
+        family="page-observation",
+        profile_name=profile_name,
+        profile_source=resolved_profile.allocation_metadata.get(
+            "profile_source",
+            _profile_source(arguments, execution_context),
+        ),
+        runtime_metadata={
+            **resolved_profile.allocation_metadata,
+            **dict(result.runtime_metadata),
+        },
+        kind="observe",
+        execution_context=execution_context,
+    )
+
+
 def _tool_application_result_payload(result: Any) -> tuple[Any, dict[str, Any]]:
     payload = getattr(result, "payload", None)
     runtime_metadata = getattr(result, "runtime_metadata", None)
@@ -3164,6 +6763,71 @@ def _normalize_snapshot_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return normalized_arguments
 
 
+def _normalize_observe_payload(arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_snapshot_arguments(arguments)
+    payload = dict(normalized.get("payload") or {})
+    selector = _normalize_text(arguments.get("selector"))
+    if selector is not None:
+        payload["selector"] = selector
+    for key in (
+        "include_tabs",
+        "include_console",
+        "include_page_errors",
+        "include_runtime",
+        "include_scripts",
+        "include_code_search",
+        "include_script_request_matches",
+        "include_resource_tree",
+        "include_performance_metrics",
+        "include_network_capture",
+    ):
+        value = _normalize_bool(arguments.get(key), label=key)
+        if value is not None:
+            payload[key] = value
+    for key in (
+        "console_limit",
+        "page_error_limit",
+        "console_error_limit",
+        "page_exception_limit",
+        "runtime_limit",
+        "network_limit",
+        "script_limit",
+        "script_wait_ms",
+        "code_search_limit",
+        "code_search_max_scripts",
+        "code_search_context_lines",
+        "script_request_limit",
+        "script_request_max_scripts",
+        "script_request_context_lines",
+    ):
+        value = _normalize_int(arguments.get(key), label=key, minimum=1)
+        if value is not None:
+            payload[key] = value
+    for key in (
+        "script_url_contains",
+        "code_search_query",
+        "code_search_url_contains",
+        "script_request_query",
+        "script_request_url",
+        "script_request_path",
+    ):
+        value = _normalize_text(arguments.get(key))
+        if value is not None:
+            payload[key] = value
+    for key in (
+        "code_search_case_sensitive",
+        "code_search_regex",
+        "script_request_case_sensitive",
+    ):
+        value = _normalize_bool(arguments.get(key), label=key)
+        if value is not None:
+            payload[key] = value
+    capture_id = _normalize_text(arguments.get("capture_id"))
+    if capture_id is not None:
+        payload["capture_id"] = capture_id
+    return payload
+
+
 def _normalize_click_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     normalized_arguments = dict(arguments)
     payload = _coerce_payload(arguments.get("payload"))
@@ -3448,6 +7112,178 @@ def _normalize_advanced_action_arguments(
             resolved = _normalize_bool(arguments.get(argument_key), label=argument_key)
             if resolved is not None:
                 payload.setdefault(payload_key, resolved)
+    if kind in _CODE_PAGE_ACTION_KINDS:
+        for argument_key, payload_key in (
+            ("query", "query"),
+            ("text", "query"),
+            ("keyword", "query"),
+            ("request_url", "request_url"),
+            ("requestUrl", "request_url"),
+            ("endpoint", "endpoint"),
+            ("object_path", "object_path"),
+            ("objectPath", "object_path"),
+            ("client_path", "object_path"),
+            ("clientPath", "object_path"),
+            ("method_name", "method_name"),
+            ("methodName", "method_name"),
+            ("path", "path"),
+            ("request_path", "request_path"),
+            ("requestPath", "request_path"),
+            ("script_id", "script_id"),
+            ("scriptId", "script_id"),
+            ("url_contains", "url_contains"),
+            ("urlContains", "url_contains"),
+            ("url", "url_contains"),
+        ):
+            value = _normalize_text(arguments.get(argument_key))
+            if value is not None:
+                payload.setdefault(payload_key, value)
+        for argument_key, payload_key in (
+            ("global_names", "global_names"),
+            ("globalNames", "global_names"),
+        ):
+            raw_value = arguments.get(argument_key)
+            if raw_value is not None:
+                payload.setdefault(payload_key, raw_value)
+        if kind == "runtime-call-client":
+            for argument_key, payload_key in (
+                ("arguments", "arguments"),
+                ("args", "arguments"),
+                ("argument", "argument"),
+                ("payload", "payload"),
+            ):
+                if argument_key in arguments and arguments.get(argument_key) is not None:
+                    payload.setdefault(payload_key, arguments.get(argument_key))
+        for argument_key, payload_key in (
+            ("case_sensitive", "case_sensitive"),
+            ("caseSensitive", "case_sensitive"),
+            ("regex", "regex"),
+            ("use_regex", "regex"),
+            ("useRegex", "regex"),
+            ("include_storage", "include_storage"),
+            ("includeStorage", "include_storage"),
+            ("include_performance", "include_performance"),
+            ("includePerformance", "include_performance"),
+            ("include_source_preview", "include_source_preview"),
+            ("includeSourcePreview", "include_source_preview"),
+        ):
+            value = _normalize_bool(arguments.get(argument_key), label=argument_key)
+            if value is not None:
+                payload.setdefault(payload_key, value)
+        for argument_key, payload_key, minimum in (
+            ("limit", "limit", 1),
+            ("max_scripts", "max_scripts", 1),
+            ("maxScripts", "max_scripts", 1),
+            ("context_lines", "context_lines", 0),
+            ("contextLines", "context_lines", 0),
+            ("wait_ms", "wait_ms", 0),
+            ("waitMs", "wait_ms", 0),
+            ("max_chars", "max_chars", 1),
+            ("maxChars", "max_chars", 1),
+            ("start_line", "start_line", 1),
+            ("startLine", "start_line", 1),
+            ("line_count", "line_count", 1),
+            ("lineCount", "line_count", 1),
+            ("start_column", "start_column", 1),
+            ("startColumn", "start_column", 1),
+            ("column", "column", 1),
+            ("match_column", "match_column", 1),
+            ("matchColumn", "match_column", 1),
+            ("column_window", "column_window", 80),
+            ("columnWindow", "column_window", 80),
+            ("preview_chars", "preview_chars", 120),
+            ("previewChars", "preview_chars", 120),
+            ("max_result_chars", "max_result_chars", 1000),
+            ("maxResultChars", "max_result_chars", 1000),
+        ):
+            value = _normalize_int(arguments.get(argument_key), label=argument_key, minimum=minimum)
+            if value is not None:
+                payload.setdefault(payload_key, value)
+    if kind == "action-trace":
+        for argument_key, payload_key in (
+            ("action", "action"),
+            ("action_kind", "action_kind"),
+            ("actionKind", "action_kind"),
+            ("action_ref", "action_ref"),
+            ("actionRef", "action_ref"),
+            ("action_selector", "action_selector"),
+            ("actionSelector", "action_selector"),
+            ("trace_id", "trace_id"),
+            ("traceId", "trace_id"),
+            ("capture_id", "capture_id"),
+            ("captureId", "capture_id"),
+            ("snapshot_format", "snapshot_format"),
+            ("snapshotFormat", "snapshot_format"),
+            ("snapshot_mode", "snapshot_mode"),
+            ("snapshotMode", "snapshot_mode"),
+            ("key", "key"),
+            ("button", "button"),
+            ("load_state", "load_state"),
+            ("loadState", "load_state"),
+            ("state", "state"),
+            ("url", "url"),
+            ("expression", "expression"),
+            ("fn", "fn"),
+        ):
+            value = _normalize_text(arguments.get(argument_key))
+            if value is not None:
+                payload.setdefault(payload_key, value)
+        for argument_key, payload_key in (
+            ("action_payload", "action_payload"),
+            ("actionPayload", "action_payload"),
+        ):
+            if argument_key not in arguments or arguments.get(argument_key) is None:
+                continue
+            raw_value = arguments.get(argument_key)
+            if not isinstance(raw_value, dict):
+                raise BrowserValidationError(f"{argument_key} must be an object.")
+            payload.setdefault(payload_key, dict(raw_value))
+        if "fields" in arguments and isinstance(arguments.get("fields"), list):
+            payload.setdefault("fields", list(arguments["fields"]))
+        if "arg" in arguments and arguments.get("arg") is not None:
+            payload.setdefault("arg", arguments.get("arg"))
+        for argument_key, payload_key in (
+            ("include_network", "include_network"),
+            ("includeNetwork", "include_network"),
+            ("include_storage_diff", "include_storage_diff"),
+            ("includeStorageDiff", "include_storage_diff"),
+            ("include_lifecycle_diff", "include_lifecycle_diff"),
+            ("includeLifecycleDiff", "include_lifecycle_diff"),
+            ("active_overlay", "active_overlay"),
+            ("activeOverlay", "active_overlay"),
+            ("double_click", "double_click"),
+            ("doubleClick", "double_click"),
+        ):
+            value = _normalize_bool(arguments.get(argument_key), label=argument_key)
+            if value is not None:
+                payload.setdefault(payload_key, value)
+        for argument_key, payload_key, minimum in (
+            ("action_timeout_ms", "action_timeout_ms", 1),
+            ("actionTimeoutMs", "action_timeout_ms", 1),
+            ("max_requests", "max_requests", 1),
+            ("maxRequests", "max_requests", 1),
+            ("max_body_bytes", "max_body_bytes", 0),
+            ("maxBodyBytes", "max_body_bytes", 0),
+            ("network_limit", "network_limit", 1),
+            ("networkLimit", "network_limit", 1),
+            ("snapshot_limit", "snapshot_limit", 1),
+            ("snapshotLimit", "snapshot_limit", 1),
+            ("console_limit", "console_limit", 1),
+            ("consoleLimit", "console_limit", 1),
+            ("page_error_limit", "page_error_limit", 1),
+            ("pageErrorLimit", "page_error_limit", 1),
+            ("stabilize_ms", "stabilize_ms", 0),
+            ("stabilizeMs", "stabilize_ms", 0),
+            ("time_ms", "time_ms", 0),
+            ("timeMs", "time_ms", 0),
+        ):
+            value = _normalize_int(arguments.get(argument_key), label=argument_key, minimum=minimum)
+            if value is not None:
+                payload.setdefault(payload_key, value)
+        for argument_key, payload_key in (("x", "x"), ("y", "y")):
+            value = _normalize_number(arguments.get(argument_key), label=argument_key)
+            if value is not None:
+                payload.setdefault(payload_key, value)
     cookies_operation = _normalize_text(arguments.get("cookies_operation"))
     if cookies_operation is None:
         cookies_operation = _normalize_text(arguments.get("operation"))
@@ -3558,6 +7394,23 @@ def _normalize_network_action_arguments(
         value = _normalize_bool(arguments.get(key), label=key)
         if value is not None:
             payload.setdefault(key, value)
+    include_body = _normalize_bool(arguments.get("includeBody"), label="includeBody")
+    if include_body is not None:
+        payload.setdefault("include_body", include_body)
+    if kind == "network-inspect":
+        for argument_key, payload_key in (
+            ("include_navigation", "include_navigation"),
+            ("includeNavigation", "include_navigation"),
+            ("include_resources", "include_resources"),
+            ("includeResources", "include_resources"),
+            ("include_cdp_tree", "include_cdp_tree"),
+            ("includeCdpTree", "include_cdp_tree"),
+            ("include_performance_metrics", "include_performance_metrics"),
+            ("includePerformanceMetrics", "include_performance_metrics"),
+        ):
+            value = _normalize_bool(arguments.get(argument_key), label=argument_key)
+            if value is not None:
+                payload.setdefault(payload_key, value)
     if "headers" in arguments and arguments.get("headers") is not None:
         if not isinstance(arguments["headers"], dict):
             raise BrowserValidationError("headers must be an object.")
@@ -4304,6 +8157,33 @@ def create_browser_snapshot_handler(
     return _handler
 
 
+def create_browser_observe_handler(
+    factory_deps: BrowserToolDeps | Any,
+    *,
+    tool_id: str = "browser.observe",
+    defaults: Mapping[str, Any] | None = None,
+):
+    deps = _coerce_tool_deps(factory_deps)
+    if deps is None or deps.browser_observation_service is None:
+        return None
+    default_arguments = dict(defaults or {})
+
+    async def _handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRunResult:
+        merged_arguments = {**default_arguments, **dict(arguments)}
+        return await asyncio.to_thread(
+            _execute_observe,
+            deps=deps,
+            tool_id=tool_id,
+            arguments=merged_arguments,
+            execution_context=execution_context,
+        )
+
+    return _handler
+
+
 def create_browser_page_action_handler(
     factory_deps: BrowserToolDeps | Any,
     *,
@@ -4409,3 +8289,265 @@ def create_browser_context_handler(
         )
 
     return _handler
+
+
+def create_browser_manifest_handler(factory_deps: Any):
+    """Build the handler declared by tools/browser/tool.yaml."""
+
+    deps = _browser_tool_deps_from_factory_deps(factory_deps)
+    if deps is None:
+        return None
+    tool_id = factory_deps.tool_id
+    if tool_id == "browser.observe":
+        return create_browser_observe_handler(deps, tool_id=tool_id)
+    if tool_id == "browser.form.inspect":
+        return create_browser_observe_handler(
+            deps,
+            tool_id=tool_id,
+            defaults={
+                "format": "interactive",
+                "mode": "wide",
+                "include_tabs": False,
+                "include_console": False,
+                "include_runtime": False,
+                "include_scripts": False,
+                "limit": 40,
+            },
+        )
+    if tool_id == "browser.overlay.observe":
+        return create_browser_observe_handler(
+            deps,
+            tool_id=tool_id,
+            defaults={
+                "format": "interactive",
+                "mode": "wide",
+                "active_overlay": True,
+                "include_tabs": False,
+                "include_console": False,
+                "include_runtime": False,
+                "include_scripts": False,
+                "limit": 40,
+            },
+        )
+    if tool_id == "browser.snapshot":
+        return create_browser_snapshot_handler(deps, tool_id=tool_id)
+    if tool_id in _BROWSER_MANIFEST_CONTROL_KINDS:
+        handler = create_browser_control_handler(deps, tool_id=tool_id)
+        return _browser_with_kind(handler, _BROWSER_MANIFEST_CONTROL_KINDS[tool_id])
+    if tool_id in _BROWSER_MANIFEST_CONTEXT_ACTIONS:
+        return create_browser_context_handler(
+            deps,
+            tool_id=tool_id,
+            action=_BROWSER_MANIFEST_CONTEXT_ACTIONS[tool_id],
+        )
+    if tool_id.startswith("browser.network."):
+        return create_browser_network_handler(deps, tool_id=tool_id)
+    if tool_id == "browser.form.fill":
+        return _browser_form_fill_handler(
+            create_browser_page_action_handler(deps, tool_id=tool_id),
+        )
+    if tool_id == "browser.overlay.select":
+        return _browser_overlay_select_handler(
+            create_browser_page_action_handler(deps, tool_id=tool_id),
+        )
+    if tool_id == "browser.native.run":
+        return _browser_native_run_handler(
+            create_browser_page_action_handler(deps, tool_id=tool_id),
+        )
+    if tool_id in _BROWSER_MANIFEST_PAGE_ACTION_KINDS:
+        handler = create_browser_page_action_handler(deps, tool_id=tool_id)
+        return _browser_with_kind(handler, _BROWSER_MANIFEST_PAGE_ACTION_KINDS[tool_id])
+    raise BrowserValidationError(f"Unsupported Browser manifest tool id: {tool_id}")
+
+
+_BROWSER_MANIFEST_CONTROL_KINDS = {
+    "browser.navigate": "navigate",
+    "browser.tabs.list": "list-tabs",
+    "browser.tabs.select": "focus-tab",
+    "browser.tabs.close": "close-tab",
+}
+
+_BROWSER_MANIFEST_CONTEXT_ACTIONS = {
+    "browser.context.acquire": "acquire",
+    "browser.context.current": "current",
+    "browser.context.heartbeat": "heartbeat",
+    "browser.context.release": "release",
+    "browser.context.reconcile": "reconcile",
+}
+
+_BROWSER_MANIFEST_PAGE_ACTION_KINDS = {
+    "browser.action.trace": "action-trace",
+    "browser.click": "click",
+    "browser.type": "type",
+    "browser.evaluate": "evaluate",
+    "browser.screenshot": "screenshot",
+    "browser.dom.inspect": "dom-inspect",
+    "browser.dom.box_model": "dom-box-model",
+    "browser.dom.computed_style": "dom-computed-style",
+    "browser.dom.clickability": "dom-clickability",
+    "browser.dom.highlight": "dom-highlight",
+    "browser.dom.mutation_wait": "dom-mutation-wait",
+    "browser.storage.indexeddb.list": "storage-indexeddb-list",
+    "browser.storage.indexeddb.get": "storage-indexeddb-get",
+    "browser.storage.indexeddb.query": "storage-indexeddb-query",
+    "browser.storage.cache.list": "storage-cache-list",
+    "browser.storage.cache.get": "storage-cache-get",
+    "browser.service_worker.list": "service-worker-list",
+    "browser.service_worker.inspect": "service-worker-inspect",
+    "browser.emulation.set": "emulation-set",
+    "browser.emulation.reset": "emulation-reset",
+    "browser.permissions.grant": "permissions-grant",
+    "browser.permissions.clear": "permissions-clear",
+    "browser.geolocation.set": "geolocation-set",
+    "browser.network_conditions.set": "network-conditions-set",
+    "browser.diagnostics.collect": "diagnostics-collect",
+    "browser.performance.metrics": "performance-metrics",
+    "browser.trace.start": "trace-start",
+    "browser.trace.stop": "trace-stop",
+    "browser.trace.export": "trace-export",
+    "browser.page.lifecycle": "page-lifecycle",
+    "browser.page.errors": "page-errors",
+    "browser.runtime.inspect": "runtime-inspect",
+    "browser.runtime.probe_client": "runtime-probe-client",
+    "browser.runtime.call_client": "runtime-call-client",
+    "browser.script.list": "script-list",
+    "browser.script.find_request": "script-find-request",
+    "browser.code.search": "code-search",
+    "browser.script.extract_request": "script-extract-request",
+    "browser.script.inspect": "script-inspect",
+}
+
+
+def _browser_tool_deps_from_factory_deps(
+    factory_deps: Any,
+) -> BrowserToolDeps | None:
+    services = factory_deps.services
+    required = (
+        "browser_tool_application",
+        "browser_system_config_store",
+        "browser_profile_resolver",
+        "browser_capabilities_resolver",
+    )
+    if any(services.get(key) is None for key in required):
+        return None
+    return BrowserToolDeps(
+        browser_tool_application=services["browser_tool_application"],
+        browser_system_config_store=services["browser_system_config_store"],
+        browser_profile_resolver=services["browser_profile_resolver"],
+        browser_capabilities_resolver=services["browser_capabilities_resolver"],
+        browser_observation_service=services.get("browser_observation_service"),
+        settings=services.get("settings"),
+        artifact_service=services.get("artifact_service"),
+        browser_runtime_state_store=services.get("browser_runtime_state_store"),
+        browser_profile_probe_service=services.get("browser_profile_probe_service"),
+        browser_profile_allocator_service=services.get(
+            "browser_profile_allocator_service",
+        ),
+    )
+
+
+def _browser_with_kind(handler, kind: str):
+    if handler is None:
+        return None
+
+    async def _handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ):
+        payload = dict(arguments)
+        payload["kind"] = kind
+        return await handler(payload, execution_context)
+
+    return _handler
+
+
+def _browser_native_run_handler(handler):
+    if handler is None:
+        return None
+
+    async def _handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ):
+        payload = dict(arguments)
+        batch_payload = payload.get("payload")
+        if not isinstance(batch_payload, dict):
+            batch_payload = {}
+        else:
+            batch_payload = dict(batch_payload)
+        if "actions" in payload and payload["actions"] is not None:
+            batch_payload.setdefault("actions", payload["actions"])
+        if "stop_on_error" in payload and payload["stop_on_error"] is not None:
+            batch_payload.setdefault("stop_on_error", payload["stop_on_error"])
+        payload["payload"] = batch_payload
+        payload["kind"] = "batch"
+        return await handler(payload, execution_context)
+
+    return _handler
+
+
+def _browser_form_fill_handler(handler):
+    if handler is None:
+        return None
+
+    async def _handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ):
+        payload = dict(arguments)
+        payload["kind"] = "action-trace"
+        payload.setdefault("action", "fill")
+        payload.setdefault("include_network", True)
+        payload.setdefault("include_lifecycle_diff", True)
+        payload.setdefault("include_storage_diff", True)
+        payload.setdefault("snapshot_limit", 30)
+        payload.setdefault("stabilize_ms", 200)
+        return await handler(payload, execution_context)
+
+    return _handler
+
+
+def _browser_overlay_select_handler(handler):
+    if handler is None:
+        return None
+
+    async def _handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ):
+        payload = dict(arguments)
+        payload["kind"] = "action-trace"
+        payload.setdefault("action", "click")
+        payload.setdefault("active_overlay", True)
+        payload.setdefault("include_network", True)
+        payload.setdefault("include_lifecycle_diff", True)
+        payload.setdefault("include_storage_diff", True)
+        payload.setdefault("snapshot_limit", 30)
+        payload.setdefault("stabilize_ms", 200)
+        _merge_overlay_select_action_payload(payload)
+        return await handler(payload, execution_context)
+
+    return _handler
+
+
+def _merge_overlay_select_action_payload(payload: dict[str, Any]) -> None:
+    raw_action_payload = payload.get("action_payload")
+    if raw_action_payload is None:
+        raw_action_payload = payload.get("actionPayload")
+    if raw_action_payload is not None and not isinstance(raw_action_payload, dict):
+        return
+
+    action_payload = dict(raw_action_payload or {})
+    action_payload.setdefault("active_overlay", True)
+    for key in (
+        "overlay_source_ref",
+        "overlay_source_selector",
+        "overlay_source_scope_selector",
+        "exact",
+        "ordinal",
+        "button",
+        "double_click",
+    ):
+        if key in payload and payload[key] is not None:
+            action_payload[key] = payload[key]
+    payload["action_payload"] = action_payload

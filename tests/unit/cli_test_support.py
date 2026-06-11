@@ -33,7 +33,7 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0062_drop_retired_browser_local_package_manifest"
+HEAD_REVISION = "0068_orchestration_run_wait_state_fields"
 
 
 class CliModuleTestCase(unittest.TestCase):

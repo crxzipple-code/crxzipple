@@ -36,7 +36,7 @@ class OrchestrationToolTerminalReaction:
             )
             return
         try:
-            signal = self.scheduler_service.queue_tool_terminal_signal(
+            continuation = self.scheduler_service.queue_tool_terminal_continuation(
                 tool_run_id=tool_run_id,
             )
         except Exception:
@@ -49,11 +49,11 @@ class OrchestrationToolTerminalReaction:
             )
             return
         logger.info(
-            "queued orchestration scheduler signal from tool reaction",
+            "queued orchestration continuation from tool reaction",
             extra={
                 "event_name": event.name,
                 "tool_run_id": tool_run_id,
-                "signal_id": signal.id,
+                "continuation_id": continuation.id,
             },
         )
 

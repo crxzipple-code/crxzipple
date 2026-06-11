@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from crxzipple.modules.context_workspace.application import CONTEXT_TREE_SCHEMA_VERSION
 from crxzipple.modules.llm.domain import LlmApiFamily, LlmProviderKind
 from crxzipple.modules.orchestration.domain import OrchestrationRunStatus
+from crxzipple.modules.session.application import EnsureSessionInput
 from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import ToolRunResult
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunStatus
@@ -154,6 +156,19 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                         json={
                             "content": "hello",
                             "agent_id": "crxzipple",
+                            "new_session": True,
+                            "metadata": {
+                                "runtime_task_policy": {
+                                    "prompt_bootstrap": {
+                                        "default_tool_schema_group_refs": [
+                                            {
+                                                "source_id": "bundled.local_package.browser",
+                                                "group_key": "observation",
+                                            },
+                                        ],
+                                    },
+                                },
+                            },
                         },
                     )
 
@@ -163,10 +178,35 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     self.assertEqual(payload["run"]["status"], "accepted")
                     self.assertEqual(payload["run"]["stage"], "accepted")
                     self.assertEqual(payload["run"]["current_step"], 0)
-                    self.assertIsNone(payload["run"]["session_key"])
+                    accepted_session_key = payload["run"]["session_key"]
+                    self.assertIsInstance(accepted_session_key, str)
+                    self.assertTrue(
+                        accepted_session_key.startswith(
+                            "agent:crxzipple:conversation:",
+                        ),
+                    )
+                    self.assertIsNone(payload["run"]["active_session_id"])
 
                     scheduled = self._process_turn_ingress(payload["run"]["id"])
                     self.assertIsNotNone(scheduled)
+                    assert scheduled is not None
+                    self.assertEqual(
+                        scheduled.metadata["prompt_flow_hint"][
+                            "default_tool_schema_group_refs"
+                        ],
+                        [
+                            {
+                                "source_id": "bundled.local_package.browser",
+                                "group_key": "observation",
+                            },
+                        ],
+                    )
+                    self.assertEqual(
+                        scheduled.metadata["prompt_flow_hint"][
+                            "default_tool_schema_source"
+                        ],
+                        "prompt_bootstrap_policy",
+                    )
                     processed = self._process_turn_execution()
                     self.assertIsNotNone(processed)
 
@@ -177,6 +217,10 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     self.assertEqual(get_payload["run"]["status"], "completed")
                     self.assertEqual(get_payload["run"]["stage"], "completed")
                     self.assertEqual(get_payload["run"]["current_step"], 1)
+                    self.assertEqual(
+                        get_payload["run"]["session_key"],
+                        accepted_session_key,
+                    )
                     self.assertEqual(get_payload["output_text"], "hello from sample llm")
                     self.assertNotIn(
                         "workspace_context_workspace",
@@ -212,9 +256,71 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     self.assertEqual(preview_payload["mode"], "normal_turn")
                     self.assertIsNotNone(preview_payload["prompt_report"])
                     self.assertTrue(
+                        str(
+                            get_payload["run"]["metadata"][
+                                "context_render_snapshot_id"
+                            ],
+                        ).startswith("ctxsnap_"),
+                    )
+                    self.assertEqual(
+                        preview_payload["context_render_snapshot_id"],
+                        get_payload["run"]["metadata"]["context_render_snapshot_id"],
+                    )
+                    self.assertIsNotNone(preview_payload["context_render"])
+                    self.assertEqual(
+                        preview_payload["context_render"]["snapshot_id"],
+                        preview_payload["context_render_snapshot_id"],
+                    )
+                    self.assertTrue(
+                        preview_payload["context_render_metadata"][
+                            "runtime_contract_hash"
+                        ],
+                    )
+                    self.assertEqual(
+                        preview_payload["context_render_metadata"][
+                            "tree_schema_version"
+                        ],
+                        CONTEXT_TREE_SCHEMA_VERSION,
+                    )
+                    self.assertIn(
+                        "prompt_input",
+                        preview_payload["provider_attachments"],
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["response_format"],
+                        None,
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["output_schema"],
+                        None,
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["overrides"],
+                        {},
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["request_metadata"][
+                            "context_render_snapshot_id"
+                        ],
+                        preview_payload["context_render_snapshot_id"],
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["request_metadata"][
+                            "tree_schema_version"
+                        ],
+                        CONTEXT_TREE_SCHEMA_VERSION,
+                    )
+                    self.assertTrue(
                         any(
                             item["role"] == "user"
                             and item["content"] == [{"type": "text", "text": "hello"}]
+                            for item in preview_payload["messages"]
+                        ),
+                    )
+                    self.assertFalse(
+                        any(
+                            item["role"] == "assistant"
+                            and item["content"] == "hello from sample llm"
                             for item in preview_payload["messages"]
                         ),
                     )
@@ -225,6 +331,57 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 else:
                     os.environ["OPENAI_API_KEY"] = previous_token
                 server.close()
+
+    def test_turns_endpoint_continues_session_by_opaque_session_key(self) -> None:
+            llm_response = self.client.post(
+                "/llms",
+                json={
+                    "id": "opaque-session-llm",
+                    "provider": "openai",
+                    "api_family": "openai_responses",
+                    "model_name": "gpt-5.4-mini",
+                    "credential_binding_id": "openai-api-key",
+                },
+            )
+            self.assertEqual(llm_response.status_code, 201)
+            agent_response = self.client.post(
+                "/agents",
+                json={
+                    "id": "crxzipple",
+                    "name": "crxzipple",
+                    "llm_routing_policy": {"default_llm_id": "opaque-session-llm"},
+                    "instruction_policy": {"system_prompt": "Be helpful."},
+                },
+            )
+            self.assertEqual(agent_response.status_code, 201)
+            session = self.client.app.state.container.require(
+                AppKey.SESSION_SERVICE,
+            ).ensure_session(
+                EnsureSessionInput(
+                    key="agent:crxzipple:conversation:server-owned",
+                    agent_id="crxzipple",
+                ),
+            )
+
+            turn_response = self.client.post(
+                "/turns",
+                json={
+                    "content": "continue existing",
+                    "session_key": session.id,
+                },
+            )
+
+            self.assertEqual(turn_response.status_code, 202)
+            payload = turn_response.json()
+            self.assertEqual(payload["run"]["status"], "accepted")
+            self.assertEqual(payload["run"]["session_key"], session.id)
+            self.assertIsNone(payload["run"]["active_session_id"])
+
+            scheduled = self._process_turn_ingress(payload["run"]["id"])
+            self.assertIsNotNone(scheduled)
+            assert scheduled is not None
+            self.assertEqual(scheduled.session_key, session.id)
+            self.assertEqual(scheduled.active_session_id, session.active_session_id)
 
     def test_turns_endpoint_routes_auto_llm_to_image_model_for_image_input(self) -> None:
             self.client.app.state.container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
@@ -408,7 +565,7 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             session_messages = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_messages(
                 ListSessionMessagesInput(
                     session_key=session_key,
-                    active_session_only=True,
+                    active_session_only=False,
                 ),
             )
             archived_messages = [
@@ -570,7 +727,12 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                 self.assertEqual(flush_run.metadata["prompt_mode"], "memory_flush")
                 self.assertNotIn("memory_flush_result", flush_run.metadata)
                 self.assertEqual(
-                    len(flush_run.result_payload.get("inline_tool_run_ids", [])),
+                    len(
+                        execution_tool_run_ids_for_run(
+                            self.client.app.state.container,
+                            flush_run.id,
+                        ),
+                    ),
                     1,
                 )
                 entries = self.client.get(
@@ -644,7 +806,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             assert waiting is not None
             self.assertEqual(waiting.stage.value, "waiting_for_confirmation")
 
-            request_id = waiting.metadata["pending_approval_request"]["request_id"]
+            pending_request = waiting.pending_approval_request()
+            assert pending_request is not None
+            request_id = pending_request.request_id
 
             approval_response = self.client.post(
                 f"/turns/{run_id}/approvals/{request_id}",
@@ -688,15 +852,24 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             self.assertEqual(turn_response.status_code, 202)
             turn_id = turn_response.json()["run"]["id"]
 
+            long_reason = "user_cancelled_" + ("because_validation_reason_is_long_" * 4)
+            expected_waiting_reason = f"{long_reason[:97]}..."
             cancel_response = self.client.post(
                 f"/turns/{turn_id}/cancel",
-                json={"reason": "user_cancelled"},
+                json={"reason": long_reason},
             )
             self.assertEqual(cancel_response.status_code, 200)
             cancel_payload = cancel_response.json()
             self.assertEqual(cancel_payload["run"]["status"], "cancelled")
             self.assertEqual(cancel_payload["run"]["stage"], "cancelled")
-            self.assertEqual(cancel_payload["run"]["waiting_reason"], "user_cancelled")
+            self.assertEqual(
+                cancel_payload["run"]["waiting_reason"],
+                expected_waiting_reason,
+            )
+            self.assertEqual(
+                cancel_payload["run"]["metadata"]["cancellation_reason"],
+                long_reason,
+            )
 
             get_response = self.client.get(f"/turns/{turn_id}")
             self.assertEqual(get_response.status_code, 200)

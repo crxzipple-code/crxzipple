@@ -3,15 +3,19 @@ from __future__ import annotations
 import base64
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from typing import Protocol
 
 from crxzipple.modules.artifacts.domain.entities import ArtifactVariant
 from crxzipple.modules.llm.domain import (
     LlmCapability,
     LlmMessage,
+    LlmMessageRole,
     LlmProfile,
     ToolSchema,
 )
 from crxzipple.modules.orchestration.domain import (
+    ExecutionStepItemKind,
+    ExecutionStepItemStatus,
     OrchestrationRun,
     OrchestrationValidationError,
 )
@@ -42,10 +46,13 @@ from crxzipple.modules.orchestration.application.prompting import (
     resolve_run_surface_policy,
 )
 from crxzipple.modules.orchestration.application.prompt_transcript import (
-    build_prompt_transcript,
+    PromptTranscript,
+    build_current_run_prompt_window,
+    build_memory_flush_prompt_transcript,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet
 from crxzipple.modules.session.application import ListSessionMessagesInput
+from crxzipple.modules.session.domain import SessionMessage
 from crxzipple.modules.session.domain import SessionRuntimeBinding
 from crxzipple.modules.session.domain import SessionMessageVisibility
 from crxzipple.modules.skills.application import (
@@ -70,81 +77,30 @@ from crxzipple.shared.runtime_metrics import (
 DEFAULT_LLM_IMAGE_MAX_BYTES = 1_500_000
 
 
-_TOOL_INTENT_KEYWORDS = (
-    "tool",
-    "tools",
-    "search",
-    "lookup",
-    "look up",
-    "browse",
-    "browser",
-    "open",
-    "read",
-    "write",
-    "edit",
-    "patch",
-    "apply",
-    "run",
-    "execute",
-    "inspect",
-    "check",
-    "review",
-    "repo",
-    "repository",
-    "file",
-    "files",
-    "workspace",
-    "memory",
-    "skill",
-    "screenshot",
-    "查看",
-    "看下",
-    "检查",
-    "搜索",
-    "检索",
-    "查一下",
-    "查询",
-    "打开",
-    "读取",
-    "写入",
-    "编辑",
-    "修改",
-    "执行",
-    "运行",
-    "仓库",
-    "代码",
-    "文件",
-    "目录",
-    "浏览器",
-    "网页",
-    "截图",
-    "记忆",
-    "技能",
-)
-
-
-def _looks_like_tool_intent(content: object) -> bool:
-    if content is None:
-        return False
-    text = extract_text_content(content)
-    if text is None:
-        text = describe_content_for_text_fallback(content)
-    normalized = text.casefold()
-    return any(keyword.casefold() in normalized for keyword in _TOOL_INTENT_KEYWORDS)
-
-
 def _available_tool_ids(resolved_tools: ResolvedToolSet | None) -> tuple[str, ...]:
     if resolved_tools is None:
         return ()
     return tuple(item.tool.id for item in resolved_tools.tools)
 
 
+class ExecutionContinuationQueryPort(Protocol):
+    def list_execution_chains(self, turn_id: str) -> list[object]:
+        ...
+
+    def list_execution_steps(self, chain_id: str) -> list[object]:
+        ...
+
+    def list_execution_step_items(self, step_id: str) -> list[object]:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
-class PromptSurface:
+class RunPromptInput:
     llm_id: str
     session_key: str
     active_session_id: str
     messages: tuple[LlmMessage, ...]
+    llm_capabilities: tuple[LlmCapability, ...] = ()
     mode: PromptMode = PromptMode.NORMAL_TURN
     report: PromptReport | None = None
     context_blocks: tuple[PromptBlock, ...] = ()
@@ -156,10 +112,10 @@ class PromptSurface:
 
 
 @dataclass(slots=True)
-class PromptSurfaceBuilder:
+class RunPromptInputCollector:
     """Collects run inputs for Context Workspace and provider invocation.
 
-    This builder does not render the final prompt body. Context Workspace owns
+    This collector does not render the final prompt body. Context Workspace owns
     the tree render and provider attachment mirror; this object only gathers
     transcript messages, routing, context blocks, and the initially resolved
     tool surface needed by that render step.
@@ -173,6 +129,7 @@ class PromptSurfaceBuilder:
     access_port: AccessReadinessPort | None = None
     events_service: EventPublishPort | None = None
     llm_resolver: LlmResolver | None = None
+    execution_query: ExecutionContinuationQueryPort | None = None
     context_block_max_chars: int = 120_000
     context_block_max_tokens: int = 30_000
     context_block_context_window_ratio: float = 0.15
@@ -191,20 +148,20 @@ class PromptSurfaceBuilder:
         *,
         resolved_tools: ResolvedToolSet | None = None,
         mode: PromptMode | None = None,
-    ) -> PromptSurface:
+    ) -> RunPromptInput:
         if run.agent_id is None or not run.agent_id.strip():
             raise OrchestrationValidationError(
-                "Orchestration run agent_id is required for prompt surface building.",
+                "Orchestration run agent_id is required for prompt input collection.",
             )
         if run.active_session_id is None or not run.active_session_id.strip():
             raise OrchestrationValidationError(
-                "Orchestration run active_session_id is required for prompt surface building.",
+                "Orchestration run active_session_id is required for prompt input collection.",
             )
 
         session_key = str(run.metadata.get("session_key", "")).strip()
         if not session_key:
             raise OrchestrationValidationError(
-                "Orchestration run metadata.session_key is required for prompt surface building.",
+                "Orchestration run metadata.session_key is required for prompt input collection.",
             )
 
         with self._timed_phase("profile_read"):
@@ -236,9 +193,10 @@ class PromptSurfaceBuilder:
                 if message.session_id == run.active_session_id
                 and message.visibility is not SessionMessageVisibility.ARCHIVED
             )
-            transcript = build_prompt_transcript(
-                filtered_session_messages,
-                max_chars=self._transcript_max_chars_for_mode(resolved_mode),
+            transcript = self._build_provider_input_transcript(
+                run,
+                session_messages=filtered_session_messages,
+                mode=resolved_mode,
             )
         with self._timed_phase("llm_resolve"):
             routing_input_content = (
@@ -328,6 +286,7 @@ class PromptSurfaceBuilder:
                             llm_id=llm_selection.resolved_llm_id,
                             home_dir=agent_home_dir,
                             workspace_dir=workspace_dir,
+                            available_tool_ids=_available_tool_ids(resolved_tools),
                         ),
                     )
                     if block is not None
@@ -339,7 +298,7 @@ class PromptSurfaceBuilder:
         llm_messages: list[LlmMessage] = list(llm_transcript_messages)
         if not llm_messages and not context_blocks:
             raise OrchestrationValidationError(
-                "Prompt surface building requires at least one llm message or context block.",
+                "Prompt input collection requires at least one llm message or context block.",
             )
         with self._timed_phase("prompt_report_build"):
             context_chars = sum(len(block.content) for block in context_blocks)
@@ -369,6 +328,7 @@ class PromptSurfaceBuilder:
                 transcript_message_count=transcript.message_count,
                 transcript_chars=transcript.chars,
                 transcript_estimated_tokens=transcript.estimated_tokens,
+                transcript_tool_result_stats=dict(transcript.tool_result_stats),
             )
         tool_schemas = (
             resolved_tools.schemas
@@ -382,8 +342,9 @@ class PromptSurfaceBuilder:
             else ()
         )
 
-        return PromptSurface(
+        return RunPromptInput(
             llm_id=llm_selection.resolved_llm_id,
+            llm_capabilities=tuple(llm_profile.capabilities),
             session_key=session_key,
             active_session_id=run.active_session_id,
             messages=tuple(llm_messages),
@@ -424,7 +385,7 @@ class PromptSurfaceBuilder:
         if not self.detailed_phase_metrics_enabled:
             return nullcontext()
         return self.metrics.timed(
-            "orchestration.prompt_surface.phase_seconds",
+            "orchestration.prompt_inputs.phase_seconds",
             labels={"phase": phase},
         )
 
@@ -432,10 +393,41 @@ class PromptSurfaceBuilder:
     def _resolve_surface_policy(mode: PromptMode) -> RunSurfacePolicy:
         return resolve_run_surface_policy(mode)
 
-    def _transcript_max_chars_for_mode(self, mode: PromptMode) -> int | None:
+    def _build_provider_input_transcript(
+        self,
+        run: OrchestrationRun,
+        *,
+        session_messages: tuple[SessionMessage, ...],
+        mode: PromptMode,
+    ) -> PromptTranscript:
+        completed_tool_call_ids = _completed_tool_call_ids_from_execution_chain(
+            self.execution_query,
+            run.id,
+        )
+        consumed_through_sequence_no = (
+            _consumed_direct_transcript_through_sequence_no(
+                self.execution_query,
+                turn_id=run.id,
+                session_id=run.active_session_id,
+            )
+        )
         if mode is PromptMode.MEMORY_FLUSH:
-            return self.memory_flush_transcript_max_chars
-        return None
+            return build_memory_flush_prompt_transcript(
+                session_messages,
+                max_chars=self.memory_flush_transcript_max_chars,
+            )
+        if mode is not PromptMode.NORMAL_TURN:
+            return build_current_run_prompt_window(
+                session_messages,
+                completed_tool_call_ids=completed_tool_call_ids,
+                consumed_through_sequence_no=consumed_through_sequence_no,
+            )
+        return _current_run_transcript(
+            run,
+            session_messages=session_messages,
+            completed_tool_call_ids=completed_tool_call_ids,
+            consumed_through_sequence_no=consumed_through_sequence_no,
+        )
 
     def _resolve_context_block_budget(
         self,
@@ -755,7 +747,7 @@ class PromptSurfaceBuilder:
     ) -> PromptMode:
         if mode is not None:
             return mode
-        hint_payload = PromptSurfaceBuilder._prompt_flow_hint_payload(run)
+        hint_payload = RunPromptInputCollector._prompt_flow_hint_payload(run)
         raw_mode = hint_payload.get("mode")
         if isinstance(raw_mode, str) and raw_mode.strip():
             try:
@@ -768,7 +760,7 @@ class PromptSurfaceBuilder:
     def _prompt_flow_hint_payload(run: OrchestrationRun) -> dict[str, object]:
         raw_hint = run.metadata.get("prompt_flow_hint")
         if not isinstance(raw_hint, dict):
-            return {}
+            return _prompt_bootstrap_hint_from_metadata(run.metadata)
         return dict(raw_hint)
 
     @staticmethod
@@ -779,7 +771,8 @@ class PromptSurfaceBuilder:
     ) -> str | None:
         for candidate in (
             session_binding.workspace,
-            profile.runtime_preferences.resolved_home_dir,
+            profile.runtime_preferences.workspace,
+            profile.runtime_preferences.workdir,
         ):
             if candidate is not None and candidate.strip():
                 return candidate.strip()
@@ -799,6 +792,328 @@ def _routing_input_content_from_transcript(
     if not blocks:
         return None
     return {"blocks": blocks}
+
+
+def _prompt_bootstrap_hint_from_metadata(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    policy = _metadata_mapping(metadata.get("prompt_bootstrap_policy"))
+    runtime_task_policy = _metadata_mapping(metadata.get("runtime_task_policy"))
+    runtime_prompt_bootstrap = _metadata_mapping(
+        runtime_task_policy.get("prompt_bootstrap"),
+    )
+    if runtime_prompt_bootstrap:
+        policy = {**runtime_prompt_bootstrap, **policy}
+    if not policy:
+        return {}
+    payload: dict[str, object] = {}
+    schema_ids = _metadata_string_list(policy.get("default_tool_schema_ids"))
+    if schema_ids:
+        payload["default_tool_schema_ids"] = schema_ids
+    group_refs = _metadata_tool_schema_group_refs(
+        policy.get("default_tool_schema_group_refs")
+        or policy.get("tool_schema_group_refs"),
+    )
+    if group_refs:
+        payload["default_tool_schema_group_refs"] = group_refs
+    source = _metadata_text(policy.get("default_tool_schema_source"))
+    if source is not None:
+        payload["default_tool_schema_source"] = source
+    elif payload:
+        payload["default_tool_schema_source"] = "prompt_bootstrap_policy"
+    return payload
+
+
+def _metadata_mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _metadata_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _metadata_string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        candidates: tuple[object, ...] = (value,)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        candidates = tuple(value)
+    else:
+        return []
+    items: list[str] = []
+    for item in candidates:
+        text = _metadata_text(item)
+        if text is not None and text not in items:
+            items.append(text)
+    return items
+
+
+def _metadata_tool_schema_group_refs(value: object) -> list[dict[str, str]]:
+    if isinstance(value, dict):
+        candidates: tuple[object, ...] = (value,)
+    elif isinstance(value, str):
+        candidates = (value,)
+    elif isinstance(value, (list, tuple)):
+        candidates = tuple(value)
+    else:
+        return []
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in candidates:
+        ref = _metadata_tool_schema_group_ref(item)
+        if ref is None:
+            continue
+        key = (
+            ref.get("node_id", ""),
+            ref.get("source_id", ""),
+            ref.get("group_key", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(ref)
+    return refs
+
+
+def _metadata_tool_schema_group_ref(value: object) -> dict[str, str] | None:
+    if isinstance(value, dict):
+        node_id = _metadata_text(value.get("node_id"))
+        source_id = _metadata_text(value.get("source_id"))
+        group_key = _metadata_text(value.get("group_key"))
+        reason = _metadata_text(value.get("reason"))
+        if node_id is not None:
+            payload = {"node_id": node_id}
+            if source_id is not None:
+                payload["source_id"] = source_id
+            if group_key is not None:
+                payload["group_key"] = group_key
+            if reason is not None:
+                payload["reason"] = reason
+            return payload
+        if source_id is None or group_key is None:
+            return None
+        payload = {"source_id": source_id, "group_key": group_key}
+        if reason is not None:
+            payload["reason"] = reason
+        return payload
+    text = _metadata_text(value)
+    if text is None:
+        return None
+    if text.startswith("tools."):
+        return {"node_id": text}
+    for separator in (":", "#", "/"):
+        if separator not in text:
+            continue
+        source_id, group_key = text.rsplit(separator, 1)
+        source_id = source_id.strip()
+        group_key = group_key.strip()
+        if source_id and group_key:
+            return {"source_id": source_id, "group_key": group_key}
+    return None
+
+
+def _current_inbound_transcript(run: OrchestrationRun) -> PromptTranscript:
+    try:
+        blocks = normalize_content_blocks(run.inbound_instruction.content)
+    except ValueError as exc:
+        raise OrchestrationValidationError(
+            "Current inbound instruction content must be structured content blocks.",
+        ) from exc
+    if not blocks:
+        return PromptTranscript(
+            messages=(),
+            message_count=0,
+            chars=0,
+            estimated_tokens=0,
+            tool_result_stats={},
+        )
+    message = LlmMessage(
+        role=LlmMessageRole.USER,
+        content=blocks,
+        metadata={
+            "prompt_block_kind": "current_inbound",
+            "source": run.inbound_instruction.source,
+            "source_kind": "orchestration_run",
+            "source_id": run.id,
+        },
+    )
+    chars = _message_content_chars(message.content)
+    return PromptTranscript(
+        messages=(message,),
+        message_count=1,
+        chars=chars,
+        estimated_tokens=_message_content_tokens(message.content),
+        tool_result_stats={},
+    )
+
+
+def _current_run_transcript(
+    run: OrchestrationRun,
+    *,
+    session_messages: tuple[SessionMessage, ...],
+    completed_tool_call_ids: tuple[str, ...] | None = None,
+    consumed_through_sequence_no: int | None = None,
+) -> PromptTranscript:
+    current_inbound = next(
+        (
+            message
+            for message in session_messages
+            if message.role == "user"
+            and message.source_kind == "orchestration_run"
+            and message.source_id == run.id
+        ),
+        None,
+    )
+    if current_inbound is None:
+        return _current_inbound_transcript(run)
+    current_run_messages = tuple(
+        message
+        for message in session_messages
+        if message.session_id == current_inbound.session_id
+        and message.sequence_no >= current_inbound.sequence_no
+    )
+    if not current_run_messages:
+        return _current_inbound_transcript(run)
+    return build_current_run_prompt_window(
+        current_run_messages,
+        completed_tool_call_ids=completed_tool_call_ids,
+        consumed_through_sequence_no=consumed_through_sequence_no,
+        preserve_message_ids=(current_inbound.id,),
+    )
+
+
+def _consumed_direct_transcript_through_sequence_no(
+    execution_query: ExecutionContinuationQueryPort | None,
+    *,
+    turn_id: str,
+    session_id: str,
+) -> int | None:
+    if execution_query is None:
+        return None
+    consumed_through: int | None = None
+    for summary in _execution_step_item_summaries(execution_query, turn_id):
+        consumption = summary.get("llm_transcript_consumption")
+        if not isinstance(consumption, dict):
+            continue
+        sequence_range = consumption.get("direct_transcript_sequence_range")
+        if not isinstance(sequence_range, dict):
+            continue
+        sessions = sequence_range.get("sessions")
+        if not isinstance(sessions, list):
+            continue
+        for item in sessions:
+            if not isinstance(item, dict):
+                continue
+            if _optional_text(item.get("session_id")) != session_id:
+                continue
+            to_sequence_no = _optional_int(item.get("to_sequence_no"))
+            if to_sequence_no is None:
+                continue
+            consumed_through = (
+                to_sequence_no
+                if consumed_through is None
+                else max(consumed_through, to_sequence_no)
+            )
+    return consumed_through
+
+
+def _completed_tool_call_ids_from_execution_chain(
+    execution_query: ExecutionContinuationQueryPort | None,
+    turn_id: str,
+) -> tuple[str, ...] | None:
+    if execution_query is None:
+        return None
+    completed_tool_call_ids: list[str] = []
+    saw_tool_protocol_item = False
+    for chain in execution_query.list_execution_chains(turn_id):
+        chain_id = getattr(chain, "id", None)
+        if not isinstance(chain_id, str) or not chain_id.strip():
+            continue
+        for step in execution_query.list_execution_steps(chain_id):
+            step_id = getattr(step, "id", None)
+            if not isinstance(step_id, str) or not step_id.strip():
+                continue
+            for item in execution_query.list_execution_step_items(step_id):
+                kind = getattr(item, "kind", None)
+                status = getattr(item, "status", None)
+                if kind in {
+                    ExecutionStepItemKind.TOOL_CALL,
+                    ExecutionStepItemKind.TOOL_RUN,
+                    ExecutionStepItemKind.TOOL_RESULT,
+                }:
+                    saw_tool_protocol_item = True
+                if kind is not ExecutionStepItemKind.TOOL_RESULT:
+                    continue
+                if status not in {
+                    ExecutionStepItemStatus.COMPLETED,
+                    ExecutionStepItemStatus.LATE_OBSERVED,
+                }:
+                    continue
+                summary = getattr(item, "summary_payload", None)
+                if not isinstance(summary, dict):
+                    continue
+                tool_call_id = _optional_text(summary.get("tool_call_id"))
+                if tool_call_id is not None:
+                    completed_tool_call_ids.append(tool_call_id)
+    if not saw_tool_protocol_item:
+        return None
+    return tuple(dict.fromkeys(completed_tool_call_ids))
+
+
+def _execution_step_item_summaries(
+    execution_query: ExecutionContinuationQueryPort,
+    turn_id: str,
+) -> tuple[dict[str, object], ...]:
+    summaries: list[dict[str, object]] = []
+    for chain in execution_query.list_execution_chains(turn_id):
+        chain_id = getattr(chain, "id", None)
+        if not isinstance(chain_id, str) or not chain_id.strip():
+            continue
+        for step in execution_query.list_execution_steps(chain_id):
+            step_id = getattr(step, "id", None)
+            if not isinstance(step_id, str) or not step_id.strip():
+                continue
+            for item in execution_query.list_execution_step_items(step_id):
+                summary = getattr(item, "summary_payload", None)
+                if isinstance(summary, dict):
+                    summaries.append(summary)
+    return tuple(summaries)
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _message_content_chars(content: object) -> int:
+    text_content = extract_text_content(content)
+    if text_content is not None:
+        return len(text_content)
+    return len(describe_content_for_text_fallback(content))
+
+
+def _message_content_tokens(content: object) -> int:
+    text_content = extract_text_content(content)
+    if text_content is not None:
+        return estimate_text_tokens(text_content)
+    return estimate_text_tokens(describe_content_for_text_fallback(content))
 
 
 def _is_text_like_file_mime_type(mime_type: str) -> bool:

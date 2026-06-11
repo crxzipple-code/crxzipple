@@ -7,8 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from crxzipple.core.logger import get_logger
+from crxzipple.modules.orchestration.application.execution_chain_lifecycle import (
+    cancel_active_execution_step,
+    current_dispatch_task_id,
+    require_current_dispatch_task_id,
+)
 from crxzipple.modules.orchestration.application.ports import (
-    RunDispatchPort,
+    OrchestrationDispatchPort,
     SessionCatalogPort,
 )
 from crxzipple.modules.orchestration.application.unit_of_work import (
@@ -22,13 +27,14 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
     OrchestrationValidationError,
 )
+from crxzipple.modules.session.domain.exceptions import SessionNotFoundError
 
 logger = get_logger(__name__)
 
 
 def cancel_run_record(
     uow_factory: Callable[[], Any],
-    dispatch_port: RunDispatchPort,
+    dispatch_port: OrchestrationDispatchPort,
     run_id: str,
     *,
     reason: str | None = None,
@@ -39,8 +45,16 @@ def cancel_run_record(
             raise OrchestrationRunNotFoundError(
                 f"Orchestration run '{run_id}' was not found.",
             )
+        cancel_active_execution_step(uow, run=run)
         run.cancel(reason=reason)
-        dispatch_port.cancel(uow.dispatch_tasks, uow, run)
+        dispatch_task_id = current_dispatch_task_id(uow, run=run)
+        if dispatch_task_id is not None:
+            dispatch_port.cancel(
+                uow.dispatch_tasks,
+                uow,
+                run,
+                dispatch_task_id=dispatch_task_id,
+            )
         uow.orchestration_waits.delete_for_run(run.id)
         uow.orchestration_runs.add(run)
         uow.collect(run)
@@ -50,7 +64,7 @@ def cancel_run_record(
 
 def fail_run_record(
     uow_factory: Callable[[], Any],
-    dispatch_port: RunDispatchPort,
+    dispatch_port: OrchestrationDispatchPort,
     run_id: str,
     *,
     worker_id: str,
@@ -62,13 +76,19 @@ def fail_run_record(
         run = uow.orchestration_runs.get(run_id)
         if run is None:
             return None
+        dispatch_task_id = require_current_dispatch_task_id(uow, run=run)
         run.fail(
             worker_id=worker_id,
             message=message,
             code=code,
             details=details,
         )
-        dispatch_port.fail(uow.dispatch_tasks, uow, run)
+        dispatch_port.fail(
+            uow.dispatch_tasks,
+            uow,
+            run,
+            dispatch_task_id=dispatch_task_id,
+        )
         uow.orchestration_waits.delete_for_run(run.id)
         uow.orchestration_runs.add(run)
         uow.collect(run)
@@ -199,7 +219,10 @@ class RunCancellationService:
     ) -> tuple[str, ...]:
         if self.session_service is None:
             return (root_session_key,)
-        root_session = self.session_service.get_session(root_session_key)
+        try:
+            root_session = self.session_service.get_session(root_session_key)
+        except SessionNotFoundError:
+            return (root_session_key,)
         binding = root_session.runtime_binding()
         agent_id = binding.agent_id or root_session.agent_id
         sessions = self.session_service.list_sessions(agent_id=agent_id)
@@ -261,7 +284,7 @@ def build_run_cancellation_service(
     uow_factory: Callable[[], Any],
     session_service: SessionCatalogPort | None,
     run_query_service,
-    dispatch_port: RunDispatchPort,
+    dispatch_port: OrchestrationDispatchPort,
     cancel_tool_run: Callable[[str], object] | None = None,
 ) -> RunCancellationService:
     return RunCancellationService(

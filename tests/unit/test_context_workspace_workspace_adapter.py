@@ -18,15 +18,24 @@ from crxzipple.modules.context_workspace.infrastructure import (
 )
 
 
-def test_workspace_adapter_expands_bootstrap_file_handles(tmp_path) -> None:
+def test_workspace_adapter_expands_task_workspace_resource_file_handles(tmp_path) -> None:
     (tmp_path / "AGENTS.md").write_text(
         "# Agent Contract\n\nFollow the project boundaries.",
         encoding="utf-8",
     )
-    (tmp_path / "SOUL.md").write_text(
-        "A short runtime identity note.",
+    (tmp_path / "BOOTSTRAP.md").write_text(
+        "Prepare this workspace before a turn.",
         encoding="utf-8",
     )
+    (tmp_path / "TOOLS.md").write_text(
+        "Use project tools when grounded facts are needed.",
+        encoding="utf-8",
+    )
+    for name in ("AGENT.md", "SOUL.md", "USER.md", "IDENTITY.md"):
+        (tmp_path / name).write_text(
+            f"{name} belongs to agent home, not workspace resources.",
+            encoding="utf-8",
+        )
     services = _context_services()
 
     services["workspace"].ensure_workspace(
@@ -39,19 +48,26 @@ def test_workspace_adapter_expands_bootstrap_file_handles(tmp_path) -> None:
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:workspace",
-            node_id="workspace.bootstrap",
+            node_id="workspace.resources",
             action=ContextAction.EXPAND,
         ),
     )
     tree = services["tree"].list_tree("session:workspace")
     file_nodes = [
-        node for node in tree.nodes if node.parent_id == "workspace.bootstrap"
+        node for node in tree.nodes if node.parent_id == "workspace.resources"
     ]
 
-    assert [node.title for node in file_nodes] == ["AGENTS.md", "SOUL.md"]
+    assert [node.title for node in file_nodes] == [
+        "AGENTS.md",
+        "BOOTSTRAP.md",
+        "TOOLS.md",
+    ]
     assert "Follow the project boundaries" in file_nodes[0].summary
     assert file_nodes[0].owner_ref == {"path": "AGENTS.md"}
-    assert file_nodes[0].metadata["source"] == "workspace.bootstrap"
+    assert file_nodes[0].metadata["source"] == "workspace.resources"
+    assert {"AGENT.md", "SOUL.md", "USER.md", "IDENTITY.md"}.isdisjoint(
+        {node.title for node in file_nodes},
+    )
 
 
 def _context_services():

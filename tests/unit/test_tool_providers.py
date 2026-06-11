@@ -5,10 +5,12 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from crxzipple.app.assembly.tool import _browser_runtime_handlers
+from tools.browser.local import create_browser_manifest_handler
 from crxzipple.interfaces.runtime_container import AppKey
+from crxzipple.modules.browser.domain import BrowserValidationError
 from crxzipple.modules.settings import CreateSettingsResourceInput
 from crxzipple.modules.tool.application.activation import (
+    ToolHandlerFactoryDeps,
     ToolPackageApplyContext,
     ToolOpenApiPlan,
     ToolPackagePlan,
@@ -27,7 +29,11 @@ from crxzipple.modules.tool.infrastructure import (
     discover_tool_package_plans,
     load_tool_package_plan,
 )
-from tools.browser.local import BrowserToolDeps
+from tools.browser.local import (
+    BrowserToolDeps,
+    _augment_browser_error_with_guidance,
+    _format_browser_action_trace_result,
+)
 from tests.unit.tool_test_support import (
     ExecuteToolInput,
     LocalToolRuntimeRegistry,
@@ -52,6 +58,37 @@ from tests.unit.tool_test_support import (
     sys,
     tool_dependency_bindings,
 )
+
+
+def _browser_manifest_handlers(deps: BrowserToolDeps) -> dict[str, object]:
+    services = {
+        "browser_tool_application": deps.browser_tool_application,
+        "browser_system_config_store": deps.browser_system_config_store,
+        "browser_profile_resolver": deps.browser_profile_resolver,
+        "browser_capabilities_resolver": deps.browser_capabilities_resolver,
+        "browser_observation_service": deps.browser_observation_service,
+        "settings": deps.settings,
+        "artifact_service": deps.artifact_service,
+        "browser_runtime_state_store": deps.browser_runtime_state_store,
+        "browser_profile_probe_service": deps.browser_profile_probe_service,
+        "browser_profile_allocator_service": deps.browser_profile_allocator_service,
+    }
+    handlers: dict[str, object] = {}
+    for binding in load_tool_package_plan("tools/browser/tool.yaml").local_handlers:
+        handler = create_browser_manifest_handler(
+            ToolHandlerFactoryDeps(
+                namespace="browser",
+                tool_id=binding.tool.id,
+                entrypoint=binding.entrypoint,
+                services=services,
+                config={},
+                capability_ids=binding.capability_ids,
+                requirements=binding.dependencies,
+            ),
+        )
+        if handler is not None:
+            handlers[binding.tool.id] = handler
+    return handlers
 
 
 def _seed_sample_openapi_access_bindings(container) -> None:  # noqa: ANN001
@@ -93,10 +130,12 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [namespace.name for namespace in namespaces],
             [
                 "brave_search",
+                "browser",
                 "command",
                 "context_tree",
                 "debug",
                 "itick_market",
+                "market_quote",
                 "memory",
                 "mobile",
                 "open_meteo_geocoding",
@@ -104,6 +143,7 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 "openai_image",
                 "sessions",
                 "skills",
+                "web",
                 "workspace",
             ],
         )
@@ -114,11 +154,14 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                 "local_package",
                 "local_package",
                 "local_package",
+                "local_package",
                 "openapi",
                 "local_package",
                 "local_package",
+                "local_package",
                 "openapi",
                 "openapi",
+                "local_package",
                 "local_package",
                 "local_package",
                 "local_package",
@@ -133,15 +176,15 @@ class ToolProvidersTestCase(ToolTestCaseBase):
         )
         self.assertEqual(
             [len(namespace.local_bindings) for namespace in namespaces],
-            [0, 2, 11, 1, 0, 4, 9, 0, 0, 2, 8, 7, 6],
+            [0, 65, 2, 9, 1, 0, 1, 4, 9, 0, 0, 2, 8, 7, 2, 6],
         )
         self.assertEqual(
             [len(namespace.remote_bindings) for namespace in namespaces],
-            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
         self.assertEqual(
             [len(namespace.sandbox_bindings) for namespace in namespaces],
-            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         )
 
         plans = discover_tool_package_plans()
@@ -150,7 +193,40 @@ class ToolProvidersTestCase(ToolTestCaseBase):
             [plan.namespace for plan in plans],
             [ns.name for ns in namespaces],
         )
-        self.assertNotIn("browser", [plan.namespace for plan in plans])
+        self.assertTrue(all(plan.prompt for plan in plans))
+        command_plan = next(plan for plan in plans if plan.namespace == "command")
+        self.assertEqual(command_plan.prompt["title"], "Command Execution")
+        self.assertIn("shell commands", command_plan.prompt["summary"])
+        sessions_plan = next(plan for plan in plans if plan.namespace == "sessions")
+        sessions_prompt_groups = sessions_plan.prompt["groups"]
+        self.assertEqual(
+            list(sessions_prompt_groups),
+            [
+                "state_history",
+                "delegation",
+                "session_tree",
+                "run_control",
+            ],
+        )
+        self.assertIn(
+            "session-local execution history",
+            sessions_prompt_groups["state_history"]["summary"],
+        )
+        self.assertIn(
+            "delegated work should be cancelled",
+            sessions_prompt_groups["session_tree"]["summary"],
+        )
+        self.assertEqual(
+            sorted(
+                function_id
+                for group in sessions_prompt_groups.values()
+                for function_id in group["function_ids"]
+            ),
+            sorted(handler.tool.id for handler in sessions_plan.local_handlers),
+        )
+        browser_plan = next(plan for plan in plans if plan.namespace == "browser")
+        self.assertEqual(browser_plan.prompt["title"], "Browser Automation")
+        self.assertEqual(len(browser_plan.local_handlers), 65)
         mobile_plan = next(plan for plan in plans if plan.namespace == "mobile")
         self.assertEqual(
             [dependency.id for dependency in mobile_plan.local_handlers[0].dependencies],
@@ -274,14 +350,13 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     "context_tree.estimate",
                     "context_tree.expand",
                     "context_tree.list",
-                    "context_tree.open_artifact",
                     "context_tree.pin",
-                    "context_tree.read_skill",
-                    "context_tree.recall_memory",
+                    "context_tree.update_plan",
                     "context_tree.unpin",
                     "apply_patch",
                     "exec",
                     "process",
+                    "market_quote.gold_spot",
                     "memory_flush_skip",
                     "memory_read",
                     "memory_search",
@@ -314,6 +389,8 @@ class ToolProvidersTestCase(ToolTestCaseBase):
                     "skill_draft_update",
                     "skill_draft_validate",
                     "skill_read",
+                    "web.fetch_json",
+                    "web.fetch_text",
                     "workspace_list",
                     "write",
                     "workspace_search",
@@ -357,14 +434,17 @@ local_tools:
             with self.assertRaisesRegex(ToolValidationError, "direct credential source"):
                 load_tool_package_plan(manifest_path)
 
-    def test_browser_tool_package_manifest_is_retired(self) -> None:
-        self.assertFalse(
-            (
-                Path(__file__).resolve().parents[2]
-                / "tools"
-                / "browser"
-                / "tool.yaml"
-            ).exists(),
+    def test_browser_tool_package_manifest_is_standard_source_contract(self) -> None:
+        plan = load_tool_package_plan(
+            Path(__file__).resolve().parents[2] / "tools" / "browser" / "tool.yaml",
+        )
+
+        self.assertEqual(plan.namespace, "browser")
+        self.assertEqual(plan.kind, "local_package")
+        self.assertEqual(len(plan.local_bindings), 65)
+        self.assertEqual(
+            plan.prompt["groups"]["navigation"]["default_tool_schema_source"],
+            "bundled.local_package.browser.prompt_group.navigation",
         )
 
     def test_mobile_tool_package_fails_fast_without_required_runtime_services(self) -> None:
@@ -587,27 +667,67 @@ local_tools:
 
     def test_browser_source_activation_registers_profile_context_catalog(self) -> None:
         source_query = self.container.require(AppKey.TOOL_SOURCE_QUERY_SERVICE)
-        source = source_query.get_source("configured.browser")
+        source = source_query.get_source("bundled.local_package.browser")
 
         self.assertIsNotNone(source)
         assert source is not None
-        self.assertEqual(source.kind, ToolSourceCatalogKind.PROVIDER_BACKEND)
+        self.assertEqual(source.kind, ToolSourceCatalogKind.LOCAL_PACKAGE)
         self.assertEqual(source.display_name, "Browser")
-        self.assertEqual(source.config["provider"], "crxzipple.browser")
-        self.assertEqual(source.config["profile_mode"], "runtime_context")
+        self.assertEqual(source.config["source"], "bundled_tool_package")
+        self.assertEqual(source.config["namespace"], "browser")
+        self.assertEqual(source.config["package_kind"], "local_package")
+        prompt = source.config["prompt"]
+        self.assertEqual(prompt["title"], "Browser Automation")
+        self.assertIn("not just a DOM snapshot tool", prompt["summary"])
+        self.assertIn("verifiable browser evidence", prompt["summary"])
+        self.assertIn("Avoid repeated tab inventory", prompt["summary"])
+        self.assertIn("groups", prompt)
+        prompt_groups = prompt["groups"]
+        self.assertIn("navigation", prompt_groups)
+        self.assertIn("network", prompt_groups)
+        self.assertEqual(
+            prompt_groups["navigation"]["default_tool_schema_ids"],
+            ["browser.navigate"],
+        )
+        self.assertEqual(prompt_groups["navigation"]["default_tool_schema_max_count"], 1)
+        self.assertIn(
+            "not a repeated pre-flight check",
+            prompt_groups["navigation"]["summary"],
+        )
+        self.assertIn("date/calendar pickers", prompt_groups["forms_overlays"]["summary"])
+        self.assertIn("live frontend scripts", prompt_groups["code_insight"]["summary"])
+        self.assertIn("script/code search as an index", prompt_groups["code_insight"]["summary"])
+        self.assertIn("browser.evaluate", prompt_groups["code_insight"]["summary"])
+        self.assertIn("observable evidence", prompt_groups["diagnostics"]["summary"])
+        self.assertEqual(
+            prompt_groups["observation"]["default_tool_schema_ids"],
+            ["browser.observe"],
+        )
+        self.assertEqual(prompt_groups["network"]["default_tool_schema_max_count"], 6)
+        self.assertNotIn(
+            "browser.evaluate",
+            prompt_groups["page_interaction"]["function_ids"],
+        )
+        self.assertIn("browser.evaluate", prompt_groups["code_insight"]["function_ids"])
+        self.assertIn(
+            "browser.evaluate",
+            prompt_groups["code_insight"]["default_tool_schema_ids"],
+        )
+        self.assertEqual(prompt_groups["code_insight"]["default_tool_schema_max_count"], 8)
 
         source_ids = {item.source_id for item in source_query.list_sources()}
-        self.assertIn("configured.browser", source_ids)
+        self.assertIn("bundled.local_package.browser", source_ids)
         self.assertNotIn("configured.mcp.browser_user", source_ids)
         self.assertNotIn("configured.mcp.browser_crxzipple", source_ids)
-        self.assertNotIn("bundled.local_package.browser", source_ids)
 
-        functions = source_query.list_functions(source_id="configured.browser")
+        functions = source_query.list_functions(source_id="bundled.local_package.browser")
         function_ids = sorted(function.function_id for function in functions)
         self.assertEqual(
             function_ids,
             [
+                "browser.action.trace",
                 "browser.click",
+                "browser.code.search",
                 "browser.context.acquire",
                 "browser.context.current",
                 "browser.context.heartbeat",
@@ -623,24 +743,38 @@ local_tools:
                 "browser.emulation.reset",
                 "browser.emulation.set",
                 "browser.evaluate",
+                "browser.form.fill",
+                "browser.form.inspect",
                 "browser.geolocation.set",
+                "browser.native.run",
                 "browser.navigate",
                 "browser.network.clear_capture",
                 "browser.network.fetch_as_page",
                 "browser.network.get_request",
                 "browser.network.get_request_body",
                 "browser.network.get_response_body",
+                "browser.network.inspect",
                 "browser.network.list_requests",
                 "browser.network.replay_request",
                 "browser.network.start_capture",
                 "browser.network.stop_capture",
                 "browser.network_conditions.set",
+                "browser.observe",
+                "browser.overlay.observe",
+                "browser.overlay.select",
                 "browser.page.errors",
                 "browser.page.lifecycle",
                 "browser.performance.metrics",
                 "browser.permissions.clear",
                 "browser.permissions.grant",
+                "browser.runtime.call_client",
+                "browser.runtime.inspect",
+                "browser.runtime.probe_client",
                 "browser.screenshot",
+                "browser.script.extract_request",
+                "browser.script.find_request",
+                "browser.script.inspect",
+                "browser.script.list",
                 "browser.service_worker.inspect",
                 "browser.service_worker.list",
                 "browser.snapshot",
@@ -658,15 +792,91 @@ local_tools:
                 "browser.type",
             ],
         )
+        functions_by_id = {function.function_id: function for function in functions}
+        self.assertIn(
+            "The snapshot is only a first pass",
+            functions_by_id["browser.observe"].description,
+        )
+        self.assertIn(
+            "Use as a quick map",
+            functions_by_id["browser.snapshot"].description,
+        )
+        self.assertIn(
+            "endpoint discovered from scripts or network captures",
+            functions_by_id["browser.network.fetch_as_page"].description,
+        )
+        self.assertIn(
+            "small bounded matching snippets",
+            functions_by_id["browser.code.search"].description,
+        )
+        code_search_schema = functions_by_id["browser.code.search"].input_schema[
+            "properties"
+        ]
+        self.assertEqual(code_search_schema["limit"]["maximum"], 12)
+        self.assertEqual(code_search_schema["limit"]["default"], 8)
+        self.assertEqual(code_search_schema["max_scripts"]["maximum"], 24)
+        self.assertEqual(code_search_schema["context_lines"]["maximum"], 2)
+        self.assertIn(
+            "script index",
+            functions_by_id["browser.code.search"].description,
+        )
+        find_request_schema = functions_by_id["browser.script.find_request"].input_schema[
+            "properties"
+        ]
+        self.assertEqual(find_request_schema["limit"]["maximum"], 20)
+        self.assertEqual(find_request_schema["max_scripts"]["maximum"], 32)
+        self.assertEqual(find_request_schema["context_lines"]["maximum"], 2)
+        script_inspect_schema = functions_by_id["browser.script.inspect"].input_schema[
+            "properties"
+        ]
+        self.assertIn("column", script_inspect_schema)
+        self.assertEqual(script_inspect_schema["column_window"]["maximum"], 8000)
+        self.assertIn(
+            "line and column",
+            functions_by_id["browser.script.inspect"].description,
+        )
+        extract_schema = functions_by_id["browser.script.extract_request"].input_schema[
+            "properties"
+        ]
+        self.assertEqual(extract_schema["limit"]["maximum"], 20)
+        self.assertEqual(extract_schema["line_count"]["maximum"], 40)
+        self.assertEqual(extract_schema["column_window"]["maximum"], 16000)
+        self.assertIn(
+            "endpoint, HTTP method",
+            functions_by_id["browser.script.extract_request"].description,
+        )
+        probe_schema = functions_by_id["browser.runtime.probe_client"].input_schema[
+            "properties"
+        ]
+        self.assertEqual(probe_schema["limit"]["maximum"], 80)
+        self.assertEqual(probe_schema["preview_chars"]["maximum"], 4000)
+        self.assertIn(
+            "Read-only probe",
+            functions_by_id["browser.runtime.probe_client"].description,
+        )
+        call_schema = functions_by_id["browser.runtime.call_client"].input_schema[
+            "properties"
+        ]
+        self.assertEqual(call_schema["max_result_chars"]["maximum"], 200000)
+        self.assertIn("arguments", call_schema)
+        self.assertIn(
+            "Call a resolved page-context client method",
+            functions_by_id["browser.runtime.call_client"].description,
+        )
         for function in functions:
             self.assertEqual(function.runtime_kind, ToolFunctionRuntimeKind.LOCAL)
-            self.assertEqual(function.source_id, "configured.browser")
+            self.assertEqual(function.source_id, "bundled.local_package.browser")
             self.assertTrue(function.function_id.startswith("browser."))
             self.assertIn("profile", function.input_schema["properties"])
             self.assertIn("profile_pool", function.input_schema["properties"])
+            profile_description = function.input_schema["properties"]["profile"][
+                "description"
+            ]
+            self.assertIn("Omit this for normal browser work", profile_description)
+            self.assertIn("'default' is not a profile name", profile_description)
             self.assertEqual(
-                function.metadata["runtime_requirement"],
-                "browser-profile-runtime",
+                function.requirements.runtime_requirement_sets,
+                (("browser-profile-runtime",),),
             )
             self.assertFalse(function.handler_ref.startswith("mcp."))
             self.assertFalse(function.function_id.startswith("mcp.browser_"))
@@ -681,11 +891,93 @@ local_tools:
         for runtime_key in function_ids:
             self.assertIsNotNone(registry.get_handler(runtime_key))
         self.assertIsNone(registry.get_handler("browser_snapshot"))
+        prompt_group_function_ids = sorted(
+            function_id
+            for group in prompt_groups.values()
+            for function_id in group["function_ids"]
+        )
+        self.assertEqual(prompt_group_function_ids, function_ids)
+        bundles = source_query.list_prompt_bundles(tuple(function_ids))
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(bundles[0].title, "Browser Automation")
+        self.assertEqual(
+            [group.group_key for group in bundles[0].groups],
+            [
+                "navigation",
+                "observation",
+                "code_insight",
+                "network",
+                "action_trace",
+                "native_script",
+                "forms_overlays",
+                "dom_inspection",
+                "page_interaction",
+                "storage",
+                "context_leases",
+                "environment",
+                "diagnostics",
+            ],
+        )
         browser_tool = self.container.require(AppKey.TOOL_QUERY_SERVICE).get_tool(
             "browser.snapshot",
         )
-        self.assertEqual(browser_tool.source_id, "configured.browser")
+        self.assertEqual(browser_tool.source_id, "bundled.local_package.browser")
         self.assertIn("browser.page_action", browser_tool.capability_ids)
+
+    def test_browser_profile_default_error_guides_agent_to_omit_profile(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(
+                    default_profile="crxzipple",
+                    profiles=(SimpleNamespace(name="crxzipple"),),
+                )
+
+        deps = BrowserToolDeps(
+            browser_tool_application=object(),
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=object(),
+            browser_capabilities_resolver=object(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+
+        error = _augment_browser_error_with_guidance(
+            deps=deps,
+            profile_name="default",
+            exc=BrowserValidationError("Browser profile 'default' is not configured."),
+        )
+
+        self.assertIn("omit the profile argument", str(error))
+        self.assertIn("browser default profile 'crxzipple'", str(error))
+        self.assertIn("'default' is not a Browser profile name", str(error))
+
+    def test_browser_ref_error_guides_agent_to_refresh_refs(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(
+                    default_profile="crxzipple",
+                    profiles=(SimpleNamespace(name="crxzipple"),),
+                )
+
+        deps = BrowserToolDeps(
+            browser_tool_application=object(),
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=object(),
+            browser_capabilities_resolver=object(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+
+        error = _augment_browser_error_with_guidance(
+            deps=deps,
+            profile_name="crxzipple",
+            exc=BrowserValidationError(
+                "Browser ref 'r999' was not found for tab 'tab-1'.",
+            ),
+        )
+
+        self.assertIn("run browser.observe", str(error))
+        self.assertIn("fresh ref", str(error))
+        self.assertIn("browser.dom.clickability", str(error))
+        self.assertNotIn("use-profile", str(error))
 
     def test_browser_runtime_handlers_report_public_function_id(self) -> None:
         class _Store:
@@ -699,21 +991,55 @@ local_tools:
             def execute_page_action(self, **_kwargs):  # noqa: ANN003, ANN201
                 return SimpleNamespace(payload={"ok": True}, runtime_metadata={})
 
+        class _BrowserObservationService:
+            def observe(self, **_kwargs):  # noqa: ANN003, ANN201
+                return SimpleNamespace(
+                    payload={"ok": True, "kind": "observe", "message": "observed"},
+                    runtime_metadata={},
+                )
+
         deps = BrowserToolDeps(
             browser_tool_application=_BrowserToolApplication(),
             browser_system_config_store=_Store(),
             browser_profile_resolver=object(),
             browser_capabilities_resolver=object(),
+            browser_observation_service=_BrowserObservationService(),
             settings=SimpleNamespace(browser_enabled=True),
         )
-        handlers = _browser_runtime_handlers(deps)
+        handlers = _browser_manifest_handlers(deps)
 
         cases = {
+            "browser.observe": {},
+            "browser.form.inspect": {},
+            "browser.form.fill": {"ref": "r1", "text": "Kunming"},
+            "browser.overlay.observe": {},
+            "browser.overlay.select": {"ref": "r2", "overlay_source_ref": "r1"},
+            "browser.action.trace": {"action": "click", "ref": "r1"},
+            "browser.native.run": {
+                "actions": [
+                    {"kind": "fill", "selector": "#depart", "text": "昆明"},
+                    {"kind": "wait", "text": "昆明 中国 KMG"},
+                    {"kind": "click", "selector": "text=昆明 中国 KMG"},
+                ],
+            },
             "browser.navigate": {"url": "https://example.com"},
             "browser.click": {"ref": "r1"},
             "browser.dom.inspect": {"ref": "r1"},
             "browser.emulation.set": {"width": 390, "height": 844},
             "browser.diagnostics.collect": {},
+            "browser.runtime.inspect": {},
+            "browser.runtime.probe_client": {"object_path": "$nuxt.$http.shopping"},
+            "browser.runtime.call_client": {
+                "object_path": "$nuxt.$http.shopping",
+                "method_name": "getShopping",
+                "arguments": [{"depCityCode": "KMG"}],
+            },
+            "browser.script.list": {},
+            "browser.script.find_request": {"path": "/api/flights/search"},
+            "browser.code.search": {"query": "fetch"},
+            "browser.script.extract_request": {"script_id": "1", "query": "fetch"},
+            "browser.script.inspect": {"script_id": "1"},
+            "browser.network.inspect": {"limit": 10},
             "browser.snapshot": {},
             "browser.tabs.list": {},
         }
@@ -722,6 +1048,364 @@ local_tools:
                 result = asyncio.run(handlers[runtime_key](arguments))
 
                 self.assertEqual(result.metadata["tool"], runtime_key)
+
+    def test_browser_action_envelope_is_visible_to_agent(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _BrowserToolApplication:
+            def execute_page_action(self, **_kwargs):  # noqa: ANN003, ANN201
+                return SimpleNamespace(
+                    payload={
+                        "ok": True,
+                        "target_id": "tab-1",
+                        "message": (
+                            "Executed click via cdp-backed-playwright; "
+                            "no observable page effect."
+                        ),
+                        "command": {"family": "page-action", "kind": "click"},
+                        "value": {
+                            "action_envelope": {
+                                "kind": "click",
+                                "tool_ok": True,
+                                "page_effect_ok": False,
+                                "page_effect_status": "no_observable_change",
+                                "before": {
+                                    "target_id": "tab-1",
+                                    "url": "https://example.com/form",
+                                    "title": "Example Form",
+                                },
+                                "after": {
+                                    "target_id": "tab-1",
+                                    "url": "https://example.com/form",
+                                    "title": "Example Form",
+                                },
+                                "changes": {},
+                                "result": {"mode": "direct"},
+                                "next_action": "use-action-trace-or-observe",
+                                "errors": [],
+                            },
+                        },
+                    },
+                    runtime_metadata={},
+                )
+
+        class _BrowserObservationService:
+            def observe(self, **_kwargs):  # noqa: ANN003, ANN201
+                return SimpleNamespace(payload={"ok": True}, runtime_metadata={})
+
+        deps = BrowserToolDeps(
+            browser_tool_application=_BrowserToolApplication(),
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=object(),
+            browser_capabilities_resolver=object(),
+            browser_observation_service=_BrowserObservationService(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handlers = _browser_manifest_handlers(deps)
+
+        result = asyncio.run(handlers["browser.click"]({"target_id": "tab-1", "ref": "r1"}))
+
+        self.assertEqual(result.metadata["tool"], "browser.click")
+        self.assertEqual(len(result.blocks), 2)
+        text = result.blocks[0]["text"]
+        self.assertIn("Browser click completed.", text)
+        self.assertIn("- Tool: ok", text)
+        self.assertIn("- Page effect: no observable change", text)
+        self.assertIn("url=https://example.com/form", text)
+        self.assertIn(
+            "- Next: use browser.action.trace or browser.observe to verify the next step",
+            text,
+        )
+        self.assertIn("Evidence path: stateful_interaction", result.blocks[1]["text"])
+        self.assertEqual(
+            result.metadata["browser_evidence"]["evidence_path_key"],
+            "stateful_interaction",
+        )
+
+    def test_browser_action_trace_handler_normalizes_wrapped_action_payload(self) -> None:
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _BrowserToolApplication:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def execute_page_action(self, **kwargs):  # noqa: ANN003, ANN201
+                self.calls.append(dict(kwargs))
+                if kwargs["kind"] == "batch":
+                    return SimpleNamespace(
+                        payload={
+                            "command": {"kind": "batch"},
+                            "value": {
+                                "result": {
+                                    "kind": "batch",
+                                    "stop_on_error": kwargs["payload"].get(
+                                        "stop_on_error",
+                                        True,
+                                    ),
+                                    "results": [],
+                                }
+                            },
+                        },
+                        runtime_metadata={},
+                    )
+                payload = {
+                    "command": {"kind": kwargs["kind"]},
+                    "value": {
+                        "result": {
+                            "kind": "action-trace",
+                            "trace_id": "trace-query",
+                            "profile_name": kwargs["profile_name"],
+                            "target_id": kwargs["target_id"],
+                            "action": {
+                                "kind": kwargs["payload"]["action"],
+                                "target": {
+                                    "target_id": kwargs["target_id"],
+                                    "ref": None,
+                                    "selector": kwargs["selector"],
+                                },
+                                "payload": dict(kwargs["payload"]),
+                                "ok": True,
+                                "error": None,
+                                "resolved_selector": kwargs["selector"],
+                                "frame_path": [],
+                                "result": {
+                                    "kind": kwargs["payload"]["action"],
+                                    "text": kwargs["payload"].get("text"),
+                                },
+                            },
+                            "before": {
+                                "format": "interactive",
+                                "snapshot_preview": "- textbox \"Query\" [ref=r1]",
+                            },
+                            "after": {
+                                "format": "interactive",
+                                "snapshot_preview": "- textbox \"Query\" [ref=r1]",
+                            },
+                            "diff": {
+                                "snapshot_changed": False,
+                                "before_chars": 26,
+                                "after_chars": 26,
+                                "ref_count_delta": 0,
+                            },
+                            "console": {"before_count": 0, "after_count": 0, "new": []},
+                            "page_errors": {
+                                "before_count": 0,
+                                "after_count": 0,
+                                "new": [],
+                            },
+                            "network": {
+                                "capture_id": None,
+                                "started": False,
+                                "stopped": False,
+                                "request_count": 0,
+                                "requests": [],
+                                "errors": [],
+                            },
+                            "action_envelope": {
+                                "kind": "type",
+                                "tool_ok": True,
+                                "page_effect_ok": False,
+                                "page_effect_status": "no_observable_change",
+                                "before": {},
+                                "after": {},
+                                "changes": {
+                                    "snapshot_changed": False,
+                                    "network_request_count": 0,
+                                },
+                                "result": {
+                                    "recommendation": {
+                                        "next_action": "observe-or-inspect-clickability",
+                                    },
+                                },
+                                "next_action": "observe-or-inspect-clickability",
+                                "errors": [],
+                            },
+                            "errors": [],
+                        }
+                    },
+                }
+                return SimpleNamespace(payload=payload, runtime_metadata={})
+
+        class _BrowserObservationService:
+            def observe(self, **_kwargs):  # noqa: ANN003, ANN201
+                return SimpleNamespace(payload={"ok": True}, runtime_metadata={})
+
+        app = _BrowserToolApplication()
+        deps = BrowserToolDeps(
+            browser_tool_application=app,
+            browser_system_config_store=_Store(),
+            browser_profile_resolver=object(),
+            browser_capabilities_resolver=object(),
+            browser_observation_service=_BrowserObservationService(),
+            artifact_service=self.artifact_service,
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handlers = _browser_manifest_handlers(deps)
+
+        result = asyncio.run(
+            handlers["browser.action.trace"](
+                {
+                    "target_id": "tab-1",
+                    "selector": "#query",
+                    "action": "type",
+                    "text": "Kunming",
+                    "include_network": False,
+                    "stabilize_ms": 0,
+                }
+            )
+        )
+
+        self.assertEqual(app.calls[-1]["kind"], "action-trace")
+        self.assertEqual(app.calls[-1]["selector"], "#query")
+        self.assertEqual(app.calls[-1]["payload"]["action"], "type")
+        self.assertEqual(app.calls[-1]["payload"]["text"], "Kunming")
+        self.assertFalse(app.calls[-1]["payload"]["include_network"])
+        self.assertIn("Browser action trace", result.blocks[0]["text"])
+        self.assertIn("- Page effect: no observable change", result.blocks[0]["text"])
+        self.assertIn("- Next: observe-or-inspect-clickability", result.blocks[0]["text"])
+        self.assertIn(
+            "- Suggested tools: browser.observe, browser.dom.clickability, browser.dom.inspect",
+            result.blocks[0]["text"],
+        )
+        self.assertIn(
+            "- Evidence path: observe again",
+            result.blocks[0]["text"],
+        )
+        self.assertEqual(len(result.blocks), 2)
+        artifact_block = result.blocks[1]
+        self.assertEqual(artifact_block["type"], "file_ref")
+        self.assertEqual(artifact_block["mime_type"], "application/json")
+        self.assertEqual(artifact_block["name"], "trace-query.json")
+        artifact = self.artifact_service.get_artifact(artifact_block["artifact_id"])
+        self.assertEqual(artifact.metadata["source"], "browser")
+        self.assertEqual(artifact.metadata["attachment_kind"], "action-trace")
+        self.assertEqual(artifact.metadata["trace_id"], "trace-query")
+
+        asyncio.run(
+            handlers["browser.form.fill"](
+                {
+                    "target_id": "tab-1",
+                    "ref": "r2",
+                    "text": "Shanghai",
+                    "stabilize_ms": 0,
+                }
+            )
+        )
+        self.assertEqual(app.calls[-1]["kind"], "action-trace")
+        self.assertEqual(app.calls[-1]["ref"], "r2")
+        self.assertEqual(app.calls[-1]["payload"]["action"], "fill")
+        self.assertEqual(app.calls[-1]["payload"]["text"], "Shanghai")
+        self.assertTrue(app.calls[-1]["payload"]["include_network"])
+        self.assertEqual(app.calls[-1]["payload"]["snapshot_limit"], 30)
+
+        asyncio.run(
+            handlers["browser.overlay.select"](
+                {
+                    "target_id": "tab-1",
+                    "ref": "r8",
+                    "overlay_source_ref": "r2",
+                    "stabilize_ms": 0,
+                }
+            )
+        )
+        self.assertEqual(app.calls[-1]["kind"], "action-trace")
+        self.assertEqual(app.calls[-1]["ref"], "r8")
+        self.assertEqual(app.calls[-1]["payload"]["action"], "click")
+        self.assertTrue(app.calls[-1]["payload"]["active_overlay"])
+        self.assertEqual(
+            app.calls[-1]["payload"]["action_payload"]["overlay_source_ref"],
+            "r2",
+        )
+        self.assertTrue(app.calls[-1]["payload"]["action_payload"]["active_overlay"])
+
+        asyncio.run(
+            handlers["browser.native.run"](
+                {
+                    "target_id": "tab-1",
+                    "actions": [
+                        {"kind": "fill", "selector": "#depart", "text": "昆明"},
+                        {"kind": "wait", "text": "昆明 中国 KMG"},
+                    ],
+                    "stop_on_error": True,
+                }
+            )
+        )
+        self.assertEqual(app.calls[-1]["kind"], "batch")
+        self.assertEqual(app.calls[-1]["target_id"], "tab-1")
+        self.assertEqual(
+            app.calls[-1]["payload"]["actions"],
+            [
+                {"kind": "fill", "selector": "#depart", "text": "昆明"},
+                {"kind": "wait", "text": "昆明 中国 KMG"},
+            ],
+        )
+        self.assertTrue(app.calls[-1]["payload"]["stop_on_error"])
+
+    def test_browser_action_trace_formatter_shows_effect_when_action_fails_after_change(
+        self,
+    ) -> None:
+        text = _format_browser_action_trace_result(
+            {
+                "kind": "action-trace",
+                "trace_id": "trace-link",
+                "profile_name": "crxzipple",
+                "target_id": "tab-1",
+                "action": {
+                    "kind": "click",
+                    "ok": False,
+                    "error": {
+                        "type": "TimeoutError",
+                        "message": "navigation wait timed out",
+                    },
+                },
+                "diff": {
+                    "snapshot_changed": True,
+                    "before_chars": 28,
+                    "after_chars": 363,
+                    "ref_count_delta": 9,
+                },
+                "lifecycle": {
+                    "changed": True,
+                    "changed_fields": {
+                        "url": {
+                            "before": "https://example.com/",
+                            "after": "https://www.iana.org/help/example-domains",
+                        },
+                    },
+                },
+                "recommendation": {
+                    "next_action": "continue-from-after-snapshot",
+                    "reason": (
+                        "The wrapped page action reported failure, but page state "
+                        "changed."
+                    ),
+                },
+                "action_envelope": {
+                    "kind": "click",
+                    "tool_ok": False,
+                    "page_effect_ok": True,
+                    "page_effect_status": "action_failed_with_observed_effect",
+                    "next_action": "continue-from-after-snapshot",
+                    "errors": [
+                        {
+                            "type": "TimeoutError",
+                            "message": "navigation wait timed out",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertIn(
+            "- Page effect: observed change (action reported failure)",
+            text,
+        )
+        self.assertIn("- Next: continue-from-after-snapshot", text)
+        self.assertIn("- Suggested tools: browser.observe", text)
 
     def test_configured_mcp_runtime_activation_uses_persisted_function_metadata(
         self,

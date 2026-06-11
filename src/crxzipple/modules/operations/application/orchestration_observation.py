@@ -11,6 +11,7 @@ RUN_LLM_ATTEMPT_REWOUND_EVENT = "orchestration.run.llm_attempt_rewound"
 RUN_WAITING_EVENT = "orchestration.run.waiting"
 RUN_WAITING_FOR_CONFIRMATION_EVENT = "orchestration.run.waiting_for_confirmation"
 RUN_APPROVAL_RESOLVED_EVENT = "orchestration.run.approval_resolved"
+RUN_WORKER_LEASE_RECOVERED_EVENT = "orchestration.run.worker_lease_recovered"
 RUN_RESUMED_EVENT = "orchestration.run.resumed"
 RUN_COMPLETED_EVENT = "orchestration.run.completed"
 RUN_FAILED_EVENT = "orchestration.run.failed"
@@ -20,11 +21,6 @@ INGRESS_REQUESTED_EVENT = "orchestration.ingress.requested"
 INGRESS_CLAIMED_EVENT = "orchestration.ingress.claimed"
 INGRESS_COMPLETED_EVENT = "orchestration.ingress.completed"
 INGRESS_FAILED_EVENT = "orchestration.ingress.failed"
-
-SCHEDULER_SIGNAL_REQUESTED_EVENT = "orchestration.scheduler.signal.requested"
-SCHEDULER_SIGNAL_CLAIMED_EVENT = "orchestration.scheduler.signal.claimed"
-SCHEDULER_SIGNAL_COMPLETED_EVENT = "orchestration.scheduler.signal.completed"
-SCHEDULER_SIGNAL_FAILED_EVENT = "orchestration.scheduler.signal.failed"
 
 EXECUTOR_ASSIGNMENT_REQUESTED_EVENT = "orchestration.executor.assignment.requested"
 EXECUTOR_LEASE_REGISTERED_EVENT = "orchestration.executor.lease.registered"
@@ -36,6 +32,10 @@ EXECUTOR_LEASE_ASSIGNMENT_RELEASED_EVENT = (
     "orchestration.executor.lease.assignment_released"
 )
 EXECUTOR_LEASE_OFFLINE_EVENT = "orchestration.executor.lease.offline"
+
+ORPHAN_TOOL_RESULT_OBSERVED_EVENT = (
+    "orchestration.execution.orphan_tool_result_observed"
+)
 
 RUNTIME_STATUS_EVENT = "orchestration.runtime.status"
 
@@ -51,6 +51,7 @@ ORCHESTRATION_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
     RUN_WAITING_EVENT,
     RUN_WAITING_FOR_CONFIRMATION_EVENT,
     RUN_APPROVAL_RESOLVED_EVENT,
+    RUN_WORKER_LEASE_RECOVERED_EVENT,
     RUN_RESUMED_EVENT,
     RUN_COMPLETED_EVENT,
     RUN_FAILED_EVENT,
@@ -59,15 +60,12 @@ ORCHESTRATION_OPERATIONAL_EVENT_NAMES: tuple[str, ...] = (
     INGRESS_CLAIMED_EVENT,
     INGRESS_COMPLETED_EVENT,
     INGRESS_FAILED_EVENT,
-    SCHEDULER_SIGNAL_REQUESTED_EVENT,
-    SCHEDULER_SIGNAL_CLAIMED_EVENT,
-    SCHEDULER_SIGNAL_COMPLETED_EVENT,
-    SCHEDULER_SIGNAL_FAILED_EVENT,
     EXECUTOR_ASSIGNMENT_REQUESTED_EVENT,
     EXECUTOR_LEASE_REGISTERED_EVENT,
     EXECUTOR_LEASE_HEARTBEATED_EVENT,
     EXECUTOR_LEASE_ASSIGNMENT_CLAIMED_EVENT,
     EXECUTOR_LEASE_ASSIGNMENT_RELEASED_EVENT,
     EXECUTOR_LEASE_OFFLINE_EVENT,
+    ORPHAN_TOOL_RESULT_OBSERVED_EVENT,
     RUNTIME_STATUS_EVENT,
 )

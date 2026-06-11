@@ -586,7 +586,6 @@ class AgentApplicationService:
     ) -> AgentRuntimePreferences:
         resolved_home_dir = (
             runtime_preferences.home_dir
-            or runtime_preferences.workspace
             or self._default_home_dir(agent_id)
         )
         resolved_workdir = (

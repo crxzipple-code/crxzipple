@@ -16,6 +16,7 @@ from crxzipple.modules.skills.application.prompt_resolver import (
     SkillPromptResolutionContext,
     SkillPromptResolver,
 )
+from crxzipple.modules.skills.application.surface import skill_surface_matches
 from crxzipple.modules.skills.domain import SkillNotFoundError
 
 
@@ -103,8 +104,7 @@ class SkillCatalogService:
         return tuple(
             package
             for package in packages
-            if not package.manifest.surfaces
-            or normalized_surface in package.manifest.surfaces
+            if skill_surface_matches(package.manifest.surfaces, normalized_surface)
         )
 
     def get(

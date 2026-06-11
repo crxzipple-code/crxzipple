@@ -100,10 +100,7 @@ class ToolRuntimePoolService(ToolServiceBase):
         with self.uow_factory() as uow:
             functions = uow.tool_functions.list(status=ToolFunctionStatus.ACTIVE)
             source_ids = tuple(dict.fromkeys(function.source_id for function in functions))
-            sources = {
-                source_id: uow.tool_sources.get(source_id)
-                for source_id in source_ids
-            }
+            sources = uow.tool_sources.list_by_ids(source_ids)
 
         resolved: dict[str, Tool] = {}
         excluded: list[ToolRuntimePoolExclusion] = []

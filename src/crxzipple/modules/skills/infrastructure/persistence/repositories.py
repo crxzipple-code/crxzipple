@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from crxzipple.core.db import SessionFactory
 from crxzipple.modules.skills.application.models import (
@@ -209,6 +210,21 @@ class SqlAlchemySkillOwnerCatalogRepository:
                 session.add(_readiness_model(snapshot))
             else:
                 _apply_readiness(existing, snapshot)
+            try:
+                session.commit()
+                return snapshot
+            except IntegrityError:
+                session.rollback()
+                if existing is not None:
+                    raise
+
+        with self._session_factory() as session:
+            existing = session.get(SkillReadinessSnapshotModel, snapshot.skill_id)
+            if existing is None:
+                raise RuntimeError(
+                    f"Skill readiness '{snapshot.skill_id}' conflicted during upsert but could not be reloaded.",
+                )
+            _apply_readiness(existing, snapshot)
             session.commit()
             return snapshot
 

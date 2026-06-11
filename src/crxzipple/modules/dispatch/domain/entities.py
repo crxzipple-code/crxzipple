@@ -14,6 +14,19 @@ from crxzipple.modules.dispatch.domain.value_objects import (
 from crxzipple.shared.domain import AggregateRoot
 from crxzipple.shared.domain.events import Event
 
+WAITING_REASON_MAX_CHARS = 100
+
+
+def _waiting_reason(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) <= WAITING_REASON_MAX_CHARS:
+        return normalized
+    return f"{normalized[: WAITING_REASON_MAX_CHARS - 3]}..."
+
 
 @dataclass(kw_only=True)
 class DispatchTask(AggregateRoot[str]):
@@ -51,7 +64,7 @@ class DispatchTask(AggregateRoot[str]):
         if self.payload_ref is not None:
             self.payload_ref = self.payload_ref.strip() or None
         if self.waiting_reason is not None:
-            self.waiting_reason = self.waiting_reason.strip() or None
+            self.waiting_reason = _waiting_reason(self.waiting_reason)
         if self.claimed_by is not None:
             self.claimed_by = self.claimed_by.strip() or None
         if self.claim_token is not None:
@@ -233,7 +246,7 @@ class DispatchTask(AggregateRoot[str]):
     def wait(self, *, reason: str | None = None, now: datetime | None = None) -> None:
         timestamp = now or utcnow()
         self.status = DispatchTaskStatus.WAITING
-        self.waiting_reason = reason.strip() if reason is not None and reason.strip() else None
+        self.waiting_reason = _waiting_reason(reason)
         self.error = None
         self._clear_claim_state()
         self.updated_at = timestamp
@@ -336,7 +349,7 @@ class DispatchTask(AggregateRoot[str]):
         self.status = DispatchTaskStatus.CANCELLED
         self.updated_at = timestamp
         self.completed_at = timestamp
-        self.waiting_reason = reason.strip() if reason is not None and reason.strip() else None
+        self.waiting_reason = _waiting_reason(reason)
         self.error = None
         self._clear_claim_state()
         self.record_event(

@@ -24,6 +24,7 @@ from playwright.sync_api import sync_playwright
 DEFAULT_MODULES = [
     "orchestration",
     "tool",
+    "browser",
     "llm",
     "access",
     "channels",
@@ -57,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wait-ms", type=int, default=2200, help="Wait after navigation before auditing.")
     parser.add_argument("--no-screenshots", action="store_true", help="Skip screenshots.")
     parser.add_argument("--warn-only", action="store_true", help="Do not exit non-zero on layout violations.")
+    parser.add_argument(
+        "--block-operations-api",
+        action="store_true",
+        help="Abort /api/operations requests to audit loading/error/empty layout stability.",
+    )
     return parser.parse_args()
 
 
@@ -152,6 +158,8 @@ def main() -> int:
           viewport={"width": args.width, "height": args.height},
           device_scale_factor=1,
       )
+      if args.block_operations_api:
+          page.route("**/api/operations**", lambda route: route.abort("failed"))
 
       for module in modules:
           url = f"{args.base_url.rstrip('/')}/operations/{module}"

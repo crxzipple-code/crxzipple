@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import MISSING, fields, is_dataclass
+from enum import Enum
 import importlib
 from inspect import Parameter, signature
 from pathlib import Path
@@ -473,6 +474,7 @@ def _load_namespace(manifest_path: Path) -> ToolNamespaceDefinition:
             manifest_path=str(manifest_path),
             package_kind=kind,
             capability_ids=package_capability_ids,
+            prompt=_load_prompt_metadata(payload.get("prompt"), manifest_path),
             local_handlers=_load_local_bindings(
                 payload,
                 manifest_path,
@@ -509,6 +511,7 @@ def _load_namespace(manifest_path: Path) -> ToolNamespaceDefinition:
             manifest_path=str(manifest_path),
             package_kind=kind,
             capability_ids=package_capability_ids,
+            prompt=_load_prompt_metadata(payload.get("prompt"), manifest_path),
             openapi=ToolOpenApiPlan(
                 namespace=namespace_name,
                 provider=_load_openapi_provider(payload, manifest_path),
@@ -678,6 +681,80 @@ def _load_provider_backend_plans(
     return tuple(backends)
 
 
+def _load_prompt_metadata(
+    raw_prompt: object,
+    manifest_path: Path,
+) -> dict[str, object]:
+    if raw_prompt in (None, {}):
+        return {}
+    if not isinstance(raw_prompt, dict):
+        raise ToolValidationError(
+            f"Tool namespace manifest '{manifest_path}' field 'prompt' must be a mapping.",
+        )
+    prompt: dict[str, object] = _stable_payload(raw_prompt)
+    for key in ("title", "summary"):
+        raw_value = raw_prompt.get(key)
+        if raw_value is None:
+            prompt.pop(key, None)
+            continue
+        value = str(raw_value).strip()
+        if value:
+            prompt[key] = value
+        else:
+            prompt.pop(key, None)
+    raw_groups = raw_prompt.get("groups")
+    if raw_groups is not None:
+        if not isinstance(raw_groups, dict):
+            raise ToolValidationError(
+                f"Tool namespace manifest '{manifest_path}' field 'prompt.groups' must be a mapping.",
+            )
+        groups: dict[str, object] = {}
+        for raw_group_key, raw_group in raw_groups.items():
+            group_key = str(raw_group_key).strip()
+            if not group_key:
+                raise ToolValidationError(
+                    f"Tool namespace manifest '{manifest_path}' prompt group keys cannot be empty.",
+                )
+            if not isinstance(raw_group, dict):
+                raise ToolValidationError(
+                    f"Tool namespace manifest '{manifest_path}' prompt group '{group_key}' must be a mapping.",
+                )
+            group_payload: dict[str, object] = _stable_payload(raw_group)
+            for key in ("title", "summary"):
+                raw_value = raw_group.get(key)
+                if raw_value is None:
+                    group_payload.pop(key, None)
+                    continue
+                value = str(raw_value).strip()
+                if value:
+                    group_payload[key] = value
+                else:
+                    group_payload.pop(key, None)
+            function_ids = _parse_string_list(
+                raw_group.get("function_ids", []),
+                "prompt.groups.function_ids",
+                manifest_path,
+            )
+            raw_order = raw_group.get("order")
+            if raw_order is not None:
+                try:
+                    group_payload["order"] = int(raw_order)
+                except (TypeError, ValueError) as exc:
+                    raise ToolValidationError(
+                        f"Tool namespace manifest '{manifest_path}' prompt group '{group_key}' order must be an integer.",
+                    ) from exc
+            if function_ids:
+                group_payload["function_ids"] = function_ids
+            else:
+                group_payload.pop("function_ids", None)
+            groups[group_key] = group_payload
+        if groups:
+            prompt["groups"] = groups
+        else:
+            prompt.pop("groups", None)
+    return prompt
+
+
 def _load_dependency_requirements(
     raw_requirements: object,
     manifest_path: Path,
@@ -834,6 +911,9 @@ def _build_tool(
             timeout_seconds=max(int(payload.get("timeout_seconds", 30)), 1),
             requires_confirmation=bool(payload.get("requires_confirmation", False)),
             mutates_state=bool(payload.get("mutates_state", False)),
+            supports_parallel=bool(payload.get("supports_parallel", True)),
+            resource_scope=_optional_manifest_text(payload.get("resource_scope")),
+            serial_group_key=_optional_manifest_text(payload.get("serial_group_key")),
         ),
         execution_support=ToolExecutionSupport(
             supported_modes=_parse_enum_list(
@@ -1120,9 +1200,17 @@ def _parse_parameters(
                 data_type=_required_string(item, "data_type", manifest_path),
                 description=str(item.get("description", "")).strip(),
                 required=bool(item.get("required", True)),
+                json_schema=_optional_mapping_payload(item.get("json_schema")),
             ),
         )
     return tuple(parameters)
+
+
+def _optional_manifest_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _parse_string_list(
@@ -1419,6 +1507,28 @@ def _mapping_payload(raw_value: object) -> dict[str, object]:
     return dict(raw_value) if isinstance(raw_value, dict) else {}
 
 
+def _optional_mapping_payload(raw_value: object) -> dict[str, object] | None:
+    return dict(raw_value) if isinstance(raw_value, dict) else None
+
+
+def _stable_payload(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _stable_payload(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _stable_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple | list):
+        return [_stable_payload(item) for item in value]
+    return value
+
+
 def _parse_enum_list(
     raw_values: object,
     *,
@@ -1579,11 +1689,15 @@ def _local_handler_dependency_type(
             )
         return None
     parameter = positional[0]
+    if parameter.name == "factory_deps":
+        return factory_deps
     try:
         hints = get_type_hints(builder)
     except (NameError, TypeError, AttributeError):
         hints = {}
     annotation = hints.get(parameter.name, parameter.annotation)
+    if annotation is ToolHandlerFactoryDeps:
+        return factory_deps
     candidates = _dependency_dataclass_candidates(annotation)
     missing_by_type: dict[str, tuple[str, ...]] = {}
     for candidate in candidates:

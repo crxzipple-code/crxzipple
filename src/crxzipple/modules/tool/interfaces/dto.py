@@ -28,6 +28,9 @@ class ToolExecutionPolicyDTO:
     timeout_seconds: int
     requires_confirmation: bool
     mutates_state: bool
+    supports_parallel: bool
+    resource_scope: str | None
+    serial_group_key: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +94,9 @@ class ToolDTO:
                 timeout_seconds=tool.execution_policy.timeout_seconds,
                 requires_confirmation=tool.execution_policy.requires_confirmation,
                 mutates_state=tool.execution_policy.mutates_state,
+                supports_parallel=tool.execution_policy.supports_parallel,
+                resource_scope=tool.execution_policy.resource_scope,
+                serial_group_key=tool.execution_policy.serial_group_key,
             ),
             execution_support=ToolExecutionSupportDTO(
                 supported_modes=tuple(

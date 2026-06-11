@@ -1,5 +1,25 @@
 kind: local_package
 namespace: workspace
+prompt:
+  title: Workspace Files
+  summary: Inspect, search, read, and edit files inside the session-bound workspace. For engineering tasks, use these tools to ground claims in the local implementation before designing or changing code.
+  groups:
+    source_inspection:
+      order: 10
+      title: Source Inspection
+      summary: Locate files, search implementations, and read exact source before making engineering claims or edits.
+      function_ids:
+        - workspace_list
+        - workspace_search
+        - read
+    source_changes:
+      order: 20
+      title: Source Changes
+      summary: Modify workspace files after inspecting the target code. Prefer exact edits or structured patches for scoped changes, then verify with command tools.
+      function_ids:
+        - edit
+        - apply_patch
+        - write
 capabilities:
   - workspace.lookup
   - workspace.read

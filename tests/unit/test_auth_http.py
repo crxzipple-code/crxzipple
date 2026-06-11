@@ -62,7 +62,7 @@ class AuthHttpTestCase(HttpModuleTestCase):
                         "kind": "tool",
                         "id": "browser.navigate",
                         "attrs": {
-                            "source_id": "configured.browser",
+                            "source_id": "bundled.local_package.browser",
                             "mutates_state": True,
                         },
                     },

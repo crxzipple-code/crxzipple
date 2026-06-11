@@ -6,7 +6,7 @@ from typing import Any
 from crxzipple.modules.tool.domain import Tool
 
 
-BROWSER_TOOL_SOURCE_ID = "configured.browser"
+BROWSER_TOOL_SOURCE_ID = "bundled.local_package.browser"
 
 
 def tool_invocation_authorization_context_attrs(

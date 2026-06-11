@@ -896,6 +896,8 @@ PYTHONPATH=src pytest -q tests/unit/test_tool_catalog_reconcile.py
 - [x] `kind: local_package` 支持多个 functions。
 - [x] `kind: openapi` 的 bundled package 迁为 OpenAPI source。
 - [x] 当前 `LocalToolRuntimeRegistry` 缩小为 local runtime handler registry，不再承担 catalog 真相。
+- [x] Browser 工具目录已收敛为 `bundled.local_package.browser` source 下的 `browser.*`，
+  source/function/prompt metadata 来自 `tools/browser/tool.yaml`。
 - [x] 删除或改名旧 local discovery 兼容语义；若保留 CLI，必须明确为 source discovery。
 - [x] `tools/README.md` 更新为 source authoring contract。
 

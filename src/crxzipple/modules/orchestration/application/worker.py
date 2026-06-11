@@ -609,6 +609,7 @@ class OrchestrationExecutorService:
         stage: OrchestrationRunStage,
         step_increment: int = 0,
         metadata: dict[str, object] | None = None,
+        execution_payload: dict[str, object] | None = None,
     ) -> OrchestrationRun:
         return self.advance_assignment_fn(
             AdvanceAssignmentInput(
@@ -617,6 +618,7 @@ class OrchestrationExecutorService:
                 stage=stage,
                 step_increment=step_increment,
                 metadata=metadata or {},
+                execution_payload=execution_payload or {},
             ),
         )
 
@@ -643,12 +645,14 @@ class OrchestrationExecutorService:
         run_id: str,
         worker_id: str,
         result_payload: dict[str, object] | None = None,
+        execution_payload: dict[str, object] | None = None,
     ) -> OrchestrationRun:
         return self.complete_assignment_fn(
             CompleteAssignmentInput(
                 run_id=run_id,
                 worker_id=worker_id,
                 result_payload=result_payload or {},
+                execution_payload=execution_payload or {},
             ),
         )
 

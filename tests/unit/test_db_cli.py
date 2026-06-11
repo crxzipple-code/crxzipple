@@ -66,6 +66,10 @@ class DbCliTestCase(CliModuleTestCase):
                 self.assertIn("session_messages", tables)
                 self.assertIn("session_instances", tables)
                 self.assertIn("orchestration_runs", tables)
+                self.assertIn("orchestration_execution_chains", tables)
+                self.assertIn("orchestration_execution_steps", tables)
+                self.assertIn("orchestration_execution_step_items", tables)
+                self.assertIn("event_outbox_records", tables)
                 self.assertTrue(
                     {
                         "sequence_no",
@@ -81,6 +85,13 @@ class DbCliTestCase(CliModuleTestCase):
                 self.assertIn("reply_target_payload", orchestration_run_columns)
                 self.assertNotIn("delivery_target_payload", orchestration_run_columns)
                 self.assertIn("lane_lock_key", orchestration_run_columns)
+                self.assertTrue(
+                    {
+                        "pending_approval_request_payload",
+                        "last_approval_resolution_payload",
+                        "recovery_contract_payload",
+                    }.issubset(orchestration_run_columns),
+                )
                 self.assertIn(
                     "uq_orchestration_runs_active_lane",
                     orchestration_run_indexes,
@@ -94,6 +105,104 @@ class DbCliTestCase(CliModuleTestCase):
                 self.assertEqual(history_result.exit_code, 0)
                 self.assertIn(HEAD_REVISION, current_result.output)
                 self.assertIn(HEAD_REVISION, history_result.output)
+            finally:
+                harness.close()
+
+    def test_db_upgrade_migrates_run_wait_state_out_of_metadata(self) -> None:
+            harness = SqliteTestHarness()
+            env = {"APP_DATABASE_URL": harness.database_url}
+            database_path = harness.database_url.removeprefix("sqlite:///")
+
+            try:
+                upgrade_0067 = self.runner.invoke(
+                    app,
+                    ["db", "upgrade", "0067_event_outbox"],
+                    env=env,
+                )
+                self.assertEqual(upgrade_0067.exit_code, 0)
+
+                pending_approval = {
+                    "request_id": "approval-migrate",
+                    "effect_id": "workspace_search",
+                    "label": "Workspace Search",
+                    "tool_ids": ["workspace_search"],
+                }
+                last_resolution = {
+                    "request_id": "approval-migrate",
+                    "decision": "allow_once",
+                }
+                recovery_contract = {
+                    "kind": "approval",
+                    "state": "resolved_allow_pending_replay",
+                }
+                with sqlite3.connect(database_path) as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO orchestration_runs (
+                            id,
+                            status,
+                            stage,
+                            queue_policy,
+                            priority,
+                            current_step,
+                            max_steps,
+                            pending_tool_run_ids,
+                            inbound_instruction_payload,
+                            metadata_payload,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "run-wait-state-migration",
+                            "waiting",
+                            "waiting_for_confirmation",
+                            "fifo",
+                            100,
+                            0,
+                            99,
+                            json.dumps([]),
+                            json.dumps({"source": "cli", "content": "hello"}),
+                            json.dumps(
+                                {
+                                    "session_key": "agent:assistant:main",
+                                    "pending_approval_request": pending_approval,
+                                    "last_approval_resolution": last_resolution,
+                                    "recovery_contract": recovery_contract,
+                                },
+                            ),
+                            "2026-06-02T00:00:00+00:00",
+                            "2026-06-02T00:00:00+00:00",
+                        ),
+                    )
+                    connection.commit()
+
+                upgrade_head = self.runner.invoke(app, ["db", "upgrade"], env=env)
+                self.assertEqual(upgrade_head.exit_code, 0)
+
+                with sqlite3.connect(database_path) as connection:
+                    row = connection.execute(
+                        """
+                        SELECT
+                            metadata_payload,
+                            pending_approval_request_payload,
+                            last_approval_resolution_payload,
+                            recovery_contract_payload
+                        FROM orchestration_runs
+                        WHERE id = ?
+                        """,
+                        ("run-wait-state-migration",),
+                    ).fetchone()
+
+                assert row is not None
+                metadata = json.loads(row[0])
+                self.assertNotIn("pending_approval_request", metadata)
+                self.assertNotIn("last_approval_resolution", metadata)
+                self.assertNotIn("recovery_contract", metadata)
+                self.assertEqual(json.loads(row[1]), pending_approval)
+                self.assertEqual(json.loads(row[2]), last_resolution)
+                self.assertEqual(json.loads(row[3]), recovery_contract)
             finally:
                 harness.close()
 
@@ -135,6 +244,9 @@ class DbCliTestCase(CliModuleTestCase):
                 self.assertNotIn("session_messages", tables)
                 self.assertNotIn("session_instances", tables)
                 self.assertNotIn("orchestration_runs", tables)
+                self.assertNotIn("orchestration_execution_chains", tables)
+                self.assertNotIn("orchestration_execution_steps", tables)
+                self.assertNotIn("orchestration_execution_step_items", tables)
                 self.assertIn("alembic_version", tables)
                 self.assertIsNone(revision)
             finally:

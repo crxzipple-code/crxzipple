@@ -6,14 +6,26 @@ import json
 from typing import Any, Protocol
 
 from crxzipple.modules.orchestration.application.ports import OrchestrationRunQueryPort
-from crxzipple.modules.orchestration.domain import OrchestrationRun
+from crxzipple.modules.orchestration.domain import (
+    ExecutionStep,
+    ExecutionStepItem,
+    OrchestrationRun,
+)
 from crxzipple.modules.orchestration.domain.value_objects import (
+    ExecutionStepItemKind,
+    ExecutionStepItemStatus,
+    ExecutionStepKind,
+    ExecutionStepStatus,
     OrchestrationRunStage,
     OrchestrationRunStatus,
 )
 from crxzipple.modules.tool.domain import ToolRun
 from crxzipple.modules.tool.domain.value_objects import ToolRunStatus
-from crxzipple.shared.content_blocks import describe_content_for_text_fallback
+from crxzipple.shared.content_blocks import (
+    content_blocks_from_payload,
+    describe_content_for_text_fallback,
+    extract_text_content,
+)
 from crxzipple.shared.runtime_console import TraceContext
 from crxzipple.shared.time import (
     coerce_utc_datetime,
@@ -47,10 +59,21 @@ class WorkbenchAgentQueryPort(Protocol):
         ...
 
 
+class WorkbenchSessionQueryPort(Protocol):
+    def get_message(self, message_id: str) -> Any:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class _DisplayToolRun:
     source_run: OrchestrationRun
     tool_run: ToolRun
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionStepBundle:
+    step: ExecutionStep
+    items: tuple[ExecutionStepItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +286,7 @@ class WorkbenchReadModelProvider:
     artifact_query: WorkbenchArtifactQueryPort | None = None
     llm_query: WorkbenchLlmQueryPort | None = None
     agent_query: WorkbenchAgentQueryPort | None = None
+    session_query: WorkbenchSessionQueryPort | None = None
 
     def get_home_view(
         self,
@@ -284,6 +308,11 @@ class WorkbenchReadModelProvider:
             requested_run_id=run_id,
             requested_session_key=session_key,
         )
+        fallback_thread_id = (
+            None
+            if run_id is not None or session_key is not None
+            else threads[0].id if threads else None
+        )
         active_thread_id = next(
             (
                 thread.id
@@ -294,7 +323,7 @@ class WorkbenchReadModelProvider:
                     and thread.session_key == session_key.strip()
                 )
             ),
-            threads[0].id if threads else None,
+            fallback_thread_id,
         )
         latest_updated_at = threads[0].updated_at if threads else None
         return WorkbenchHomeView(
@@ -344,10 +373,14 @@ class WorkbenchReadModelProvider:
                 tool_runs=tool_runs,
             )
         )
-        llm_invocations = _llm_invocations_for_runs(self.llm_query, session_runs)
+        llm_invocations = _llm_invocations_for_runs(
+            self.run_query,
+            self.llm_query,
+            session_runs,
+        )
         trace = _trace_for_run(run, turn_id=turn_id)
         agent_ref = _agent_ref(run, self.agent_query)
-        model_ref = _llm_ref(run, self.llm_query)
+        model_ref = _llm_ref(run, self.llm_query, run_query=self.run_query)
         metrics = _metrics_for_runs(
             session_runs,
             related_tool_runs=tuple(
@@ -435,8 +468,24 @@ class WorkbenchReadModelProvider:
             for display_tool_run in display_tool_runs
             if display_tool_run.source_run.id == run.id
         )
+        chain_steps = _chain_step_views_for_run(
+            self.run_query,
+            self.llm_query,
+            self.artifact_query,
+            self.session_query,
+            run,
+            turn_id=turn_id,
+            display_tool_runs=display_tool_runs,
+        )
+        if chain_steps:
+            return chain_steps
+
         pending_tool_run_ids = set(run.pending_tool_run_ids)
-        llm_invocation = _llm_invocation_for_run(self.llm_query, run)
+        llm_invocation = _llm_invocation_for_run(
+            self.run_query,
+            self.llm_query,
+            run,
+        )
         steps: list[TurnStepView] = [
             _step(
                 run=run,
@@ -496,7 +545,9 @@ class WorkbenchReadModelProvider:
                             tone="info",
                         ),
                     ),
-                    llm_invocation_id=_metadata_str(run, "llm_invocation_id"),
+                    llm_invocation_id=_optional_text(
+                        getattr(llm_invocation, "id", None),
+                    ),
                 ),
             )
 
@@ -853,12 +904,13 @@ def _step(
     llm_invocation_id: str | None = None,
     artifact_id: str | None = None,
     approval_request_id: str | None = None,
+    trace_step_id: str | None = None,
 ) -> TurnStepView:
     stable_step_id = f"{run.id}:{step_id}"
     trace = _trace_for_run(
         run,
         turn_id=turn_id,
-        step_id=stable_step_id,
+        step_id=trace_step_id or stable_step_id,
         tool_run_id=tool_run_id,
         llm_invocation_id=llm_invocation_id,
         artifact_id=artifact_id,
@@ -897,6 +949,770 @@ def _step(
         details_available=True,
         trace=trace,
     )
+
+
+def _chain_step_views_for_run(
+    run_query: OrchestrationRunQueryPort,
+    llm_query: WorkbenchLlmQueryPort | None,
+    artifact_query: WorkbenchArtifactQueryPort | None,
+    session_query: WorkbenchSessionQueryPort | None,
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    display_tool_runs: tuple[_DisplayToolRun, ...],
+) -> tuple[TurnStepView, ...]:
+    bundles = _execution_step_bundles(run_query, run.id)
+    if not bundles:
+        return ()
+    tool_runs_by_id = {
+        display_tool_run.tool_run.id: display_tool_run.tool_run
+        for display_tool_run in display_tool_runs
+    }
+    views: list[TurnStepView] = []
+    tool_only_streak = 0
+    for bundle in bundles:
+        step = bundle.step
+        if step.kind is ExecutionStepKind.INTAKE:
+            views.append(
+                _step(
+                    run=run,
+                    turn_id=turn_id,
+                    step_id=f"execution:{step.id}",
+                    step_type="user_input",
+                    status=(
+                        "success"
+                        if step.status is ExecutionStepStatus.COMPLETED
+                        else _execution_step_view_status(step, run=run)
+                    ),
+                    title="User Input",
+                    summary=_instruction_summary(run),
+                    started_at=run.created_at,
+                    completed_at=run.created_at,
+                    trace_step_id=step.id,
+                ),
+            )
+            continue
+        if step.kind is ExecutionStepKind.LLM:
+            tool_only_streak = (
+                tool_only_streak + 1
+                if _llm_bundle_is_tool_only(bundle)
+                else 0
+            )
+            views.extend(
+                _chain_llm_step_views(
+                    llm_query,
+                    session_query,
+                    run,
+                    turn_id=turn_id,
+                    bundle=bundle,
+                    tool_only_streak=tool_only_streak,
+                ),
+            )
+            continue
+        if step.kind is ExecutionStepKind.TOOL_BATCH:
+            views.extend(
+                _chain_tool_step_views(
+                    run,
+                    turn_id=turn_id,
+                    bundle=bundle,
+                    tool_runs_by_id=tool_runs_by_id,
+                    artifact_query=artifact_query,
+                ),
+            )
+            continue
+        if step.kind is ExecutionStepKind.APPROVAL:
+            approval_view = _chain_approval_step_view(
+                run,
+                turn_id=turn_id,
+                bundle=bundle,
+            )
+            if approval_view is not None:
+                views.append(approval_view)
+            continue
+        if step.kind is ExecutionStepKind.FINAL_RESPONSE:
+            output_text = _output_text(run)
+            views.append(
+                _step(
+                    run=run,
+                    turn_id=turn_id,
+                    step_id=f"execution:{step.id}",
+                    step_type="final_response",
+                    status=_execution_step_view_status(step, run=run),
+                    title="Final Response",
+                    summary=output_text or "Run completed.",
+                    markdown=output_text,
+                    started_at=step.started_at or step.created_at,
+                    completed_at=step.completed_at or run.completed_at or run.updated_at,
+                    trace_step_id=step.id,
+                ),
+            )
+            continue
+        views.append(
+            _generic_execution_step_view(
+                run,
+                turn_id=turn_id,
+                bundle=bundle,
+            ),
+        )
+    return tuple(views)
+
+
+def _chain_llm_step_views(
+    llm_query: WorkbenchLlmQueryPort | None,
+    session_query: WorkbenchSessionQueryPort | None,
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+    tool_only_streak: int = 0,
+) -> tuple[TurnStepView, ...]:
+    return (
+        *_assistant_progress_step_views(
+            session_query,
+            run,
+            turn_id=turn_id,
+            bundle=bundle,
+        ),
+        _chain_llm_step_view(
+            llm_query,
+            run,
+            turn_id=turn_id,
+            bundle=bundle,
+            tool_only_streak=tool_only_streak,
+        ),
+    )
+
+
+def _assistant_progress_step_views(
+    session_query: WorkbenchSessionQueryPort | None,
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+) -> tuple[TurnStepView, ...]:
+    views: list[TurnStepView] = []
+    for index, item in enumerate(bundle.items):
+        if item.kind is not ExecutionStepItemKind.SESSION_MESSAGE:
+            continue
+        summary = _execution_item_summary(item)
+        if _summary_text(summary, "message_kind") != "assistant_progress":
+            continue
+        progress_text = _summary_text(summary, "assistant_progress_text")
+        if progress_text is None:
+            progress_text = _session_message_text(
+                session_query,
+                _summary_text(summary, "session_message_id"),
+            )
+        if progress_text is None:
+            continue
+        views.append(
+            _step(
+                run=run,
+                turn_id=turn_id,
+                step_id=f"execution:{bundle.step.id}:progress:{index}",
+                step_type="agent_progress",
+                status=_execution_item_view_status(item),
+                title="Agent Progress",
+                summary=progress_text,
+                markdown=progress_text,
+                started_at=bundle.step.started_at or item.created_at,
+                completed_at=item.completed_at or bundle.step.completed_at,
+                badges=(StatusBadgeModel(label="Assistant", tone="info"),),
+                llm_invocation_id=_summary_text(summary, "llm_invocation_id"),
+                trace_step_id=bundle.step.id,
+            ),
+        )
+    return tuple(views)
+
+
+def _session_message_text(
+    session_query: WorkbenchSessionQueryPort | None,
+    message_id: str | None,
+) -> str | None:
+    if session_query is None or not message_id:
+        return None
+    try:
+        message = session_query.get_message(message_id)
+    except Exception:
+        return None
+    content_payload = getattr(message, "content_payload", None)
+    text = extract_text_content(content_blocks_from_payload(content_payload))
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return None
+
+
+def _chain_llm_step_view(
+    llm_query: WorkbenchLlmQueryPort | None,
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+    tool_only_streak: int = 0,
+) -> TurnStepView:
+    step = bundle.step
+    invocation_id = _llm_invocation_id_from_execution_items(bundle.items)
+    llm_invocation = _safe_llm_invocation(llm_query, invocation_id)
+    tool_names = _tool_names_from_execution_items(bundle.items)
+    is_dispatch_wait = (
+        step.status is ExecutionStepStatus.CREATED
+        and run.status in {OrchestrationRunStatus.ACCEPTED, OrchestrationRunStatus.QUEUED}
+    )
+    if is_dispatch_wait:
+        return _step(
+            run=run,
+            turn_id=turn_id,
+            step_id=f"execution:{step.id}",
+            step_type="agent_thinking",
+            status="queued",
+            title="Queued",
+            summary=run.waiting_reason or "Run is waiting for scheduler admission.",
+            started_at=run.queued_at or step.created_at,
+            completed_at=None,
+            trace_step_id=step.id,
+        )
+    diagnostics = _llm_step_diagnostics(llm_invocation, bundle.items)
+    summary = _llm_summary(run, llm_invocation=llm_invocation)
+    if diagnostics:
+        summary = f"{summary} {_llm_diagnostics_sentence(diagnostics)}"
+    if tool_only_streak >= 3:
+        summary = f"{summary} Tool-only streak: {tool_only_streak} LLM steps."
+    if llm_invocation is None and tool_names:
+        summary = f"{summary} Model requested tool call(s): {', '.join(tool_names)}."
+    badge_label = (
+        _llm_invocation_llm_id(llm_invocation)
+        or _summary_text_from_items(bundle.items, "llm_id")
+        or _llm_id(run)
+        or "Auto"
+    )
+    badges = (
+        StatusBadgeModel(label=badge_label, tone="info"),
+        *_llm_diagnostic_badges(diagnostics),
+        *_tool_only_streak_badges(tool_only_streak),
+    )
+    return _step(
+        run=run,
+        turn_id=turn_id,
+        step_id=f"execution:{step.id}",
+        step_type="llm",
+        status=_execution_step_view_status(step, run=run),
+        title="LLM Thinking",
+        summary=summary,
+        started_at=step.started_at or _llm_started_at(run, llm_invocation),
+        completed_at=(
+            step.completed_at
+            or (
+                _llm_completed_at(run, llm_invocation)
+                if step.status in {
+                    ExecutionStepStatus.COMPLETED,
+                    ExecutionStepStatus.FAILED,
+                    ExecutionStepStatus.CANCELLED,
+                }
+                else None
+            )
+        ),
+        badges=badges,
+        llm_invocation_id=invocation_id,
+        trace_step_id=step.id,
+    )
+
+
+def _chain_tool_step_views(
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+    tool_runs_by_id: dict[str, ToolRun],
+    artifact_query: WorkbenchArtifactQueryPort | None,
+) -> tuple[TurnStepView, ...]:
+    views: list[TurnStepView] = []
+    for item in bundle.items:
+        if item.kind is not ExecutionStepItemKind.TOOL_RUN:
+            continue
+        tool_run_id = _execution_item_owner_id(item, owner_kind="tool_run")
+        if tool_run_id is None:
+            continue
+        tool_run = tool_runs_by_id.get(tool_run_id)
+        summary = _execution_item_summary(item)
+        status = _tool_status(tool_run) if tool_run is not None else _execution_item_view_status(item)
+        failed = (
+            tool_run.status in _FAILED_TOOL_RUN_STATUSES
+            if tool_run is not None
+            else item.status is ExecutionStepItemStatus.FAILED
+        )
+        artifacts = (
+            _tool_artifacts(tool_run, artifact_query=artifact_query)
+            if tool_run is not None and tool_run.status in _TERMINAL_TOOL_RUN_STATUSES
+            else ()
+        )
+        tool_label = (
+            tool_run.tool_id
+            if tool_run is not None
+            else _summary_text(summary, "tool_id")
+            or _summary_text(summary, "tool_name")
+            or "Tool Call"
+        )
+        views.append(
+            _step(
+                run=run,
+                turn_id=turn_id,
+                step_id=f"execution:{bundle.step.id}:{item.id}",
+                step_type="error" if failed else "tool_call",
+                status=status,
+                title="Tool Failed" if failed else "Tool Call",
+                summary=(
+                    _tool_step_summary(tool_run)
+                    if tool_run is not None
+                    else _execution_tool_item_summary(summary, item)
+                ),
+                started_at=(
+                    tool_run.created_at
+                    if tool_run is not None
+                    else bundle.step.started_at or item.created_at
+                ),
+                completed_at=(
+                    tool_run.completed_at
+                    if tool_run is not None
+                    else item.completed_at
+                ),
+                artifacts=artifacts,
+                badges=(StatusBadgeModel(label=tool_label, tone="danger" if failed else "info"),),
+                tool_run_id=tool_run_id,
+                artifact_id=artifacts[0].artifact_id if artifacts else None,
+                trace_step_id=bundle.step.id,
+            ),
+        )
+    if views:
+        return tuple(views)
+    return (
+        _generic_execution_step_view(
+            run,
+            turn_id=turn_id,
+            bundle=bundle,
+        ),
+    )
+
+
+def _chain_approval_step_view(
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+) -> TurnStepView | None:
+    approval_item = next(
+        (
+            item
+            for item in bundle.items
+            if item.kind is ExecutionStepItemKind.APPROVAL_REQUEST
+        ),
+        None,
+    )
+    payload = (
+        _execution_item_summary(approval_item)
+        if approval_item is not None
+        else _pending_approval(run)
+    )
+    if not payload:
+        return None
+    request_id = _optional_text(payload.get("request_id")) or _optional_text(payload.get("id"))
+    approval_detail = _approval_detail(payload)
+    return _step(
+        run=run,
+        turn_id=turn_id,
+        step_id=f"execution:{bundle.step.id}",
+        step_type="approval_required",
+        status=_execution_step_view_status(bundle.step, run=run),
+        title="Approval Required",
+        summary=_approval_summary(payload),
+        started_at=bundle.step.started_at or bundle.step.created_at,
+        completed_at=bundle.step.completed_at,
+        badges=(StatusBadgeModel(label="Authorization", tone="warning"),),
+        linked_entities=_approval_entities(approval_detail),
+        approval=approval_detail,
+        approval_request_id=request_id,
+        trace_step_id=bundle.step.id,
+    )
+
+
+def _llm_step_diagnostics(
+    llm_invocation: Any | None,
+    items: tuple[ExecutionStepItem, ...],
+) -> dict[str, int | bool]:
+    result = getattr(llm_invocation, "result", None)
+    text = getattr(result, "text", None)
+    text_chars = len(text.strip()) if isinstance(text, str) and text.strip() else 0
+    raw_tool_calls = getattr(result, "tool_calls", None)
+    tool_calls_count = len(raw_tool_calls) if isinstance(raw_tool_calls, (tuple, list)) else 0
+    if tool_calls_count == 0:
+        tool_calls_count = len(_tool_call_names_from_execution_items(items))
+    tool_call_message_count = len(_tool_call_message_ids_from_execution_items(items))
+    progress_count = len(_assistant_progress_message_ids_from_execution_items(items))
+    if progress_count == 0 and _summary_text_from_items(items, "assistant_progress_text"):
+        progress_count = 1
+    if text_chars == 0:
+        progress_text = _summary_text_from_items(items, "assistant_progress_text")
+        text_chars = len(progress_text) if progress_text is not None else 0
+    return {
+        "text_present": text_chars > 0,
+        "text_chars": text_chars,
+        "tool_calls_count": tool_calls_count,
+        "tool_call_message_count": tool_call_message_count,
+        "progress_recorded": progress_count > 0,
+        "assistant_progress_message_count": progress_count,
+    }
+
+
+def _llm_bundle_is_tool_only(bundle: _ExecutionStepBundle) -> bool:
+    diagnostics = _llm_step_diagnostics(None, bundle.items)
+    return (
+        diagnostics.get("tool_calls_count", 0) > 0
+        and diagnostics.get("text_present") is False
+        and diagnostics.get("progress_recorded") is False
+    )
+
+
+def _llm_diagnostics_sentence(diagnostics: dict[str, int | bool]) -> str:
+    text_chars = diagnostics.get("text_chars")
+    tool_calls_count = diagnostics.get("tool_calls_count")
+    tool_call_message_count = diagnostics.get("tool_call_message_count")
+    progress_count = diagnostics.get("assistant_progress_message_count")
+    parts: list[str] = []
+    if isinstance(text_chars, int) and text_chars > 0:
+        parts.append(f"text: {text_chars} chars")
+    elif isinstance(tool_calls_count, int) and tool_calls_count > 0:
+        parts.append("text: none")
+    if isinstance(tool_calls_count, int) and tool_calls_count > 0:
+        parts.append(f"tool calls: {tool_calls_count}")
+    if isinstance(tool_call_message_count, int) and tool_call_message_count > 0:
+        parts.append(f"tool call messages: {tool_call_message_count}")
+    if isinstance(progress_count, int) and progress_count > 0:
+        parts.append(f"progress recorded: {progress_count}")
+    if not parts:
+        return ""
+    return "Diagnostics: " + "; ".join(parts) + "."
+
+
+def _llm_diagnostic_badges(
+    diagnostics: dict[str, int | bool],
+) -> tuple[StatusBadgeModel, ...]:
+    tool_calls_count = diagnostics.get("tool_calls_count")
+    tool_call_message_count = diagnostics.get("tool_call_message_count")
+    text_present = diagnostics.get("text_present") is True
+    progress_recorded = diagnostics.get("progress_recorded") is True
+    badges: list[StatusBadgeModel] = []
+    if isinstance(tool_calls_count, int) and tool_calls_count > 0:
+        badges.append(
+            StatusBadgeModel(
+                label="Text + tools" if text_present else "Tool only",
+                tone="success" if text_present else "warning",
+            ),
+        )
+    elif text_present:
+        badges.append(StatusBadgeModel(label="Text", tone="success"))
+    if progress_recorded:
+        badges.append(StatusBadgeModel(label="Progress recorded", tone="info"))
+    if isinstance(tool_call_message_count, int) and tool_call_message_count > 0:
+        badges.append(
+            StatusBadgeModel(
+                label=f"Tool messages: {tool_call_message_count}",
+                tone="info",
+            ),
+        )
+    return tuple(badges)
+
+
+def _tool_only_streak_badges(tool_only_streak: int) -> tuple[StatusBadgeModel, ...]:
+    if tool_only_streak < 3:
+        return ()
+    return (
+        StatusBadgeModel(
+            label=f"Tool-only streak: {tool_only_streak}",
+            tone="warning",
+        ),
+    )
+
+
+def _generic_execution_step_view(
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+) -> TurnStepView:
+    step = bundle.step
+    if step.kind is ExecutionStepKind.ERROR or step.status is ExecutionStepStatus.FAILED:
+        step_type = "error"
+        title = "Run Failed"
+        summary = (
+            step.error_payload.message
+            if step.error_payload is not None
+            else run.error.message
+            if run.error is not None
+            else "Run failed."
+        )
+    else:
+        step_type = "agent_thinking"
+        title = step.kind.value.replace("_", " ").title()
+        summary = f"Execution step: {step.kind.value}."
+    return _step(
+        run=run,
+        turn_id=turn_id,
+        step_id=f"execution:{step.id}",
+        step_type=step_type,
+        status=_execution_step_view_status(step, run=run),
+        title=title,
+        summary=summary,
+        started_at=step.started_at or step.created_at,
+        completed_at=step.completed_at,
+        trace_step_id=step.id,
+    )
+
+
+def _execution_step_bundles(
+    run_query: OrchestrationRunQueryPort,
+    turn_id: str,
+) -> tuple[_ExecutionStepBundle, ...]:
+    try:
+        chains = run_query.list_execution_chains(turn_id)
+    except Exception:
+        return ()
+    bundles: list[_ExecutionStepBundle] = []
+    for chain in chains:
+        try:
+            steps = run_query.list_execution_steps(chain.id)
+        except Exception:
+            continue
+        for step in steps:
+            try:
+                items = tuple(run_query.list_execution_step_items(step.id))
+            except Exception:
+                items = ()
+            bundles.append(_ExecutionStepBundle(step=step, items=items))
+    return tuple(
+        sorted(
+            bundles,
+            key=lambda bundle: (
+                bundle.step.created_at,
+                bundle.step.chain_id,
+                bundle.step.step_index,
+                bundle.step.id,
+            ),
+        ),
+    )
+
+
+def _execution_step_view_status(
+    step: ExecutionStep,
+    *,
+    run: OrchestrationRun,
+) -> str:
+    if step.status is ExecutionStepStatus.COMPLETED:
+        return "success"
+    if step.status is ExecutionStepStatus.FAILED:
+        return "failed"
+    if step.status is ExecutionStepStatus.CANCELLED:
+        return "cancelled"
+    if step.status is ExecutionStepStatus.WAITING:
+        return "waiting"
+    if step.status is ExecutionStepStatus.RUNNING:
+        return "running"
+    if run.status in {OrchestrationRunStatus.ACCEPTED, OrchestrationRunStatus.QUEUED}:
+        return "queued"
+    return "running"
+
+
+def _execution_item_view_status(item: ExecutionStepItem) -> str:
+    if item.status is ExecutionStepItemStatus.COMPLETED:
+        return "success"
+    if item.status is ExecutionStepItemStatus.FAILED:
+        return "failed"
+    if item.status is ExecutionStepItemStatus.CANCELLED:
+        return "cancelled"
+    if item.status is ExecutionStepItemStatus.WAITING:
+        return "waiting"
+    if item.status is ExecutionStepItemStatus.RUNNING:
+        return "running"
+    if item.status in {
+        ExecutionStepItemStatus.LATE_OBSERVED,
+        ExecutionStepItemStatus.LATE_IGNORED,
+    }:
+        return "success"
+    return "queued"
+
+
+def _execution_item_owner_id(
+    item: ExecutionStepItem,
+    *,
+    owner_kind: str,
+) -> str | None:
+    if item.owner is None or item.owner.owner_kind != owner_kind:
+        return None
+    return item.owner.owner_id
+
+
+def _execution_item_summary(
+    item: ExecutionStepItem | None,
+) -> dict[str, object]:
+    if item is None or not isinstance(item.summary_payload, dict):
+        return {}
+    return dict(item.summary_payload)
+
+
+def _summary_text(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _summary_text_from_items(
+    items: tuple[ExecutionStepItem, ...],
+    key: str,
+) -> str | None:
+    for item in items:
+        value = _summary_text(_execution_item_summary(item), key)
+        if value is not None:
+            return value
+    return None
+
+
+def _llm_invocation_id_from_execution_items(
+    items: tuple[ExecutionStepItem, ...],
+) -> str | None:
+    for item in items:
+        if item.kind is not ExecutionStepItemKind.LLM_INVOCATION:
+            continue
+        owner_id = _execution_item_owner_id(item, owner_kind="llm_invocation")
+        if owner_id is not None:
+            return owner_id
+        summary_id = _summary_text(_execution_item_summary(item), "llm_invocation_id")
+        if summary_id is not None:
+            return summary_id
+    return None
+
+
+def _tool_names_from_execution_items(
+    items: tuple[ExecutionStepItem, ...],
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in items:
+        if item.kind not in {
+            ExecutionStepItemKind.TOOL_CALL,
+            ExecutionStepItemKind.TOOL_RUN,
+        }:
+            continue
+        summary = _execution_item_summary(item)
+        name = _summary_text(summary, "tool_name") or _summary_text(summary, "tool_id")
+        if name is not None and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _tool_call_names_from_execution_items(
+    items: tuple[ExecutionStepItem, ...],
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in items:
+        summary = _execution_item_summary(item)
+        raw_names = summary.get("tool_call_names")
+        if isinstance(raw_names, (list, tuple)):
+            for raw_name in raw_names:
+                if not isinstance(raw_name, str):
+                    continue
+                name = raw_name.strip()
+                if name and name not in names:
+                    names.append(name)
+    return tuple(names)
+
+
+def _assistant_progress_message_ids_from_execution_items(
+    items: tuple[ExecutionStepItem, ...],
+) -> tuple[str, ...]:
+    ids: list[str] = []
+    for item in items:
+        summary = _execution_item_summary(item)
+        raw_ids = summary.get("assistant_progress_message_ids")
+        if isinstance(raw_ids, (list, tuple)):
+            for raw_id in raw_ids:
+                if not isinstance(raw_id, str):
+                    continue
+                message_id = raw_id.strip()
+                if message_id and message_id not in ids:
+                    ids.append(message_id)
+        if _summary_text(summary, "message_kind") != "assistant_progress":
+            continue
+        message_id = _summary_text(summary, "session_message_id")
+        if message_id is not None and message_id not in ids:
+            ids.append(message_id)
+    return tuple(ids)
+
+
+def _tool_call_message_ids_from_execution_items(
+    items: tuple[ExecutionStepItem, ...],
+) -> tuple[str, ...]:
+    ids: list[str] = []
+    for item in items:
+        summary = _execution_item_summary(item)
+        raw_ids = summary.get("tool_call_message_ids")
+        if not isinstance(raw_ids, (list, tuple)):
+            continue
+        for raw_id in raw_ids:
+            if not isinstance(raw_id, str):
+                continue
+            message_id = raw_id.strip()
+            if message_id and message_id not in ids:
+                ids.append(message_id)
+    return tuple(ids)
+
+
+def _execution_tool_item_summary(
+    summary: dict[str, object],
+    item: ExecutionStepItem,
+) -> str:
+    tool_name = _summary_text(summary, "tool_name") or _summary_text(summary, "tool_id")
+    status = _summary_text(summary, "status") or item.status.value
+    if tool_name is not None:
+        return f"{tool_name} · status: {status}"
+    return f"Tool run status: {status}"
+
+
+def _execution_tool_run_ids_for_run(
+    run_query: OrchestrationRunQueryPort,
+    turn_id: str,
+) -> tuple[str, ...]:
+    ids: list[str] = []
+    for bundle in _execution_step_bundles(run_query, turn_id):
+        for item in bundle.items:
+            if item.kind is not ExecutionStepItemKind.TOOL_RUN:
+                continue
+            tool_run_id = _execution_item_owner_id(item, owner_kind="tool_run")
+            if tool_run_id is not None and tool_run_id not in ids:
+                ids.append(tool_run_id)
+    return tuple(ids)
+
+
+def _execution_llm_invocation_ids_for_run(
+    run_query: OrchestrationRunQueryPort,
+    turn_id: str,
+) -> tuple[str, ...]:
+    ids: list[str] = []
+    for bundle in _execution_step_bundles(run_query, turn_id):
+        invocation_id = _llm_invocation_id_from_execution_items(bundle.items)
+        if invocation_id is not None and invocation_id not in ids:
+            ids.append(invocation_id)
+    return tuple(ids)
+
+
+def _safe_llm_invocation(
+    llm_query: WorkbenchLlmQueryPort | None,
+    invocation_id: str | None,
+) -> Any | None:
+    if invocation_id is None or llm_query is None:
+        return None
+    try:
+        return llm_query.get_invocation(invocation_id)
+    except Exception:
+        return None
 
 
 def _linked_entity(
@@ -952,7 +1768,10 @@ def _runtime_action(
 
 
 def _trace_route(trace: TraceContext) -> str:
-    return f"/trace/{trace.trace_id}"
+    route = f"/trace/{trace.trace_id}"
+    if trace.step_id:
+        return f"{route}?step_id={trace.step_id}"
+    return route
 
 
 def _trace_entity(trace: TraceContext) -> WorkbenchLinkedEntity:
@@ -1254,6 +2073,7 @@ def _display_tool_runs(
     tool_runs: list[ToolRun] | None = None,
 ) -> tuple[_DisplayToolRun, ...]:
     return _tool_runs_for_runs(
+        run_query,
         tool_query,
         _display_source_runs(run_query, run, candidate_runs=candidate_runs),
         tool_runs=tool_runs,
@@ -1336,6 +2156,7 @@ def _linked_child_run_ids(run: OrchestrationRun) -> tuple[str, ...]:
 
 
 def _tool_runs_for_runs(
+    run_query: OrchestrationRunQueryPort,
     tool_query: WorkbenchToolRunQueryPort | None,
     runs: tuple[OrchestrationRun, ...],
     *,
@@ -1353,7 +2174,7 @@ def _tool_runs_for_runs(
     for run in runs:
         for tool_run_id in (
             *run.pending_tool_run_ids,
-            *_metadata_list(run, "inline_tool_run_ids"),
+            *_execution_tool_run_ids_for_run(run_query, run.id),
         ):
             tool_id_to_run.setdefault(tool_run_id, run)
     related: list[_DisplayToolRun] = []
@@ -1617,8 +2438,12 @@ def _agent_ref(
 def _llm_ref(
     run: OrchestrationRun,
     llm_query: WorkbenchLlmQueryPort | None,
+    *,
+    run_query: OrchestrationRunQueryPort | None = None,
 ) -> RuntimeRef:
-    llm_id = _llm_id(run) or _llm_invocation_llm_id(_llm_invocation_for_run(llm_query, run))
+    llm_id = _llm_id(run) or _llm_invocation_llm_id(
+        _llm_invocation_for_run(run_query, llm_query, run),
+    )
     if llm_id is None:
         return RuntimeRef(id="auto", name="Auto")
     if llm_query is not None:
@@ -1636,26 +2461,31 @@ def _llm_ref(
 
 
 def _llm_invocation_for_run(
+    run_query: OrchestrationRunQueryPort | None,
     llm_query: WorkbenchLlmQueryPort | None,
     run: OrchestrationRun,
 ) -> Any | None:
-    invocation_id = _metadata_str(run, "llm_invocation_id")
-    if invocation_id is None or llm_query is None:
+    invocation_ids: list[str] = []
+    if run_query is not None:
+        invocation_ids.extend(_execution_llm_invocation_ids_for_run(run_query, run.id))
+    if not invocation_ids or llm_query is None:
         return None
-    try:
-        return llm_query.get_invocation(invocation_id)
-    except Exception:
-        return None
+    for invocation_id in dict.fromkeys(invocation_ids):
+        invocation = _safe_llm_invocation(llm_query, invocation_id)
+        if invocation is not None:
+            return invocation
+    return None
 
 
 def _llm_invocations_for_runs(
+    run_query: OrchestrationRunQueryPort,
     llm_query: WorkbenchLlmQueryPort | None,
     runs: tuple[OrchestrationRun, ...],
 ) -> tuple[Any, ...]:
     invocations: list[Any] = []
     seen: set[str] = set()
     for run in runs:
-        invocation = _llm_invocation_for_run(llm_query, run)
+        invocation = _llm_invocation_for_run(run_query, llm_query, run)
         invocation_id = _optional_text(getattr(invocation, "id", None))
         if invocation is None or invocation_id is None or invocation_id in seen:
             continue
@@ -1989,10 +2819,6 @@ def _llm_summary(run: OrchestrationRun, *, llm_invocation: Any | None = None) ->
         return message or "Model invocation failed."
     if run.stage is OrchestrationRunStage.LLM:
         return "Model invocation is in progress."
-    if run.stage is OrchestrationRunStage.TOOL:
-        names = _metadata_list(run, "tool_call_names")
-        if names:
-            return f"Model requested tool call(s): {', '.join(names)}."
     if run.status in {OrchestrationRunStatus.COMPLETED, OrchestrationRunStatus.WAITING}:
         return "Model response was processed by orchestration."
     return f"Run stage: {run.stage.value}."
@@ -2195,10 +3021,8 @@ def _metrics(
     related_tool_runs: tuple[ToolRun, ...] = (),
     llm_invocations: tuple[Any, ...] = (),
 ) -> RunMetrics:
-    inline_tool_ids = _metadata_list(run, "inline_tool_run_ids")
     known_tool_ids = {
         *run.pending_tool_run_ids,
-        *inline_tool_ids,
         *(tool_run.id for tool_run in related_tool_runs),
     }
     prompt_report = run.metadata.get("prompt_report")
@@ -2230,7 +3054,6 @@ def _metrics_for_runs(
     llm_calls = len(llm_invocations)
     for run in runs:
         known_tool_ids.update(run.pending_tool_run_ids)
-        known_tool_ids.update(_metadata_list(run, "inline_tool_run_ids"))
         prompt_report = run.metadata.get("prompt_report")
         if not llm_invocations and isinstance(prompt_report, dict):
             raw_total = prompt_report.get("token_total") or prompt_report.get("total_tokens")
@@ -2305,10 +3128,11 @@ def _output_text(run: OrchestrationRun) -> str | None:
 def _pending_approval(run: OrchestrationRun) -> dict[str, object] | None:
     if not _run_is_waiting_for_approval(run):
         return None
-    value = run.metadata.get("pending_approval_request")
-    if isinstance(value, dict):
-        return dict(value)
-    return None
+    return (
+        dict(run.pending_approval_request_payload)
+        if run.pending_approval_request_payload is not None
+        else None
+    )
 
 
 def _run_is_waiting_for_approval(run: OrchestrationRun) -> bool:
@@ -2330,13 +3154,6 @@ def _optional_text(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def _metadata_list(run: OrchestrationRun, key: str) -> list[str]:
-    value = run.metadata.get(key)
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _truncate(value: str, *, limit: int) -> str:

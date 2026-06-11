@@ -122,7 +122,7 @@ class ContextRenderSnapshotModel(Base):
         index=True,
     )
     session_key: Mapped[str] = mapped_column(String(240), nullable=False, index=True)
-    run_id: Mapped[str] = mapped_column(String(160), nullable=False, unique=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     tree_revision: Mapped[int] = mapped_column(Integer(), nullable=False)
     prompt_body: Mapped[str] = mapped_column(Text(), nullable=False)
     provider_attachments: Mapped[dict[str, object]] = mapped_column(

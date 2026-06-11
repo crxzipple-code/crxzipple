@@ -95,9 +95,15 @@ class EventTraceReadModelProvider:
         trace_id: str,
         *,
         aliases: set[str] | None = None,
+        step_id: str | None = None,
         limit: int = 200,
     ) -> TraceSummaryView:
-        events = self.list_trace_events(trace_id, aliases=aliases, limit=limit)
+        events = self.list_trace_events(
+            trace_id,
+            aliases=aliases,
+            step_id=step_id,
+            limit=limit,
+        )
         timestamps = [
             datetime.fromisoformat(event.timestamp)
             for event in events
@@ -132,6 +138,7 @@ class EventTraceReadModelProvider:
         trace_id: str,
         *,
         aliases: set[str] | None = None,
+        step_id: str | None = None,
         limit: int = 200,
     ) -> tuple[TraceEventView, ...]:
         normalized_aliases = {
@@ -139,6 +146,7 @@ class EventTraceReadModelProvider:
             for item in {trace_id, *(aliases or set())}
             if isinstance(item, str) and item.strip()
         }
+        normalized_step_id = step_id.strip() if isinstance(step_id, str) else ""
         if not normalized_aliases:
             return ()
         records: list[EventTopicRecord] = []
@@ -149,6 +157,11 @@ class EventTraceReadModelProvider:
                 limit=per_topic_limit,
             ):
                 if _record_matches_alias(record, normalized_aliases):
+                    if normalized_step_id and not _record_matches_alias(
+                        record,
+                        {normalized_step_id},
+                    ):
+                        continue
                     records.append(record)
         records.sort(
             key=lambda record: (
@@ -323,6 +336,9 @@ def _status_from_payload(payload: dict[str, Any], *, kind: str) -> str:
 
 
 def _summary_from_payload(payload: dict[str, Any], *, event_name: str) -> str:
+    repeated_probe_summary = _repeated_probe_summary(payload)
+    if repeated_probe_summary is not None:
+        return repeated_probe_summary
     for key in ("summary", "message", "reason", "error_message", "text_delta", "text"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
@@ -330,6 +346,35 @@ def _summary_from_payload(payload: dict[str, Any], *, event_name: str) -> str:
     if event_name:
         return event_name.replace(".", " ")
     return "Runtime event"
+
+
+def _repeated_probe_summary(payload: dict[str, Any]) -> str | None:
+    observation = payload.get("repeated_probe_observation")
+    if not isinstance(observation, dict):
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            observation = metadata.get("repeated_probe_observation")
+    if not isinstance(observation, dict):
+        return None
+    repeated = observation.get("repeated")
+    if not isinstance(repeated, list) or not repeated:
+        return None
+    first = repeated[0]
+    if not isinstance(first, dict):
+        return None
+    count = _optional_int(first.get("count")) or 0
+    target = (
+        _optional_str(first.get("normalized_url"))
+        or _optional_str(first.get("command_fingerprint"))
+        or _optional_str(first.get("argument_fingerprint"))
+        or _optional_str(first.get("key"))
+        or "target"
+    )
+    repeated_count = _optional_int(observation.get("repeated_count")) or len(repeated)
+    return _truncate(
+        f"Repeated probes: {repeated_count} target(s), top={target} x{count}",
+        limit=120,
+    )
 
 
 def _trace_status(events: tuple[TraceEventView, ...]) -> str:
@@ -382,6 +427,15 @@ def _optional_str(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _truncate(value: str, *, limit: int) -> str:

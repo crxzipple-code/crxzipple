@@ -6,6 +6,7 @@ import threading
 from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
 )
+from crxzipple.modules.orchestration.domain import ExecutionOwnerReference
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.shared.domain.events import Event
 
@@ -18,7 +19,31 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
     def test_sessions_yield_stops_inline_tool_auto_continue(self) -> None:
         adapter = _SequentialResultAdapter(
             LlmResult(
-                text="yield now",
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-expand-sessions",
+                        name="context_tree.expand",
+                        arguments={
+                            "node_id": "tools.bundle.bundled.local_package.sessions",
+                        },
+                    ),
+                ),
+            ),
+            LlmResult(
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-expand-sessions-run-control",
+                        name="context_tree.expand",
+                        arguments={
+                            "node_id": (
+                                "tools.bundle.bundled.local_package.sessions."
+                                "group.run_control"
+                            ),
+                        },
+                    ),
+                ),
+            ),
+            LlmResult(
                 tool_calls=(
                     ToolCallIntent(
                         id="call-yield-1",
@@ -62,7 +87,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(len(adapter.requests), 1)
+        self.assertEqual(len(adapter.requests), 3)
         self.assertEqual(processed.result_payload["yield_requested"], True)
         self.assertEqual(
             processed.result_payload["yield_reason"],
@@ -190,6 +215,30 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
             ),
         )
+        self.orchestration_executor_service.advance_assignment(
+            run_id=run.id,
+            worker_id="worker-1",
+            stage=OrchestrationRunStage.LLM,
+            step_increment=1,
+        )
+        self.orchestration_executor_service.advance_assignment(
+            run_id=run.id,
+            worker_id="worker-1",
+            stage=OrchestrationRunStage.TOOL,
+            execution_payload={
+                "llm_invocation_id": "llm-early-tool-finish",
+                "tool_run_links": [
+                    {
+                        "tool_call_id": "call-early-tool-finish",
+                        "tool_name": "background_echo",
+                        "tool_run_id": queued_tool_run.id,
+                        "tool_id": "background_echo",
+                        "status": "queued",
+                        "background": True,
+                    },
+                ],
+            },
+        )
         finished_tool_run = process_next_background_tool_run(
             self.container,
             worker_id="tool-worker-1",
@@ -286,7 +335,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "dispatch.task.heartbeated",
                 [
                     event.event_name
-                    for event in container.require(AppKey.EVENTS_BUS).published_events
+                    for event in published_event_bus_events(container)
                     if isinstance(event, Event) and bool(event.name)
                 ],
             )
@@ -425,15 +474,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             any("# Available Tools" in str(message.content) for message in system_messages),
         )
         tool_schema_names = {schema.name for schema in adapter.requests[0].tool_schemas}
-        self.assertIn("sessions_send", tool_schema_names)
-        self.assertIn("sessions_spawn", tool_schema_names)
-        self.assertIn("sessions_yield", tool_schema_names)
+        self.assertIn("context_tree.expand", tool_schema_names)
+        self.assertNotIn("sessions_send", tool_schema_names)
+        self.assertNotIn("sessions_spawn", tool_schema_names)
+        self.assertNotIn("sessions_yield", tool_schema_names)
         context_tree_message = next(
             message
             for message in system_messages
             if message.metadata.get("prompt_block_kind") == "context_workspace"
         )
         self.assertIn("tools.available", str(context_tree_message.content))
+        self.assertIn("Session Runtime", str(context_tree_message.content))
         self.assertNotIn(
             "session_tools",
             [
@@ -442,7 +493,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             ],
         )
 
-    def test_process_next_orchestration_assignment_can_read_skill_and_continue(self) -> None:
+    def test_process_next_orchestration_assignment_can_use_skill_read_and_continue(self) -> None:
         adapter = _SkillReadingAdapter()
         self.llm_adapter_registry.register(
             LlmApiFamily.OPENAI_RESPONSES,
@@ -497,23 +548,26 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
             assert completed.result_payload is not None
             self.assertEqual(completed.result_payload["output_text"], "used repo-review skill")
-            self.assertEqual(len(adapter.requests), 2)
+            self.assertEqual(len(adapter.requests), 3)
             skill_tool_messages = [
                 message
-                for message in adapter.requests[1].messages
-                if message.role is LlmMessageRole.TOOL and message.name == "skill_read"
+                for message in adapter.requests[2].messages
+                if message.role is LlmMessageRole.TOOL
+                and message.name == "skill_read"
             ]
             self.assertEqual(len(skill_tool_messages), 1)
-            self.assertIn(
-                "# Skill: repo-review",
-                str(skill_tool_messages[0].content),
+            context_tree_message = next(
+                message
+                for message in adapter.requests[2].messages
+                if message.role is LlmMessageRole.SYSTEM
+                and message.metadata.get("prompt_block_kind") == "context_workspace"
             )
-            self.assertIn("- Version: 1", str(skill_tool_messages[0].content))
-            self.assertIn("- Tags: review, repository", str(skill_tool_messages[0].content))
-            self.assertIn("- Suggested tools: memory_search", str(skill_tool_messages[0].content))
+            self.assertIn("skills.skill.repo-review", str(context_tree_message.content))
+            self.assertIn("SKILL.md", str(context_tree_message.content))
+            self.assertIn("Suggested tools: memory_search", str(context_tree_message.content))
             self.assertIn(
-                "Review changes carefully and cite concrete findings.",
-                str(skill_tool_messages[0].content),
+                "skill_read",
+                str(context_tree_message.content),
             )
             session_messages = self.session_service.list_messages(
                 ListSessionMessagesInput(
@@ -530,7 +584,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(len(skill_results), 1)
             self.assertEqual(skill_results[0].metadata["tool_name"], "skill_read")
             self.assertIn(
-                "# Skill: repo-review",
+                "# Repo Review",
                 str(skill_results[0].content_payload.get("content")),
             )
 
@@ -713,7 +767,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         )
         resolution_event = next(
             event
-            for event in self.container.require(AppKey.EVENTS_BUS).published_events
+            for event in self.published_event_bus_events()
             if event.event_name == "skills.resolution.completed"
             and event.payload.get("run_id") == "run-resolve-skill-visibility"
         )
@@ -821,7 +875,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(context_workspace.metadata["available_skill_names"], [])
         resolution_event = next(
             event
-            for event in self.container.require(AppKey.EVENTS_BUS).published_events
+            for event in self.published_event_bus_events()
             if event.event_name == "skills.resolution.completed"
             and event.payload.get("run_id") == "run-blocked-skills-observed"
         )
@@ -915,10 +969,10 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 completed.result_payload["output_text"],
                 "used skill guidance without mode switch",
             )
-            self.assertEqual(len(adapter.requests), 2)
+            self.assertEqual(len(adapter.requests), 3)
             second_request_tool_names = [
                 message.name
-                for message in adapter.requests[1].messages
+                for message in adapter.requests[2].messages
                 if message.role is LlmMessageRole.TOOL
             ]
             self.assertIn("skill_read", second_request_tool_names)
@@ -984,7 +1038,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             )
             second_request_tool_names = [
                 message.name
-                for message in adapter.requests[1].messages
+                for message in adapter.requests[2].messages
                 if message.role is LlmMessageRole.TOOL
             ]
             self.assertEqual(second_request_tool_names.count("skill_read"), 2)
@@ -1008,6 +1062,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             return ToolRunResult.text(
                 str(arguments.get("message") or ""),
                 details={"echo": arguments.get("message")},
+                metadata={
+                    "artifact_ids": ["artifact-echo"],
+                    "browser_target_id": "tab-echo",
+                    "custom_untrusted": "not persisted",
+                    "execution_context": {"large": "not persisted"},
+                },
             )
 
         self.local_runtime_registry.register(tool, echo)
@@ -1040,30 +1100,86 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
-        self.assertEqual(processed.current_step, 2)
+        self.assertEqual(processed.current_step, 4)
         assert processed.result_payload is not None
         self.assertEqual(processed.result_payload["output_text"], "tool loop complete")
         self.assertEqual(processed.result_payload["llm_id"], "openai.gpt-5.4-mini")
-        self.assertEqual(len(adapter.requests), 2)
+        self.assertEqual(len(adapter.requests), 4)
         first_schema_names = [schema.name for schema in adapter.requests[0].tool_schemas]
-        self.assertIn("echo", first_schema_names)
-        self.assertIn("memory_read", first_schema_names)
-        self.assertIn("memory_search", first_schema_names)
-        self.assertIn("memory_write_daily", first_schema_names)
-        self.assertIn("skill_read", first_schema_names)
-        self.assertEqual(adapter.requests[1].messages[0].role, LlmMessageRole.SYSTEM)
-        self.assertIn("<context_tree", str(adapter.requests[1].messages[0].content))
+        self.assertIn("context_tree.expand", first_schema_names)
+        self.assertNotIn("echo", first_schema_names)
+        second_schema_names = [schema.name for schema in adapter.requests[1].tool_schemas]
+        self.assertIn("context_tree.enable_tool_schema", second_schema_names)
+        self.assertNotIn("echo", second_schema_names)
+        third_schema_names = [schema.name for schema in adapter.requests[2].tool_schemas]
+        self.assertIn("echo", third_schema_names)
+        self.assertEqual(adapter.requests[3].messages[0].role, LlmMessageRole.SYSTEM)
+        self.assertIn("<context_tree", str(adapter.requests[3].messages[0].content))
+        echo_messages = [
+            message
+            for message in adapter.requests[3].messages
+            if message.tool_call_id == "call-echo-1"
+        ]
         self.assertEqual(
-            [message.role for message in adapter.requests[1].messages[-3:]],
-            [
-                LlmMessageRole.USER,
-                LlmMessageRole.ASSISTANT,
-                LlmMessageRole.TOOL,
-            ],
+            [message.role for message in echo_messages],
+            [LlmMessageRole.ASSISTANT, LlmMessageRole.TOOL],
         )
-        self.assertEqual(adapter.requests[1].messages[-2].tool_call_id, "call-echo-1")
-        self.assertEqual(adapter.requests[1].messages[-1].tool_call_id, "call-echo-1")
-        self.assertEqual(adapter.requests[1].messages[-1].name, "echo")
+        self.assertEqual(echo_messages[1].name, "echo")
+        latest_invocation = self.llm_service.list_invocations(
+            llm_id="openai.gpt-5.4-mini",
+            limit=1,
+        )[0]
+        self.assertEqual(
+            latest_invocation.request_metadata["direct_transcript_session_message_count"],
+            3,
+        )
+        self.assertIn(
+            "call-echo-1",
+            latest_invocation.request_metadata["direct_tool_protocol_call_ids"],
+        )
+        self.assertNotIn(
+            "call-expand-echo",
+            latest_invocation.request_metadata["direct_tool_protocol_call_ids"],
+        )
+        self.assertNotIn(
+            "call-enable-echo",
+            latest_invocation.request_metadata["direct_tool_protocol_call_ids"],
+        )
+        self.assertEqual(
+            latest_invocation.request_metadata["direct_transcript_sequence_range"],
+            {
+                "sessions": [
+                    {
+                        "session_id": processed.active_session_id,
+                        "from_sequence_no": 1,
+                        "to_sequence_no": 7,
+                        "message_count": 3,
+                    },
+                ],
+            },
+        )
+        llm_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=latest_invocation.id,
+            ),
+        )
+        self.assertEqual(len(llm_items), 1)
+        consumption = llm_items[0].summary_payload["llm_transcript_consumption"]
+        self.assertEqual(consumption["direct_transcript_session_message_count"], 3)
+        self.assertIn("call-echo-1", consumption["direct_tool_protocol_call_ids"])
+        self.assertNotIn(
+            "call-expand-echo",
+            consumption["direct_tool_protocol_call_ids"],
+        )
+        self.assertNotIn(
+            "call-enable-echo",
+            consumption["direct_tool_protocol_call_ids"],
+        )
+        self.assertEqual(
+            consumption["direct_transcript_sequence_range"],
+            latest_invocation.request_metadata["direct_transcript_sequence_range"],
+        )
 
         session_messages = self.session_service.list_messages(
             ListSessionMessagesInput(
@@ -1073,13 +1189,207 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(
             [message.role for message in session_messages],
-            ["user", "assistant", "tool", "assistant"],
+            [
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+            ],
         )
-        self.assertEqual(session_messages[1].metadata["tool_call_id"], "call-echo-1")
-        self.assertEqual(session_messages[2].metadata["tool_call_id"], "call-echo-1")
+        self.assertEqual(session_messages[1].metadata["tool_call_id"], "call-expand-echo")
+        self.assertEqual(session_messages[2].metadata["tool_call_id"], "call-expand-echo")
+        self.assertEqual(session_messages[3].metadata["tool_call_id"], "call-enable-echo")
+        self.assertEqual(session_messages[4].metadata["tool_call_id"], "call-enable-echo")
+        self.assertEqual(session_messages[5].metadata["tool_call_id"], "call-echo-1")
+        self.assertEqual(session_messages[6].metadata["tool_call_id"], "call-echo-1")
+        echo_result_payload = session_messages[6].content_payload
+        self.assertEqual(
+            echo_result_payload["metadata"],
+            {
+                "artifact_ids": ["artifact-echo"],
+                "browser_target_id": "tab-echo",
+            },
+        )
+
+    def test_text_with_tool_calls_records_assistant_progress_for_next_prompt(self) -> None:
+        adapter = _SequentialResultAdapter(
+            LlmResult(
+                tool_calls=(
+                    _expand_tool_bundle_call(
+                        call_id="call-expand-echo",
+                        source_id="test.local_package.echo",
+                    ),
+                ),
+            ),
+            LlmResult(
+                tool_calls=(
+                    _enable_tool_schema_call(
+                        call_id="call-enable-echo",
+                        tool_id="echo",
+                    ),
+                ),
+            ),
+            LlmResult(
+                text="我先检查页面状态。",
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-echo-progress",
+                        name="echo",
+                        arguments={"message": "progress-visible"},
+                    ),
+                ),
+            ),
+            "tool loop complete",
+        )
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Returns the input payload for local inline execution tests.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
+        )
+
+        async def echo(arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(str(arguments.get("message") or ""))
+
+        self.local_runtime_registry.register(tool, echo)
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-text-tool-progress-session",
+                inbound_instruction=InboundInstruction(source="cli", content="search"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(len(adapter.requests), 4)
+
+        session_messages = self.session_service.list_messages(
+            ListSessionMessagesInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        progress_messages = [
+            message
+            for message in session_messages
+            if message.role == "assistant"
+            and message.source_kind == "llm_invocation"
+            and message.content_payload.get("text") == "我先检查页面状态。"
+        ]
+        self.assertEqual(len(progress_messages), 1)
+        self.assertEqual(
+            progress_messages[0].content_payload["finish_reason"],
+            "tool_calls",
+        )
+        function_call_messages = [
+            message
+            for message in session_messages
+            if message.role == "assistant"
+            and message.content_payload.get("type") == "function_call"
+            and message.content_payload.get("call_id") == "call-echo-progress"
+        ]
+        self.assertEqual(len(function_call_messages), 1)
+        progress_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="session_message",
+                owner_id=progress_messages[0].id,
+            ),
+        )
+        self.assertEqual(len(progress_items), 1)
+        self.assertEqual(
+            progress_items[0].summary_payload["message_kind"],
+            "assistant_progress",
+        )
+        function_call_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="session_message",
+                owner_id=function_call_messages[0].id,
+            ),
+        )
+        self.assertEqual(function_call_items, [])
+        llm_invocation_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+            ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=progress_items[0].summary_payload["llm_invocation_id"],
+            ),
+        )
+        self.assertEqual(len(llm_invocation_items), 1)
+        self.assertEqual(
+            llm_invocation_items[0].summary_payload["assistant_progress_message_ids"],
+            [progress_messages[0].id],
+        )
+        self.assertEqual(
+            llm_invocation_items[0].summary_payload["tool_call_message_ids"],
+            [function_call_messages[0].id],
+        )
+        diagnostic_events = [
+            event
+            for event in self.published_event_bus_events()
+            if event.name == "orchestration.execution.llm_step_completed"
+            and event.payload.get("assistant_progress_message_ids")
+            == [progress_messages[0].id]
+        ]
+        self.assertEqual(len(diagnostic_events), 1)
+        self.assertEqual(
+            diagnostic_events[0].payload["tool_call_message_ids"],
+            [function_call_messages[0].id],
+        )
+
+        final_request_content = [
+            message.content for message in adapter.requests[3].messages
+        ]
+        self.assertIn("我先检查页面状态。", str(final_request_content))
+        self.assertTrue(_has_tool_call_message(adapter.requests[3], "echo"))
 
     def test_process_next_orchestration_assignment_executes_multiple_inline_tool_calls_concurrently(self) -> None:
         adapter = _SequentialResultAdapter(
+            LlmResult(
+                tool_calls=(
+                    _expand_tool_bundle_call(
+                        call_id="call-expand-echo",
+                        source_id="test.local_package.echo",
+                    ),
+                ),
+            ),
+            LlmResult(
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-enable-echo",
+                        name="context_tree.enable_tool_schema",
+                        arguments={"node_id": "tools.tool.echo"},
+                    ),
+                ),
+            ),
             LlmResult(
                 tool_calls=(
                     ToolCallIntent(
@@ -1156,11 +1466,11 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
         self.assertCountEqual(entered, ["first", "second"])
-        self.assertEqual(len(adapter.requests), 2)
+        self.assertEqual(len(adapter.requests), 4)
         tool_messages = [
             message
-            for message in adapter.requests[1].messages
-            if message.role is LlmMessageRole.TOOL
+            for message in adapter.requests[3].messages
+            if message.role is LlmMessageRole.TOOL and message.name == "echo"
         ]
         self.assertEqual(
             [message.tool_call_id for message in tool_messages],
@@ -1354,7 +1664,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             assert processed is not None
             self.assertEqual(processed.status, OrchestrationRunStatus.WAITING)
             self.assertEqual(processed.stage, OrchestrationRunStage.WAITING_ON_TOOL)
-            self.assertEqual(processed.current_step, 1)
+            self.assertEqual(processed.current_step, 2)
             self.assertEqual(processed.waiting_reason, "tool_background_wait")
             self.assertEqual(len(processed.pending_tool_run_ids), 1)
 
@@ -1369,8 +1679,13 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                     active_session_only=True,
                 ),
             )
-            self.assertEqual([message.role for message in session_messages], ["user", "assistant"])
-            self.assertEqual(session_messages[1].metadata["tool_call_id"], "call-bg-1")
+            self.assertEqual(
+                [message.role for message in session_messages],
+                ["user", "assistant", "tool", "assistant"],
+            )
+            self.assertEqual(session_messages[1].metadata["tool_call_id"], "call-expand-background")
+            self.assertEqual(session_messages[2].metadata["tool_call_id"], "call-expand-background")
+            self.assertEqual(session_messages[3].metadata["tool_call_id"], "call-bg-1")
         finally:
             custom_harness.close()
 
@@ -1663,20 +1978,25 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(finished_tool_run.id, background_tool_run_id)
             self.assertEqual(finished_tool_run.status, ToolRunStatus.SUCCEEDED)
 
+            self.assertGreater(publish_outbox_events(container), 0)
             container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
                 limit_per_subscription=10,
             )
-            processed_signal = container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_next_signal(
+            processed_continuation = container.require(
+                AppKey.ORCHESTRATION_SCHEDULER_SERVICE,
+            ).process_next_continuation(
                 worker_id="scheduler-1",
             )
-            self.assertIsNotNone(processed_signal)
-            assert processed_signal is not None
+            self.assertIsNotNone(processed_continuation)
+            assert processed_continuation is not None
             self.assertEqual(
-                processed_signal.signal_kind.value,
+                processed_continuation.continuation_kind.value,
                 "tool_terminal",
             )
 
-            resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id)
+            resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(
+                run.id,
+            )
             self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
             self.assertEqual(resumed.stage, OrchestrationRunStage.QUEUED)
             self.assertEqual(resumed.pending_tool_run_ids, ())
@@ -1694,10 +2014,10 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             )
             self.assertEqual(
                 [message.role for message in session_messages],
-                ["user", "assistant", "tool"],
+                ["user", "assistant", "tool", "assistant", "tool"],
             )
-            self.assertEqual(session_messages[2].source_id, background_tool_run_id)
-            self.assertEqual(session_messages[2].metadata["tool_call_id"], "call-bg-1")
+            self.assertEqual(session_messages[4].source_id, background_tool_run_id)
+            self.assertEqual(session_messages[4].metadata["tool_call_id"], "call-bg-1")
 
             completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
@@ -1706,27 +2026,28 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             assert completed is not None
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
             self.assertEqual(completed.stage, OrchestrationRunStage.COMPLETED)
-            self.assertEqual(completed.current_step, 2)
+            self.assertEqual(completed.current_step, 3)
             assert completed.result_payload is not None
             self.assertEqual(
                 completed.result_payload["output_text"],
                 "background loop complete",
             )
-            self.assertEqual(len(adapter.requests), 2)
-            self.assertEqual(adapter.requests[1].messages[0].role, LlmMessageRole.SYSTEM)
-            self.assertIn("<context_tree", str(adapter.requests[1].messages[0].content))
+            self.assertEqual(len(adapter.requests), 3)
+            self.assertEqual(adapter.requests[2].messages[0].role, LlmMessageRole.SYSTEM)
+            self.assertIn("<context_tree", str(adapter.requests[2].messages[0].content))
+            background_messages = [
+                message
+                for message in adapter.requests[2].messages
+                if message.tool_call_id == "call-bg-1"
+            ]
             self.assertEqual(
-                [message.role for message in adapter.requests[1].messages[-3:]],
-                [
-                    LlmMessageRole.USER,
-                    LlmMessageRole.ASSISTANT,
-                    LlmMessageRole.TOOL,
-                ],
+                [message.role for message in background_messages],
+                [LlmMessageRole.ASSISTANT, LlmMessageRole.TOOL],
             )
             self.assertEqual(completed.metadata["prompt_mode"], "recovery_resume")
             recovery_system_messages = [
                 message
-                for message in adapter.requests[1].messages
+                for message in adapter.requests[2].messages
                 if message.role is LlmMessageRole.SYSTEM
             ]
             context_tree_message = next(
@@ -1752,6 +2073,361 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertFalse(
                 any("# Recalled Memory" in str(message.content) for message in recovery_system_messages),
             )
+        finally:
+            custom_harness.close()
+
+    def test_failed_background_tool_result_resumes_with_model_visible_error(self) -> None:
+        custom_harness = SqliteTestHarness()
+        settings = replace(
+            load_settings(),
+            authorization_enabled=True,
+            authorization_policy_paths=(
+                str(
+                    Path(__file__).resolve().parents[2]
+                    / "config"
+                    / "authorization_policies"
+                    / "default.yaml"
+                ),
+            ),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        custom_harness.initialize_schema(settings=settings)
+        container = custom_harness.build_runtime_container(settings=settings)
+        try:
+            adapter = _BackgroundResumeAdapter()
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+                LlmApiFamily.OPENAI_RESPONSES,
+                adapter,
+            )
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).register_profile(
+                RegisterLlmProfileInput(
+                    id="openai.gpt-5.4-mini",
+                    provider=LlmProviderKind.OPENAI,
+                    api_family=LlmApiFamily.OPENAI_RESPONSES,
+                    model_name="gpt-5.4-mini",
+                    credential_binding_id=credential_binding_id,
+                ),
+            )
+            container.require(AppKey.AGENT_SERVICE).register_profile(
+                RegisterAgentProfileInput(
+                    id="assistant",
+                    name="Assistant",
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt="Be helpful and concise.",
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(
+                        default_llm_id="openai.gpt-5.4-mini",
+                    ),
+                ),
+            )
+
+            tool = seed_catalog_tool(
+                container,
+                tool_id="background_echo",
+                name="Background Echo",
+                description="Only runs in the background.",
+                supported_modes=(ToolMode.BACKGROUND,),
+                runtime_key="background_echo",
+            )
+
+            async def background_echo(_arguments: dict[str, object]) -> ToolRunResult:
+                raise RuntimeError("intentional background failure")
+
+            container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(
+                tool,
+                background_echo,
+            )
+            AuthorizationServiceAdapter(
+                container.require(AppKey.AUTHORIZATION_SERVICE),
+            ).grant_agent_effect_authorization(
+                agent_id="assistant",
+                effect_id="background_execution",
+            )
+
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
+                AcceptOrchestrationRunInput(
+                    run_id="run-process-background-failure-resume",
+                    inbound_instruction=InboundInstruction(source="cli", content="search"),
+                ),
+            )
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
+                PrepareSessionRunInput(
+                    run_id=run.id,
+                    context=SessionRouteContext(
+                        agent_id="assistant",
+                        channel="webchat",
+                        direct_scope=DirectSessionScope.MAIN,
+                    ),
+                ),
+            )
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
+                EnqueueOrchestrationRunInput(run_id=run.id),
+            )
+
+            waiting = process_next_orchestration_assignment(
+                container,
+                worker_id="worker-1",
+            )
+            assert waiting is not None
+            self.assertEqual(waiting.status, OrchestrationRunStatus.WAITING)
+            self.assertEqual(len(waiting.pending_tool_run_ids), 1)
+            background_tool_run_id = waiting.pending_tool_run_ids[0]
+
+            first_attempt = process_next_background_tool_run(
+                container,
+                worker_id="tool-worker-1",
+            )
+            second_attempt = process_next_background_tool_run(
+                container,
+                worker_id="tool-worker-1",
+            )
+            finished_tool_run = process_next_background_tool_run(
+                container,
+                worker_id="tool-worker-1",
+            )
+            self.assertIsNotNone(first_attempt)
+            assert first_attempt is not None
+            self.assertEqual(first_attempt.status, ToolRunStatus.QUEUED)
+            self.assertIsNotNone(second_attempt)
+            assert second_attempt is not None
+            self.assertEqual(second_attempt.status, ToolRunStatus.QUEUED)
+            self.assertIsNotNone(finished_tool_run)
+            assert finished_tool_run is not None
+            self.assertEqual(finished_tool_run.id, background_tool_run_id)
+            self.assertEqual(finished_tool_run.status, ToolRunStatus.FAILED)
+            self.assertEqual(finished_tool_run.attempt_count, 3)
+            self.assertIn(
+                "intentional background failure",
+                finished_tool_run.error_message or "",
+            )
+
+            self.assertGreater(publish_outbox_events(container), 0)
+            container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
+                limit_per_subscription=10,
+            )
+            processed_continuation = container.require(
+                AppKey.ORCHESTRATION_SCHEDULER_SERVICE,
+            ).process_next_continuation(
+                worker_id="scheduler-1",
+            )
+            self.assertIsNotNone(processed_continuation)
+
+            resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id)
+            self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
+            self.assertEqual(resumed.stage, OrchestrationRunStage.QUEUED)
+            self.assertEqual(resumed.pending_tool_run_ids, ())
+            self.assertEqual(
+                resumed.metadata["prompt_flow_hint"]["reason"],
+                "tool_failed_results_ready",
+            )
+
+            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
+                ListSessionMessagesInput(
+                    session_key="agent:assistant:main",
+                    active_session_only=True,
+                ),
+            )
+            self.assertEqual(
+                [message.role for message in session_messages],
+                ["user", "assistant", "tool", "assistant", "tool"],
+            )
+            self.assertEqual(session_messages[4].source_id, background_tool_run_id)
+            self.assertEqual(session_messages[4].content_payload["status"], "failed")
+            self.assertIn(
+                "intentional background failure",
+                str(session_messages[4].content_payload),
+            )
+
+            completed = process_next_orchestration_assignment(
+                container,
+                worker_id="worker-1",
+            )
+            self.assertIsNotNone(completed)
+            assert completed is not None
+            self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
+            self.assertEqual(completed.stage, OrchestrationRunStage.COMPLETED)
+            assert completed.result_payload is not None
+            self.assertEqual(
+                completed.result_payload["output_text"],
+                "background loop complete",
+            )
+            failed_tool_messages = [
+                message
+                for message in adapter.requests[2].messages
+                if message.role is LlmMessageRole.TOOL
+                and message.name == "background_echo"
+            ]
+            self.assertEqual(len(failed_tool_messages), 1)
+            self.assertIn(
+                "intentional background failure",
+                str(failed_tool_messages[0].content),
+            )
+        finally:
+            custom_harness.close()
+
+    def test_cancelled_background_tool_result_resumes_with_model_visible_status(self) -> None:
+        custom_harness = SqliteTestHarness()
+        settings = replace(
+            load_settings(),
+            authorization_enabled=True,
+            authorization_policy_paths=(
+                str(
+                    Path(__file__).resolve().parents[2]
+                    / "config"
+                    / "authorization_policies"
+                    / "default.yaml"
+                ),
+            ),
+            tool_openapi_providers=(),
+            tool_mcp_providers=(),
+            llm_profiles=(),
+        )
+        custom_harness.initialize_schema(settings=settings)
+        container = custom_harness.build_runtime_container(settings=settings)
+        try:
+            adapter = _BackgroundResumeAdapter()
+            container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+                LlmApiFamily.OPENAI_RESPONSES,
+                adapter,
+            )
+            credential_binding_id = self._install_default_llm_access_binding(container)
+            container.require(AppKey.LLM_SERVICE).register_profile(
+                RegisterLlmProfileInput(
+                    id="openai.gpt-5.4-mini",
+                    provider=LlmProviderKind.OPENAI,
+                    api_family=LlmApiFamily.OPENAI_RESPONSES,
+                    model_name="gpt-5.4-mini",
+                    credential_binding_id=credential_binding_id,
+                ),
+            )
+            container.require(AppKey.AGENT_SERVICE).register_profile(
+                RegisterAgentProfileInput(
+                    id="assistant",
+                    name="Assistant",
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt="Be helpful and concise.",
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(
+                        default_llm_id="openai.gpt-5.4-mini",
+                    ),
+                ),
+            )
+
+            tool = seed_catalog_tool(
+                container,
+                tool_id="background_echo",
+                name="Background Echo",
+                description="Only runs in the background.",
+                supported_modes=(ToolMode.BACKGROUND,),
+                runtime_key="background_echo",
+            )
+
+            async def background_echo(arguments: dict[str, object]) -> ToolRunResult:
+                return ToolRunResult.text(str(arguments.get("message") or ""))
+
+            container.require(AppKey.TOOL_LOCAL_RUNTIME_REGISTRY).register(
+                tool,
+                background_echo,
+            )
+            AuthorizationServiceAdapter(
+                container.require(AppKey.AUTHORIZATION_SERVICE),
+            ).grant_agent_effect_authorization(
+                agent_id="assistant",
+                effect_id="background_execution",
+            )
+
+            run = container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).accept(
+                AcceptOrchestrationRunInput(
+                    run_id="run-process-background-cancel-resume",
+                    inbound_instruction=InboundInstruction(source="cli", content="search"),
+                ),
+            )
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).prepare_session_run(
+                PrepareSessionRunInput(
+                    run_id=run.id,
+                    context=SessionRouteContext(
+                        agent_id="assistant",
+                        channel="webchat",
+                        direct_scope=DirectSessionScope.MAIN,
+                    ),
+                ),
+            )
+            container.require(AppKey.ORCHESTRATION_INTAKE_SERVICE).enqueue(
+                EnqueueOrchestrationRunInput(run_id=run.id),
+            )
+
+            waiting = process_next_orchestration_assignment(
+                container,
+                worker_id="worker-1",
+            )
+            assert waiting is not None
+            self.assertEqual(waiting.status, OrchestrationRunStatus.WAITING)
+            self.assertEqual(len(waiting.pending_tool_run_ids), 1)
+            background_tool_run_id = waiting.pending_tool_run_ids[0]
+
+            cancelled_tool_run = container.require(AppKey.TOOL_SERVICE).cancel_tool_run(
+                background_tool_run_id,
+            )
+            self.assertEqual(cancelled_tool_run.status, ToolRunStatus.CANCELLED)
+
+            self.assertGreater(publish_outbox_events(container), 0)
+            container.require(AppKey.ORCHESTRATION_SCHEDULER_SERVICE).process_runtime_events(
+                limit_per_subscription=10,
+            )
+            processed_continuation = container.require(
+                AppKey.ORCHESTRATION_SCHEDULER_SERVICE,
+            ).process_next_continuation(
+                worker_id="scheduler-1",
+            )
+            self.assertIsNotNone(processed_continuation)
+
+            resumed = container.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE).get_run(run.id)
+            self.assertEqual(resumed.status, OrchestrationRunStatus.QUEUED)
+            self.assertEqual(
+                resumed.metadata["prompt_flow_hint"]["reason"],
+                "tool_terminal_results_ready",
+            )
+
+            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
+                ListSessionMessagesInput(
+                    session_key="agent:assistant:main",
+                    active_session_only=True,
+                ),
+            )
+            cancelled_messages = [
+                message
+                for message in session_messages
+                if message.kind is SessionMessageKind.TOOL_RESULT
+                and message.source_id == background_tool_run_id
+            ]
+            self.assertEqual(len(cancelled_messages), 1)
+            self.assertEqual(
+                cancelled_messages[0].content_payload["status"],
+                "cancelled",
+            )
+            self.assertIn(
+                "cancelled before completion",
+                str(cancelled_messages[0].content_payload),
+            )
+
+            completed = process_next_orchestration_assignment(
+                container,
+                worker_id="worker-1",
+            )
+            self.assertIsNotNone(completed)
+            assert completed is not None
+            self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
+            cancelled_tool_messages = [
+                message
+                for message in adapter.requests[2].messages
+                if message.role is LlmMessageRole.TOOL
+                and message.name == "background_echo"
+            ]
+            self.assertEqual(len(cancelled_tool_messages), 1)
+            self.assertIn("cancelled before completion", str(cancelled_tool_messages[0].content))
         finally:
             custom_harness.close()
 

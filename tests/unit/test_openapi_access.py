@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from crxzipple.core.config import OpenApiCredentialBinding, OpenApiProviderSettings
+from crxzipple.modules.tool.application.catalog_models import ToolFunctionCandidate
 from crxzipple.modules.tool.domain.exceptions import ToolValidationError
 from crxzipple.modules.tool.domain.value_objects import ToolParameter
 from crxzipple.modules.tool.infrastructure.discovery.openapi import (
@@ -15,6 +17,8 @@ from crxzipple.modules.tool.infrastructure.discovery.openapi import (
 )
 from crxzipple.modules.tool.infrastructure.runtimes.openapi_remote import (
     _build_request,
+    _openapi_result_details,
+    _openapi_result_text,
     _resolve_credential_binding,
 )
 from crxzipple.shared.access import AccessCredentialKind
@@ -74,6 +78,190 @@ class OpenApiAccessTestCase(unittest.TestCase):
         self.assertEqual(consumer.component, "openapi_remote")
         self.assertEqual(consumer.runtime_ref, "openapi.sample_api.echo_message")
 
+    def test_build_request_normalizes_openapi_parameter_aliases(self) -> None:
+        operation = OpenApiOperation(
+            provider_name="brave_search",
+            tool_id="brave_search.web_search",
+            runtime_key="openapi.brave_search.web_search",
+            name="Search",
+            description="Search.",
+            method="GET",
+            path_template="/res/v1/web/search",
+            base_url="https://api.search.brave.com",
+            timeout_seconds=5,
+            path_parameters=(),
+            query_parameters=("q", "search_lang", "ui_lang"),
+            body_required=False,
+            tags=(),
+            parameters=(
+                ToolParameter(name="q", data_type="string", required=True),
+                ToolParameter(
+                    name="search_lang",
+                    data_type="string",
+                    required=False,
+                    json_schema={
+                        "type": "string",
+                        "enum": ["en", "zh-hans", "zh-hant"],
+                    },
+                ),
+                ToolParameter(
+                    name="ui_lang",
+                    data_type="string",
+                    required=False,
+                    json_schema={
+                        "type": "string",
+                        "enum": ["en-US", "zh-CN", "zh-TW"],
+                    },
+                ),
+            ),
+        )
+
+        _url, query_items, _headers, _body = _build_request(
+            operation,
+            {"q": "黄金", "search_lang": "zh-cn", "ui_lang": "zh-cn"},
+            credential_provider=_FakeCredentialProvider("unused"),
+        )
+
+        self.assertIn(("search_lang", "zh-hans"), query_items)
+        self.assertIn(("ui_lang", "zh-CN"), query_items)
+
+    def test_build_request_rejects_openapi_enum_values_locally(self) -> None:
+        operation = OpenApiOperation(
+            provider_name="search_api",
+            tool_id="search_api.web_search",
+            runtime_key="openapi.search_api.web_search",
+            name="Search",
+            description="Search.",
+            method="GET",
+            path_template="/search",
+            base_url="https://api.example.test",
+            timeout_seconds=5,
+            path_parameters=(),
+            query_parameters=("search_lang",),
+            body_required=False,
+            tags=(),
+            parameters=(
+                ToolParameter(
+                    name="search_lang",
+                    data_type="string",
+                    required=False,
+                    json_schema={"type": "string", "enum": ["en", "zh-hans"]},
+                ),
+            ),
+        )
+
+        with self.assertRaises(ToolValidationError):
+            _build_request(
+                operation,
+                {"search_lang": "klingon"},
+                credential_provider=_FakeCredentialProvider("unused"),
+            )
+
+    def test_openapi_result_details_compacts_oversized_remote_payload(self) -> None:
+        payload = {
+            "web": {
+                "results": [
+                    {
+                        "title": f"result {index}",
+                        "url": f"https://example.test/{index}",
+                        "description": "x" * 400,
+                        "extra_snippets": ["y" * 300 for _ in range(5)],
+                    }
+                    for index in range(500)
+                ],
+            },
+        }
+
+        details = _openapi_result_details(payload)
+
+        self.assertLess(
+            len(json.dumps(details, ensure_ascii=False, separators=(",", ":"))),
+            131072,
+        )
+        self.assertTrue(details["details_compacted"])
+        self.assertEqual(
+            details["web"]["results"][-1]["items_omitted_from_details"],
+            460,
+        )
+
+    def test_openapi_result_text_summarizes_weather_hourly_arrays(self) -> None:
+        payload = {
+            "current": {
+                "time": "2026-06-10T10:00",
+                "temperature_2m": 18.5,
+                "weather_code": 3,
+            },
+            "hourly_units": {
+                "temperature_2m": "°C",
+                "precipitation_probability": "%",
+            },
+            "hourly": {
+                "time": [f"2026-06-10T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [
+                    14,
+                    14.2,
+                    14.4,
+                    14.9,
+                    15.2,
+                    15.8,
+                    16,
+                    16.7,
+                    17.1,
+                    17.8,
+                    18.4,
+                    18.9,
+                    19.3,
+                    20,
+                    20.4,
+                    20.1,
+                    19.8,
+                    19.1,
+                    18.5,
+                    17.8,
+                    17.1,
+                    16.4,
+                    15.7,
+                    15,
+                ],
+                "precipitation_probability": [
+                    10,
+                    10,
+                    12,
+                    15,
+                    18,
+                    20,
+                    50,
+                    55,
+                    58,
+                    60,
+                    62,
+                    64,
+                    66,
+                    68,
+                    78,
+                    72,
+                    66,
+                    60,
+                    54,
+                    48,
+                    42,
+                    36,
+                    30,
+                    24,
+                ],
+                "weather_code": [3] * 24,
+            },
+        }
+
+        text = _openapi_result_text(_operation(), payload)
+
+        self.assertIn("Weather forecast summary:", text)
+        self.assertIn("2026-06-10T06:00", text)
+        self.assertIn("precipitation_probability=50%", text)
+        self.assertIn("2026-06-10T12:00", text)
+        self.assertIn("Highest precipitation probability: 78% at 2026-06-10T14:00", text)
+        self.assertIn("Raw response:", text)
+
     def test_openapi_discovery_projects_credentials_to_tool_access_requirements(self) -> None:
         provider = OpenApiDiscoveryProvider(
             OpenApiProviderSettings(
@@ -119,6 +307,63 @@ class OpenApiAccessTestCase(unittest.TestCase):
         self.assertEqual(search_requirement.slot.binding_id, "binding.sample.bearer")
         self.assertEqual(search_requirement.slot.expected_kind.value, "bearer_token")
         self.assertEqual(search_requirement.transport.value, "oauth_authorization_header")
+
+    def test_openapi_discovery_preserves_parameter_schema_constraints(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            spec_path = Path(tempdir) / "search.json"
+            spec_path.write_text(
+                """
+                {
+                  "openapi": "3.0.3",
+                  "info": {"title": "Search API", "version": "1.0.0"},
+                  "servers": [{"url": "https://search.example.test"}],
+                  "paths": {
+                    "/search": {
+                      "get": {
+                        "operationId": "web_search",
+                        "parameters": [
+                          {
+                            "name": "search_lang",
+                            "in": "query",
+                            "required": false,
+                            "description": "Content language.",
+                            "schema": {
+                              "type": "string",
+                              "enum": ["en", "zh-hans", "zh-hant"],
+                              "default": "zh-hans"
+                            }
+                          }
+                        ],
+                        "responses": {"200": {"description": "ok"}}
+                      }
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            provider = OpenApiDiscoveryProvider(
+                OpenApiProviderSettings(
+                    name="search_api",
+                    spec_location=str(spec_path),
+                ),
+            )
+
+            spec = provider.discover_specs()[0]
+            candidate = ToolFunctionCandidate.from_tool_spec(
+                spec,
+                source_id="configured.openapi.search_api",
+            )
+
+        parameter = spec.parameters[0]
+        self.assertEqual(parameter.json_schema["enum"], ["en", "zh-hans", "zh-hant"])
+        properties = candidate.input_schema["properties"]
+        self.assertEqual(
+            properties["search_lang"]["enum"],
+            ["en", "zh-hans", "zh-hant"],
+        )
+        self.assertEqual(properties["search_lang"]["default"], "zh-hans")
+        self.assertEqual(properties["search_lang"]["description"], "Content language.")
 
     def test_openapi_discovery_maps_security_scheme_credential_kinds(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

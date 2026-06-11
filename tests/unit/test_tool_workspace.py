@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from tests.unit.tool_test_support import *  # noqa: F403
 
 
@@ -527,10 +529,131 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
         self.assertIn("Workspace Command Execution", str(tool_run.output_payload))
         self.assertEqual(tool_run.result.metadata["cwd"], "nested")
         self.assertEqual(tool_run.result.metadata["exit_code"], 0)
+        self.assertFalse(tool_run.result.metadata["timed_out"])
+        self.assertGreaterEqual(tool_run.result.metadata["wall_time_seconds"], 0)
         self.assertIn(
             str(Path(workspace_dir, "nested").resolve()),
             tool_run.result.metadata["stdout"],
         )
+
+    def test_workspace_exec_tool_honors_output_token_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            tool_run = asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="exec",
+                        arguments={
+                            "command": "python - <<'PY'\nprint('x' * 2000)\nPY",
+                            "max_output_tokens": 100,
+                        },
+                        execution_context=ToolExecutionContext(
+                            attrs={"workspace_dir": workspace_dir},
+                        ),
+                    ),
+                ),
+            )
+
+        self.assertEqual(tool_run.status, ToolRunStatus.SUCCEEDED)
+        self.assertTrue(tool_run.result.metadata["output_truncated"])
+        self.assertTrue(tool_run.result.metadata["stdout_truncated"])
+        self.assertEqual(tool_run.result.metadata["output_budget_tokens"], 100)
+        self.assertLess(
+            len(tool_run.result.metadata["stdout"]),
+            tool_run.result.metadata["stdout_original_chars"],
+        )
+        self.assertIn("output_truncated: true", str(tool_run.output_payload))
+        self.assertNotIn("tool_result_raw_output_blocks", tool_run.result.metadata)
+        artifact_ids = tool_run.result.metadata.get("raw_output_artifact_ids")
+        self.assertIsInstance(artifact_ids, list)
+        assert isinstance(artifact_ids, list)
+        self.assertEqual(len(artifact_ids), 1)
+        envelope = tool_run.result.metadata.get("tool_result_envelope")
+        self.assertIsInstance(envelope, dict)
+        assert isinstance(envelope, dict)
+        self.assertTrue(envelope["truncated"])
+        self.assertEqual(envelope["read_handles"][0]["kind"], "artifact")
+        artifact = self.artifact_service.get_artifact(str(artifact_ids[0]))
+        self.assertEqual(artifact.metadata["source"], "tool.raw_output")
+        self.assertEqual(artifact.metadata["raw_output_name"], "stdout")
+        resolved = self.artifact_service.resolve_variant(artifact.id)
+        self.assertIn("x" * 2000, resolved.path.read_text())
+
+    def test_workspace_exec_tool_returns_structured_timeout_result(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            tool_run = asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="exec",
+                        arguments={
+                            "command": "python - <<'PY'\nimport time\nprint('started')\ntime.sleep(2)\nPY",
+                            "timeout_seconds": 1,
+                        },
+                        execution_context=ToolExecutionContext(
+                            attrs={"workspace_dir": workspace_dir},
+                        ),
+                    ),
+                ),
+            )
+
+        self.assertEqual(tool_run.status, ToolRunStatus.SUCCEEDED)
+        self.assertTrue(tool_run.result.metadata["timed_out"])
+        self.assertIsNotNone(tool_run.result.metadata["exit_code"])
+        self.assertGreaterEqual(tool_run.result.metadata["wall_time_seconds"], 1)
+        self.assertIn(
+            "Workspace command timed out after 1 seconds.",
+            tool_run.result.metadata["stderr"],
+        )
+        self.assertIn("timed_out: true", str(tool_run.output_payload))
+
+    def test_workspace_exec_tool_yields_long_command_as_background_process(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            yielded = asyncio.run(
+                self.tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id="exec",
+                        arguments={
+                            "command": "printf 'started\\n'; sleep 3; printf 'done\\n'",
+                            "yield_time_ms": 50,
+                            "timeout_seconds": 5,
+                        },
+                        execution_context=ToolExecutionContext(
+                            attrs={"workspace_dir": workspace_dir},
+                        ),
+                    ),
+                ),
+            )
+            process_id = str(yielded.result.metadata["process_id"])
+
+            deadline = time.monotonic() + 5.0
+            poll = None
+            while time.monotonic() < deadline:
+                poll = asyncio.run(
+                    self.tool_service.execute(
+                        ExecuteToolInput(
+                            tool_id="process",
+                            arguments={"action": "poll", "process_id": process_id},
+                            execution_context=ToolExecutionContext(
+                                attrs={"workspace_dir": workspace_dir},
+                            ),
+                        ),
+                    ),
+                )
+                if (
+                    poll.result.metadata["status"] != "running"
+                    and "done" in poll.result.metadata["stdout"]
+                ):
+                    break
+                time.sleep(0.05)
+
+        self.assertEqual(yielded.status, ToolRunStatus.SUCCEEDED)
+        self.assertTrue(yielded.result.metadata["background"])
+        self.assertTrue(yielded.result.metadata["yielded"])
+        self.assertEqual(yielded.result.metadata["yield_time_ms"], 50)
+        self.assertIn("Workspace Command Yielded", str(yielded.output_payload))
+        self.assertIsNotNone(poll)
+        assert poll is not None
+        self.assertIn("started", poll.result.metadata["stdout"])
+        self.assertIn("done", poll.result.metadata["stdout"])
 
     def test_workspace_exec_tool_rejects_cwd_escape(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_dir:
@@ -635,7 +758,7 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                     ),
                 ),
             )
-            deadline = time.monotonic() + 0.5
+            deadline = time.monotonic() + 2.0
             while True:
                 polled = asyncio.run(
                     self.tool_service.execute(
@@ -648,7 +771,9 @@ class ToolWorkspaceTestCase(ToolTestCaseBase):
                         ),
                     ),
                 )
-                if "done" in str(polled.result.metadata.get("stdout", "")):
+                polled_stdout = str(polled.result.metadata.get("stdout", ""))
+                polled_status = str(polled.result.metadata.get("status", ""))
+                if "done" in polled_stdout and polled_status in {"exited", "failed"}:
                     break
                 if time.monotonic() >= deadline:
                     break

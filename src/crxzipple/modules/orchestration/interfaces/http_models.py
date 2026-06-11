@@ -188,6 +188,7 @@ class AdvanceAssignmentRequest(BaseModel):
     stage: OrchestrationRunStage
     step_increment: int = Field(default=0, ge=0)
     metadata: dict[str, object] = Field(default_factory=dict)
+    execution_payload: dict[str, object] = Field(default_factory=dict)
 
     def to_input(self, *, run_id: str) -> AdvanceAssignmentInput:
         return AdvanceAssignmentInput(
@@ -196,6 +197,7 @@ class AdvanceAssignmentRequest(BaseModel):
             stage=self.stage,
             step_increment=self.step_increment,
             metadata=self.metadata,
+            execution_payload=self.execution_payload,
         )
 
 
@@ -261,12 +263,14 @@ class ResumeRunRequest(BaseModel):
 class CompleteAssignmentRequest(BaseModel):
     worker_id: str
     result_payload: dict[str, object] = Field(default_factory=dict)
+    execution_payload: dict[str, object] = Field(default_factory=dict)
 
     def to_input(self, *, run_id: str) -> CompleteAssignmentInput:
         return CompleteAssignmentInput(
             run_id=run_id,
             worker_id=self.worker_id,
             result_payload=self.result_payload,
+            execution_payload=self.execution_payload,
         )
 
 
@@ -335,6 +339,9 @@ class OrchestrationRunResponse(BaseModel):
     max_steps: int
     pending_tool_run_ids: list[str] = Field(default_factory=list)
     waiting_reason: str | None = None
+    pending_approval_request: dict[str, object] | None = None
+    last_approval_resolution: dict[str, object] | None = None
+    recovery_contract: dict[str, object] | None = None
     inbound_instruction: InboundInstructionResponse
     reply_target: ReplyTargetResponse | None = None
     result_payload: dict[str, object] | None = None
@@ -363,6 +370,9 @@ class OrchestrationRunResponse(BaseModel):
             max_steps=dto.max_steps,
             pending_tool_run_ids=list(dto.pending_tool_run_ids),
             waiting_reason=dto.waiting_reason,
+            pending_approval_request=dto.pending_approval_request,
+            last_approval_resolution=dto.last_approval_resolution,
+            recovery_contract=dto.recovery_contract,
             inbound_instruction=InboundInstructionResponse.from_dto(
                 dto.inbound_instruction,
             ),

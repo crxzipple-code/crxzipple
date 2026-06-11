@@ -10,13 +10,13 @@
 2. assembly/integration 层把 workspace 偏好接入 `context_workspace`。
 3. workspace adapter 从 workspace 根目录加载受信任 bootstrap 文件。
 4. Context Workspace 将这些文件建成 workspace/bootstrap 节点。
-5. `PromptSurfaceBuilder` 渲染 Context Tree 快照；session transcript、memory recall、skills catalog、tool schema 仍由各自 owner 模块通过 port/application 提供。
+5. `RunPromptInputBuilder` 渲染 Context Tree 快照；session transcript、memory recall、skills catalog、tool schema 仍由各自 owner 模块通过 port/application 提供。
 
 ## 代码入口
 
 - `src/crxzipple/modules/context_workspace/`
 - `src/crxzipple/app/integration/context_workspace_workspace.py`
-- `src/crxzipple/modules/orchestration/application/prompt_surface.py`
+- `src/crxzipple/modules/orchestration/application/prompt_input.py`
 - `src/crxzipple/modules/orchestration/application/prompting/producers.py`
 - `src/crxzipple/modules/orchestration/application/engine.py`
 - `src/crxzipple/modules/agent/domain/value_objects.py`
@@ -52,7 +52,7 @@ loader 当前约束：
 
 ## Prompt 注入位置
 
-Context Workspace 会把 workspace bootstrap 建成可折叠、可估算的 Context Tree 节点。`PromptSurfaceBuilder` 只读取树的 rendered body 和 provider attachments；workspace 内容和以下节点一起接受统一 context budget：
+Context Workspace 会把 workspace bootstrap 建成可折叠、可估算的 Context Tree 节点。`RunPromptInputBuilder` 只读取树的 rendered body 和 provider attachments；workspace 内容和以下节点一起接受统一 context budget：
 
 - agent instruction
 - runtime context

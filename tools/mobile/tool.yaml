@@ -1,5 +1,8 @@
 kind: local_package
 namespace: mobile
+prompt:
+  title: Mobile Device Control
+  summary: Inspect connected Android devices, capture screens, and perform mobile interaction actions.
 capabilities:
   - mobile.device_read
   - mobile.action

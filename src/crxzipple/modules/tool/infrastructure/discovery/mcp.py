@@ -165,15 +165,33 @@ def _parameters_from_input_schema(input_schema: dict[str, Any]) -> tuple[ToolPar
     for name, schema in properties.items():
         if not isinstance(schema, dict):
             continue
+        description = str(schema.get("description", "")).strip()
         parameters.append(
             ToolParameter(
                 name=str(name),
                 data_type=_schema_type(schema),
-                description=str(schema.get("description", "")).strip(),
+                description=description,
                 required=str(name) in required,
+                json_schema=_tool_parameter_json_schema(
+                    schema,
+                    description=description,
+                ),
             ),
         )
     return tuple(parameters)
+
+
+def _tool_parameter_json_schema(
+    schema: dict[str, Any],
+    *,
+    description: str,
+) -> dict[str, Any]:
+    payload = dict(schema)
+    if not payload:
+        payload["type"] = _schema_type(schema)
+    if description and not payload.get("description"):
+        payload["description"] = description
+    return payload
 
 
 def _schema_type(schema: dict[str, Any]) -> str:

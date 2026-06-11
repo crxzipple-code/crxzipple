@@ -28,7 +28,7 @@ import {
 import { useOperationsProjectionRefresh } from "../useOperationsProjectionRefresh";
 
 type SegmentTone = "neutral" | "info" | "success" | "warning" | "danger";
-type DetailSectionId = "run_queue" | "ingress_queue" | "lane_locks" | "executor_overview" | "recent_failures" | "ops_event_log";
+type DetailSectionId = "run_queue" | "execution_chains" | "ingress_queue" | "lane_locks" | "executor_overview" | "recent_failures" | "ops_event_log";
 type SelectedDetail = {
   sectionId: DetailSectionId;
   title: string;
@@ -74,6 +74,7 @@ const emptyMetricDeltas: Record<string, string> = {
 const fallbackTabs: OperationsTab[] = [
   { id: "overview", label: "Overview" },
   { id: "runs", label: "Runs", count: 0 },
+  { id: "execution_chains", label: "Execution", count: 0 },
   { id: "lane_locks", label: "Lane Locks", count: 0 },
   { id: "executors", label: "Executors", count: 0 },
   { id: "failures", label: "Failures", count: 0 },
@@ -410,6 +411,8 @@ const mainTable = computed<UiTableSection>(() => {
   switch (activeTab.value) {
     case "overview":
       return overviewMainTable.value;
+    case "execution_chains":
+      return page.value.execution_chains;
     case "lane_locks":
       return page.value.lane_locks;
     case "executors":
@@ -496,6 +499,7 @@ const selectedDetailHeadline = computed(() => {
   const detail = selectedDetail.value;
   if (!detail) return "";
   if (detail.sectionId === "run_queue") return firstPresentCell(detail.row, ["run_id", "intake_key"]);
+  if (detail.sectionId === "execution_chains") return firstPresentCell(detail.row, ["chain_id", "run_id"]);
   if (detail.sectionId === "ingress_queue") return firstPresentCell(detail.row, ["run_id", "intake_key"]);
   if (detail.sectionId === "lane_locks") return firstPresentCell(detail.row, ["holder_run_id", "lane_key"]);
   if (detail.sectionId === "executor_overview") return firstPresentCell(detail.row, ["current_run", "worker_id"]);
@@ -510,6 +514,9 @@ const selectedDetailSubtitle = computed(() => {
   if (!detail) return "";
   if (detail.sectionId === "run_queue") {
     return [rowCellText(detail.row, "wait_reason"), rowCellText(detail.row, "lane_key")].filter((item) => item && item !== "-").join(" · ");
+  }
+  if (detail.sectionId === "execution_chains") {
+    return [rowCellText(detail.row, "chain_status"), rowCellText(detail.row, "active_step"), rowCellText(detail.row, "items")].filter((item) => item && item !== "-").join(" · ");
   }
   if (detail.sectionId === "ingress_queue") {
     return [rowCellText(detail.row, "source"), rowCellText(detail.row, "status"), rowCellText(detail.row, "age")].filter((item) => item && item !== "-").join(" · ");
@@ -530,8 +537,9 @@ const selectedDetailFields = computed(() => {
   const detail = selectedDetail.value;
   if (!detail) return [];
   const keys = {
-    run_queue: ["run_id", "priority", "lane_key", "enqueued_at", "agent_target", "wait_reason", "wait_time", "policy", "stage", "trace"],
-    ingress_queue: ["run_id", "intake_key", "source", "status", "target_lane", "priority", "received_at", "age", "session_key", "summary", "trace"],
+    run_queue: ["run_id", "priority", "lane_key", "enqueued_at", "agent_target", "wait_reason", "dispatch_status", "dispatch_worker", "dispatch_lease_expires_at", "wait_time", "policy", "stage", "trace"],
+    execution_chains: ["run_id", "chain_id", "chain_status", "active_step", "last_step", "steps", "items", "dispatch_status", "dispatch_task_id", "dispatch_worker", "updated_at", "started_at", "completed_at", "age", "active_step_id", "stage", "trace"],
+    ingress_queue: ["run_id", "intake_key", "source", "status", "dispatch_owner_kind", "dispatch_task_id", "dispatch_worker", "dispatch_lease_expires_at", "target_lane", "priority", "received_at", "age", "session_key", "summary", "trace"],
     lane_locks: ["lane_key", "holder_run_id", "type", "worker_id", "duration", "status", "progress", "lock_epoch", "ttl", "expires_at", "renewed_at", "reason", "held_for", "stage", "trace", "actions"],
     executor_overview: ["worker_id", "status", "last_heartbeat", "lease_expires_at", "current_run", "load", "running", "capacity", "available_slots", "capabilities", "runs_5m", "actions"],
     recent_failures: ["time", "run_id", "error", "status", "module", "trace", "actions"],
@@ -551,7 +559,7 @@ const selectedDetailFields = computed(() => {
 const selectedDetailText = computed(() => {
   const row = selectedDetail.value?.row;
   if (!row) return "-";
-  return [rowCellText(row, "details"), rowCellText(row, "payload"), rowCellText(row, "raw_payload")]
+  return [rowCellText(row, "details"), rowCellText(row, "step_breakdown"), rowCellText(row, "item_breakdown"), rowCellText(row, "payload"), rowCellText(row, "raw_payload")]
     .find((item) => item && item !== "-") ?? "-";
 });
 
@@ -751,6 +759,7 @@ function normalizeKey(key: string): string {
 function isDetailSectionId(id: string): id is DetailSectionId {
   return [
     "run_queue",
+    "execution_chains",
     "ingress_queue",
     "lane_locks",
     "executor_overview",
@@ -866,6 +875,23 @@ function detailFieldLabel(key: string): string {
     held_for: t("table.duration"),
     stage: t("table.stage"),
     priority: t("table.priority"),
+    dispatch_status: t("table.dispatchStatus"),
+    dispatch_owner_kind: t("table.dispatchOwnerKind"),
+    dispatch_task_id: t("table.dispatchTaskId"),
+    dispatch_worker: t("table.dispatchWorker"),
+    dispatch_lease_expires_at: t("table.leaseExpiresAt"),
+    chain_id: t("table.chainId"),
+    chain_status: t("table.chainStatus"),
+    active_step: t("table.activeStep"),
+    active_step_id: t("table.activeStepId"),
+    last_step: t("table.lastStep"),
+    steps: t("table.steps"),
+    items: t("table.items"),
+    step_breakdown: t("table.stepBreakdown"),
+    item_breakdown: t("table.itemBreakdown"),
+    updated_at: t("table.updatedAt"),
+    started_at: t("table.startedAt"),
+    completed_at: t("table.completedAt"),
     session_key: t("table.sessionKey"),
     summary: t("table.summary"),
     error: t("table.error"),
@@ -973,6 +999,7 @@ function tableText(value: string): string {
   if (value === "No stuck runs detected.") return t("operations.orchestration.empty.noStuckRuns");
   if (value === "Run queue is empty.") return t("operations.orchestration.empty.runQueue");
   if (value === "Ingress queue is empty.") return t("operations.orchestration.empty.ingressQueue");
+  if (value === "No execution chains observed.") return t("operations.orchestration.empty.executionChains");
   if (value === "No runtime overview records.") return t("operations.orchestration.empty.runtimeOverview");
   if (value === "No active orchestration runs.") return t("operations.orchestration.empty.noActiveRuns");
   if (value === "No active lane locks.") return t("operations.orchestration.empty.noLaneLocks");
@@ -1118,6 +1145,7 @@ function emptyOrchestrationPage(): OperationsOrchestrationReadModel {
     stuck_runs: emptyTableSection("stuck_runs", "Stuck Runs"),
     policy_limits: emptyKeyValueSection("policy_limits", "Policy & Limits"),
     run_queue: emptyTableSection("run_queue", "Run Queue"),
+    execution_chains: emptyTableSection("execution_chains", "Execution Chains"),
     lane_locks: emptyTableSection("lane_locks", "Lane Locks"),
     executor_overview: emptyTableSection("executor_overview", "Executor Overview"),
     ingress_queue: emptyTableSection("ingress_queue", "Ingress Queue"),

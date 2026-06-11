@@ -32,7 +32,7 @@ class DispatchTestCase(unittest.TestCase):
         task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-task-1",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-1",
                 lane_key="bulk:conversation:main",
                 priority=20,
@@ -87,7 +87,7 @@ class DispatchTestCase(unittest.TestCase):
         active = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-active",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-active",
                 lane_key="bulk:blocked",
                 priority=50,
@@ -96,7 +96,7 @@ class DispatchTestCase(unittest.TestCase):
         available = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-available",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-available",
                 lane_key="bulk:available",
                 priority=10,
@@ -105,7 +105,7 @@ class DispatchTestCase(unittest.TestCase):
         same_lane = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-same-lane",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-same-lane",
                 lane_key="bulk:blocked",
                 priority=1,
@@ -142,7 +142,7 @@ class DispatchTestCase(unittest.TestCase):
         other_lane_fifo = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-other-lane-fifo",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-other-lane-fifo",
                 lane_key="bulk:other",
                 priority=10,
@@ -151,7 +151,7 @@ class DispatchTestCase(unittest.TestCase):
         same_lane_fifo = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-shared-lane-fifo",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-shared-lane-fifo",
                 lane_key="bulk:shared",
                 priority=10,
@@ -160,7 +160,7 @@ class DispatchTestCase(unittest.TestCase):
         lane_jump = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-lane-jump",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-lane-jump",
                 lane_key="bulk:shared",
                 priority=10,
@@ -191,7 +191,7 @@ class DispatchTestCase(unittest.TestCase):
         fifo = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-fifo",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-fifo",
                 lane_key="bulk:fifo",
                 priority=10,
@@ -200,7 +200,7 @@ class DispatchTestCase(unittest.TestCase):
         jump_queue = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-jump",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-jump",
                 lane_key="bulk:jump",
                 priority=10,
@@ -210,7 +210,7 @@ class DispatchTestCase(unittest.TestCase):
         resume_first = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-resume",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-resume",
                 lane_key="bulk:resume",
                 priority=10,
@@ -241,7 +241,7 @@ class DispatchTestCase(unittest.TestCase):
         orchestration_task = self.dispatch_service.create_task(
             CreateDispatchTaskInput(
                 task_id="dispatch-orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-orchestration",
                 lane_key="bulk:orchestration",
                 priority=50,
@@ -265,7 +265,7 @@ class DispatchTestCase(unittest.TestCase):
         )
 
         claimed = self.dispatch_service.claim_next_queued_task(
-            owner_kind="orchestration_run",
+            owner_kind="orchestration_step",
             worker_id="worker-1",
             claim_token="claim-1",
             lease_seconds=30,

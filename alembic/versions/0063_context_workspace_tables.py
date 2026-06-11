@@ -141,7 +141,6 @@ def upgrade() -> None:
         sa.Column("metadata", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("snapshot_id"),
-        sa.UniqueConstraint("run_id"),
     )
     for column in (
         "workspace_id",

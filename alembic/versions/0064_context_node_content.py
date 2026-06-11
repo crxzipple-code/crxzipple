@@ -18,6 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
     op.add_column(
         "context_node_states",
         sa.Column(
@@ -27,6 +28,8 @@ def upgrade() -> None:
             server_default="",
         ),
     )
+    if bind.dialect.name == "sqlite":
+        return
     op.alter_column(
         "context_node_states",
         "content",

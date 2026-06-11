@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from crxzipple.modules.tool.application.catalog_service import ToolCatalogService
 from crxzipple.modules.tool.application.concurrency import ToolRunConcurrencyPolicy
 from crxzipple.modules.tool.application.provider_backend_service import (
@@ -97,6 +99,9 @@ class ToolApplicationService:
 
     def get_tool(self, tool_id: str) -> Tool:
         return self.catalog_service.get_tool(tool_id)
+
+    def get_tools(self, tool_ids: Iterable[str]) -> dict[str, Tool]:
+        return self.catalog_service.get_tools(tool_ids)
 
     def check_access_readiness(
         self,

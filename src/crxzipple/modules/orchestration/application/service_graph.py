@@ -25,12 +25,12 @@ from crxzipple.modules.orchestration.application.coordinators import (
     RunProgressCoordinator,
     RunRecoveryCoordinator,
     RunRequestCoordinator,
-    RunSchedulerSignalCoordinator,
+    RunContinuationCoordinator,
     RunWaitCoordinator,
 )
 from crxzipple.modules.orchestration.application.engine import (
     OrchestrationEngine,
-    PromptSurfacePreview,
+    RunPromptInputPreview,
 )
 from crxzipple.modules.orchestration.application.execution import RunExecutionService
 from crxzipple.modules.orchestration.application.followups import (
@@ -57,7 +57,7 @@ from crxzipple.modules.orchestration.application.ports import (
     EventBusPort,
     LlmPort,
     OrchestrationSessionPort,
-    RunDispatchPort,
+    OrchestrationDispatchPort,
     SessionResolutionPort,
 )
 from crxzipple.modules.orchestration.application.query import (
@@ -99,7 +99,7 @@ class OrchestrationServiceGraph:
         uow_factory: Callable[[], OrchestrationUnitOfWork],
         *,
         scheduler: OrchestrationScheduler | None = None,
-        dispatch_port: RunDispatchPort | None = None,
+        dispatch_port: OrchestrationDispatchPort | None = None,
         agent_service: AgentProfileCatalogPort | None = None,
         authorization_port: AuthorizationPort | None = None,
         llm_port: LlmPort | None = None,
@@ -130,9 +130,11 @@ class OrchestrationServiceGraph:
             engine=engine,
             get_run=self.run_query_service.get_run,
         )
+        if engine is not None:
+            engine.tool_executor.run_dispatch_guard = self._run_accepts_tool_dispatch
 
         self.ingress_coordinator = RunIngressCoordinator(uow_factory=uow_factory)
-        self.scheduler_signal_coordinator = RunSchedulerSignalCoordinator(
+        self.continuation_coordinator = RunContinuationCoordinator(
             uow_factory=uow_factory,
         )
         self.intake_coordinator = build_run_intake_coordinator(
@@ -165,8 +167,8 @@ class OrchestrationServiceGraph:
             get_run=self.run_query_service.get_run,
             progress_coordinator=lambda: self.progress_coordinator,
             wait_coordinator=lambda: self.wait_coordinator,
-            queue_child_completion_signal=(
-                lambda run: self.sessions_spawn_followup_service.queue_child_completion_signal(
+            queue_child_completion_continuation=(
+                lambda run: self.sessions_spawn_followup_service.queue_child_completion_continuation(
                     run,
                 )
             ),
@@ -313,6 +315,7 @@ class OrchestrationServiceGraph:
                 engine=engine,
                 get_run=self.run_query_service.get_run,
                 resume_run=self.wait_coordinator.resume_after_tool_completion,
+                events_service=events_service,
             )
             if engine is not None
             else None
@@ -326,7 +329,7 @@ class OrchestrationServiceGraph:
         self.scheduler_service = OrchestrationSchedulerService(
             ingress_coordinator=self.ingress_coordinator,
             intake_port=self.intake_service,
-            scheduler_signal_coordinator=self.scheduler_signal_coordinator,
+            continuation_coordinator=self.continuation_coordinator,
             get_run_fn=self.run_query_service.get_run,
             assign_next_assignment_fn=self.lease_manager.assign_next_assignment,
             recover_abandoned_runs_fn=self.recovery_coordinator.recover_abandoned_runs,
@@ -352,8 +355,8 @@ class OrchestrationServiceGraph:
             session_service=session_service,
             get_run=self.run_query_service.get_run,
             submit_bound_turn=self.scheduler_service.submit_bound_turn,
-            queue_followup_signal=(
-                lambda child_run_id: self.scheduler_service.queue_sessions_spawn_followup_signal(
+            queue_followup_continuation=(
+                lambda child_run_id: self.scheduler_service.queue_sessions_spawn_followup_continuation(
                     child_run_id=child_run_id,
                 )
             ),
@@ -362,7 +365,21 @@ class OrchestrationServiceGraph:
     def get_run(self, run_id: str) -> OrchestrationRun:
         return self.run_query_service.get_run(run_id)
 
-    def preview_prompt(self, run_id: str) -> PromptSurfacePreview:
+    def _run_accepts_tool_dispatch(self, run: OrchestrationRun) -> bool:
+        if run.status in {
+            OrchestrationRunStatus.COMPLETED,
+            OrchestrationRunStatus.FAILED,
+            OrchestrationRunStatus.CANCELLED,
+        }:
+            return False
+        current = self.run_query_service.get_run(run.id)
+        return current.status not in {
+            OrchestrationRunStatus.COMPLETED,
+            OrchestrationRunStatus.FAILED,
+            OrchestrationRunStatus.CANCELLED,
+        }
+
+    def preview_prompt(self, run_id: str) -> RunPromptInputPreview:
         return self.inspection_service.preview_prompt(run_id)
 
     def resolve_tools(self, run: OrchestrationRun) -> ResolvedToolSet:

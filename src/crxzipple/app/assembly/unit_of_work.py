@@ -14,7 +14,7 @@ def unit_of_work_factories() -> tuple[ApplicationFactory, ...]:
         ApplicationFactory(
             key="database.unit_of_work_factory",
             provides=(AppKey.UNIT_OF_WORK_FACTORY,),
-            requires=(AppKey.DATABASE_SESSION_FACTORY, AppKey.EVENTS_BUS),
+            requires=(AppKey.DATABASE_SESSION_FACTORY,),
             build=_build_unit_of_work_factory,
         ),
     )
@@ -22,8 +22,7 @@ def unit_of_work_factories() -> tuple[ApplicationFactory, ...]:
 
 def _build_unit_of_work_factory(ctx):
     session_factory = ctx.require(AppKey.DATABASE_SESSION_FACTORY)
-    event_bus = ctx.require(AppKey.EVENTS_BUS)
-    return lambda: SqlAlchemyUnitOfWork(session_factory, event_bus)
+    return lambda: SqlAlchemyUnitOfWork(session_factory)
 
 
 __all__ = ["unit_of_work_factories"]

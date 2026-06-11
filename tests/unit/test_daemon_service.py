@@ -298,7 +298,7 @@ class DaemonServiceTestCase(unittest.TestCase):
 
             lease = service.acquire_lease(
                 service_key="worker:orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-1",
                 ttl_seconds=15,
             )
@@ -395,7 +395,7 @@ class DaemonServiceTestCase(unittest.TestCase):
             try:
                 lease = service.acquire_lease(
                     service_key="worker:orchestration",
-                    owner_kind="orchestration_run",
+                    owner_kind="orchestration_step",
                     owner_id="run-atomic",
                     ttl_seconds=15,
                 )
@@ -417,7 +417,7 @@ class DaemonServiceTestCase(unittest.TestCase):
 
             lease = service.acquire_lease(
                 service_key="worker:orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-1",
                 ttl_seconds=15,
             )
@@ -425,7 +425,7 @@ class DaemonServiceTestCase(unittest.TestCase):
             with self.assertRaises(DaemonValidationError):
                 service.acquire_lease(
                     service_key="worker:orchestration",
-                    owner_kind="orchestration_run",
+                    owner_kind="orchestration_step",
                     owner_id="run-2",
                     ttl_seconds=15,
                 )
@@ -436,7 +436,7 @@ class DaemonServiceTestCase(unittest.TestCase):
 
             next_lease = service.acquire_lease(
                 service_key="worker:orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-2",
                 ttl_seconds=15,
             )
@@ -454,7 +454,7 @@ class DaemonServiceTestCase(unittest.TestCase):
 
             lease = service.acquire_lease(
                 service_key="worker:orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-history",
                 ttl_seconds=15,
             )
@@ -482,13 +482,13 @@ class DaemonServiceTestCase(unittest.TestCase):
 
             first = service.acquire_lease(
                 service_key="worker:orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-reentrant",
                 ttl_seconds=15,
             )
             second = service.acquire_lease(
                 service_key="worker:orchestration",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-reentrant",
                 ttl_seconds=15,
             )
@@ -550,7 +550,7 @@ class DaemonServiceTestCase(unittest.TestCase):
             service.save_instance(appium_instance)
             service.acquire_lease(
                 service_key="capability:appium:default",
-                owner_kind="orchestration_run",
+                owner_kind="orchestration_step",
                 owner_id="run-1",
                 ttl_seconds=15,
             )

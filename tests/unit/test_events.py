@@ -24,6 +24,9 @@ from crxzipple.modules.events import (
     InMemoryEventsBackend,
     RedisEventsBackend,
 )
+from crxzipple.modules.events.application.read_models.trace import (
+    _summary_from_payload,
+)
 from crxzipple.modules.dispatch.application import (
     CreateDispatchTaskInput,
     DispatchWakeupObserver,
@@ -65,7 +68,7 @@ from crxzipple.shared.domain.events import Event, named_event_topic
 from crxzipple.shared.event_contracts import TOOL_LLM_EVENT_NAMES
 from crxzipple.shared.infrastructure.event_bus import InMemoryEventBus
 from crxzipple.interfaces.runtime_container import AppKey
-from tests.unit.support import SqliteTestHarness
+from tests.unit.support import SqliteTestHarness, publish_outbox_events
 
 
 def _published_named_events(backend: object) -> tuple[Event, ...]:
@@ -81,6 +84,31 @@ def _published_topic_events(backend: object) -> tuple[Event, ...]:
         event
         for event in getattr(backend, "published_events", ())
         if isinstance(event, Event) and not event.name
+    )
+
+
+def test_trace_summary_prefers_repeated_probe_observation() -> None:
+    summary = _summary_from_payload(
+        {
+            "summary": "generic run update",
+            "metadata": {
+                "repeated_probe_observation": {
+                    "repeated_count": 1,
+                    "repeated": [
+                        {
+                            "normalized_url": "www.ceair.com/booking/04ffa1f.js",
+                            "count": 3,
+                        },
+                    ],
+                },
+            },
+        },
+        event_name="orchestration.run.advanced",
+    )
+
+    assert summary == (
+        "Repeated probes: 1 target(s), "
+        "top=www.ceair.com/booking/04ffa1f.js x3"
     )
 
 
@@ -462,7 +490,6 @@ class EventsModuleTestCase(unittest.TestCase):
             "tool.function.created",
             "llm.stream_delta_observed",
             "orchestration.ingress.requested",
-            "orchestration.scheduler.signal.requested",
             "orchestration.executor.assignment.requested",
             "orchestration.executor.lease.heartbeated",
             "browser.network.fetch.executed",
@@ -1122,8 +1149,8 @@ class EventsModuleTestCase(unittest.TestCase):
                 name="dispatch.task.queued",
                 payload={
                     "task_id": "task-1",
-                    "owner_kind": "orchestration_run",
-                    "owner_id": "run-1",
+                    "owner_kind": "orchestration_step",
+                    "owner_id": "step-1",
                     "lane_key": "agent:main",
                 },
             ),
@@ -1132,9 +1159,9 @@ class EventsModuleTestCase(unittest.TestCase):
         published_envelopes = _published_topic_events(backend)
         self.assertEqual(len(published_envelopes), 1)
         envelope = published_envelopes[0]
-        self.assertEqual(envelope.topic, dispatch_wakeup_topic("orchestration_run"))
+        self.assertEqual(envelope.topic, dispatch_wakeup_topic("orchestration_step"))
         self.assertEqual(envelope.kind, "command")
-        self.assertEqual(envelope.payload["owner_id"], "run-1")
+        self.assertEqual(envelope.payload["owner_id"], "step-1")
 
     def test_turn_event_subscriber_publishes_run_and_session_topics(self) -> None:
         backend = InMemoryEventsBackend()
@@ -1152,20 +1179,18 @@ class EventsModuleTestCase(unittest.TestCase):
                     current_step=2,
                     waiting_reason=None,
                     pending_tool_run_ids=(),
-                    metadata={
-                        "pending_approval_request": {
-                            "request_id": "req-1",
-                            "effect_id": "effect-1",
-                            "label": "Need approval",
-                            "reason": "network",
-                            "tool_ids": ["tool-1"],
-                            "created_at": "2026-04-13T00:00:00+00:00",
-                        },
-                        "last_approval_resolution": {
-                            "request_id": "req-1",
-                            "decision": "approved",
-                            "resolved_at": "2026-04-13T00:00:01+00:00",
-                        },
+                    pending_approval_request_payload={
+                        "request_id": "req-1",
+                        "effect_id": "effect-1",
+                        "label": "Need approval",
+                        "reason": "network",
+                        "tool_ids": ["tool-1"],
+                        "created_at": "2026-04-13T00:00:00+00:00",
+                    },
+                    last_approval_resolution_payload={
+                        "request_id": "req-1",
+                        "decision": "approved",
+                        "resolved_at": "2026-04-13T00:00:01+00:00",
                     },
                     updated_at=SimpleNamespace(isoformat=lambda: "2026-04-13T00:00:00+00:00"),
                 )
@@ -1524,14 +1549,15 @@ class EventsModuleTestCase(unittest.TestCase):
             dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="task-1",
-                    owner_kind="orchestration_run",
-                    owner_id="run-1",
+                    owner_kind="orchestration_step",
+                    owner_id="step-1",
                     lane_key="agent:main",
                 ),
             )
             dispatch_service.enqueue_task(
                 EnqueueDispatchTaskInput(task_id="task-1"),
             )
+            publish_outbox_events(container)
             processed_events = (
                 operations_observer_runtime.process_available_events(
                     limit_per_subscription=10,
@@ -1547,7 +1573,7 @@ class EventsModuleTestCase(unittest.TestCase):
             self.assertTrue(
                 any(
                     event.event_name == "dispatch.task.queued"
-                    and event.payload.get("owner_id") == "run-1"
+                    and event.payload.get("owner_id") == "step-1"
                     for event in dispatch_observation.recent_events
                 ),
             )
@@ -1569,22 +1595,23 @@ class EventsModuleTestCase(unittest.TestCase):
             dispatch_service.create_task(
                 CreateDispatchTaskInput(
                     task_id="task-1",
-                    owner_kind="orchestration_run",
-                    owner_id="run-1",
+                    owner_kind="orchestration_step",
+                    owner_id="step-1",
                     lane_key="agent:main",
                 ),
             )
             dispatch_service.enqueue_task(
                 EnqueueDispatchTaskInput(task_id="task-1"),
             )
+            publish_outbox_events(container)
             scheduler_runtime.process_available_events(
                 limit_per_subscription=10,
             )
             published = _published_topic_events(backend)
             self.assertTrue(
                 any(
-                    envelope.topic == dispatch_wakeup_topic("orchestration_run")
-                    and envelope.payload.get("owner_id") == "run-1"
+                    envelope.topic == dispatch_wakeup_topic("orchestration_step")
+                    and envelope.payload.get("owner_id") == "step-1"
                     for envelope in published
                 ),
             )

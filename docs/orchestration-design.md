@@ -52,7 +52,7 @@ src/crxzipple/modules/orchestration/
     engine_llm_invoker.py
     engine_session_recorder.py
     engine_tool_executor.py
-    prompt_surface.py
+    prompt_input.py
     llm_resolver.py
     tool_resolver.py
     # skill prompt readiness is delegated to modules/skills.application.prompt_resolver
@@ -69,7 +69,7 @@ src/crxzipple/modules/orchestration/
       progress.py
       waiting.py
       recovery.py
-      scheduler_signals.py
+      continuation_tasks.py
     observers/
       observation.py
     reactions/
@@ -102,7 +102,7 @@ Important cleanup state:
 - There is no old `application/router.py` route center.
 - There is no old `application/session_resolver.py`; session resolution is provided by the session module and used through orchestration workflows.
 - Skill prompt readiness is not computed in orchestration. Context Workspace and
-  `PromptSurfaceBuilder` pass run context and resolved tool ids into
+  `RunPromptInputBuilder` pass run context and resolved tool ids into
   `SkillCatalogPort.resolve_prompt_catalog(...)`; Skills resolves
   tool/access/authorization/surface readiness and returns the catalog.
 - Public API/CLI/channel turn submission helpers live in `application/turn_submission.py`, not in a top-level interface helper.
@@ -132,7 +132,7 @@ The graph may expose convenience methods for composition, but the primary runtim
 
 `OrchestrationSchedulerService` is the scheduler-facing application surface.
 
-It accepts high-level scheduling commands and cross-process scheduler signals. It delegates actual state transitions to coordinators and publishes wake-up events when work should move forward.
+It accepts high-level scheduling commands plus dispatch-backed ingress and continuation tasks. It delegates actual state transitions to coordinators and publishes wake-up events when work should move forward.
 
 It owns scheduling flow, not execution internals.
 
@@ -169,7 +169,8 @@ Coordinators are the small application units that keep the service graph readabl
 - `RunProgressCoordinator` moves assigned runs through running states.
 - `RunWaitCoordinator` handles approval waits, tool waits, and resume semantics.
 - `RunRecoveryCoordinator` reconciles abandoned leases and terminal tool events.
-- `RunSchedulerSignalCoordinator` records and consumes scheduler signal requests.
+- `RunContinuationCoordinator` records and consumes dispatch-backed continuation tasks,
+  such as terminal tool result resume and sessions-spawn follow-up.
 
 These are not independent domain owners. They are orchestration application components.
 
@@ -260,7 +261,7 @@ Events are the cross-runtime coordination substrate.
 Orchestration publishes or consumes:
 
 - ingress request events
-- scheduler signal request events
+- dispatch continuation wake-up events
 - executor assignment request events
 - dispatch wake-up events
 - tool terminal events

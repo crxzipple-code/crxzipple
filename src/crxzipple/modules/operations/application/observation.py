@@ -444,7 +444,6 @@ def _entity_id(payload: dict[str, Any], *, fallback: str) -> str:
         "run_id",
         "owner_id",
         "request_id",
-        "signal_id",
         "tool_run_id",
         "assignment_id",
         "worker_id",

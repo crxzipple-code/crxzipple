@@ -9,7 +9,7 @@ from typing import Any
 from crxzipple.app.assembly.runtime_defaults import (
     RuntimeSettingsBootstrapConfig,
 )
-from crxzipple.app.integration.context_workspace_orchestration import (
+from crxzipple.app.integration.context_workspace_orchestration.adapter import (
     ContextWorkspacePromptSnapshotAdapter,
 )
 from crxzipple.app.keys import AppKey
@@ -23,7 +23,7 @@ from crxzipple.modules.orchestration.application import (
     OrchestrationRunQueryService,
     OrchestrationSchedulerService,
     OrchestrationSessionRecorder,
-    PromptSurfaceBuilder,
+    RunPromptInputCollector,
     ToolResolver,
 )
 from crxzipple.modules.orchestration.application.cancellation import (
@@ -40,7 +40,7 @@ from crxzipple.modules.memory.application import MemoryActorContext
 from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
     LlmServiceAdapter,
-    OrchestrationRunDispatchAdapter,
+    OrchestrationDispatchAdapter,
     ToolServiceAdapter,
 )
 
@@ -161,6 +161,7 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_TREE_SERVICE,
                 AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_admin_runtime_factory,
@@ -196,6 +197,7 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_TREE_SERVICE,
                 AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_test_runtime_factory,
@@ -220,6 +222,7 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_TREE_SERVICE,
                 AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_scheduler_factory,
@@ -244,6 +247,7 @@ def orchestration_factories() -> tuple[ApplicationFactory, ...]:
                 AppKey.ARTIFACT_SERVICE,
                 AppKey.ACCESS_SERVICE,
                 AppKey.CONTEXT_WORKSPACE_SERVICE,
+                AppKey.CONTEXT_TREE_SERVICE,
                 AppKey.CONTEXT_RENDER_SERVICE,
             ),
             build=_build_orchestration_executor_factory,
@@ -276,7 +280,7 @@ def _build_orchestration_ingress_runtime_service(
         uow_factory=ctx.require(AppKey.UNIT_OF_WORK_FACTORY),
         run_query_service=ctx.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
         session_resolution_service=ctx.require(AppKey.SESSION_RESOLUTION_SERVICE),
-        dispatch_port=OrchestrationRunDispatchAdapter(
+        dispatch_port=OrchestrationDispatchAdapter(
             ctx.require(AppKey.DISPATCH_SERVICE),
         ),
     )
@@ -292,7 +296,7 @@ def _build_orchestration_cancellation_service(ctx) -> RunCancellationService:
         uow_factory=ctx.require(AppKey.UNIT_OF_WORK_FACTORY),
         session_service=ctx.require(AppKey.SESSION_SERVICE),
         run_query_service=ctx.require(AppKey.ORCHESTRATION_RUN_QUERY_SERVICE),
-        dispatch_port=OrchestrationRunDispatchAdapter(
+        dispatch_port=OrchestrationDispatchAdapter(
             ctx.require(AppKey.DISPATCH_SERVICE),
         ),
         cancel_tool_run=tool_control.cancel_tool_run,
@@ -354,6 +358,7 @@ def _build_orchestration_runtime(ctx) -> OrchestrationRuntimeAssembly:
         artifact_service=ctx.require(AppKey.ARTIFACT_SERVICE),
         access_service=ctx.require(AppKey.ACCESS_SERVICE),
         context_workspace_service=ctx.require(AppKey.CONTEXT_WORKSPACE_SERVICE),
+        context_tree_service=ctx.require(AppKey.CONTEXT_TREE_SERVICE),
         context_render_service=ctx.require(AppKey.CONTEXT_RENDER_SERVICE),
         events_service=(
             ctx.require(AppKey.EVENTS_SERVICE) if ctx.has(AppKey.EVENTS_SERVICE) else None
@@ -392,6 +397,7 @@ def build_orchestration_runtime(
     artifact_service: Any,
     access_service: Any,
     context_workspace_service: Any,
+    context_tree_service: Any,
     context_render_service: Any,
     events_service: Any | None,
 ) -> OrchestrationRuntimeAssembly:
@@ -399,7 +405,7 @@ def build_orchestration_runtime(
     llm_port = LlmServiceAdapter(llm_service)
     tool_port = ToolServiceAdapter(tool_service)
     run_query_service = OrchestrationRunQueryService(uow_factory)
-    prompt_surface = PromptSurfaceBuilder(
+    prompt_inputs = RunPromptInputCollector(
         agent_service=agent_service,
         llm_port=llm_port,
         skill_catalog_port=skill_manager,
@@ -407,6 +413,7 @@ def build_orchestration_runtime(
         artifact_service=artifact_service,
         access_port=access_service,
         events_service=events_service,
+        execution_query=run_query_service,
         context_block_max_chars=settings.prompt_system_max_chars,
         context_block_max_tokens=settings.prompt_system_max_tokens,
         context_block_context_window_ratio=(
@@ -429,12 +436,14 @@ def build_orchestration_runtime(
     context_snapshot_port = ContextWorkspacePromptSnapshotAdapter(
         workspace_service=context_workspace_service,
         render_service=context_render_service,
+        tree_service=context_tree_service,
         artifact_service=artifact_service,
     )
     orchestration_engine = OrchestrationEngine(
-        prompt_surface=prompt_surface,
+        prompt_inputs=prompt_inputs,
         session_recorder=OrchestrationSessionRecorder(
             session_service=session_service,
+            execution_item_lookup=run_query_service,
         ),
         llm_port=llm_port,
         tool_resolver=tool_resolver,
@@ -447,7 +456,7 @@ def build_orchestration_runtime(
     )
     service_graph = OrchestrationServiceGraph(
         uow_factory,
-        dispatch_port=OrchestrationRunDispatchAdapter(
+        dispatch_port=OrchestrationDispatchAdapter(
             dispatch_service=dispatch_service,
         ),
         agent_service=agent_service,

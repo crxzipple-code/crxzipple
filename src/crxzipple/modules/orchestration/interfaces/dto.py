@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from crxzipple.modules.llm.interfaces.dto import LlmMessageDTO, ToolSchemaDTO
-from crxzipple.modules.orchestration.application import PromptSurfacePreview
+from crxzipple.modules.orchestration.application import RunPromptInputPreview
 from crxzipple.modules.orchestration.domain import (
     InboundInstruction,
     OrchestrationErrorPayload,
@@ -82,6 +82,9 @@ class OrchestrationRunDTO:
     max_steps: int
     pending_tool_run_ids: tuple[str, ...]
     waiting_reason: str | None
+    pending_approval_request: dict[str, object] | None
+    last_approval_resolution: dict[str, object] | None
+    recovery_contract: dict[str, object] | None
     inbound_instruction: InboundInstructionDTO
     reply_target: ReplyTargetDTO | None
     result_payload: dict[str, object] | None
@@ -110,6 +113,21 @@ class OrchestrationRunDTO:
             max_steps=run.max_steps,
             pending_tool_run_ids=tuple(run.pending_tool_run_ids),
             waiting_reason=run.waiting_reason,
+            pending_approval_request=(
+                dict(run.pending_approval_request_payload)
+                if run.pending_approval_request_payload is not None
+                else None
+            ),
+            last_approval_resolution=(
+                dict(run.last_approval_resolution_payload)
+                if run.last_approval_resolution_payload is not None
+                else None
+            ),
+            recovery_contract=(
+                dict(run.recovery_contract_payload)
+                if run.recovery_contract_payload is not None
+                else None
+            ),
             inbound_instruction=InboundInstructionDTO.from_value_object(
                 run.inbound_instruction,
             ),
@@ -180,21 +198,32 @@ class OrchestrationExecutorLeaseDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class PromptSurfacePreviewDTO:
+class RunPromptInputPreviewDTO:
     run_id: str
     llm_id: str
     mode: str
     messages: tuple[LlmMessageDTO, ...]
     tool_schemas: tuple[ToolSchemaDTO, ...]
     prompt_report: dict[str, object] | None
+    context_render_snapshot_id: str | None
+    context_render: dict[str, object] | None
+    context_render_metadata: dict[str, object]
+    provider_attachments: dict[str, object]
+    provider_request_options: dict[str, object]
 
     @classmethod
     def from_value(
         cls,
         *,
         run_id: str,
-        preview: PromptSurfacePreview,
-    ) -> "PromptSurfacePreviewDTO":
+        preview: RunPromptInputPreview,
+    ) -> "RunPromptInputPreviewDTO":
+        context_render = (
+            preview.prompt_report.context_render.to_payload()
+            if preview.prompt_report is not None
+            and preview.prompt_report.context_render is not None
+            else None
+        )
         return cls(
             run_id=run_id,
             llm_id=preview.llm_id,
@@ -212,4 +241,9 @@ class PromptSurfacePreviewDTO:
                 if preview.prompt_report is not None
                 else None
             ),
+            context_render_snapshot_id=preview.context_render_snapshot_id,
+            context_render=context_render,
+            context_render_metadata=dict(preview.context_render_metadata),
+            provider_attachments=dict(preview.provider_attachments),
+            provider_request_options=dict(preview.provider_request_options),
         )

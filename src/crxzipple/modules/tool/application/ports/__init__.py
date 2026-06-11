@@ -5,8 +5,8 @@ from crxzipple.modules.tool.application.ports.access import (
 )
 from crxzipple.modules.tool.application.ports.artifact import ToolArtifactWritePort
 from crxzipple.modules.tool.application.ports.dispatch import (
-    ToolRunDispatchClaim,
-    ToolRunDispatchPort,
+    ToolOrchestrationDispatchClaim,
+    ToolOrchestrationDispatchPort,
 )
 from crxzipple.modules.tool.application.ports.control import ToolRunControlPort
 from crxzipple.modules.tool.application.ports.events import (
@@ -32,8 +32,8 @@ __all__ = [
     "ToolArtifactWritePort",
     "ToolEventSubscriptionStreamPort",
     "ToolEventWaitPort",
-    "ToolRunDispatchClaim",
-    "ToolRunDispatchPort",
+    "ToolOrchestrationDispatchClaim",
+    "ToolOrchestrationDispatchPort",
     "ToolRunControlPort",
     "ToolQueryPort",
     "ToolRuntimeReadiness",

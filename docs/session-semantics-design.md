@@ -2,212 +2,311 @@
 
 ## Goal
 
-Define a clean session model for the upgraded system before exposing session capabilities as tools.
+Define the session model before continuing prompt tree, orchestration, and
+session tooling work.
 
-This design intentionally favors a clear target model over backward compatibility.
+This document intentionally separates the current code names from the target
+runtime concepts. The current code already works in broad strokes, but the
+names `session`, `session instance`, `bulk`, `turn`, and `run` have drifted.
+Further changes should make the model explicit instead of adding another layer
+of ambiguous compatibility.
 
-The key principle is:
+## Scope
 
-`session` owns conversation continuity, not semantic recall.
+This document is only about session and turn execution.
 
-## Upgrade Stance
+`memory` is outside this cleanup pass. Memory may later use agent-related
+sessions as an information source for durable cross-session knowledge, but it
+must not be used as a hidden backup layer for the current session scheduler,
+segment rotation, or prompt compaction flow.
 
-This is a new system.
-
-We do not preserve ambiguous behavior for compatibility if that behavior weakens the model.
-
-We prefer:
-
-- fresh resets over implicit carry-over
-- explicit agent switches over silent rebinding
-- low coupling between `session`, `memory`, `orchestration`, and `frontend`
-
-## Core Model
-
-### Session Key
-
-`session_key` is the stable conversation bucket.
-
-It is agent-owned.
-
-That means:
-
-- a session bucket belongs to exactly one agent
-- changing agent means selecting a different bucket
-- an existing bucket is never rebound to another agent
-
-### Session Instance
-
-`active_session_id` identifies the active instance inside a bucket.
-
-The system keeps:
-
-- one stable `session_key`
-- one active `session_id`
-- zero or more archived instances under the same key
-
-This preserves a clean separation:
-
-- bucket identity
-- active transcript identity
-- run identity
-
-### Run
-
-Runs are orchestration-level execution records.
-
-Runs bind to the active session instance at the moment they are created.
-
-Runs do not redefine session ownership or session continuity rules.
-
-## Reset Semantics
-
-`reset` is a fresh reset.
-
-When a session resets:
-
-- `session_key` stays the same
-- a new `active_session_id` is created
-- subsequent messages write to the new instance
-- old instance history remains exact and addressable under the old instance
-
-Reset does not:
-
-- inherit the previous instance transcript
-- inherit the previous compaction summary into prompt context
-- auto-handoff semantic context into the new instance
-
-This is intentional.
-
-If we later need handoff behavior, it should be added as a new explicit feature, not hidden inside reset.
-
-## Compaction Semantics
-
-Compaction is instance-local.
-
-Its purpose is:
-
-- reduce prompt cost
-- preserve continuity inside the current active instance
-
-Compaction is not a cross-reset continuity mechanism.
-
-That means:
-
-- a compaction summary belongs to the active instance that produced it
-- a fresh reset does not import the old summary into the new instance
-- session-level metadata may record compaction state for observability, but not for implicit prompt injection
-
-## Agent Switching
-
-Agent switching always creates or selects a different session bucket.
-
-The frontend must not allow this ambiguous state:
-
-- the UI still shows old history
-- the next turn silently routes to a different agent
-
-So the rule is:
-
-- if the user switches agent while viewing an existing conversation, the UI must move to a fresh draft
-- existing conversation history remains attached to its original agent-owned bucket
-
-## Session vs Memory
-
-`session` and `memory` are different systems.
+## Target Concepts
 
 ### Session
 
-Owns:
+`Session` is the stable conversation container.
 
-- exact conversation history
-- active/archived instances
-- message visibility and message metadata
-- reset boundaries
-- transcript-oriented continuity
+It answers:
 
-### Memory
+- Which agent owns this conversation?
+- Which channel/user/thread scope does this conversation correspond to?
+- Which active segment is currently writable?
+- Which segment history belongs to this same conversation?
 
-Owns:
+The stable id is `session_key`.
 
-- semantic recall
-- embedding-backed retrieval
-- long-term cross-session knowledge
+`session_key` is resolved from channel/web/CLI context. The key is the idempotent
+conversation bucket. Reusing the same key means the inbound request belongs to
+the same conversation container.
 
-Session history tools should use exact retrieval plus strict trimming.
+Rules:
 
-They should not use embedding search.
+- A session belongs to one agent runtime binding.
+- A session owns many segments over time.
+- A session has exactly one active segment.
+- A session is not a semantic memory store.
 
-## Tooling Direction
+### Session Segment
 
-Session tools should be introduced in phases.
+`SessionSegment` is the writable message interval inside a session.
 
-### Phase 1
+The current code calls this `SessionInstance` and stores the active segment id in
+`Session.active_session_id`. Context Workspace projects these instances as
+`session.segment.*` nodes. The old `session.bulk.*` prompt-tree label has been
+retired.
 
-Read-only tools:
+It answers:
 
-- `session_status`
-- `sessions_list`
-- `sessions_history`
+- Which exact messages are in the current active interval?
+- Which old interval was compacted or closed?
+- Which summary belongs to that old interval?
+- Which raw message ranges can be expanded when the agent needs exact history?
 
-### Phase 2
+Rules:
 
-Controlled write tools:
+- New inbound messages are written to the active segment.
+- Reset or compaction closes the current segment and opens a new one.
+- Closed/compacted segments remain exact, addressable history under the same
+  session.
+- A compacted segment has a summary, but the raw ranges remain available through
+  explicit session/context expansion.
 
-- `sessions_send`
-- `sessions_yield`
+### Turn
 
-### Phase 3
+`Turn` is one inbound request to the runtime.
 
-Subagent tools:
+It answers:
 
-- `sessions_spawn`
-- `subagents`
-- `sessions_stop`
+- What did the user/system/channel ask the agent to do?
+- Which session and active segment did the request bind to?
+- Where should the final answer or delivery status be reported?
+- What is the overall lifecycle of this request from accepted to terminal?
 
-Subagent behavior should build on the semantics above rather than redefining them.
+The current code does not have a separate `Turn` aggregate. Today
+`OrchestrationRun` is carrying most of the turn responsibilities.
 
-Requester-facing observability should stay exact and transcript-oriented:
+Target rules:
 
-- `session_status` may expose requester-tree and follow-up scheduling state
-- `subagents` may expose spawned child-session tree state and current/latest run status
-- these remain exact session-tree views, not memory recall
+- A turn binds to one `session_key`.
+- A turn starts against the active segment at intake time.
+- A turn may pause for approval or background tools.
+- Background tool completion should resume the same turn unless a deliberate new
+  follow-up turn is created.
+- Turn state is orchestration-owned; session only stores message facts.
 
-Operationally, the preferred inspection order is:
+### Execution Chain
 
-1. use `session_status` first for requester-wide state
-2. use `subagents` only when you need per-child bucket or run details
-3. use `sessions_history` only when you need exact transcript content from a chosen bucket or instance
+`ExecutionChain` is the LLM/tool loop inside a turn.
 
-The first `sessions_spawn` shape should stay narrow:
+It answers:
 
-- create a fresh child session bucket under the current agent
-- seed the child run with exact kickoff text
-- enqueue the child run in the background
-- return an accepted result immediately
+- Which LLM invocation happened first?
+- Which tool calls did that invocation request?
+- Which tool runs completed inline or in the background?
+- Which later LLM invocation consumed those tool results?
 
-It should not:
+The current code represents this with `OrchestrationRun.current_step`,
+LLM invocation records, tool run ids, pending tool ids, and session messages.
+There is no separate execution-chain entity yet.
 
-- implicitly carry over the parent transcript
-- implicitly yield the parent run
-- pretend the child result is available inline
+Target rules:
 
-`sessions_stop` should operate at requester-session tree scope:
+- LLM invocation facts stay in the `llm` module.
+- Tool run facts stay in the `tool` module.
+- Session message facts stay in the `session` module.
+- Orchestration owns the chain boundary and knows which invocation/tool facts
+  belong to the current turn.
+- Prompt assembly must use the execution-chain boundary, not a loose
+  `sequence_no >= inbound_message.sequence_no` window, when provider-native
+  protocol messages are needed.
 
-- stop non-terminal runs in the requester session bucket
-- recursively stop spawned child session buckets under that requester
-- cascade into pending background tool runs owned by cancelled orchestration runs
+### Lane
 
-## Design Consequences
+`Lane` is the scheduler serialization key.
 
-This model keeps coupling low:
+It answers:
 
-- `session` does not become `memory`
-- `reset` does not become hidden handoff orchestration
-- frontend routing does not mutate session ownership
-- orchestration consumes session state through session services but does not own
-  session storage rules
-- compaction timing belongs to orchestration, while transcript archival and
-  compaction-summary message metadata updates belong to `session`
+- Which turns must not run concurrently?
+- Which worker may claim the next assignment?
+- Which waiting turn should resume first?
 
-This is the target model for the next session/tooling upgrade.
+The current default lane is derived from `session_key`.
+
+Rules:
+
+- Lane belongs to orchestration scheduling.
+- Lane does not own session history.
+- Lane does not decide memory visibility.
+
+## Current Code Mapping
+
+```text
+Target Concept      Current Code
+--------------      ------------
+Session             session.domain.Session
+session_key         Session.id and OrchestrationRun.metadata["session_key"]
+SessionSegment      session.domain.SessionInstance
+active segment id   Session.active_session_id / OrchestrationRun.active_session_id
+Turn                mostly orchestration.domain.OrchestrationRun
+ExecutionChain      OrchestrationRun + LLM invocations + ToolRuns + session messages
+Lane                OrchestrationRun.lane_key / session_lane_key(session_key)
+```
+
+Important naming correction:
+
+- `SessionInstance` should be understood as a segment.
+- Context Workspace `session.segment.*` nodes are segment views.
+- `bulk` is not an outer session container. Remaining `bulk` names belong to the
+  older Session compaction use case/event vocabulary and should not leak into new
+  Context Workspace node IDs or UI.
+
+## Runtime Flow
+
+The target flow is:
+
+```text
+channel/web/cli input
+  -> resolve session_key
+  -> resolve active SessionSegment
+  -> create/bind Turn
+  -> enqueue Turn on lane
+  -> worker claims assignment
+  -> build Context Workspace prompt tree
+  -> invoke LLM
+  -> run tools inline or background
+  -> continue LLM/tool loop
+  -> wait on approval/background tool when needed
+  -> resume same Turn when wait completes
+  -> complete/fail/cancel Turn
+  -> maybe rotate SessionSegment by compaction/reset
+```
+
+The current runtime mostly follows this shape, except that `Turn` is still
+represented by `OrchestrationRun`.
+
+## Prompt Boundary
+
+Context Workspace owns historical prompt delivery.
+
+Normal provider-native messages should be limited to the current turn protocol:
+
+- current inbound user content
+- assistant tool-call messages needed by the provider protocol
+- tool result messages needed to continue the current turn
+- provider-specific attachment mirrors produced by Context Workspace rendering
+
+Historical session content belongs in the Context Workspace XML tree:
+
+- current active segment summary/ranges
+- compacted segment summaries
+- closed segment summaries
+- expandable exact message ranges
+- tool interaction nodes
+
+This keeps one visible prompt body while preserving provider protocol
+correctness.
+
+## Segment Rotation
+
+Compaction and reset both rotate the active segment, but they mean different
+things.
+
+### Compaction
+
+Compaction closes the current segment, records a summary on that segment, archives
+the selected old messages, and opens a new active segment under the same session.
+
+The old segment remains visible in Context Workspace as a collapsed historical
+segment. Raw ranges remain explicitly expandable under budget guards.
+
+Compaction does not require a memory flush.
+
+### Reset
+
+Reset closes the current segment and opens a new active segment. It is a stronger
+conversation boundary than compaction.
+
+Reset must not silently migrate hidden context into the new segment. If handoff
+is desired, it should be explicit and visible as a segment summary or requested
+context node, not hidden memory injection.
+
+## Session vs Memory
+
+Session owns exact conversation facts:
+
+- session container
+- active segment pointer
+- segment history
+- user/assistant/tool/approval messages
+- segment summary and raw ranges
+- reset/compaction boundaries
+
+Memory owns durable cross-session knowledge:
+
+- user explicitly requested memories
+- stable preferences and constraints
+- long-term project facts
+- public/shared/common knowledge scopes
+- later, optional derived memories sourced from agent sessions
+
+Memory must not be the mechanism that prevents current session history loss.
+Session segment history already provides that exact trace.
+
+## Required Cleanup
+
+### Naming Cleanup
+
+- Rename documentation and UI labels from `bulk` to `segment` where the concept
+  is a `SessionInstance`.
+- Keep storage fields such as `active_session_id` until a deliberate migration is
+  scheduled, but document them as active segment ids.
+- Avoid introducing new APIs that expose `bulk` as an architecture concept.
+
+### Turn Boundary Cleanup
+
+- Introduce an explicit turn concept in docs and read models before changing
+  storage.
+- Decide whether `OrchestrationRun` should be renamed/reframed as `Turn`, or
+  whether a new `Turn` aggregate should wrap execution runs.
+- Until then, treat `OrchestrationRun` as the current turn record, not a generic
+  low-level execution attempt.
+
+### Execution Chain Cleanup
+
+- Make prompt assembly derive provider-native protocol messages from the current
+  turn execution chain.
+- Do not rely on session message sequence windows as the primary execution-chain
+  boundary.
+- Preserve existing LLM invocation ids and tool run ids as owner facts.
+- Add orchestration query helpers that can answer: "which provider protocol
+  messages are needed to continue this turn?"
+
+### Maintenance Cleanup
+
+- Remove memory flush as a mandatory pre-compaction step.
+- Let compaction rotate session segments directly.
+- Keep durable memory capture as an explicit memory/tool/policy action outside
+  the session scheduling path.
+
+### Context Workspace Cleanup
+
+- Project `SessionInstance` as `session.segment.*` node ids.
+- Do not reintroduce old `session.bulk.*` Context Workspace node ids.
+- Session owner compaction APIs and events use segment vocabulary:
+  `CompactSessionSegmentInput`, `compact_active_segment()`, and
+  `session.segment.compacted`.
+- Historical segment nodes should remain collapsed by default, with exact ranges
+  expandable under budget guards.
+
+## Acceptance Criteria
+
+- A developer can explain the system without using `bulk` as an outer session
+  term.
+- Session history remains exact after compaction or reset.
+- Memory is not required to preserve current session continuity.
+- A normal turn prompt does not replay unrelated active-segment messages through
+  provider-native transcript.
+- Background tool completion resumes the same turn unless a new follow-up turn is
+  explicitly created.
+- Operations and Workbench can show session, segment, turn, execution chain, and
+  lane as separate concepts.

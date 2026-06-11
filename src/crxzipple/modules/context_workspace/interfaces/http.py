@@ -115,7 +115,15 @@ def render_prompt_body(
         "workspace": _workspace_payload(result.workspace),
         "prompt_body": result.prompt_body,
         "estimate": result.estimate.to_payload(),
+        "estimate_breakdown": dict(result.estimate_breakdown),
         "included_node_ids": list(result.included_node_ids),
+        "mirrored_node_ids": list(result.mirrored_node_ids),
+        "provider_attachments": dict(result.provider_attachments),
+        "provider_attachment_report": dict(result.provider_attachment_report),
+        "tool_schema_mirror_available": result.tool_schema_mirror_available,
+        "runtime_contract": dict(result.runtime_contract),
+        "tree_schema_version": result.tree_schema_version,
+        "root_node_ids": list(result.root_node_ids),
     }
 
 
@@ -151,6 +159,20 @@ def get_render_snapshot(
     try:
         snapshot = container.require(AppKey.CONTEXT_RENDER_SERVICE).get_snapshot_by_run(
             run_id,
+        )
+    except ContextRenderSnapshotNotFoundError as exc:
+        raise _not_found(exc) from None
+    return {"snapshot": _snapshot_payload(snapshot)}
+
+
+@router.get("/render-snapshots/{snapshot_id}")
+def get_render_snapshot_by_id(
+    snapshot_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> dict[str, object]:
+    try:
+        snapshot = container.require(AppKey.CONTEXT_RENDER_SERVICE).get_snapshot(
+            snapshot_id,
         )
     except ContextRenderSnapshotNotFoundError as exc:
         raise _not_found(exc) from None
