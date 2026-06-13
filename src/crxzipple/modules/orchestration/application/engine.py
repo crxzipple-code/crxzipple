@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from crxzipple.modules.llm.domain import (
+    LlmApiFamily,
     LlmMessage,
     LlmProviderContinuation,
     ToolCallIntent,
@@ -263,6 +264,7 @@ class OrchestrationEngine:
         with self._timed_phase("build_context"):
             context = self._build_advance_context(run)
         with self._timed_phase("llm_invoke"):
+            provider_continuation = _provider_continuation_for_prompt(run, context.prompt)
             invocation = self.llm_invoker.invoke(
                 llm_id=context.request_envelope.llm_id,
                 messages=context.request_envelope.messages,
@@ -271,7 +273,7 @@ class OrchestrationEngine:
                     context.request_envelope,
                 ),
                 request_overrides=context.request_envelope.provider_options,
-                continuation=_provider_continuation_from_run(run),
+                continuation=provider_continuation,
                 require_tool_call=context.prompt.surface_policy.require_tool_call,
                 request_metadata=_llm_request_metadata_from_envelope(
                     context.request_envelope,
@@ -309,6 +311,7 @@ class OrchestrationEngine:
         with self._timed_phase("build_context"):
             context = await asyncio.to_thread(self._build_advance_context, run)
         with self._timed_phase("llm_invoke"):
+            provider_continuation = _provider_continuation_for_prompt(run, context.prompt)
             invocation = await self.llm_invoker.invoke_async(
                 llm_id=context.request_envelope.llm_id,
                 messages=context.request_envelope.messages,
@@ -317,7 +320,7 @@ class OrchestrationEngine:
                     context.request_envelope,
                 ),
                 request_overrides=context.request_envelope.provider_options,
-                continuation=_provider_continuation_from_run(run),
+                continuation=provider_continuation,
                 require_tool_call=context.prompt.surface_policy.require_tool_call,
                 request_metadata=_llm_request_metadata_from_envelope(
                     context.request_envelope,
@@ -397,7 +400,7 @@ class OrchestrationEngine:
             provider_options,
             request_options["reasoning_config"],
         )
-        provider_continuation = _provider_continuation_from_run(run)
+        provider_continuation = _provider_continuation_for_prompt(run, prompt)
         request_envelope = self.provider_request_builder.request_envelope(
             prompt=surface.prompt,
             context_render_snapshot=context_render_snapshot,
@@ -1041,6 +1044,24 @@ def _provider_continuation_from_run(
         previous_invocation_id=_optional_text(raw_state.get("previous_invocation_id")),
         provider_family=_optional_text(raw_state.get("provider_family")),
     )
+
+
+def _provider_continuation_for_prompt(
+    run: OrchestrationRun,
+    prompt: RunPromptInput,
+) -> LlmProviderContinuation | None:
+    if not _llm_api_family_supports_provider_continuation(prompt.llm_api_family):
+        return None
+    return _provider_continuation_from_run(run)
+
+
+def _llm_api_family_supports_provider_continuation(api_family: str | None) -> bool:
+    if api_family is None:
+        return False
+    return api_family.strip() in {
+        LlmApiFamily.OPENAI_RESPONSES.value,
+        LlmApiFamily.OPENAI_CODEX_RESPONSES.value,
+    }
 
 
 def _provider_continuation_state(invocation: Any) -> dict[str, object]:

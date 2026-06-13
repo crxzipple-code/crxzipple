@@ -214,7 +214,7 @@ OpenAI/Codex Responses adapter：
 - [x] Provider actual request preview 持久化。
 - [x] 单测覆盖首轮 request。
 - [x] 单测覆盖 continuation request。
-- [ ] 单测覆盖 provider 不支持 continuation 时退化 transcript replay。
+- [x] 单测覆盖 provider 不支持 continuation 时退化 transcript/tool-result replay。
 
 ## 2. Orchestration Module
 

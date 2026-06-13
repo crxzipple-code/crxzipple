@@ -232,6 +232,42 @@ class _ProviderNativeToolContinuationAdapter:
         )
 
 
+class _ProviderContinuationUnsupportedToolAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return LlmAdapterResponse(
+                result=LlmResult(text=""),
+                response_items=(
+                    _tool_call_response_item(
+                        request,
+                        sequence_no=1,
+                        call_id="call-unsupported-list",
+                        name="context_tree.list",
+                        arguments={},
+                    ),
+                ),
+                provider_request_id="chat-first",
+                continuation=LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                ),
+            )
+        return LlmAdapterResponse(
+            result=LlmResult(text="fallback final"),
+            provider_request_id="chat-second",
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
+
+
 class _ProviderExternalOnlyAdapter:
     def __init__(self) -> None:
         self.requests: list[LlmAdapterRequest] = []
@@ -2077,6 +2113,89 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             preview["payload_preview"]["input"][0]["call_id"],
             "call-provider-native-list",
         )
+
+    def test_provider_continuation_unsupported_api_replays_tool_result_history(
+        self,
+    ) -> None:
+        adapter = _ProviderContinuationUnsupportedToolAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+            adapter,
+        )
+        credential_binding_id = self._install_default_llm_access_binding(self.container)
+        self.llm_service.sync_profiles(
+            (
+                RegisterLlmProfileInput(
+                    id="openai.chat-compatible",
+                    provider=LlmProviderKind.OPENAI,
+                    api_family=LlmApiFamily.OPENAI_CHAT_COMPATIBLE,
+                    model_name="gpt-5.4-mini-chat",
+                    credential_binding_id=credential_binding_id,
+                ),
+            ),
+        )
+        self.agent_service.sync_profiles(
+            (
+                RegisterAgentProfileInput(
+                    id="assistant",
+                    name="Assistant",
+                    instruction_policy=AgentInstructionPolicy(
+                        system_prompt="Be helpful and concise.",
+                    ),
+                    llm_routing_policy=AgentLlmRoutingPolicy(
+                        default_llm_id="openai.chat-compatible",
+                    ),
+                ),
+            ),
+        )
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-provider-continuation-fallback",
+                inbound_instruction=InboundInstruction(source="cli", content="echo"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertGreaterEqual(len(adapter.requests), 2)
+        second_request = adapter.requests[1]
+        self.assertIsNone(second_request.continuation)
+        tool_messages = [
+            message
+            for message in second_request.messages
+            if message.role == LlmMessageRole.TOOL
+        ]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0].tool_call_id, "call-unsupported-list")
+        invocations = self.llm_service.list_invocations(
+            llm_id="openai.chat-compatible",
+            limit=10,
+        )
+        provider_request_ids = {
+            invocation.provider_request_id for invocation in invocations
+        }
+        self.assertIn("chat-first", provider_request_ids)
+        self.assertIn("chat-second", provider_request_ids)
 
     def test_text_with_tool_calls_records_assistant_progress_for_next_prompt(self) -> None:
         adapter = _SequentialResultAdapter(
