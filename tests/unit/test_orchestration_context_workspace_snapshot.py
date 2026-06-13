@@ -147,6 +147,9 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
     assert snapshot.metadata["execution_current_node_id"] == EXECUTION_CURRENT_NODE_ID
     assert snapshot.metadata["session_current_node_id"] == SESSION_CURRENT_NODE_ID
     assert snapshot.metadata["history_delivery"] == "context_tree"
+    assert snapshot.metadata["evidence_frontier"]["schema_version"] == "2026-06-14"
+    assert snapshot.metadata["evidence_frontier"]["item_count"] == 0
+    assert snapshot.metadata["evidence_frontier"]["fingerprint"]
     assert snapshot.metadata["runtime_contract_version"] == "2026-06-10"
     assert snapshot.metadata["runtime_contract_hash"]
     assert snapshot.metadata["runtime_contract"]["node_id"] == "runtime.contract"
@@ -206,6 +209,84 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
     assert snapshot.metadata["artifact_content_budget"]["status"] == "ok"
     assert "current_inbound_message_id" not in snapshot.metadata
     assert snapshot.metadata["current_inbound_session_item_id"] == "item-user-1"
+
+
+def test_context_workspace_adapter_injects_evidence_frontier_delta_for_changed_items() -> None:
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    snapshots = InMemoryContextRenderSnapshotRepository()
+    adapter = ContextWorkspacePromptSnapshotAdapter(
+        workspace_service=ContextWorkspaceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+        ),
+        render_service=ContextRenderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+    )
+    first_run = _run()
+    first_run.metadata["evidence_frontier"] = [
+        {
+            "id": "fact:endpoint",
+            "kind": "network_endpoint",
+            "status": "verified",
+            "summary": "Nuxt bundle exposes the flight endpoint.",
+            "source_kind": "tool_result",
+            "source_id": "tool-1",
+        },
+    ]
+    first_record = adapter.record_run_prompt_snapshot(
+        run=first_run,
+        prompt=_prompt(),
+    )
+    assert first_record is not None
+
+    second_run = _run()
+    second_run.metadata["context_render_snapshot_id"] = first_record.snapshot_id
+    second_run.metadata["evidence_frontier"] = [
+        *first_run.metadata["evidence_frontier"],
+        {
+            "id": "gap:payload",
+            "kind": "request_payload",
+            "status": "gap",
+            "summary": "Actual search payload shape is still unresolved.",
+            "source_kind": "tool_result",
+            "source_id": "tool-2",
+        },
+    ]
+
+    second_record = adapter.record_run_prompt_snapshot(
+        run=second_run,
+        prompt=_prompt(),
+    )
+
+    assert second_record is not None
+    snapshot = snapshots.get_by_run("run-context")
+    assert snapshot is not None
+    context_delta = snapshot.metadata["context_delta"]
+    assert context_delta["added_node_ids"] == []
+    evidence_delta = context_delta["evidence_delta"]
+    assert evidence_delta["item_count"] == 2
+    assert evidence_delta["new_items"] == [
+        {
+            "id": "gap:payload",
+            "kind": "request_payload",
+            "status": "gap",
+            "summary": "Actual search payload shape is still unresolved.",
+            "source_kind": "tool_result",
+            "source_id": "tool-2",
+            "confidence": "unspecified",
+        },
+    ]
+    assert evidence_delta["remaining_gaps"] == [
+        "Actual search payload shape is still unresolved.",
+    ]
+    assert "evidence_delta" in str(context_delta["prompt_body"])
+    assert "Actual search payload shape is still unresolved." in str(
+        context_delta["prompt_body"],
+    )
 
 
 def test_context_workspace_snapshot_records_direct_session_item_refs() -> None:

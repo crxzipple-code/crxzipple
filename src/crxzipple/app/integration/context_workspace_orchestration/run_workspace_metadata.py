@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
 from crxzipple.modules.llm.domain import LlmMessage
 from crxzipple.modules.orchestration.application.prompt_input import RunPromptInput
 from crxzipple.modules.orchestration.domain import OrchestrationRun
 
 from ._metadata import estimate_text_tokens, metadata_text
+
+
+EVIDENCE_FRONTIER_SCHEMA_VERSION = "2026-06-14"
 
 
 def build_run_workspace_metadata(
@@ -244,32 +248,70 @@ def build_evidence_frontier_payload(
     prompt: RunPromptInput,
 ) -> dict[str, object]:
     pending_tool_run_ids = tuple(run.pending_tool_run_ids)
+    items = _evidence_frontier_items(run, prompt=prompt)
+    verified_facts = [
+        str(item["summary"])
+        for item in items
+        if item.get("status") in {"verified", "success"}
+    ]
+    failed_paths = [
+        str(item["summary"])
+        for item in items
+        if item.get("status") in {"failed", "blocked"}
+    ]
+    remaining_gaps = [
+        str(item["summary"])
+        for item in items
+        if item.get("status") in {"open", "gap", "unknown"}
+    ]
     latest_messages = prompt.messages[-3:]
     latest_lines = [
         _message_frontier_line(index=index, message=message)
         for index, message in enumerate(latest_messages, start=1)
     ]
     lines = [
+        f"Schema: {EVIDENCE_FRONTIER_SCHEMA_VERSION}",
         f"Run status: {run.status.value}",
         f"Run stage: {run.stage.value}",
         f"Direct transcript messages: {len(prompt.messages)}",
         f"Pending background tool runs: {len(pending_tool_run_ids)}",
+        f"Evidence items: {len(items)}",
+        f"Verified facts: {len(verified_facts)}",
+        f"Failed evidence paths: {len(failed_paths)}",
+        f"Remaining gaps: {len(remaining_gaps)}",
     ]
+    if items:
+        lines.append("Evidence frontier:")
+        lines.extend(
+            f"- [{item.get('status')}] {item.get('summary')}"
+            for item in items
+        )
     if latest_lines:
         lines.append("Latest direct transcript tail:")
         lines.extend(latest_lines)
     else:
         lines.append("Latest direct transcript tail: -")
+    fingerprint = _evidence_frontier_fingerprint(items)
     return {
         "summary": "Latest evidence tail the next model call should handle first.",
         "content": "\n".join(lines),
         "metadata": {
+            "schema_version": EVIDENCE_FRONTIER_SCHEMA_VERSION,
             "status": run.status.value,
             "stage": run.stage.value,
             "message_count": len(prompt.messages),
             "pending_tool_run_count": len(pending_tool_run_ids),
             "pending_tool_run_ids": list(pending_tool_run_ids),
             "latest_roles": [_message_role(message) for message in latest_messages],
+            "item_count": len(items),
+            "items": items,
+            "verified_fact_count": len(verified_facts),
+            "verified_facts": verified_facts,
+            "failed_evidence_path_count": len(failed_paths),
+            "failed_evidence_paths": failed_paths,
+            "remaining_gap_count": len(remaining_gaps),
+            "remaining_gaps": remaining_gaps,
+            "fingerprint": fingerprint,
         },
     }
 
@@ -455,6 +497,118 @@ def _message_frontier_line(*, index: int, message: LlmMessage) -> str:
 def _message_role(message: LlmMessage) -> str:
     role = message.role
     return role.value if hasattr(role, "value") else str(role)
+
+
+def _evidence_frontier_items(
+    run: OrchestrationRun,
+    *,
+    prompt: RunPromptInput,
+) -> list[dict[str, object]]:
+    explicit = _explicit_evidence_items(run.metadata.get("evidence_frontier"))
+    items = list(explicit)
+    seen_ids = {str(item.get("id")) for item in items if item.get("id")}
+    for tool_run_id in run.pending_tool_run_ids:
+        item_id = f"pending-tool:{tool_run_id}"
+        if item_id in seen_ids:
+            continue
+        items.append(
+            {
+                "id": item_id,
+                "kind": "tool_pending",
+                "status": "open",
+                "summary": f"Background tool run is still pending: {tool_run_id}",
+                "source_kind": "orchestration_run",
+                "source_id": run.id,
+                "confidence": "system",
+            },
+        )
+        seen_ids.add(item_id)
+    for message in prompt.messages:
+        role = _message_role(message)
+        if role != "tool":
+            continue
+        metadata = dict(message.metadata)
+        sequence_no = metadata.get("sequence_no")
+        source_id = metadata_text(metadata.get("source_id")) or metadata_text(
+            metadata.get("tool_call_id"),
+        )
+        item_id = f"tool-message:{source_id or sequence_no or len(items) + 1}"
+        if item_id in seen_ids:
+            continue
+        content = _payload_text(message.content, limit=240)
+        items.append(
+            {
+                "id": item_id,
+                "kind": "tool_result",
+                "status": _tool_message_status(message),
+                "summary": content or "Tool result observed.",
+                "source_kind": "session_item",
+                "source_id": source_id or str(sequence_no or ""),
+                "confidence": "observed",
+            },
+        )
+        seen_ids.add(item_id)
+    return items
+
+
+def _explicit_evidence_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list | tuple):
+        return []
+    items: list[dict[str, object]] = []
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, dict):
+            continue
+        summary = metadata_text(raw.get("summary")) or metadata_text(raw.get("fact"))
+        if summary is None:
+            continue
+        item = {
+            "id": metadata_text(raw.get("id")) or f"evidence:{index}",
+            "kind": metadata_text(raw.get("kind")) or "fact",
+            "status": _evidence_status(raw.get("status")),
+            "summary": summary,
+            "source_kind": metadata_text(raw.get("source_kind")) or "metadata",
+            "source_id": metadata_text(raw.get("source_id")) or "",
+            "confidence": metadata_text(raw.get("confidence")) or "unspecified",
+        }
+        metadata = raw.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            item["metadata"] = dict(metadata)
+        items.append(item)
+    return items
+
+
+def _tool_message_status(message: LlmMessage) -> str:
+    metadata = dict(message.metadata)
+    status = _evidence_status(metadata.get("status"))
+    if status != "unknown":
+        return status
+    content = _payload_text(message.content, limit=400).lower()
+    if "error" in content or "failed" in content or "traceback" in content:
+        return "failed"
+    return "success"
+
+
+def _evidence_status(value: object) -> str:
+    status = metadata_text(value)
+    if status in {"verified", "success", "failed", "blocked", "open", "gap"}:
+        return status
+    return "unknown"
+
+
+def _evidence_frontier_fingerprint(items: list[dict[str, object]]) -> str:
+    payload = [
+        {
+            "id": item.get("id"),
+            "kind": item.get("kind"),
+            "status": item.get("status"),
+            "summary": item.get("summary"),
+            "source_kind": item.get("source_kind"),
+            "source_id": item.get("source_id"),
+        }
+        for item in items
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _payload_text(value: object, *, limit: int = 4000) -> str:

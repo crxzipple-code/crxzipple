@@ -116,15 +116,16 @@ class ContextWorkspacePromptSnapshotAdapter:
             mode=prompt.mode,
             hint_payload=prompt.flow_hint,
         )
+        run_workspace_metadata = build_run_workspace_metadata(
+            run=run,
+            prompt=prompt,
+            flow_context=flow_context.to_payload(),
+        )
         self._workspace_service.ensure_workspace(
             EnsureContextWorkspaceInput(
                 session_key=session_key,
                 agent_id=agent_id,
-                metadata=build_run_workspace_metadata(
-                    run=run,
-                    prompt=prompt,
-                    flow_context=flow_context.to_payload(),
-                ),
+                metadata=run_workspace_metadata,
             ),
         )
         render_metadata = merge_default_tool_schema_metadata(
@@ -168,6 +169,11 @@ class ContextWorkspacePromptSnapshotAdapter:
             mirrored_node_ids=rendered.mirrored_node_ids,
             tool_schema_count=len(provider_attachments.get("tool_schemas", ())),
         )
+        evidence_frontier = _evidence_frontier_from_workspace_metadata(
+            run_workspace_metadata,
+        )
+        if evidence_frontier is not None:
+            snapshot_metadata["evidence_frontier"] = evidence_frontier
         included_refs = _snapshot_ref_tuple(
             snapshot_metadata.get("direct_session_item_refs"),
         )
@@ -194,6 +200,7 @@ class ContextWorkspacePromptSnapshotAdapter:
             session_key=session_key,
             current_included_node_ids=rendered.included_node_ids,
             current_provider_attachments=provider_attachments,
+            current_snapshot_metadata=snapshot_metadata,
         )
         if context_delta is not None:
             snapshot_metadata["context_delta"] = context_delta
@@ -311,6 +318,7 @@ def _context_delta_metadata(
     session_key: str,
     current_included_node_ids: tuple[str, ...],
     current_provider_attachments: dict[str, object],
+    current_snapshot_metadata: dict[str, object],
 ) -> dict[str, object] | None:
     if parent_snapshot is None:
         return None
@@ -333,6 +341,10 @@ def _context_delta_metadata(
     removed_tool_schema_names = tuple(
         name for name in baseline_tool_schema_names if name not in current_tool_schema_names
     )
+    evidence_delta = _evidence_frontier_delta(
+        parent_snapshot.metadata,
+        current_snapshot_metadata,
+    )
     changed_revision = current_revision != parent_snapshot.tree_revision
     if (
         not changed_revision
@@ -340,6 +352,7 @@ def _context_delta_metadata(
         and not removed_node_ids
         and not added_tool_schema_names
         and not removed_tool_schema_names
+        and evidence_delta is None
     ):
         return None
     prompt_body = render_context_delta_body(
@@ -352,8 +365,9 @@ def _context_delta_metadata(
         removed_node_ids=removed_node_ids,
         added_tool_schema_names=added_tool_schema_names,
         removed_tool_schema_names=removed_tool_schema_names,
+        evidence_delta=evidence_delta,
     )
-    return {
+    payload: dict[str, object] = {
         "baseline_snapshot_id": parent_snapshot.id,
         "baseline_revision": parent_snapshot.tree_revision,
         "current_revision": current_revision,
@@ -364,6 +378,72 @@ def _context_delta_metadata(
         "removed_tool_schema_names": list(removed_tool_schema_names),
         "prompt_body": prompt_body,
     }
+    if evidence_delta is not None:
+        payload["evidence_delta"] = evidence_delta
+    return payload
+
+
+def _evidence_frontier_from_workspace_metadata(
+    metadata: dict[str, object],
+) -> dict[str, object] | None:
+    node = metadata.get("evidence_frontier_node")
+    if not isinstance(node, dict):
+        return None
+    frontier = node.get("metadata")
+    if not isinstance(frontier, dict):
+        return None
+    return dict(frontier)
+
+
+def _evidence_frontier_delta(
+    baseline_metadata: dict[str, object],
+    current_metadata: dict[str, object],
+) -> dict[str, object] | None:
+    baseline = _dict_value(baseline_metadata.get("evidence_frontier"))
+    current = _dict_value(current_metadata.get("evidence_frontier"))
+    if not current:
+        return None
+    if baseline.get("fingerprint") == current.get("fingerprint"):
+        return None
+    baseline_ids = {
+        str(item.get("id"))
+        for item in _dict_list_value(baseline.get("items"))
+        if item.get("id") is not None
+    }
+    current_items = _dict_list_value(current.get("items"))
+    new_items = [
+        item
+        for item in current_items
+        if str(item.get("id")) not in baseline_ids
+    ]
+    return {
+        "schema_version": current.get("schema_version"),
+        "baseline_fingerprint": baseline.get("fingerprint"),
+        "current_fingerprint": current.get("fingerprint"),
+        "item_count": current.get("item_count", len(current_items)),
+        "new_items": new_items,
+        "verified_facts": _list_value(current.get("verified_facts")),
+        "failed_evidence_paths": _list_value(current.get("failed_evidence_paths")),
+        "remaining_gaps": _list_value(current.get("remaining_gaps")),
+    }
+
+
+def _dict_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _dict_list_value(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _list_value(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
 
 
 class _DeltaWorkspace:

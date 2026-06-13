@@ -517,12 +517,26 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 
 ### Checklist
 
-- [ ] 定义 evidence frontier item schema。
+- [x] 定义 evidence frontier item schema。
 - [ ] Tool result 自动提取 failure/success evidence。
-- [ ] Orchestration 每轮生成 evidence delta。
-- [ ] Context Tree 展示 evidence frontier。
-- [ ] 后续 continuation 可注入 evidence delta。
+- [x] Orchestration 每轮生成 evidence delta。
+- [x] Context Tree 展示 evidence frontier。
+- [x] 后续 continuation 可注入 evidence delta。
 - [ ] Workbench 展示 verified facts 和 remaining gaps。
+
+### Construction Notes 2026-06-14
+
+- `evidence.frontier` 的 orchestration payload 升级为 `2026-06-14`
+  schema，统一 `id/kind/status/summary/source_kind/source_id/confidence`
+  item 字段，并沉淀 `verified_facts`、`failed_evidence_paths`、
+  `remaining_gaps` 与稳定 fingerprint。
+- Context Workspace snapshot metadata 记录 `evidence_frontier`，用于跨轮比较。
+- `context_tree_delta` 支持内嵌 `evidence_delta`。即使
+  `evidence.frontier` 节点 ID 不变，只要 evidence fingerprint 变化，
+  后续 provider continuation 也会收到新增 evidence item、verified facts
+  和 remaining gaps。
+- 当前只完成显式 `run.metadata.evidence_frontier` 与 direct tool message
+  的归一化入口；从具体 tool result envelope 自动抽取成功/失败事实仍待补。
 
 ## 迁移策略
 

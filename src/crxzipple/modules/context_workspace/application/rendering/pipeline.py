@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from crxzipple.modules.context_workspace.application import root_nodes
 from crxzipple.modules.context_workspace.application.models import (
     RenderContextDeltaResult,
@@ -149,6 +151,7 @@ def render_context_delta_body(
     removed_node_ids: tuple[str, ...],
     added_tool_schema_names: tuple[str, ...],
     removed_tool_schema_names: tuple[str, ...],
+    evidence_delta: dict[str, object] | None = None,
 ) -> str:
     lines = [
         (
@@ -161,6 +164,7 @@ def render_context_delta_body(
         _xml_list("removed_rendered_nodes", removed_node_ids),
         _xml_list("added_tool_schemas", added_tool_schema_names),
         _xml_list("removed_tool_schemas", removed_tool_schema_names),
+        _xml_payload("evidence_delta", evidence_delta),
         "</context_tree_delta>",
     ]
     return "\n".join(lines)
@@ -173,6 +177,16 @@ def _xml_list(tag: str, values: tuple[str, ...]) -> str:
     lines.extend(f"    <item>{_escape_xml(value)}</item>" for value in values)
     lines.append(f"  </{tag}>")
     return "\n".join(lines)
+
+
+def _xml_payload(tag: str, payload: dict[str, object] | None) -> str:
+    if not payload:
+        return f"  <{tag} />"
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        encoded = str(payload)
+    return f"  <{tag}>{_escape_xml(encoded)}</{tag}>"
 
 
 def _escape_xml(value: str) -> str:
