@@ -397,6 +397,7 @@ class OrchestrationEngine:
             provider_options,
             request_options["reasoning_config"],
         )
+        provider_continuation = _provider_continuation_from_run(run)
         request_envelope = self.provider_request_builder.request_envelope(
             prompt=surface.prompt,
             context_render_snapshot=context_render_snapshot,
@@ -407,6 +408,7 @@ class OrchestrationEngine:
             provider_options=provider_options,
             reasoning_config=request_options["reasoning_config"],
             output_contract=request_options["output_contract"],
+            include_context_messages=provider_continuation is None,
         )
         context = _AdvanceContext(
             session_key=session_key,

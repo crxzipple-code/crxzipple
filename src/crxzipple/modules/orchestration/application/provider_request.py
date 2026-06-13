@@ -38,6 +38,8 @@ class ProviderPromptRequestBuilder:
         self,
         prompt: RunPromptInput,
         context_render_snapshot: ContextRenderSnapshotRecord | None,
+        *,
+        include_context_messages: bool = True,
     ) -> RunPromptInput:
         prompt = self._prompt_with_context_render_report(
             prompt,
@@ -47,6 +49,8 @@ class ProviderPromptRequestBuilder:
             prompt,
             context_render_snapshot,
         )
+        if not include_context_messages:
+            return prompt
         prompt = self._prompt_with_context_workspace_body(
             prompt,
             context_render_snapshot,
@@ -108,10 +112,12 @@ class ProviderPromptRequestBuilder:
         provider_options: dict[str, object] | None = None,
         reasoning_config: dict[str, object] | None = None,
         output_contract: dict[str, object] | None = None,
+        include_context_messages: bool = True,
     ) -> "LlmRequestEnvelope":
         prompt_with_snapshot = self.prompt_with_context_snapshot(
             prompt,
             context_render_snapshot,
+            include_context_messages=include_context_messages,
         )
         tool_surface = ToolSurface.from_resolved_tools(
             resolved_tools_for_envelope := self.resolved_tools_for_prompt(

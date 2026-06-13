@@ -285,9 +285,9 @@ Loop 结束判断继续使用：
 - [x] Run loop 保存 latest provider response id。
 - [ ] Tool call session item 记录 provider call id。
 - [ ] Tool result replay item 绑定 provider call id。
-- [ ] `LlmRequestEnvelope` 支持 delta input。
-- [ ] 首轮完整 Context Tree render。
-- [ ] 后续 provider-native continuation 不再重放完整 tree/transcript。
+- [x] `LlmRequestEnvelope` 支持 continuation 场景跳过自动 context message replay。
+- [x] 首轮完整 Context Tree render。
+- [x] 后续 provider-native continuation 不再重放完整 tree/transcript。
 - [ ] context tree revision 变化时生成 context delta。
 - [ ] tool surface 变化时更新 provider tools。
 - [ ] execution chain summary 展示 continuation state。

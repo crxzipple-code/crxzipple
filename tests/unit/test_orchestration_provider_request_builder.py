@@ -65,6 +65,55 @@ def test_prompt_with_context_snapshot_inserts_tree_after_system_prefix() -> None
     assert result.tool_schemas == snapshot.tool_schemas
 
 
+def test_request_envelope_can_use_snapshot_without_replaying_context_messages() -> None:
+    builder = ProviderPromptRequestBuilder()
+    prompt = _prompt(
+        messages=(
+            LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+            LlmMessage(role=LlmMessageRole.USER, content="hello"),
+        ),
+        tool_schemas=(ToolSchema(name="old.tool"),),
+    )
+    snapshot = ContextRenderSnapshotRecord(
+        snapshot_id="ctxsnap_delta",
+        prompt_body="<context_tree><node id=\"session.current\" /></context_tree>",
+        included_node_ids=("session.current",),
+        provider_attachments={"tool_schemas": [{"name": "weather.lookup"}]},
+        tool_schemas=(ToolSchema(name="weather.lookup"),),
+        artifact_content_blocks=(
+            {
+                "type": "image_ref",
+                "image_ref": {"artifact_id": "artifact-1"},
+            },
+        ),
+    )
+    resolved_tools = ResolvedToolSet(
+        tools=(_resolved_tool("tool.weather", schema_name="weather.lookup"),),
+    )
+
+    envelope = builder.request_envelope(
+        prompt=prompt,
+        context_render_snapshot=snapshot,
+        resolved_tools=resolved_tools,
+        snapshot_metadata=snapshot.metadata,
+        include_context_messages=False,
+    )
+
+    assert tuple(message.content for message in envelope.messages) == (
+        "system",
+        "hello",
+    )
+    assert all(
+        message.metadata.get("prompt_block_kind") != "context_workspace"
+        for message in envelope.messages
+    )
+    assert envelope.tool_schemas == snapshot.tool_schemas
+    assert envelope.context_surface.snapshot_id == "ctxsnap_delta"
+    assert envelope.context_surface.rendered_context == snapshot.prompt_body
+    assert envelope.tool_surface.functions[0].name == "weather.lookup"
+    assert envelope.metadata["context_render_snapshot_id"] == "ctxsnap_delta"
+
+
 def test_resolved_tools_for_prompt_filters_to_mirrored_interactive_schemas() -> None:
     builder = ProviderPromptRequestBuilder()
     weather = _resolved_tool("tool.weather", schema_name="weather.lookup")
