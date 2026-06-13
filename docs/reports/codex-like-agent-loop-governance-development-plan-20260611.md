@@ -529,13 +529,40 @@ Baseline 记录模板：
 - [x] Workbench LLM step 展示 `Tool-only streak: N` 诊断 badge 和 summary。
 - [x] Operations execution chain 聚合展示 tool-only streak，并保留 trace route
   跳转到对应事件流。
-- [ ] 设计后续治理策略：连续 tool-only 超阈值时，下一轮 prompt 注入简短 evidence checkpoint，要求模型基于已有事实选择验证/收束/求助，而不是继续同类探测。
+- [x] 设计后续治理策略：连续 tool-only 超阈值时，下一轮只能注入来自
+  Evidence Frontier 的简短 checkpoint，要求模型基于已有事实选择验证/收束/求助，
+  而不是继续同类探测。
 
 边界：
 
 - 本阶段不硬中断 run。
 - 不生成新的 assistant summary 概念。
 - 不把 checkpoint 做成任务/工具专用 route。
+
+治理策略：
+
+1. 触发条件只来自通用执行事实：
+   - `max_consecutive_llm_tool_only_steps >= 3`。
+   - 最近 LLM step 有 tool call，但无 assistant progress text。
+   - 当前 run 仍未完成，且无 pending approval / background tool wait。
+2. checkpoint 内容只来自已有 owner fact：
+   - `evidence_frontier.verified_facts`。
+   - `evidence_frontier.failed_evidence_paths`。
+   - `evidence_frontier.remaining_gaps`。
+   - 最近一次 tool result envelope 的 failure/success summary。
+3. checkpoint 不制造新的用户可见 assistant message：
+   - 它是 model-visible / trace-visible 的 request delta。
+   - Workbench 只展示其 source refs 和 evidence summary，不当聊天消息展示。
+4. checkpoint 不写任务策略：
+   - 只提示模型“基于已有证据选择下一步类型：验证、收束、请求用户输入、或说明无法推进”。
+   - 不出现航空、浏览器、CDP、Playwright、DOM 等 source/task-specific 指导。
+5. checkpoint 不作为失败条件：
+   - 连续 tool-only 仍允许继续。
+   - 若 checkpoint 后仍继续同类探测，只增加诊断权重和 Operations 风险展示。
+6. 实现位置：
+   - Orchestration 只负责识别 tool-only streak 和选择是否请求 checkpoint delta。
+   - Context Workspace / Evidence Frontier 负责生成 checkpoint 内容。
+   - Provider adapter 仍只做 provider-specific shape mapping。
 
 ### Phase 8: Documentation And Developer Workflow
 
