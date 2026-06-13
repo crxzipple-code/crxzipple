@@ -2149,6 +2149,9 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
+        assert processed.result_payload is not None
+        self.assertEqual(processed.result_payload["output_text"], "provider native final")
         self.assertGreaterEqual(len(adapter.requests), 2)
         first_request = adapter.requests[0]
         second_request = adapter.requests[1]

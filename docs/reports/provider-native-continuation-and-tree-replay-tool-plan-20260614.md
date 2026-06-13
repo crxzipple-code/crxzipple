@@ -294,7 +294,7 @@ Loop 结束判断继续使用：
 - [x] 单测覆盖 orchestration invoker -> LLM input continuation 透传。
 - [x] 单测覆盖首轮 -> tool call -> tool result continuation。
 - [x] 单测覆盖 `context_tree.enable_tool_schema` 后工具面更新。
-- [ ] 单测覆盖 final answer 完成 run。
+- [x] 单测覆盖 final answer 完成 run。
 
 ## 3. Context Workspace Module
 
