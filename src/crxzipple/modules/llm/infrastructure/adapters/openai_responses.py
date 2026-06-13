@@ -292,6 +292,7 @@ class OpenAIResponsesAdapter:
             "input": openai_response_input_items(
                 request.messages,
                 tool_name_aliases=tool_name_aliases,
+                continuation_delta_only=_uses_provider_native_continuation(request),
             ),
         }
         _apply_provider_continuation(payload, request)
@@ -707,3 +708,12 @@ def _apply_provider_continuation(
         return
     payload["type"] = "response.create"
     payload["previous_response_id"] = continuation.previous_response_id
+
+
+def _uses_provider_native_continuation(request: LlmAdapterRequest) -> bool:
+    continuation = request.continuation
+    return (
+        continuation is not None
+        and continuation.mode == "provider_native"
+        and continuation.previous_response_id is not None
+    )

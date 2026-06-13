@@ -396,6 +396,7 @@ def openai_response_input_items(
     messages: tuple[LlmMessage, ...],
     *,
     tool_name_aliases: dict[str, str] | None = None,
+    continuation_delta_only: bool = False,
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     for message in messages:
@@ -435,7 +436,29 @@ def openai_response_input_items(
         if message.name is not None:
             payload["name"] = message.name
         payloads.append(payload)
+    if continuation_delta_only:
+        delta_payloads = _openai_response_continuation_delta_items(payloads)
+        if delta_payloads:
+            return delta_payloads
     return payloads
+
+
+def _openai_response_continuation_delta_items(
+    payloads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    delta_items: list[dict[str, Any]] = []
+    include_next_attachment = False
+    for payload in payloads:
+        if payload.get("type") == "function_call_output":
+            delta_items.append(payload)
+            include_next_attachment = True
+            continue
+        if include_next_attachment and payload.get("role") == "user":
+            delta_items.append(payload)
+            include_next_attachment = False
+            continue
+        include_next_attachment = False
+    return delta_items
 
 
 def anthropic_messages(messages: tuple[LlmMessage, ...]) -> list[dict[str, Any]]:

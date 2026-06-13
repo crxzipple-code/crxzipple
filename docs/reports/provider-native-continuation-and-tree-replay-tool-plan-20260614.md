@@ -210,7 +210,7 @@ OpenAI/Codex Responses adapter：
 - [x] 扩展 `LlmInvocation` provider request preview/ref 字段。
 - [x] OpenAI Responses adapter 支持 `previous_response_id`。
 - [x] Codex Responses adapter 支持 `previous_response_id`。
-- [ ] Tool result 映射为 `function_call_output`。
+- [x] Tool result 映射为 `function_call_output`。
 - [x] Provider actual request preview 持久化。
 - [x] 单测覆盖首轮 request。
 - [x] 单测覆盖 continuation request。

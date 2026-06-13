@@ -2101,6 +2101,55 @@ class LlmAdapterTestCase(unittest.TestCase):
             {"verbosity": "low"},
         )
 
+    def test_openai_codex_responses_continuation_sends_tool_output_delta(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.SYSTEM,
+                    content="Runtime tree that should not be replayed.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Original task that should not be replayed.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.TOOL,
+                    content="tool completed with evidence",
+                    tool_call_id="call_123",
+                ),
+            ),
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["previous_response_id"], "resp_previous")
+        self.assertEqual(preview["input_item_count"], 1)
+        self.assertEqual(
+            preview["input_item_types"],
+            ("function_call_output",),
+        )
+        self.assertEqual(
+            preview["payload_preview"]["input"],
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "tool completed with evidence",
+                },
+            ],
+        )
+
     def test_openai_codex_responses_adapter_sanitizes_tool_names_and_restores_tool_calls(self) -> None:
         profile = LlmProfile(
             id="codex-tool-alias",
