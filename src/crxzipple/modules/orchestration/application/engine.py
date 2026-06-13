@@ -88,6 +88,7 @@ class EngineAdvanceOutcome:
     continuation_end_turn: bool | None = None
     provider_continuation_state: dict[str, object] = field(default_factory=dict)
     loop_diagnostic: dict[str, object] = field(default_factory=dict)
+    evidence_frontier: tuple[dict[str, object], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +114,7 @@ class _ResolvedRunPromptInput:
 
 @dataclass(frozen=True, slots=True)
 class _AdvanceContext:
+    run: OrchestrationRun
     session_key: str
     user_session_item_id: str | None
     prompt: RunPromptInput
@@ -415,6 +417,7 @@ class OrchestrationEngine:
             include_context_messages=provider_continuation is None,
         )
         context = _AdvanceContext(
+            run=run,
             session_key=session_key,
             user_session_item_id=inbound_record.user_session_item_id,
             prompt=prompt,
@@ -573,6 +576,10 @@ class OrchestrationEngine:
             pending_tool_run_ids=tuple(
                 tool_run.id for _, tool_run in execution_outcome.background_runs
             ),
+            evidence_frontier=_merge_evidence_frontier(
+                context.run.metadata.get("evidence_frontier"),
+                execution_outcome.evidence_frontier_items,
+            ),
             pending_approval_request=execution_outcome.pending_approval_request,
             yield_requested=execution_outcome.yield_requested,
             yield_reason=execution_outcome.yield_reason,
@@ -703,6 +710,7 @@ class OrchestrationEngine:
         tool_call_names: tuple[str, ...] = (),
         tool_run_links: tuple[dict[str, object], ...] = (),
         pending_tool_run_ids: tuple[str, ...] = (),
+        evidence_frontier: tuple[dict[str, object], ...] = (),
         pending_approval_request: PendingApprovalRequest | None = None,
         yield_requested: bool = False,
         yield_reason: str | None = None,
@@ -723,6 +731,7 @@ class OrchestrationEngine:
             tool_call_names=tool_call_names,
             tool_run_links=tool_run_links,
             pending_tool_run_ids=pending_tool_run_ids,
+            evidence_frontier=evidence_frontier,
             pending_approval_request=pending_approval_request,
             prompt_report=context.prompt.report,
             context_render_snapshot_id=context.context_render_snapshot_id,
@@ -1086,6 +1095,34 @@ def _provider_continuation_state(invocation: Any) -> dict[str, object]:
             preview.get("has_previous_response_id"),
         ),
     }
+
+
+def _merge_evidence_frontier(
+    existing: object,
+    new_items: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    items: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    if isinstance(existing, list | tuple):
+        for raw in existing:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            item_id = str(item.get("id") or "")
+            if item_id and item_id in seen_ids:
+                continue
+            items.append(item)
+            if item_id:
+                seen_ids.add(item_id)
+    for raw in new_items:
+        item = dict(raw)
+        item_id = str(item.get("id") or "")
+        if item_id and item_id in seen_ids:
+            continue
+        items.append(item)
+        if item_id:
+            seen_ids.add(item_id)
+    return tuple(items)
 
 
 def _terminal_loop_diagnostic(invocation: Any) -> dict[str, object]:

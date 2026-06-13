@@ -2942,6 +2942,14 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(len(outcome.inline_runs), 1)
         tool_run = outcome.inline_runs[0]
         self.assertIsNotNone(tool_run.result_envelope_payload)
+        self.assertEqual(len(outcome.evidence_frontier_items), 1)
+        evidence_item = outcome.evidence_frontier_items[0]
+        self.assertEqual(evidence_item["id"], f"tool-run:{tool_run.id}")
+        self.assertEqual(evidence_item["status"], "success")
+        self.assertEqual(evidence_item["summary"], "Envelope summary for model replay.")
+        self.assertEqual(evidence_item["source_kind"], "tool_run")
+        self.assertEqual(evidence_item["source_id"], tool_run.id)
+        self.assertEqual(evidence_item["metadata"]["tool_name"], "enveloped.result")
         session_items = self.session_service.list_model_visible_items(
             ListSessionItemsInput(
                 session_key="agent:assistant:main",

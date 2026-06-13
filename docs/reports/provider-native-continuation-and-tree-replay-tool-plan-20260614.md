@@ -535,8 +535,14 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
   `evidence.frontier` 节点 ID 不变，只要 evidence fingerprint 变化，
   后续 provider continuation 也会收到新增 evidence item、verified facts
   和 remaining gaps。
-- 当前只完成显式 `run.metadata.evidence_frontier` 与 direct tool message
-  的归一化入口；从具体 tool result envelope 自动抽取成功/失败事实仍待补。
+- Tool executor 已从 terminal inline tool run 自动抽取
+  `tool_result` evidence item，并通过 `EngineAdvanceOutcome.evidence_frontier`
+  写回 run metadata；摘要优先取 tool result envelope summary，状态由
+  envelope / `ToolRunStatus` 归一化为 success / failed / blocked。
+- 显式 `run.metadata.evidence_frontier` 与 direct tool message 仍作为
+  Context Workspace 的归一化入口。
+- 背景工具完成后从 waiting/resume 路径合并 terminal result evidence 仍待补，
+  因此 checklist 中的 tool result 自动抽取暂不标满。
 
 ## 迁移策略
 

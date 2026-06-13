@@ -662,6 +662,10 @@ class RunExecutionService:
             metadata["provider_continuation_state"] = dict(
                 outcome.provider_continuation_state,
             )
+        if outcome.evidence_frontier:
+            metadata["evidence_frontier"] = [
+                dict(item) for item in outcome.evidence_frontier
+            ]
         return metadata
 
     @staticmethod
