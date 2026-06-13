@@ -895,6 +895,81 @@ class OperationsObservationTestCase(unittest.TestCase):
             ),
         )
 
+    def test_orchestration_page_projects_tool_only_streak(self) -> None:
+        timestamp = datetime.now(timezone.utc)
+        run = OrchestrationRun(
+            id="run-tool-only-row",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="inspect tool-only loop",
+            ),
+            status=OrchestrationRunStatus.RUNNING,
+            stage=OrchestrationRunStage.LLM,
+            lane_key="session:agent:assistant:main",
+            priority=4,
+            metadata={"trace_id": "trace-tool-only-row"},
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        chain = ExecutionChain.create(
+            chain_id="chain-tool-only-row",
+            turn_id=run.id,
+        )
+        chain.start(active_step_id="step-tool-only-row-3")
+        steps: list[ExecutionStep] = []
+        items_by_step_id: dict[str, list[ExecutionStepItem]] = {}
+        for index in range(1, 4):
+            chain.increment_step_count()
+            step = ExecutionStep.create(
+                step_id=f"step-tool-only-row-{index}",
+                chain_id=chain.id,
+                turn_id=run.id,
+                step_index=index,
+                kind=ExecutionStepKind.LLM,
+                correlation_key=f"run-tool-only-row:{index}:llm",
+            )
+            step.complete()
+            item = ExecutionStepItem.create(
+                item_id=f"item-tool-only-row-{index}",
+                step_id=step.id,
+                chain_id=chain.id,
+                turn_id=run.id,
+                item_index=1,
+                kind=ExecutionStepItemKind.LLM_INVOCATION,
+                owner=ExecutionOwnerReference(
+                    owner_kind="llm_invocation",
+                    owner_id=f"llm-tool-only-row-{index}",
+                ),
+                correlation_key=f"llm-tool-only-row-{index}",
+            )
+            item.complete(
+                summary_payload={
+                    "llm_invocation_id": f"llm-tool-only-row-{index}",
+                    "text_present": False,
+                    "tool_call_names": ["exec"],
+                },
+            )
+            steps.append(step)
+            items_by_step_id[step.id] = [item]
+        provider = OrchestrationOperationsReadModelProvider(
+            run_query=_FakeOrchestrationRunQuery(
+                runs=[run],
+                chains_by_run_id={run.id: [chain]},
+                steps_by_chain_id={chain.id: steps},
+                items_by_step_id=items_by_step_id,
+            ),
+            executor_lease_query=_FakeOrchestrationExecutorControl(leases=[]),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.execution_chains.total, 1)
+        row = page.execution_chains.rows[0]
+        self.assertEqual(
+            row.cells["tool_only_streak"],
+            "max 3 / current 3 / total 3 suspected",
+        )
+
     def test_materializer_stores_paginated_tables_outside_page_projection(
         self,
     ) -> None:

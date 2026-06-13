@@ -1495,6 +1495,7 @@ def _execution_chain_section(
             ("items", "Items"),
             ("continuation", "Continuation"),
             ("latest_decision", "Latest Decision"),
+            ("tool_only_streak", "Tool-only"),
             ("dispatch_status", "Dispatch"),
             ("updated_at", "Updated At"),
             ("actions", "Actions"),
@@ -1540,10 +1541,14 @@ def _execution_chain_row(
     now: datetime,
 ) -> OperationsTableRowModel:
     steps = _safe_execution_steps(run_query, chain.id)
+    items_by_step_id = {
+        step.id: tuple(_safe_execution_step_items(run_query, step.id))
+        for step in steps
+    }
     items = [
         item
         for step in steps
-        for item in _safe_execution_step_items(run_query, step.id)
+        for item in items_by_step_id.get(step.id, ())
     ]
     active_step = _active_execution_step(chain, steps)
     last_step = max(steps, key=lambda item: item.step_index, default=None)
@@ -1552,6 +1557,7 @@ def _execution_chain_row(
     )
     continuation_items = _continuation_decision_items(items)
     latest_continuation = _latest_continuation_decision(continuation_items)
+    tool_only_streaks = _llm_tool_only_streaks(items_by_step_id, steps=steps)
     dispatch_status = (
         dispatch_task.status.value if dispatch_task is not None else run.status.value
     )
@@ -1567,6 +1573,7 @@ def _execution_chain_row(
             "items": f"{len(items)} / {active_item_count} active",
             "continuation": _continuation_decision_count_label(continuation_items),
             "latest_decision": _continuation_decision_label(latest_continuation),
+            "tool_only_streak": _llm_tool_only_streak_label(tool_only_streaks),
             "dispatch_status": dispatch_status,
             "dispatch_task_id": dispatch_task.id if dispatch_task is not None else "-",
             "dispatch_worker": _dispatch_worker(dispatch_task),
@@ -1730,6 +1737,71 @@ def _continuation_decision_label(item: ExecutionStepItem | None) -> str:
     return "; ".join(parts)
 
 
+def _llm_tool_only_streaks(
+    items_by_step_id: dict[str, tuple[ExecutionStepItem, ...]],
+    *,
+    steps: list[ExecutionStep],
+) -> dict[str, object]:
+    total = 0
+    current = 0
+    maximum = 0
+    for step in sorted(steps, key=lambda item: item.step_index):
+        if step.kind.value != "llm":
+            continue
+        step_items = items_by_step_id.get(step.id, ())
+        if _llm_step_is_tool_only(step_items):
+            total += 1
+            current += 1
+            maximum = max(maximum, current)
+            continue
+        current = 0
+    return {
+        "total": total,
+        "current": current,
+        "max": maximum,
+        "suspected": maximum >= 3,
+    }
+
+
+def _llm_tool_only_streak_label(streaks: dict[str, object]) -> str:
+    maximum = _int_value(streaks.get("max"))
+    current = _int_value(streaks.get("current"))
+    total = _int_value(streaks.get("total"))
+    if maximum <= 0:
+        return "-"
+    suffix = " suspected" if streaks.get("suspected") is True else ""
+    return f"max {maximum} / current {current} / total {total}{suffix}"
+
+
+def _llm_step_is_tool_only(items: tuple[ExecutionStepItem, ...]) -> bool:
+    has_tool_call = False
+    has_text = False
+    has_progress = False
+    for item in items:
+        if item.kind.value == "tool_call":
+            has_tool_call = True
+        if item.kind.value == "session_message":
+            summary = _execution_item_summary(item)
+            if _summary_text(summary, "message_kind") == "assistant_progress":
+                has_progress = True
+        summary = _execution_item_summary(item)
+        if _summary_bool(summary, "text_present"):
+            has_text = True
+        if _summary_text(summary, "assistant_progress_text") is not None:
+            has_text = True
+            has_progress = True
+        if _summary_text_list(summary, "assistant_progress_item_ids"):
+            has_progress = True
+        if _summary_text_list(summary, "session_item_ids") and _summary_text(
+            summary,
+            "message_kind",
+        ) == "assistant_progress":
+            has_progress = True
+        if _summary_text_list(summary, "tool_call_names"):
+            has_tool_call = True
+    return has_tool_call and not has_text and not has_progress
+
+
 def _execution_item_summary(item: ExecutionStepItem) -> dict[str, object]:
     summary = item.summary_payload
     return dict(summary) if isinstance(summary, dict) else {}
@@ -1752,6 +1824,28 @@ def _summary_bool(summary: dict[str, object], key: str) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def _summary_text_list(summary: dict[str, object], key: str) -> tuple[str, ...]:
+    raw = summary.get(key)
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    values: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            values.append(text)
+    return tuple(values)
+
+
+def _int_value(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return 0
 
 
 def _tone_for_execution_chain_status(status: ExecutionChainStatus) -> str:

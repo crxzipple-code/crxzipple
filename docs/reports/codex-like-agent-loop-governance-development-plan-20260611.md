@@ -527,7 +527,8 @@ Baseline 记录模板：
 - [x] baseline 增加 `tool_only_loop_suspected`。
 - [x] 单测覆盖连续 tool-only 诊断。
 - [x] Workbench LLM step 展示 `Tool-only streak: N` 诊断 badge 和 summary。
-- [ ] Operations/Trace 聚合展示 tool-only streak。
+- [x] Operations execution chain 聚合展示 tool-only streak，并保留 trace route
+  跳转到对应事件流。
 - [ ] 设计后续治理策略：连续 tool-only 超阈值时，下一轮 prompt 注入简短 evidence checkpoint，要求模型基于已有事实选择验证/收束/求助，而不是继续同类探测。
 
 边界：
