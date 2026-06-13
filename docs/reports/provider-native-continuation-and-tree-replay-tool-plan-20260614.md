@@ -637,15 +637,29 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 
 - continuation、context delta、provider call id、actual request preview 全部可见。
 
-## 施工前决策
+## 已决施工原则
 
-- [ ] `previous_response_id` 存储位置：Orchestration run metadata 还是独立 loop state 表。
-- [ ] Raw provider payload 是否持久化全文，还是只保存 preview + artifact ref。
-- [ ] `service_tier=priority` 是否默认启用，还是仅 agent/model profile 开关。
-- [ ] `include=["reasoning.encrypted_content"]` 是否对 Codex family 默认开启。
-- [ ] Context Tree delta 是否作为 system message 注入，还是 provider-specific input item。
+- [x] `previous_response_id` 存储在 Orchestration run metadata 的
+  `provider_continuation_state` 中，不新增独立 loop state 表。Orchestration
+  是综合 runtime flow owner，latest provider response id、latest invocation id
+  和 continuation mode 都属于 run 推进状态。
+- [x] Raw provider payload 默认不全文落 LLM invocation 表。当前落地策略是：
+  `provider_request_payload_preview` 存 provider actual request preview；
+  provider response item 保留 item-level `provider_payload`；大型/敏感 payload
+  走 artifact/ref 机制或显式 `trace_raw_provider_payload` 开关，不作为默认路径。
+- [x] `service_tier=priority` 不硬编码默认开启。它由 runtime/model/agent
+  request policy 显式合成，字段来源必须进入 policy trace；没有配置时不注入。
+- [x] `include=["reasoning.encrypted_content"]` 不按 provider family 静默硬编码。
+  它由 LLM defaults / runtime request policy 的
+  `include_reasoning_encrypted_content` 或 `include` 显式开启，并在非 Responses
+  provider 上被 capability filter 降级剔除。
+- [x] Context Tree delta 作为 provider request 的 normal message delta 输入，
+  由 `ProviderPromptRequestBuilder` 从 Context Workspace snapshot metadata 注入；
+  adapter 只负责映射到 provider-specific input shape。
 - [x] `context_tree.render_current` 默认输出上限：`max_chars=16000`，避免工具层引入额外 token estimator 依赖。
-- [ ] Exec 是否允许模型在临时目录安装 npm/pip 依赖，权限由 tool runtime 还是 authorization module 控制。
+- [x] Exec 是否允许模型在临时目录安装 npm/pip 依赖不由 prompt 或 LLM module
+  决定。权限归 tool runtime / authorization / sandbox policy 控制；exec 结果只需
+  明确返回 cwd、sandbox、approval、network/install 权限事实，让模型据实选择下一步。
 
 ## 风险
 
