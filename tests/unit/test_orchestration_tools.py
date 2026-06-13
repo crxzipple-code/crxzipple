@@ -268,6 +268,81 @@ class _ProviderContinuationUnsupportedToolAdapter:
         )
 
 
+class _ProviderNativeToolSurfaceUpdateAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        request_index = len(self.requests) - 1
+        response_items: tuple[LlmResponseItem, ...] = ()
+        if request_index == 0:
+            result = LlmResult(text="")
+            response_items = (
+                _tool_call_response_item(
+                    request,
+                    sequence_no=1,
+                    call_id="call-provider-expand-tools",
+                    name="context_tree.expand",
+                    arguments={"node_id": "tools.available"},
+                ),
+            )
+            provider_request_id = "resp-surface-1"
+        elif request_index == 1:
+            result = LlmResult(text="")
+            response_items = (
+                _tool_call_response_item(
+                    request,
+                    sequence_no=1,
+                    call_id="call-provider-expand-echo",
+                    name="context_tree.expand",
+                    arguments={"node_id": "tools.bundle.test.local_package.echo"},
+                ),
+            )
+            provider_request_id = "resp-surface-2"
+        elif request_index == 2:
+            result = LlmResult(text="")
+            response_items = (
+                _tool_call_response_item(
+                    request,
+                    sequence_no=1,
+                    call_id="call-provider-enable-echo",
+                    name="context_tree.enable_tool_schema",
+                    arguments={"node_id": "tools.tool.echo"},
+                ),
+            )
+            provider_request_id = "resp-surface-3"
+        elif request_index == 3:
+            result = LlmResult(text="")
+            response_items = (
+                _tool_call_response_item(
+                    request,
+                    sequence_no=1,
+                    call_id="call-provider-echo",
+                    name="echo",
+                    arguments={"message": "provider surface updated"},
+                ),
+            )
+            provider_request_id = "resp-surface-4"
+        else:
+            result = LlmResult(text="provider surface final")
+            provider_request_id = "resp-surface-5"
+        return LlmAdapterResponse(
+            result=result,
+            response_items=response_items,
+            provider_request_id=provider_request_id,
+            continuation=LlmContinuationSignal(
+                end_turn=request_index >= 4,
+                needs_follow_up=request_index < 4,
+                reason=(
+                    LlmContinuationReason.NONE
+                    if request_index >= 4
+                    else LlmContinuationReason.TOOL_CALL
+                ),
+            ),
+        )
+
+
 class _ProviderExternalOnlyAdapter:
     def __init__(self) -> None:
         self.requests: list[LlmAdapterRequest] = []
@@ -2196,6 +2271,90 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         }
         self.assertIn("chat-first", provider_request_ids)
         self.assertIn("chat-second", provider_request_ids)
+
+    def test_provider_native_tool_surface_updates_after_schema_enable(
+        self,
+    ) -> None:
+        adapter = _ProviderNativeToolSurfaceUpdateAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Returns the input payload for provider surface tests.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
+        )
+
+        async def echo(arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(str(arguments.get("message") or ""))
+
+        self.local_runtime_registry.register(tool, echo)
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-provider-native-tool-surface-update",
+                inbound_instruction=InboundInstruction(source="cli", content="echo"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(len(adapter.requests), 5)
+        first_schema_names = [schema.name for schema in adapter.requests[0].tool_schemas]
+        self.assertIn("context_tree.expand", first_schema_names)
+        self.assertNotIn("echo", first_schema_names)
+        second_schema_names = [schema.name for schema in adapter.requests[1].tool_schemas]
+        self.assertIn("context_tree.expand", second_schema_names)
+        self.assertNotIn("echo", second_schema_names)
+        third_schema_names = [schema.name for schema in adapter.requests[2].tool_schemas]
+        self.assertIn("context_tree.enable_tool_schema", third_schema_names)
+        self.assertNotIn("echo", third_schema_names)
+        fourth_request = adapter.requests[3]
+        fourth_schema_names = [schema.name for schema in fourth_request.tool_schemas]
+        self.assertIn("echo", fourth_schema_names)
+        self.assertIsNotNone(fourth_request.continuation)
+        assert fourth_request.continuation is not None
+        self.assertEqual(
+            fourth_request.continuation.previous_response_id,
+            "resp-surface-3",
+        )
+        context_messages = [
+            message
+            for message in fourth_request.messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace"
+        ]
+        self.assertEqual(context_messages, [])
+        third_request = adapter.requests[2]
+        third_schema_names = [schema.name for schema in third_request.tool_schemas]
+        self.assertIsNotNone(third_request.continuation)
+        assert third_request.continuation is not None
+        self.assertEqual(
+            third_request.continuation.previous_response_id,
+            "resp-surface-2",
+        )
 
     def test_text_with_tool_calls_records_assistant_progress_for_next_prompt(self) -> None:
         adapter = _SequentialResultAdapter(

@@ -289,11 +289,11 @@ Loop 结束判断继续使用：
 - [x] 首轮完整 Context Tree render。
 - [x] 后续 provider-native continuation 不再重放完整 tree/transcript。
 - [ ] context tree revision 变化时生成 context delta。
-- [ ] tool surface 变化时更新 provider tools。
+- [x] tool surface 变化时更新 provider tools。
 - [x] execution chain summary 展示 continuation state。
 - [x] 单测覆盖 orchestration invoker -> LLM input continuation 透传。
 - [x] 单测覆盖首轮 -> tool call -> tool result continuation。
-- [ ] 单测覆盖 `context_tree.enable_tool_schema` 后工具面更新。
+- [x] 单测覆盖 `context_tree.enable_tool_schema` 后工具面更新。
 - [ ] 单测覆盖 final answer 完成 run。
 
 ## 3. Context Workspace Module
