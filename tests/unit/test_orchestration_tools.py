@@ -2973,6 +2973,18 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             payload["metadata"][TOOL_RESULT_ENVELOPE_METADATA_KEY]["summary"],
             "Envelope summary for model replay.",
         )
+        self.assertEqual(
+            payload["metadata"][TOOL_RESULT_ENVELOPE_METADATA_KEY]["tool_run_id"],
+            tool_run.id,
+        )
+        self.assertEqual(
+            payload["metadata"][TOOL_RESULT_ENVELOPE_METADATA_KEY]["call_id"],
+            "call-envelope-1",
+        )
+        self.assertEqual(
+            payload["metadata"][TOOL_RESULT_ENVELOPE_METADATA_KEY]["tool_name"],
+            "enveloped.result",
+        )
 
     def test_process_next_orchestration_assignment_waits_when_tool_is_background(self) -> None:
         custom_harness = SqliteTestHarness()

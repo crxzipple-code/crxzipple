@@ -74,6 +74,28 @@ def _tool_result_envelope_payload(result: ToolRunResult) -> dict[str, Any] | Non
     return None
 
 
+def _normalized_tool_result_envelope_payload(
+    result: ToolRunResult,
+    *,
+    tool_run_id: str,
+    call_id: str | None,
+    fallback_tool_name: str,
+) -> dict[str, Any] | None:
+    payload = _tool_result_envelope_payload(result)
+    if payload is None:
+        return None
+    payload["tool_run_id"] = tool_run_id
+    if call_id is not None:
+        payload["call_id"] = call_id
+    else:
+        payload.pop("call_id", None)
+    if not isinstance(payload.get("tool_name"), str) or not str(
+        payload.get("tool_name"),
+    ).strip():
+        payload["tool_name"] = fallback_tool_name
+    return payload
+
+
 def _worker_capability_signature(payload: dict[str, Any]) -> tuple[Any, Any]:
     return (
         payload.get("runtime_registry"),
@@ -702,7 +724,12 @@ class ToolRun(AggregateRoot[str]):
     def succeed(self, output_payload: ToolRunResult) -> None:
         self.status = ToolRunStatus.SUCCEEDED
         self.result_payload = output_payload.to_payload()
-        self.result_envelope_payload = _tool_result_envelope_payload(output_payload)
+        self.result_envelope_payload = _normalized_tool_result_envelope_payload(
+            output_payload,
+            tool_run_id=self.id,
+            call_id=self.call_id,
+            fallback_tool_name=self.tool_id,
+        )
         self.error_payload = None
         self.completed_at = datetime.now(timezone.utc)
         self.heartbeat_at = self.completed_at

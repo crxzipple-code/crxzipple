@@ -386,12 +386,12 @@ CRXZipple 的 `exec/process` 结果应明确返回：
 
 ### Checklist
 
-- [ ] ToolRun 记录 provider call id。
-- [ ] ToolRun result envelope 支持 provider-native output mapping。
+- [x] ToolRun 记录 provider call id。
+- [x] ToolRun result envelope 支持 provider-native output mapping。
 - [ ] Exec result 返回环境事实。
 - [ ] Process result 返回可恢复 session/ref。
 - [ ] stderr/stdout 裁剪保留完整 payload ref。
-- [ ] 单测覆盖 function_call_output mapping。
+- [x] 单测覆盖 function_call_output mapping。
 - [ ] 单测覆盖 exec failure 结果可用于下一步推理。
 
 ## 5. Model / Agent Policy
