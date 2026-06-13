@@ -127,6 +127,18 @@ def test_llm_operations_page_exposes_prompt_transcript_budget_metadata() -> None
             reason=LlmContinuationReason.TOOL_CALL,
             provider_payload={"status": "requires_action"},
         ),
+        provider_request_payload_preview={
+            "has_previous_response_id": True,
+            "previous_response_id": "resp_previous",
+            "input_item_types": ["function_call_output"],
+            "tool_count": 3,
+            "option_summary": {
+                "parallel_tool_calls": True,
+                "prompt_cache_key": "crxzipple:assistant:session:budget",
+                "service_tier": "priority",
+                "text": {"verbosity": "low"},
+            },
+        },
     )
     response_events = (
         LlmResponseEvent(
@@ -187,6 +199,14 @@ def test_llm_operations_page_exposes_prompt_transcript_budget_metadata() -> None
     assert request_context["Artifact Omitted"] == "1"
     assert request_context["Direct Sequence Range"] == "session-budget:5-9 (3)"
     assert request_context["Context Snapshot"] == "ctxsnap-budget"
+    assert request_context["Provider Continuation"] == (
+        "previous_response_id=resp_previous"
+    )
+    assert request_context["Provider Input Items"] == "function_call_output"
+    assert request_context["Provider Tool Count"] == "3"
+    assert request_context["Provider Options"] == (
+        "parallel_tool_calls, prompt_cache_key, service_tier, text"
+    )
     assert detail.policy_trace.total == 2
     assert detail.policy_trace.rows[0].cells["source"] == (
         "settings.llm_request_defaults"

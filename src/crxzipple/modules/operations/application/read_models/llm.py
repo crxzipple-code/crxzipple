@@ -1785,6 +1785,22 @@ def _invocation_details(
                     ),
                     OperationsKeyValueItemModel("Response Format", "Configured" if invocation.response_format else "-"),
                     OperationsKeyValueItemModel("Provider Request ID", invocation.provider_request_id or "-"),
+                    OperationsKeyValueItemModel(
+                        "Provider Continuation",
+                        _provider_request_continuation_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Input Items",
+                        _provider_request_input_items_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Tool Count",
+                        _provider_request_tool_count_label(invocation),
+                    ),
+                    OperationsKeyValueItemModel(
+                        "Provider Options",
+                        _provider_request_options_label(invocation),
+                    ),
                 ),
                 request_payload=_request_payload(invocation),
                 result_payload=_result_payload(invocation),
@@ -3163,6 +3179,57 @@ def _request_payload(invocation: LlmInvocation) -> dict[str, Any]:
             ),
         },
     )
+
+
+def _provider_request_preview(invocation: LlmInvocation) -> dict[str, Any]:
+    preview = getattr(invocation, "provider_request_payload_preview", None)
+    return dict(preview) if isinstance(preview, dict) else {}
+
+
+def _provider_request_continuation_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    if not preview:
+        return "-"
+    has_previous = bool(preview.get("has_previous_response_id"))
+    previous_response_id = _text(preview.get("previous_response_id"))
+    if has_previous and previous_response_id:
+        return f"previous_response_id={previous_response_id}"
+    if has_previous:
+        return "previous_response_id present"
+    return "initial request"
+
+
+def _provider_request_input_items_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    values = preview.get("input_item_types")
+    if not isinstance(values, list) or not values:
+        return "-"
+    return ", ".join(str(item) for item in values[:8])
+
+
+def _provider_request_tool_count_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    value = preview.get("tool_count")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return "-"
+
+
+def _provider_request_options_label(invocation: LlmInvocation) -> str:
+    preview = _provider_request_preview(invocation)
+    option_summary = preview.get("option_summary")
+    if not isinstance(option_summary, dict) or not option_summary:
+        return "-"
+    keys = [
+        key
+        for key, value in option_summary.items()
+        if value not in (None, {}, [], ())
+    ]
+    if not keys:
+        return "-"
+    return ", ".join(str(key) for key in keys[:8])
 
 
 def _result_payload(invocation: LlmInvocation) -> dict[str, Any] | None:

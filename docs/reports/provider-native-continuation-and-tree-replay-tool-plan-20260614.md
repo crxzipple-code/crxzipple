@@ -477,13 +477,23 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 
 ### Checklist
 
-- [ ] Operations LLM detail 展示 provider request preview。
-- [ ] Trace 展示 previous_response_id。
-- [ ] Workbench timeline 展示 continuation badge。
-- [ ] Workbench timeline 展示 context delta item。
-- [ ] Workbench timeline 展示 provider call id。
-- [ ] UI 不把 normalized request 当 actual provider request。
-- [ ] 前端 typecheck/build。
+- [x] Operations LLM detail 展示 provider request preview。
+- [x] Trace 展示 previous_response_id。
+- [x] Workbench timeline 展示 continuation badge。
+- [x] Workbench timeline 展示 context delta item。
+- [x] Workbench timeline 展示 provider call id。
+- [x] UI 不把 normalized request 当 actual provider request。
+- [x] 前端 typecheck/build。
+
+### 2026-06-14 施工记录
+
+- Operations LLM invocation detail 的 request context 增加 provider request preview 摘要：provider continuation、input item types、provider tool count、provider option keys。
+- Workbench timeline/steps 既有覆盖已确认 continuation decision、provider-native badge、previous response id、response item refs、provider external item 不伪装成本地 tool run。
+- `request_payload` 继续包含 CRXZipple normalized invocation payload 和 `provider_request_payload_preview`，UI 摘要使用 preview 字段避免把 normalized request 当 actual provider request。
+- 验证：
+  - `PYTHONPATH=src pytest -q tests/unit/test_operations_llm_read_model.py tests/unit/test_ui_http.py -k "llm or workbench"`
+  - `cd frontend && npm run typecheck`
+  - `cd frontend && npm run build`
 
 ## 7. Evidence Frontier
 
