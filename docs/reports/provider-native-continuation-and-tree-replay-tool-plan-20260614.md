@@ -282,7 +282,7 @@ Loop 结束判断继续使用：
 
 ### Checklist
 
-- [ ] Run loop 保存 latest provider response id。
+- [x] Run loop 保存 latest provider response id。
 - [ ] Tool call session item 记录 provider call id。
 - [ ] Tool result replay item 绑定 provider call id。
 - [ ] `LlmRequestEnvelope` 支持 delta input。
@@ -291,6 +291,7 @@ Loop 结束判断继续使用：
 - [ ] context tree revision 变化时生成 context delta。
 - [ ] tool surface 变化时更新 provider tools。
 - [ ] execution chain summary 展示 continuation state。
+- [x] 单测覆盖 orchestration invoker -> LLM input continuation 透传。
 - [ ] 单测覆盖首轮 -> tool call -> tool result continuation。
 - [ ] 单测覆盖 `context_tree.enable_tool_schema` 后工具面更新。
 - [ ] 单测覆盖 final answer 完成 run。

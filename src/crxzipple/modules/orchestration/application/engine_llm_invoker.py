@@ -8,6 +8,7 @@ from crxzipple.modules.llm.application import InvokeLlmInput, StreamLlmInput
 from crxzipple.modules.llm.domain import (
     LlmAdapterNotConfiguredError,
     LlmApiFamily,
+    LlmProviderContinuation,
 )
 from crxzipple.modules.orchestration.application.ports import LlmPort
 from crxzipple.modules.orchestration.domain import OrchestrationValidationError
@@ -32,6 +33,7 @@ class OrchestrationEngineLlmInvoker:
         tool_schemas: tuple,
         response_format: dict[str, object] | None = None,
         request_overrides: dict[str, object] | None = None,
+        continuation: LlmProviderContinuation | None = None,
         require_tool_call: bool = False,
         request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
@@ -54,6 +56,7 @@ class OrchestrationEngineLlmInvoker:
                             response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
+                            continuation=continuation,
                         ),
                     )
                 except LlmAdapterNotConfiguredError:
@@ -65,6 +68,7 @@ class OrchestrationEngineLlmInvoker:
                             response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
+                            continuation=continuation,
                         ),
                     )
 
@@ -109,6 +113,7 @@ class OrchestrationEngineLlmInvoker:
         tool_schemas: tuple,
         response_format: dict[str, object] | None = None,
         request_overrides: dict[str, object] | None = None,
+        continuation: LlmProviderContinuation | None = None,
         require_tool_call: bool = False,
         request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
@@ -131,6 +136,7 @@ class OrchestrationEngineLlmInvoker:
                             response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
+                            continuation=continuation,
                         ),
                     )
                 except LlmAdapterNotConfiguredError:
@@ -142,6 +148,7 @@ class OrchestrationEngineLlmInvoker:
                             response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
+                            continuation=continuation,
                         ),
                     )
 
@@ -181,6 +188,7 @@ class OrchestrationEngineLlmInvoker:
                             response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
+                            continuation=continuation,
                         ),
                     )
 

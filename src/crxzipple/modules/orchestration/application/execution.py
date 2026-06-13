@@ -628,6 +628,10 @@ class RunExecutionService:
             payload["llm_continuation_end_turn"] = outcome.continuation_end_turn
         if outcome.continue_loop:
             payload["llm_continuation_follow_up"] = True
+        if outcome.provider_continuation_state:
+            payload["provider_continuation_state"] = dict(
+                outcome.provider_continuation_state,
+            )
         if outcome.loop_diagnostic:
             payload["llm_loop_diagnostic"] = dict(outcome.loop_diagnostic)
         transcript_consumption = _transcript_consumption_from_request_metadata(
@@ -653,6 +657,10 @@ class RunExecutionService:
         ):
             metadata["context_render_snapshot_id"] = (
                 outcome.context_render_snapshot_id.strip()
+            )
+        if outcome.provider_continuation_state:
+            metadata["provider_continuation_state"] = dict(
+                outcome.provider_continuation_state,
             )
         return metadata
 

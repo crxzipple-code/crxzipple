@@ -8,6 +8,7 @@ from typing import Any
 
 from crxzipple.modules.llm.domain import (
     LlmMessage,
+    LlmProviderContinuation,
     ToolCallIntent,
     ToolSchema,
 )
@@ -83,6 +84,7 @@ class EngineAdvanceOutcome:
     continue_loop: bool = False
     continuation_reason: str | None = None
     continuation_end_turn: bool | None = None
+    provider_continuation_state: dict[str, object] = field(default_factory=dict)
     loop_diagnostic: dict[str, object] = field(default_factory=dict)
 
 
@@ -269,6 +271,7 @@ class OrchestrationEngine:
                     context.request_envelope,
                 ),
                 request_overrides=context.request_envelope.provider_options,
+                continuation=_provider_continuation_from_run(run),
                 require_tool_call=context.prompt.surface_policy.require_tool_call,
                 request_metadata=_llm_request_metadata_from_envelope(
                     context.request_envelope,
@@ -314,6 +317,7 @@ class OrchestrationEngine:
                     context.request_envelope,
                 ),
                 request_overrides=context.request_envelope.provider_options,
+                continuation=_provider_continuation_from_run(run),
                 require_tool_call=context.prompt.surface_policy.require_tool_call,
                 request_metadata=_llm_request_metadata_from_envelope(
                     context.request_envelope,
@@ -722,6 +726,7 @@ class OrchestrationEngine:
             continue_loop=continue_loop,
             continuation_reason=_continuation_reason(invocation),
             continuation_end_turn=_continuation_end_turn(invocation),
+            provider_continuation_state=_provider_continuation_state(invocation),
             loop_diagnostic=_terminal_loop_diagnostic(invocation),
         )
 
@@ -1016,6 +1021,46 @@ def _continuation_end_turn(invocation: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _provider_continuation_from_run(
+    run: OrchestrationRun,
+) -> LlmProviderContinuation | None:
+    raw_state = run.metadata.get("provider_continuation_state")
+    if not isinstance(raw_state, dict):
+        return None
+    if raw_state.get("mode") != "provider_native":
+        return None
+    previous_response_id = _optional_text(raw_state.get("previous_response_id"))
+    if previous_response_id is None:
+        return None
+    return LlmProviderContinuation(
+        mode="provider_native",
+        previous_response_id=previous_response_id,
+        previous_invocation_id=_optional_text(raw_state.get("previous_invocation_id")),
+        provider_family=_optional_text(raw_state.get("provider_family")),
+    )
+
+
+def _provider_continuation_state(invocation: Any) -> dict[str, object]:
+    previous_response_id = _optional_text(getattr(invocation, "provider_request_id", None))
+    if previous_response_id is None:
+        return {}
+    preview = getattr(invocation, "provider_request_payload_preview", None)
+    if not isinstance(preview, dict):
+        return {}
+    api_family = _optional_text(preview.get("api_family"))
+    if api_family not in {"openai_responses", "openai_codex_responses"}:
+        return {}
+    return {
+        "mode": "provider_native",
+        "provider_family": api_family,
+        "previous_response_id": previous_response_id,
+        "previous_invocation_id": getattr(invocation, "id", ""),
+        "last_request_had_previous_response_id": bool(
+            preview.get("has_previous_response_id"),
+        ),
+    }
+
+
 def _terminal_loop_diagnostic(invocation: Any) -> dict[str, object]:
     if _continuation_needs_follow_up(invocation):
         return {}
@@ -1051,3 +1096,10 @@ def _enum_value(value: Any) -> str:
     raw_value = getattr(value, "value", value)
     text = str(raw_value or "").strip()
     return text or "-"
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None

@@ -36,6 +36,7 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmModelFamily,
     LlmProviderKind,
     LlmContinuationSignal,
+    LlmProviderContinuation,
     LlmResponseEvent,
     LlmResponseEventType,
     LlmResponseItem,
@@ -105,6 +106,7 @@ class InvokeLlmInput:
     overrides: dict[str, Any] = field(default_factory=dict)
     request_metadata: dict[str, Any] = field(default_factory=dict)
     invocation_id: str | None = None
+    continuation: LlmProviderContinuation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,7 @@ class StreamLlmInput:
     overrides: dict[str, Any] = field(default_factory=dict)
     request_metadata: dict[str, Any] = field(default_factory=dict)
     invocation_id: str | None = None
+    continuation: LlmProviderContinuation | None = None
 
 
 def register_llm_profile_input_from_config(
@@ -465,7 +468,11 @@ class LlmApplicationService:
             uow.commit()
 
         try:
-            request = self._build_adapter_request(profile, invocation)
+            request = self._build_adapter_request(
+                profile,
+                invocation,
+                continuation=data.continuation,
+            )
             self._record_provider_request_payload_preview(
                 invocation.id,
                 self._provider_request_payload_preview(adapter, profile, request),
@@ -532,7 +539,11 @@ class LlmApplicationService:
         invocation.start()
 
         try:
-            request = self._build_adapter_request(profile, invocation)
+            request = self._build_adapter_request(
+                profile,
+                invocation,
+                continuation=data.continuation,
+            )
             invocation.record_provider_request_payload_preview(
                 self._provider_request_payload_preview(adapter, profile, request),
             )
@@ -588,7 +599,11 @@ class LlmApplicationService:
         await asyncio.to_thread(self._store_started_invocation, invocation)
 
         try:
-            request = self._build_adapter_request(profile, invocation)
+            request = self._build_adapter_request(
+                profile,
+                invocation,
+                continuation=data.continuation,
+            )
             await asyncio.to_thread(
                 self._record_provider_request_payload_preview,
                 invocation.id,
@@ -688,7 +703,11 @@ class LlmApplicationService:
                 sequence += 1
 
                 try:
-                    request = self._build_adapter_request(profile, invocation)
+                    request = self._build_adapter_request(
+                        profile,
+                        invocation,
+                        continuation=data.continuation,
+                    )
                     self._record_provider_request_payload_preview(
                         invocation.id,
                         self._provider_request_payload_preview(
@@ -863,7 +882,11 @@ class LlmApplicationService:
             sequence += 1
 
             try:
-                request = self._build_adapter_request(profile, invocation)
+                request = self._build_adapter_request(
+                    profile,
+                    invocation,
+                    continuation=data.continuation,
+                )
                 await asyncio.to_thread(
                     self._record_provider_request_payload_preview,
                     invocation.id,
@@ -1235,6 +1258,8 @@ class LlmApplicationService:
         self,
         profile: LlmProfile,
         invocation: LlmInvocation,
+        *,
+        continuation: LlmProviderContinuation | None = None,
     ) -> LlmAdapterRequest:
         return LlmAdapterRequest(
             invocation_id=invocation.id,
@@ -1243,6 +1268,7 @@ class LlmApplicationService:
             response_format=invocation.response_format,
             overrides=invocation.request_overrides,
             resolved_credential=self._resolve_profile_credential(profile),
+            continuation=continuation,
         )
 
     def _provider_request_payload_preview(
