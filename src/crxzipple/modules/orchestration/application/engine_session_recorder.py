@@ -566,6 +566,14 @@ class OrchestrationSessionRecorder:
         run: OrchestrationRun,
         tool_run: ToolRun,
     ) -> dict[str, str]:
+        return self.background_tool_result_reference(run=run, tool_run=tool_run)
+
+    def background_tool_result_reference(
+        self,
+        *,
+        run: OrchestrationRun,
+        tool_run: ToolRun,
+    ) -> dict[str, str]:
         if self.execution_item_lookup is None:
             raise OrchestrationValidationError(
                 "Execution step item lookup is required to append background tool "

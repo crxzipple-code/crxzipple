@@ -518,7 +518,7 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 ### Checklist
 
 - [x] 定义 evidence frontier item schema。
-- [ ] Tool result 自动提取 failure/success evidence。
+- [x] Tool result 自动提取 failure/success evidence。
 - [x] Orchestration 每轮生成 evidence delta。
 - [x] Context Tree 展示 evidence frontier。
 - [x] 后续 continuation 可注入 evidence delta。
@@ -539,10 +539,10 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
   `tool_result` evidence item，并通过 `EngineAdvanceOutcome.evidence_frontier`
   写回 run metadata；摘要优先取 tool result envelope summary，状态由
   envelope / `ToolRunStatus` 归一化为 success / failed / blocked。
+- 背景工具完成后，`tool_resume` 和 waiting/recovery 两条路径都会复用同一
+  evidence builder，把 terminal tool result 合并进 resumed run metadata。
 - 显式 `run.metadata.evidence_frontier` 与 direct tool message 仍作为
   Context Workspace 的归一化入口。
-- 背景工具完成后从 waiting/resume 路径合并 terminal result evidence 仍待补，
-  因此 checklist 中的 tool result 自动抽取暂不标满。
 
 ## 迁移策略
 

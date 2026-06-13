@@ -47,6 +47,7 @@ from crxzipple.modules.orchestration.application.engine_llm_invoker import (
 from crxzipple.modules.orchestration.application.engine_tool_executor import (
     OrchestrationEngineToolExecutor,
     ToolExecutionBatchOutcome,
+    tool_run_evidence_frontier_item,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet, ToolResolver
 from crxzipple.modules.orchestration.domain import (
@@ -782,6 +783,64 @@ class OrchestrationEngine:
             run,
             tool_runs=tool_runs,
         )
+
+    def evidence_frontier_for_tool_runs(
+        self,
+        run: OrchestrationRun,
+        *,
+        tool_runs: tuple[ToolRun, ...],
+    ) -> tuple[dict[str, object], ...]:
+        items: list[dict[str, object]] = []
+        for tool_run in tool_runs:
+            tool_call = self._tool_call_intent_for_background_run(
+                run=run,
+                tool_run=tool_run,
+            )
+            if tool_call is None:
+                continue
+            items.append(
+                tool_run_evidence_frontier_item(
+                    tool_call=tool_call,
+                    tool_run=tool_run,
+                    source_run_id=run.id,
+                ),
+            )
+        return _merge_evidence_frontier(
+            run.metadata.get("evidence_frontier"),
+            tuple(items),
+        )
+
+    def _tool_call_intent_for_background_run(
+        self,
+        *,
+        run: OrchestrationRun,
+        tool_run: ToolRun,
+    ) -> ToolCallIntent | None:
+        if isinstance(tool_run.metadata, dict):
+            tool_call_id = _optional_text(tool_run.metadata.get("tool_call_id"))
+            tool_name = _optional_text(tool_run.metadata.get("tool_name"))
+            if tool_call_id is not None and tool_name is not None:
+                return ToolCallIntent(id=tool_call_id, name=tool_name, arguments={})
+        try:
+            reference = self.session_recorder.background_tool_result_reference(
+                run=run,
+                tool_run=tool_run,
+            )
+        except OrchestrationValidationError:
+            return ToolCallIntent(
+                id=tool_run.call_id or tool_run.id,
+                name=tool_run.tool_id,
+                arguments={},
+            )
+        tool_call_id = _optional_text(reference.get("tool_call_id"))
+        tool_name = _optional_text(reference.get("tool_name"))
+        if tool_call_id is None or tool_name is None:
+            return ToolCallIntent(
+                id=tool_run.call_id or tool_run.id,
+                name=tool_run.tool_id,
+                arguments={},
+            )
+        return ToolCallIntent(id=tool_call_id, name=tool_name, arguments={})
 
     def _build_prompt_input(
         self,

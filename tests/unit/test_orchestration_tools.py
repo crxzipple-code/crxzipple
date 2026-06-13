@@ -3442,6 +3442,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 resumed.queue_policy,
                 OrchestrationQueuePolicy.RESUME_FIRST,
             )
+            evidence_frontier = resumed.metadata["evidence_frontier"]
+            background_evidence = [
+                item
+                for item in evidence_frontier
+                if item.get("id") == f"tool-run:{background_tool_run_id}"
+            ]
+            self.assertEqual(len(background_evidence), 1)
+            self.assertEqual(background_evidence[0]["status"], "success")
+            self.assertEqual(background_evidence[0]["source_kind"], "tool_run")
 
             session_items = container.require(AppKey.SESSION_SERVICE).list_model_visible_items(
                 ListSessionItemsInput(

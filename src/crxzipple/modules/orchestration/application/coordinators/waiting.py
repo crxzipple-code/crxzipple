@@ -308,18 +308,22 @@ class RunWaitCoordinator:
         run_id: str,
         queue_policy: OrchestrationQueuePolicy,
         reason: str,
+        *,
+        metadata: dict[str, object] | None = None,
     ) -> OrchestrationRun:
+        resume_metadata = {
+            **dict(metadata or {}),
+            "prompt_flow_hint": {
+                "mode": "recovery_resume",
+                "reason": reason,
+            },
+        }
         return self.resume_run(
             self.resume_input_factory(
                 run_id=run_id,
                 queue_policy=queue_policy,
                 reason=reason,
-                metadata={
-                    "prompt_flow_hint": {
-                        "mode": "recovery_resume",
-                        "reason": reason,
-                    },
-                },
+                metadata=resume_metadata,
             ),
         )
 
@@ -621,10 +625,19 @@ class RunWaitCoordinator:
             tool_runs=pending_tool_runs,
             item_ids=item_ids,
         )
+        evidence_frontier = self.engine.evidence_frontier_for_tool_runs(
+            run,
+            tool_runs=pending_tool_runs,
+        )
         resumed = self.resume_after_tool_completion(
             run.id,
             OrchestrationQueuePolicy.RESUME_FIRST,
             self._resume_reason_from_tool_runs(pending_tool_runs),
+            metadata=(
+                {"evidence_frontier": [dict(item) for item in evidence_frontier]}
+                if evidence_frontier
+                else None
+            ),
         )
         self._store_recovery_contract(
             resumed.id,

@@ -485,7 +485,7 @@ class OrchestrationEngineToolExecutor:
                         )
                     inline_runs.append(tool_run)
                     evidence_frontier_items.append(
-                        _tool_run_evidence_frontier_item(
+                        tool_run_evidence_frontier_item(
                             tool_call=tool_call,
                             tool_run=tool_run,
                             source_run_id=run.id,
@@ -1018,7 +1018,7 @@ def _tool_lifecycle_sources(tool_run: ToolRun) -> tuple[dict[str, object], ...]:
     return tuple(sources)
 
 
-def _tool_run_evidence_frontier_item(
+def tool_run_evidence_frontier_item(
     *,
     tool_call: ToolCallIntent,
     tool_run: ToolRun,
