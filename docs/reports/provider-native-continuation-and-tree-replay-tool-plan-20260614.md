@@ -310,7 +310,7 @@ Loop 结束判断继续使用：
 
 `context_tree.render_current`：
 
-- 输入：`session_key`、`scope`、`max_tokens`。
+- 输入：`session_key`、`max_chars`。
 - 输出：当前可见树的 compact render。
 - 用途：模型迷路、需要重新看当前上下文时主动调用。
 
@@ -337,13 +337,13 @@ Loop 结束判断继续使用：
 
 ### Checklist
 
-- [ ] 新增 `context_tree.render_current`。
-- [ ] 新增 `context_tree.diff_since`。
-- [ ] 新增 `context_tree.read_snapshot`。
+- [x] 新增 `context_tree.render_current`。
+- [x] 新增 `context_tree.diff_since`。
+- [x] 新增 `context_tree.read_snapshot`。
 - [ ] Render service 支持 delta render。
 - [ ] Provider mirror 支持 tool schema delta summary。
 - [ ] Context snapshot 记录 revision 和 parent snapshot。
-- [ ] 单测覆盖显式 tree replay。
+- [x] 单测覆盖显式 tree replay。
 - [ ] 单测覆盖 schema_enabled delta。
 
 ## 4. Tool Module
@@ -595,7 +595,7 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 - [ ] `service_tier=priority` 是否默认启用，还是仅 agent/model profile 开关。
 - [ ] `include=["reasoning.encrypted_content"]` 是否对 Codex family 默认开启。
 - [ ] Context Tree delta 是否作为 system message 注入，还是 provider-specific input item。
-- [ ] `context_tree.render_current` 最大 token 默认值。
+- [x] `context_tree.render_current` 默认输出上限：`max_chars=16000`，避免工具层引入额外 token estimator 依赖。
 - [ ] Exec 是否允许模型在临时目录安装 npm/pip 依赖，权限由 tool runtime 还是 authorization module 控制。
 
 ## 风险

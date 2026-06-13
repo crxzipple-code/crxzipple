@@ -7,14 +7,21 @@ from crxzipple.app.integration.context_workspace_tool import ToolContextNodeProv
 from crxzipple.app.integration.context_workspace_skills import SkillContextNodeProvider
 from crxzipple.modules.context_workspace.application import (
     ContextOwnerRegistry,
+    ContextNodeUpsertInput,
     ContextRenderService,
     ContextTreeService,
     ContextWorkspaceService,
     EnsureContextWorkspaceInput,
+    RecordContextRenderSnapshotInput,
     RenderContextPromptInput,
 )
 from crxzipple.modules.skills.application import SkillPackage, SkillReadResult
 from crxzipple.modules.skills.domain import SkillManifest
+from crxzipple.modules.context_workspace.domain import (
+    ContextAction,
+    ContextNodeSeed,
+    ContextNodeState,
+)
 from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextNodeRepository,
     InMemoryContextOperationRepository,
@@ -34,7 +41,10 @@ from tools.context_tree.local import (
     context_tree_enable_tool_schema,
     context_tree_estimate,
     context_tree_expand,
+    context_tree_diff_since,
     context_tree_list,
+    context_tree_read_snapshot,
+    context_tree_render_current,
     context_tree_update_plan,
 )
 
@@ -50,6 +60,9 @@ def test_context_tree_tool_manifest_does_not_reintroduce_owner_resource_actions(
     assert "read_skill" not in manifest_text
     assert "open_artifact" not in manifest_text
     assert "recall_memory" not in manifest_text
+    assert "context_tree.render_current" in manifest_text
+    assert "context_tree.read_snapshot" in manifest_text
+    assert "context_tree.diff_since" in manifest_text
 
 
 def test_context_tree_tools_expand_and_control_tool_schema_mirror() -> None:
@@ -139,6 +152,95 @@ def test_context_tree_tool_requires_session_key() -> None:
         assert "session_key" in str(exc)
     else:  # pragma: no cover - defensive assertion branch.
         raise AssertionError("context_tree.list should require session_key")
+
+
+def test_context_tree_replay_tools_render_read_snapshot_and_diff() -> None:
+    deps = _deps()
+    deps.workspace_service.ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:replay",
+            agent_id="assistant",
+            metadata={"available_tool_names": ["fetch_weather"]},
+        ),
+    )
+    execution_context = ToolExecutionContext(
+        attrs={
+            "session_key": "session:replay",
+            "agent_id": "assistant",
+            "run_id": "run-replay",
+        },
+    )
+
+    current_result = asyncio.run(
+        context_tree_render_current(deps.tool_deps)(
+            {"max_chars": 8000},
+            execution_context,
+        ),
+    )
+    assert current_result.metadata["tool"] == "context_tree.render_current"
+    assert current_result.details["revision"] == 1
+    assert "session.current" in current_result.details["included_node_ids"]
+    assert "<context_tree" in current_result.blocks[0]["text"]
+    assert current_result.details["prompt_body"] == deps.render_service.render_prompt_body(
+        RenderContextPromptInput(session_key="session:replay"),
+    ).prompt_body
+
+    rendered = deps.render_service.render_prompt_body(
+        RenderContextPromptInput(session_key="session:replay"),
+    )
+    snapshot = deps.render_service.record_render_snapshot(
+        RecordContextRenderSnapshotInput(
+            session_key="session:replay",
+            run_id="run-replay",
+            prompt_body=rendered.prompt_body,
+            estimate=rendered.estimate,
+            included_node_ids=rendered.included_node_ids,
+            mirrored_node_ids=rendered.mirrored_node_ids,
+            snapshot_id="ctxsnap_replay",
+        ),
+    )
+
+    read_result = asyncio.run(
+        context_tree_read_snapshot(deps.tool_deps)(
+            {"snapshot_id": snapshot.id, "max_chars": 8000},
+            execution_context,
+        ),
+    )
+    assert read_result.metadata["tool"] == "context_tree.read_snapshot"
+    assert read_result.metadata["snapshot_id"] == "ctxsnap_replay"
+    assert read_result.details["prompt_body"] == rendered.prompt_body
+    assert "<context_tree" in read_result.blocks[0]["text"]
+
+    deps.tree_service.upsert_nodes(
+        ContextNodeUpsertInput(
+            session_key="session:replay",
+            nodes=(
+                ContextNodeSeed(
+                    node_id="custom.replay",
+                    parent_id="execution.current",
+                    owner="context_workspace",
+                    kind="test_context",
+                    title="Replay Evidence",
+                    summary="Replay diff evidence.",
+                    content="replay_diff: true",
+                    state=ContextNodeState(collapsed=False, loaded=True),
+                ),
+            ),
+            action=ContextAction.UPSERT,
+            parent_node_id="execution.current",
+        ),
+    )
+    diff_result = asyncio.run(
+        context_tree_diff_since(deps.tool_deps)(
+            {"snapshot_id": snapshot.id},
+            execution_context,
+        ),
+    )
+    assert diff_result.metadata["tool"] == "context_tree.diff_since"
+    assert diff_result.details["baseline_snapshot_id"] == "ctxsnap_replay"
+    assert diff_result.details["changed_revision"] is True
+    assert "custom.replay" in diff_result.details["added_node_ids"]
+    assert "Added rendered node ids:" in diff_result.blocks[0]["text"]
 
 
 def test_context_tree_expand_skill_exposes_skill_read_handle() -> None:

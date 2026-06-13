@@ -193,6 +193,98 @@ local_tools:
     context_requirements:
       - session_key
     runtime_key: context_tree.estimate
+  - id: context_tree.render_current
+    name: Context Tree Render Current
+    description: Render the current visible Context Tree prompt body. Use when provider-native continuation needs to re-check current tree state instead of relying on stale memory.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_render_current
+    tool_kind: function
+    parameters:
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+      - name: max_chars
+        data_type: integer
+        description: Maximum characters of prompt body to return in the tool text. Defaults to 16000.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.render_current
+  - id: context_tree.read_snapshot
+    name: Context Tree Read Snapshot
+    description: Read a recorded Context Tree render snapshot by id, including the rendered prompt body and included node handles.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_read_snapshot
+    tool_kind: function
+    parameters:
+      - name: snapshot_id
+        data_type: string
+        description: Context render snapshot id.
+        required: true
+      - name: max_chars
+        data_type: integer
+        description: Maximum characters of prompt body to return in the tool text. Defaults to 16000.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    runtime_key: context_tree.read_snapshot
+  - id: context_tree.diff_since
+    name: Context Tree Diff Since
+    description: Compare the current Context Tree render against a previous render snapshot or tree revision. Use to decide whether current tree state must be re-read.
+    provider_name: local_system
+    entrypoint: tools.context_tree.local:context_tree_diff_since
+    tool_kind: function
+    parameters:
+      - name: snapshot_id
+        data_type: string
+        description: Optional render snapshot id used as the baseline.
+        required: false
+      - name: revision
+        data_type: integer
+        description: Optional baseline tree revision when no snapshot id is available.
+        required: false
+      - name: session_key
+        data_type: string
+        description: Optional session key. Defaults to the current session in tool context.
+        required: false
+    tags:
+      - context_tree
+      - builtin
+      - system-managed
+      - scope:session_context
+      - surface:interactive
+    supported_modes:
+      - inline
+    supported_strategies:
+      - async
+    supported_environments:
+      - local
+    context_requirements:
+      - session_key
+    runtime_key: context_tree.diff_since
   - id: context_tree.update_plan
     name: Context Tree Update Plan
     description: Update the visible public working plan node only when the task phase, objective, verified facts, blocker, or next-step strategy materially changes. Do not use this as a per-tool-call progress log or private reasoning scratchpad. Repeating phase_update/phase_change inside the same phase is treated as no-op; use verified_fact, blocker, recovery, or final_summary to record meaningful state inside the same phase.

@@ -29,6 +29,9 @@ CONTEXT_TREE_COLLAPSE_TOOL_ID = "context_tree.collapse"
 CONTEXT_TREE_PIN_TOOL_ID = "context_tree.pin"
 CONTEXT_TREE_UNPIN_TOOL_ID = "context_tree.unpin"
 CONTEXT_TREE_ESTIMATE_TOOL_ID = "context_tree.estimate"
+CONTEXT_TREE_RENDER_CURRENT_TOOL_ID = "context_tree.render_current"
+CONTEXT_TREE_READ_SNAPSHOT_TOOL_ID = "context_tree.read_snapshot"
+CONTEXT_TREE_DIFF_SINCE_TOOL_ID = "context_tree.diff_since"
 CONTEXT_TREE_UPDATE_PLAN_TOOL_ID = "context_tree.update_plan"
 CONTEXT_TREE_ENABLE_TOOL_SCHEMA_TOOL_ID = "context_tree.enable_tool_schema"
 CONTEXT_TREE_DISABLE_TOOL_SCHEMA_TOOL_ID = "context_tree.disable_tool_schema"
@@ -124,6 +127,175 @@ def context_tree_estimate(deps: ContextTreeToolDeps | Any):
                 "tool": CONTEXT_TREE_ESTIMATE_TOOL_ID,
                 "session_key": rendered.workspace.session_key,
                 "included_node_count": len(rendered.included_node_ids),
+            },
+        )
+
+    return handler
+
+
+def context_tree_render_current(deps: ContextTreeToolDeps | Any):
+    resolved = _coerce_deps(deps)
+    if resolved is None:
+        return None
+
+    async def handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRunResult:
+        session_key = _resolve_session_key(arguments, execution_context)
+        max_chars = _bounded_int(arguments.get("max_chars"), default=16000)
+        rendered = resolved.context_render_service.render_prompt_body(
+            RenderContextPromptInput(session_key=session_key),
+        )
+        prompt_body = _truncate_text(rendered.prompt_body, max_chars)
+        truncated = len(prompt_body) < len(rendered.prompt_body)
+        text = _render_current_prompt_text(
+            session_key=rendered.workspace.session_key,
+            revision=rendered.workspace.active_revision,
+            prompt_body=prompt_body,
+            truncated=truncated,
+        )
+        return ToolRunResult.text(
+            text,
+            details={
+                "session_key": rendered.workspace.session_key,
+                "workspace_id": rendered.workspace.id,
+                "revision": rendered.workspace.active_revision,
+                "estimate": rendered.estimate.to_payload(),
+                "included_node_ids": list(rendered.included_node_ids),
+                "mirrored_node_ids": list(rendered.mirrored_node_ids),
+                "tool_schema_mirror_available": rendered.tool_schema_mirror_available,
+                "provider_attachment_keys": sorted(rendered.provider_attachments),
+                "prompt_body": rendered.prompt_body,
+                "truncated": truncated,
+                "max_chars": max_chars,
+            },
+            metadata={
+                "tool": CONTEXT_TREE_RENDER_CURRENT_TOOL_ID,
+                "session_key": rendered.workspace.session_key,
+                "revision": rendered.workspace.active_revision,
+                "included_node_count": len(rendered.included_node_ids),
+                "truncated": truncated,
+            },
+        )
+
+    return handler
+
+
+def context_tree_read_snapshot(deps: ContextTreeToolDeps | Any):
+    resolved = _coerce_deps(deps)
+    if resolved is None:
+        return None
+
+    async def handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRunResult:
+        snapshot_id = _required_text(arguments.get("snapshot_id"), "snapshot_id")
+        max_chars = _bounded_int(arguments.get("max_chars"), default=16000)
+        snapshot = resolved.context_render_service.get_snapshot(snapshot_id)
+        prompt_body = _truncate_text(snapshot.prompt_body, max_chars)
+        truncated = len(prompt_body) < len(snapshot.prompt_body)
+        return ToolRunResult.text(
+            _render_snapshot_text(
+                snapshot_id=snapshot.id,
+                session_key=snapshot.session_key,
+                revision=snapshot.tree_revision,
+                prompt_body=prompt_body,
+                truncated=truncated,
+            ),
+            details=_snapshot_payload(
+                snapshot,
+                prompt_body=snapshot.prompt_body,
+                truncated=truncated,
+                max_chars=max_chars,
+            ),
+            metadata={
+                "tool": CONTEXT_TREE_READ_SNAPSHOT_TOOL_ID,
+                "session_key": snapshot.session_key,
+                "snapshot_id": snapshot.id,
+                "revision": snapshot.tree_revision,
+                "included_node_count": len(snapshot.included_node_ids),
+                "truncated": truncated,
+            },
+        )
+
+    return handler
+
+
+def context_tree_diff_since(deps: ContextTreeToolDeps | Any):
+    resolved = _coerce_deps(deps)
+    if resolved is None:
+        return None
+
+    async def handler(
+        arguments: dict[str, Any],
+        execution_context: ToolExecutionContext | None = None,
+    ) -> ToolRunResult:
+        session_key = _resolve_session_key(arguments, execution_context)
+        snapshot_id = _optional_text(arguments.get("snapshot_id"))
+        since_revision = _optional_int(arguments.get("revision"))
+        current = resolved.context_render_service.render_prompt_body(
+            RenderContextPromptInput(session_key=session_key),
+        )
+        baseline_revision = since_revision
+        baseline_node_ids: tuple[str, ...] = ()
+        baseline_snapshot_payload: dict[str, object] | None = None
+        if snapshot_id is not None:
+            snapshot = resolved.context_render_service.get_snapshot(snapshot_id)
+            baseline_revision = snapshot.tree_revision
+            baseline_node_ids = tuple(snapshot.included_node_ids)
+            baseline_snapshot_payload = _snapshot_payload(
+                snapshot,
+                prompt_body="",
+                truncated=False,
+                max_chars=0,
+            )
+        current_node_ids = tuple(current.included_node_ids)
+        added = tuple(item for item in current_node_ids if item not in baseline_node_ids)
+        removed = tuple(item for item in baseline_node_ids if item not in current_node_ids)
+        changed_revision = (
+            baseline_revision is None
+            or current.workspace.active_revision != baseline_revision
+        )
+        text = _render_diff_text(
+            session_key=current.workspace.session_key,
+            current_revision=current.workspace.active_revision,
+            baseline_revision=baseline_revision,
+            snapshot_id=snapshot_id,
+            added=added,
+            removed=removed,
+            changed_revision=changed_revision,
+        )
+        return ToolRunResult.text(
+            text,
+            details={
+                "session_key": current.workspace.session_key,
+                "workspace_id": current.workspace.id,
+                "current_revision": current.workspace.active_revision,
+                "baseline_revision": baseline_revision,
+                "baseline_snapshot_id": snapshot_id,
+                "changed_revision": changed_revision,
+                "current_estimate": current.estimate.to_payload(),
+                "current_included_node_ids": list(current_node_ids),
+                "baseline_included_node_ids": list(baseline_node_ids),
+                "added_node_ids": list(added),
+                "removed_node_ids": list(removed),
+                "baseline_snapshot": baseline_snapshot_payload,
+                "note": (
+                    "Diff compares rendered node membership and tree revision. "
+                    "Use context_tree.render_current when full current prompt text is needed."
+                ),
+            },
+            metadata={
+                "tool": CONTEXT_TREE_DIFF_SINCE_TOOL_ID,
+                "session_key": current.workspace.session_key,
+                "current_revision": current.workspace.active_revision,
+                "baseline_revision": baseline_revision,
+                "baseline_snapshot_id": snapshot_id,
+                "changed_revision": changed_revision,
+                "added_node_count": len(added),
+                "removed_node_count": len(removed),
             },
         )
 
@@ -764,6 +936,13 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _bounded_int(value: object, *, default: int, minimum: int = 1000, maximum: int = 50000) -> int:
+    parsed = _optional_int(value)
+    if parsed is None:
+        return default
+    return max(minimum, min(parsed, maximum))
+
+
 def _text_estimate(text: str) -> ContextEstimate:
     normalized = text or ""
     return ContextEstimate(
@@ -858,6 +1037,36 @@ def _node_payload(node: ContextNode) -> dict[str, object]:
             for key, value in node.metadata.items()
             if key != "provider_schema"
         },
+    }
+
+
+def _snapshot_payload(
+    snapshot: Any,
+    *,
+    prompt_body: str,
+    truncated: bool,
+    max_chars: int,
+) -> dict[str, object]:
+    return {
+        "id": snapshot.id,
+        "workspace_id": snapshot.workspace_id,
+        "session_key": snapshot.session_key,
+        "run_id": snapshot.run_id,
+        "tree_revision": snapshot.tree_revision,
+        "prompt_body": prompt_body,
+        "provider_attachment_keys": sorted(snapshot.provider_attachments),
+        "estimate": snapshot.estimate.to_payload(),
+        "included_node_ids": list(snapshot.included_node_ids),
+        "mirrored_node_ids": list(snapshot.mirrored_node_ids),
+        "included_refs": [dict(ref) for ref in snapshot.included_refs],
+        "collapsed_refs": [dict(ref) for ref in snapshot.collapsed_refs],
+        "protocol_required_refs": [
+            dict(ref) for ref in snapshot.protocol_required_refs
+        ],
+        "metadata": dict(snapshot.metadata),
+        "created_at": snapshot.created_at.isoformat(),
+        "truncated": truncated,
+        "max_chars": max_chars,
     }
 
 
@@ -964,3 +1173,76 @@ def _render_estimate(estimate: dict[str, object]) -> str:
         f"{estimate.get('tool_schema_tokens', 0)} tool schema tokens, "
         f"{estimate.get('provider_attachment_count', 0)} provider attachments."
     )
+
+
+def _render_current_prompt_text(
+    *,
+    session_key: str,
+    revision: int,
+    prompt_body: str,
+    truncated: bool,
+) -> str:
+    header = (
+        f"Current context tree render for {session_key} at revision {revision}."
+    )
+    if truncated:
+        header += " Output was truncated by max_chars."
+    return f"{header}\n\n{prompt_body}"
+
+
+def _render_snapshot_text(
+    *,
+    snapshot_id: str,
+    session_key: str,
+    revision: int,
+    prompt_body: str,
+    truncated: bool,
+) -> str:
+    header = (
+        f"Context render snapshot {snapshot_id} for {session_key} "
+        f"at tree revision {revision}."
+    )
+    if truncated:
+        header += " Output was truncated by max_chars."
+    return f"{header}\n\n{prompt_body}"
+
+
+def _render_diff_text(
+    *,
+    session_key: str,
+    current_revision: int,
+    baseline_revision: int | None,
+    snapshot_id: str | None,
+    added: tuple[str, ...],
+    removed: tuple[str, ...],
+    changed_revision: bool,
+) -> str:
+    baseline = (
+        f"snapshot {snapshot_id} / revision {baseline_revision}"
+        if snapshot_id is not None
+        else f"revision {baseline_revision}" if baseline_revision is not None else "unknown baseline"
+    )
+    lines = [
+        (
+            f"Context tree diff for {session_key}: {baseline} -> "
+            f"current revision {current_revision}."
+        ),
+        f"- revision_changed: {str(changed_revision).lower()}",
+        f"- added_rendered_nodes: {len(added)}",
+        f"- removed_rendered_nodes: {len(removed)}",
+    ]
+    if added:
+        lines.append("Added rendered node ids:")
+        lines.extend(f"- {node_id}" for node_id in added[:20])
+        if len(added) > 20:
+            lines.append(f"- ... and {len(added) - 20} more")
+    if removed:
+        lines.append("Removed rendered node ids:")
+        lines.extend(f"- {node_id}" for node_id in removed[:20])
+        if len(removed) > 20:
+            lines.append(f"- ... and {len(removed) - 20} more")
+    lines.append(
+        "This diff reports rendered node membership and revision movement; "
+        "call context_tree.render_current for the full current render."
+    )
+    return "\n".join(lines)
