@@ -457,6 +457,51 @@ def test_effective_llm_request_policy_applies_runtime_defaults_before_model_and_
     }
 
 
+def test_effective_llm_request_policy_applies_codex_style_provider_options() -> None:
+    run = OrchestrationRun(
+        id="run-effective-codex-options",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        agent_id="assistant",
+        metadata={"session_key": "session:codex-like"},
+    )
+    prompt = _prompt(
+        llm_capabilities=(LlmCapability.REASONING,),
+        runtime_llm_defaults={
+            "service_tier": "priority",
+        },
+        llm_defaults={
+            "parallel_tool_calls": True,
+            "prompt_cache_enabled": True,
+            "response_verbosity": "low",
+            "include_reasoning_encrypted_content": True,
+            "include": ["other.provider.item"],
+        },
+    )
+
+    options = _llm_request_options_from_run(run, prompt=prompt)
+
+    assert options["provider_options"] == {
+        "service_tier": "priority",
+        "parallel_tool_calls": True,
+        "prompt_cache_enabled": True,
+        "text": {"verbosity": "low"},
+        "include": ["other.provider.item", "reasoning.encrypted_content"],
+        "prompt_cache_key": "crxzipple:assistant:session:codex-like",
+    }
+    trace = options["policy"].to_payload()["resolution_trace"]
+    assert {
+        item["field"]
+        for item in trace
+    } >= {
+        "provider_options.parallel_tool_calls",
+        "provider_options.prompt_cache_enabled",
+        "provider_options.text.verbosity",
+        "provider_options.include.reasoning.encrypted_content",
+        "provider_options.include",
+        "provider_options.prompt_cache_key",
+    }
+
+
 def test_effective_llm_request_policy_applies_agent_llm_policy() -> None:
     run = OrchestrationRun(
         id="run-effective-agent-policy",

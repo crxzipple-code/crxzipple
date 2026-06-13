@@ -108,6 +108,11 @@ def resolve_effective_llm_request_policy(
         capabilities=capabilities,
         agent_llm_policy=dict(agent_llm_policy or {}),
     )
+    _apply_prompt_cache_key(
+        run=run,
+        provider_options=provider_options,
+        trace=trace,
+    )
 
     return EffectiveLlmRequestPolicy(
         reasoning_config=reasoning_config,
@@ -176,6 +181,55 @@ def _apply_default_request_params(
                 field="provider_options.prompt_cache_enabled",
                 source=source_name,
                 value=prompt_cache_enabled,
+            ),
+        )
+    response_verbosity = _optional_text(defaults.get("response_verbosity"))
+    if response_verbosity is not None:
+        text_options = dict(_dict_option(provider_options.get("text")))
+        text_options["verbosity"] = response_verbosity
+        provider_options["text"] = text_options
+        trace.append(
+            _trace(
+                field="provider_options.text.verbosity",
+                source=source_name,
+                value=response_verbosity,
+            ),
+        )
+    text_options = _dict_option(defaults.get("text"))
+    if text_options:
+        provider_options["text"] = text_options
+        trace.append(
+            _trace(
+                field="provider_options.text",
+                source=source_name,
+                value="configured",
+            ),
+        )
+    include_values = _text_tuple(defaults.get("include"))
+    if include_values:
+        provider_options["include"] = list(include_values)
+        trace.append(
+            _trace(
+                field="provider_options.include",
+                source=source_name,
+                value="configured",
+            ),
+        )
+    include_reasoning_encrypted = defaults.get("include_reasoning_encrypted_content")
+    if isinstance(include_reasoning_encrypted, bool):
+        include = _text_tuple(provider_options.get("include"))
+        include_list = list(include)
+        marker = "reasoning.encrypted_content"
+        if include_reasoning_encrypted and marker not in include_list:
+            include_list.append(marker)
+        if not include_reasoning_encrypted:
+            include_list = [item for item in include_list if item != marker]
+        provider_options["include"] = include_list
+        trace.append(
+            _trace(
+                field="provider_options.include.reasoning.encrypted_content",
+                source=source_name,
+                value=include_reasoning_encrypted,
             ),
         )
     parallel_tool_calls = defaults.get("parallel_tool_calls")
@@ -311,6 +365,49 @@ def _merge_provider_options(
         trace.append(_trace(field=f"provider_options.{key}", source=source_name, value="configured"))
 
 
+def _apply_prompt_cache_key(
+    *,
+    run: OrchestrationRun,
+    provider_options: dict[str, object],
+    trace: list[dict[str, object]],
+) -> None:
+    if provider_options.get("prompt_cache_key") is not None:
+        return
+    if provider_options.get("prompt_cache_enabled") is not True:
+        return
+    cache_key = _prompt_cache_key_for_run(run)
+    if cache_key is None:
+        trace.append(
+            _trace(
+                field="provider_options.prompt_cache_key",
+                source="derived.run_context",
+                value="missing",
+                status="downgraded",
+                reason="stable_session_key_not_available",
+            ),
+        )
+        return
+    provider_options["prompt_cache_key"] = cache_key
+    trace.append(
+        _trace(
+            field="provider_options.prompt_cache_key",
+            source="derived.run_context",
+            value=cache_key,
+        ),
+    )
+
+
+def _prompt_cache_key_for_run(run: OrchestrationRun) -> str | None:
+    session_key = _optional_text(run.metadata.get("session_key"))
+    active_session_id = _optional_text(run.active_session_id)
+    lane_key = _optional_text(run.lane_key)
+    stable = session_key or active_session_id or lane_key
+    if stable is None:
+        return None
+    agent_id = _optional_text(run.agent_id) or "agent"
+    return f"crxzipple:{agent_id}:{stable}"
+
+
 def _merge_reasoning_config(
     *,
     target: dict[str, object],
@@ -371,6 +468,22 @@ def _trace(
 
 def _dict_option(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _text_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return (normalized,) if normalized else ()
+    if not isinstance(value, (list, tuple)):
+        return ()
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip()
+        if normalized and normalized not in items:
+            items.append(normalized)
+    return tuple(items)
 
 
 def _optional_text(value: object) -> str | None:

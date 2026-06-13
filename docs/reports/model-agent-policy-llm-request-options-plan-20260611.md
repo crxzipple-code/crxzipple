@@ -190,6 +190,11 @@ Operations/Trace 应展示：
   `trace_raw_provider_payload`、`reasoning_summary_default_visibility` 和
   `extra_body`，解析顺序为 runtime defaults -> model defaults ->
   agent policy -> run override。
+- 2026-06-14 已补充 Codex/OpenAI Responses 风格 provider options：
+  runtime/model defaults 可配置 `response_verbosity`、`text`、`include`、
+  `include_reasoning_encrypted_content`；当 `prompt_cache_enabled=true`
+  且未显式提供 `prompt_cache_key` 时，resolver 会从 run 的 session/agent
+  上下文生成稳定 `prompt_cache_key`。
 - request metadata 已写入 `llm_request_policy` payload，包含 resolution trace。
 - LLM Operations invocation detail 已新增 `policy_trace` 表格，展示
   `field`、`source`、`status`、`value`、`reason`，前端 LLM Operations 抽屉

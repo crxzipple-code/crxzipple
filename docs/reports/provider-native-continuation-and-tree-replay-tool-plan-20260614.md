@@ -423,9 +423,9 @@ CRXZipple 的 `exec/process` 结果应明确返回：
 - [ ] Model profile capability 声明 provider-native continuation。
 - [ ] Agent profile policy 可配置 text verbosity。
 - [ ] Runtime settings 可配置 service tier。
-- [ ] Policy resolver 生成 prompt cache key。
-- [ ] Policy trace 展示每个字段来源。
-- [ ] 单测覆盖 Codex/OpenAI Responses policy。
+- [x] Policy resolver 生成 prompt cache key。
+- [x] Policy trace 展示每个字段来源。
+- [x] 单测覆盖 Codex/OpenAI Responses policy。
 - [ ] 单测覆盖非 Responses provider 字段过滤。
 
 ## 6. Operations / Workbench
