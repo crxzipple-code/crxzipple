@@ -11,6 +11,7 @@ from crxzipple.modules.orchestration.application.ports import (
 from crxzipple.modules.orchestration.application.engine import (
     _llm_request_options_from_run,
     _llm_request_options_from_run_metadata,
+    _provider_continuation_for_prompt,
 )
 from crxzipple.modules.orchestration.application.prompt_input import RunPromptInput
 from crxzipple.modules.orchestration.application.provider_request import (
@@ -639,6 +640,38 @@ def test_effective_llm_request_policy_applies_agent_llm_policy() -> None:
         "output_contract.tool_use_policy",
         "provider_options.parallel_tool_calls",
     }
+
+
+def test_provider_native_continuation_requires_profile_capability() -> None:
+    run = OrchestrationRun(
+        id="run-provider-continuation-capability-gate",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        metadata={
+            "provider_continuation_state": {
+                "mode": "provider_native",
+                "previous_response_id": "resp_previous",
+                "previous_invocation_id": "llminv_previous",
+                "provider_family": "openai_responses",
+            },
+        },
+    )
+    prompt_without_capability = _prompt(
+        llm_api_family="openai_responses",
+        llm_capabilities=(LlmCapability.TOOL_CALLING,),
+    )
+    prompt_with_capability = _prompt(
+        llm_api_family="openai_responses",
+        llm_capabilities=(
+            LlmCapability.TOOL_CALLING,
+            LlmCapability.PROVIDER_NATIVE_CONTINUATION,
+        ),
+    )
+
+    assert _provider_continuation_for_prompt(run, prompt_without_capability) is None
+    continuation = _provider_continuation_for_prompt(run, prompt_with_capability)
+
+    assert continuation is not None
+    assert continuation.previous_response_id == "resp_previous"
 
 
 def test_effective_llm_request_policy_downgrades_unsupported_reasoning() -> None:

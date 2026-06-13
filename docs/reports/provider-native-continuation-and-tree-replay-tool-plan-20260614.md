@@ -430,13 +430,19 @@ CRXZipple 的 `exec/process` 结果应明确返回：
 
 ### Checklist
 
-- [ ] Model profile capability 声明 provider-native continuation。
-- [ ] Agent profile policy 可配置 text verbosity。
-- [ ] Runtime settings 可配置 service tier。
+- [x] Model profile capability 声明 provider-native continuation。
+- [x] Agent profile policy 可配置 text verbosity。
+- [x] Runtime settings 可配置 service tier。
 - [x] Policy resolver 生成 prompt cache key。
 - [x] Policy trace 展示每个字段来源。
 - [x] 单测覆盖 Codex/OpenAI Responses policy。
 - [x] 单测覆盖非 Responses provider 字段过滤。
+
+### 2026-06-14 施工记录
+
+- 新增 `LlmCapability.PROVIDER_NATIVE_CONTINUATION`，Responses family profile 导入时自动补齐该 capability，配置文件也显式声明。
+- Orchestration provider-native continuation gate 从“仅看 api family”收敛为“api family 支持 + model profile capability 声明”。
+- 已有 `EffectiveLlmRequestPolicy` 继续负责合成 `service_tier`、`text.verbosity`、`parallel_tool_calls`、`prompt_cache_key`、`include`，并对非 Responses provider 做降级过滤。
 
 ## 6. Operations / Workbench
 

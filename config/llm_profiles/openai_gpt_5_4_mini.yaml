@@ -6,6 +6,7 @@ context_window_tokens: 400000
 model_family: reasoning
 capabilities:
   - tool_calling
+  - provider_native_continuation
   - structured_output
   - vision_input
   - reasoning

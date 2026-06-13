@@ -145,9 +145,7 @@ def register_llm_profile_input_from_config(
         model_family=_coerce_model_family(
             _config_value(config, "model_family", LlmModelFamily.GENERAL),
         ),
-        capabilities=_capabilities_from_config_value(
-            _config_value(config, "capabilities", ()),
-        ),
+        capabilities=_capabilities_for_profile_config(config),
         default_params=_defaults_from_config_value(
             _config_value(config, "default_params", None),
         ),
@@ -1491,6 +1489,25 @@ def _capabilities_from_config_value(value: object) -> tuple[LlmCapability, ...]:
         item if isinstance(item, LlmCapability) else LlmCapability(str(item))
         for item in value
     )
+
+
+def _capabilities_for_profile_config(
+    config: LlmProfileImportLike | Mapping[str, Any],
+) -> tuple[LlmCapability, ...]:
+    capabilities = list(
+        _capabilities_from_config_value(_config_value(config, "capabilities", ())),
+    )
+    api_family = _coerce_api_family(_config_value(config, "api_family"))
+    if (
+        api_family
+        in {
+            LlmApiFamily.OPENAI_RESPONSES,
+            LlmApiFamily.OPENAI_CODEX_RESPONSES,
+        }
+        and LlmCapability.PROVIDER_NATIVE_CONTINUATION not in capabilities
+    ):
+        capabilities.append(LlmCapability.PROVIDER_NATIVE_CONTINUATION)
+    return tuple(dict.fromkeys(capabilities))
 
 
 def _defaults_from_config_value(value: object) -> LlmDefaults:

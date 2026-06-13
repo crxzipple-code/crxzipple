@@ -8,6 +8,7 @@ from typing import Any
 
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
+    LlmCapability,
     LlmMessage,
     LlmProviderContinuation,
     ToolCallIntent,
@@ -1051,6 +1052,8 @@ def _provider_continuation_for_prompt(
     prompt: RunPromptInput,
 ) -> LlmProviderContinuation | None:
     if not _llm_api_family_supports_provider_continuation(prompt.llm_api_family):
+        return None
+    if LlmCapability.PROVIDER_NATIVE_CONTINUATION not in set(prompt.llm_capabilities):
         return None
     return _provider_continuation_from_run(run)
 

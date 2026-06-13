@@ -55,7 +55,11 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
         self.assertEqual(register_input.model_family, LlmModelFamily.REASONING)
         self.assertEqual(
             register_input.capabilities,
-            (LlmCapability.TOOL_CALLING, LlmCapability.STRUCTURED_OUTPUT),
+            (
+                LlmCapability.TOOL_CALLING,
+                LlmCapability.STRUCTURED_OUTPUT,
+                LlmCapability.PROVIDER_NATIVE_CONTINUATION,
+            ),
         )
         self.assertEqual(register_input.default_params.temperature, 0.2)
         self.assertEqual(register_input.default_params.reasoning_effort, "medium")
@@ -83,6 +87,10 @@ class LlmSettingsIntegrationTestCase(unittest.TestCase):
         self.assertEqual(register_input.source_kind, LlmSourceKind.IMPORTED)
         self.assertEqual(register_input.default_params.top_p, 0.9)
         self.assertEqual(register_input.credential_binding_id, "compatible-dev")
+        self.assertNotIn(
+            LlmCapability.PROVIDER_NATIVE_CONTINUATION,
+            register_input.capabilities,
+        )
 
     def test_legacy_credential_source_keys_are_rejected(self) -> None:
         base_config = {

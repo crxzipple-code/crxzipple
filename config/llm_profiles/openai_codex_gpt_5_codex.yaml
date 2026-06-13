@@ -6,6 +6,7 @@ context_window_tokens: 400000
 model_family: codex
 capabilities:
   - tool_calling
+  - provider_native_continuation
   - reasoning
 default_params:
   reasoning_effort: medium

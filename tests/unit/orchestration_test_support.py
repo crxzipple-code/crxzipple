@@ -42,6 +42,7 @@ from crxzipple.modules.llm.application.adapters import (
 )
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
+    LlmCapability,
     LlmMessagePhase,
     LlmMessageRole,
     LlmProviderKind,
@@ -1282,6 +1283,7 @@ class OrchestrationTestCaseBase(unittest.TestCase):
                     api_family=LlmApiFamily.OPENAI_RESPONSES,
                     model_name="gpt-5.4-mini",
                     context_window_tokens=context_window_tokens,
+                    capabilities=(LlmCapability.PROVIDER_NATIVE_CONTINUATION,),
                     credential_binding_id=credential_binding_id,
                 ),
             ),

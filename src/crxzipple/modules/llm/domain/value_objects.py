@@ -44,6 +44,7 @@ class LlmCapability(StrEnum):
     VISION_INPUT = "vision_input"
     STREAMING = "streaming"
     REASONING = "reasoning"
+    PROVIDER_NATIVE_CONTINUATION = "provider_native_continuation"
 
 
 class LlmSourceKind(StrEnum):
