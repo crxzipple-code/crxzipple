@@ -175,12 +175,37 @@ diagnostic 必须带 source refs，便于跳转 Trace。
 
 ## Checklist
 
-- [ ] 定义 Workbench timeline projection builder。
-- [ ] 定义 LLM response item/event projection。
-- [ ] 定义 continuation decision projection。
-- [ ] 定义 Trace inspector source refs。
-- [ ] Operations observer/materializer 消费新事件或 query facts。
-- [ ] `/operations/llm` 展示 response item stats。
-- [ ] `/operations/orchestration` 展示 continuation decisions。
-- [ ] Workbench 无真实 content 时不展示假 progress。
-- [ ] 清库重建后 Operations projection 单测通过。
+- [x] 定义 Workbench timeline projection builder。
+- [x] 定义 LLM response item/event projection。
+- [x] Workbench timeline 聚合 LLM response items。
+- [x] Workbench timeline 聚合 SessionItem source refs。
+- [x] Workbench timeline 聚合 ToolRuns。
+- [x] Workbench timeline 拆分 Tool call/run/result lifecycle。
+- [x] 定义 continuation decision execution item projection。
+- [x] 定义 Trace inspector source refs。
+- [x] Operations observer/materializer 消费新事件或 query facts。
+- [x] `/operations/llm` 展示 response item stats。
+- [x] `/operations/orchestration` 展示 continuation decisions。
+- [x] Workbench step view 展示 continuation decision。
+- [x] Workbench run read model 返回 timeline contract。
+- [x] Workbench 无真实 content 时不展示假 progress。
+- [x] 清库重建后 Operations projection 单测通过。
+
+## 施工状态 2026-06-11
+
+- LLM Operations recent invocation table 已展示 response item count、continuation reason、end_turn。
+- LLM invocation detail 已展示 response item table 和 response event table。
+- HTTP response DTO 和 frontend runtime contract 已同步 `response_items` / `response_events`。
+- Frontend LLM Operations drawer 已展示 response items/events。
+- Orchestration execution chain 已开始记录 `CONTINUATION_DECISION` item，可供 Operations/Workbench 后续投影。
+- Orchestration Operations execution chains table 已展示 continuation decision count 和 latest decision。
+- Workbench 现有 step view 已展示 continuation decision，可解释 run 因 provider continuation 继续或终止。
+- Workbench run read model 已返回 timeline contract，初始 timeline 从可信 execution projection 生成。
+- Workbench timeline 已优先展开 LLM invocation response items，并保留 `llm_response_item_id` source ref。
+- Workbench timeline 已为 assistant progress 保留 `session_item_id` source ref，不再暴露旧 `session_message_id` surface。
+- Workbench timeline 已过滤无真实内容的 assistant response item，不再展示假 progress。
+- Workbench timeline diagnostics 已进入 inspector debug，可观察 timeline item、LLM response item、tool lifecycle、hidden reasoning 和 provider external item 计数。
+- Workbench timeline 已聚合 ToolRun 基础项，并保留 `tool_run_id`、`execution_step_id`、`execution_item_id` source refs。
+- Workbench timeline 已拆分 execution `TOOL_CALL` / `TOOL_RUN` / `TOOL_RESULT` lifecycle，并保留 `tool_call_id`、`tool_run_id`、`session_item_id` source refs。
+- Trace event read model 已识别 `llm_response_item_id`、`execution_item_id`、`session_item_id`、`tool_call_id`、`continuation_decision_id` 等 source refs，并作为 linked entities 输出；Trace 前端优先展示 API linked entities，并可打开 `session_item` / `llm_response_item` detail。
+- 当前完成范围包含 LLM Operations、Orchestration Operations、Workbench LLM response item timeline、Workbench SessionItem/source refs、Workbench Tool lifecycle timeline、Workbench continuation decision、Trace source refs、timeline contract 外壳，以及 Session/LLM owner detail drilldown；SessionItem 迁移主路径已收口，后续只保留测试 fixture bridge 清理和清库重建回归。

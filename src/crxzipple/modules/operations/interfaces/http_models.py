@@ -1014,6 +1014,8 @@ class LlmInvocationDetailResponse(BaseModel):
     error: str
     resolver: OperationsKeyValueSectionResponse
     error_facts: OperationsKeyValueSectionResponse
+    response_items: OperationsTableSectionResponse
+    response_events: OperationsTableSectionResponse
     events: OperationsTableSectionResponse
 
     @classmethod
@@ -1041,6 +1043,12 @@ class LlmInvocationDetailResponse(BaseModel):
             resolver=OperationsKeyValueSectionResponse.from_value(value.resolver),
             error_facts=OperationsKeyValueSectionResponse.from_value(
                 value.error_facts,
+            ),
+            response_items=OperationsTableSectionResponse.from_value(
+                value.response_items,
+            ),
+            response_events=OperationsTableSectionResponse.from_value(
+                value.response_events,
             ),
             events=OperationsTableSectionResponse.from_value(value.events),
         )

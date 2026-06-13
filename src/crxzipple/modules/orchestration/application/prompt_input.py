@@ -47,14 +47,14 @@ from crxzipple.modules.orchestration.application.prompting import (
 )
 from crxzipple.modules.orchestration.application.prompt_transcript import (
     PromptTranscript,
-    build_current_run_prompt_window,
-    build_memory_flush_prompt_transcript,
+    build_model_visible_session_item_prompt_window,
 )
 from crxzipple.modules.orchestration.application.tool_resolver import ResolvedToolSet
-from crxzipple.modules.session.application import ListSessionMessagesInput
-from crxzipple.modules.session.domain import SessionMessage
+from crxzipple.modules.session.application import (
+    ListSessionItemsInput,
+)
+from crxzipple.modules.session.domain import SessionItem
 from crxzipple.modules.session.domain import SessionRuntimeBinding
-from crxzipple.modules.session.domain import SessionMessageVisibility
 from crxzipple.modules.skills.application import (
     SKILL_RESOLUTION_COMPLETED_EVENT,
     SkillCatalogPrompt,
@@ -63,6 +63,7 @@ from crxzipple.modules.skills.application import (
 from crxzipple.shared.content_blocks import (
     FILE_REF_BLOCK_TYPE,
     IMAGE_REF_BLOCK_TYPE,
+    content_blocks_from_payload,
     describe_content_for_text_fallback,
     extract_text_content,
     normalize_content_blocks,
@@ -101,6 +102,9 @@ class RunPromptInput:
     active_session_id: str
     messages: tuple[LlmMessage, ...]
     llm_capabilities: tuple[LlmCapability, ...] = ()
+    runtime_llm_defaults: dict[str, object] = field(default_factory=dict)
+    llm_defaults: dict[str, object] = field(default_factory=dict)
+    llm_policy: dict[str, object] = field(default_factory=dict)
     mode: PromptMode = PromptMode.NORMAL_TURN
     report: PromptReport | None = None
     context_blocks: tuple[PromptBlock, ...] = ()
@@ -133,10 +137,12 @@ class RunPromptInputCollector:
     context_block_max_chars: int = 120_000
     context_block_max_tokens: int = 30_000
     context_block_context_window_ratio: float = 0.15
+    session_item_transcript_max_chars: int = 120_000
     memory_flush_transcript_max_chars: int = 120_000
     llm_image_max_bytes: int = DEFAULT_LLM_IMAGE_MAX_BYTES
     llm_file_max_bytes: int = 4_000_000
     llm_text_file_max_chars: int = 20_000
+    runtime_llm_defaults: dict[str, object] = field(default_factory=dict)
     detailed_phase_metrics_enabled: bool = False
     metrics: RuntimeMetricsRegistry = field(
         default_factory=get_runtime_metrics_registry,
@@ -166,14 +172,16 @@ class RunPromptInputCollector:
 
         with self._timed_phase("profile_read"):
             profile = self.agent_service.get_profile(run.agent_id)
+        resolved_mode = self._resolve_prompt_mode(run, mode=mode)
         with self._timed_phase("session_bundle_read"):
-            session_bundle = self.session_service.get_session_with_messages(
-                ListSessionMessagesInput(
+            session_item_bundle = self.session_service.get_session_with_items(
+                ListSessionItemsInput(
                     session_key=session_key,
                     active_session_only=True,
+                    model_visible=True,
                 ),
             )
-        session = session_bundle.session
+        session = session_item_bundle.session
         session_binding = session.runtime_binding()
         agent_home_dir = profile.runtime_preferences.resolved_home_dir
         workspace_dir = self._resolve_workspace_dir(
@@ -184,23 +192,25 @@ class RunPromptInputCollector:
             run_metadata=run.metadata,
             routing_policy=profile.llm_routing_policy,
         )
-        resolved_mode = self._resolve_prompt_mode(run, mode=mode)
 
         with self._timed_phase("transcript_build"):
-            filtered_session_messages = tuple(
-                message
-                for message in session_bundle.messages
-                if message.session_id == run.active_session_id
-                and message.visibility is not SessionMessageVisibility.ARCHIVED
+            filtered_session_items = tuple(
+                item
+                for item in session_item_bundle.items
+                if item.session_id == run.active_session_id
+                and item.visibility.model_visible
             )
             transcript = self._build_provider_input_transcript(
                 run,
-                session_messages=filtered_session_messages,
+                session_items=filtered_session_items,
                 mode=resolved_mode,
             )
         with self._timed_phase("llm_resolve"):
             routing_input_content = (
-                _routing_input_content_from_transcript(transcript.messages)
+                _routing_input_content(
+                    transcript_messages=transcript.messages,
+                    session_items=filtered_session_items,
+                )
                 if is_auto_llm_id(requested_llm_id)
                 else None
             )
@@ -306,6 +316,11 @@ class RunPromptInputCollector:
                 estimate_text_tokens(block.content)
                 for block in context_blocks
             )
+            transcript_budget = _transcript_budget_with_execution_chain_refs(
+                dict(transcript.budget),
+                execution_query=self.execution_query,
+                turn_id=run.id,
+            )
             report = PromptReport(
                 mode=resolved_mode,
                 context_blocks=tuple(
@@ -329,6 +344,7 @@ class RunPromptInputCollector:
                 transcript_chars=transcript.chars,
                 transcript_estimated_tokens=transcript.estimated_tokens,
                 transcript_tool_result_stats=dict(transcript.tool_result_stats),
+                transcript_budget=transcript_budget,
             )
         tool_schemas = (
             resolved_tools.schemas
@@ -345,6 +361,9 @@ class RunPromptInputCollector:
         return RunPromptInput(
             llm_id=llm_selection.resolved_llm_id,
             llm_capabilities=tuple(llm_profile.capabilities),
+            runtime_llm_defaults=dict(self.runtime_llm_defaults),
+            llm_defaults=llm_profile.default_params.to_payload(),
+            llm_policy=profile.llm_policy.to_payload(),
             session_key=session_key,
             active_session_id=run.active_session_id,
             messages=tuple(llm_messages),
@@ -397,37 +416,30 @@ class RunPromptInputCollector:
         self,
         run: OrchestrationRun,
         *,
-        session_messages: tuple[SessionMessage, ...],
+        session_items: tuple[SessionItem, ...] = (),
         mode: PromptMode,
     ) -> PromptTranscript:
-        completed_tool_call_ids = _completed_tool_call_ids_from_execution_chain(
-            self.execution_query,
-            run.id,
-        )
-        consumed_through_sequence_no = (
-            _consumed_direct_transcript_through_sequence_no(
-                self.execution_query,
-                turn_id=run.id,
-                session_id=run.active_session_id,
-            )
-        )
         if mode is PromptMode.MEMORY_FLUSH:
-            return build_memory_flush_prompt_transcript(
-                session_messages,
+            return build_model_visible_session_item_prompt_window(
+                session_items,
                 max_chars=self.memory_flush_transcript_max_chars,
+                include_non_protocol_history=True,
+            )
+        if session_items:
+            return build_model_visible_session_item_prompt_window(
+                session_items,
+                max_chars=self.session_item_transcript_max_chars,
+                include_non_protocol_history=_mode_includes_direct_history(mode),
             )
         if mode is not PromptMode.NORMAL_TURN:
-            return build_current_run_prompt_window(
-                session_messages,
-                completed_tool_call_ids=completed_tool_call_ids,
-                consumed_through_sequence_no=consumed_through_sequence_no,
+            return PromptTranscript(
+                messages=(),
+                message_count=0,
+                chars=0,
+                estimated_tokens=0,
+                tool_result_stats={},
             )
-        return _current_run_transcript(
-            run,
-            session_messages=session_messages,
-            completed_tool_call_ids=completed_tool_call_ids,
-            consumed_through_sequence_no=consumed_through_sequence_no,
-        )
+        return _current_inbound_transcript(run)
 
     def _resolve_context_block_budget(
         self,
@@ -794,6 +806,24 @@ def _routing_input_content_from_transcript(
     return {"blocks": blocks}
 
 
+def _routing_input_content(
+    *,
+    transcript_messages: tuple[LlmMessage, ...],
+    session_items: tuple[SessionItem, ...],
+) -> dict[str, object] | None:
+    blocks: list[dict[str, object]] = []
+    transcript_payload = _routing_input_content_from_transcript(transcript_messages)
+    if isinstance(transcript_payload, dict):
+        raw_blocks = transcript_payload.get("blocks")
+        if isinstance(raw_blocks, list):
+            blocks.extend(dict(block) for block in raw_blocks if isinstance(block, dict))
+    for item in session_items:
+        blocks.extend(content_blocks_from_payload(item.content_payload))
+    if not blocks:
+        return None
+    return {"blocks": blocks}
+
+
 def _prompt_bootstrap_hint_from_metadata(
     metadata: dict[str, object],
 ) -> dict[str, object]:
@@ -949,84 +979,55 @@ def _current_inbound_transcript(run: OrchestrationRun) -> PromptTranscript:
     )
 
 
-def _current_run_transcript(
-    run: OrchestrationRun,
+def _mode_includes_direct_history(mode: PromptMode) -> bool:
+    return mode in {
+        PromptMode.COMPACTION,
+        PromptMode.MEMORY_FLUSH,
+    }
+
+
+def _transcript_budget_with_execution_chain_refs(
+    budget: dict[str, object],
     *,
-    session_messages: tuple[SessionMessage, ...],
-    completed_tool_call_ids: tuple[str, ...] | None = None,
-    consumed_through_sequence_no: int | None = None,
-) -> PromptTranscript:
-    current_inbound = next(
-        (
-            message
-            for message in session_messages
-            if message.role == "user"
-            and message.source_kind == "orchestration_run"
-            and message.source_id == run.id
-        ),
-        None,
-    )
-    if current_inbound is None:
-        return _current_inbound_transcript(run)
-    current_run_messages = tuple(
-        message
-        for message in session_messages
-        if message.session_id == current_inbound.session_id
-        and message.sequence_no >= current_inbound.sequence_no
-    )
-    if not current_run_messages:
-        return _current_inbound_transcript(run)
-    return build_current_run_prompt_window(
-        current_run_messages,
-        completed_tool_call_ids=completed_tool_call_ids,
-        consumed_through_sequence_no=consumed_through_sequence_no,
-        preserve_message_ids=(current_inbound.id,),
-    )
-
-
-def _consumed_direct_transcript_through_sequence_no(
-    execution_query: ExecutionContinuationQueryPort | None,
-    *,
-    turn_id: str,
-    session_id: str,
-) -> int | None:
-    if execution_query is None:
-        return None
-    consumed_through: int | None = None
-    for summary in _execution_step_item_summaries(execution_query, turn_id):
-        consumption = summary.get("llm_transcript_consumption")
-        if not isinstance(consumption, dict):
-            continue
-        sequence_range = consumption.get("direct_transcript_sequence_range")
-        if not isinstance(sequence_range, dict):
-            continue
-        sessions = sequence_range.get("sessions")
-        if not isinstance(sessions, list):
-            continue
-        for item in sessions:
-            if not isinstance(item, dict):
-                continue
-            if _optional_text(item.get("session_id")) != session_id:
-                continue
-            to_sequence_no = _optional_int(item.get("to_sequence_no"))
-            if to_sequence_no is None:
-                continue
-            consumed_through = (
-                to_sequence_no
-                if consumed_through is None
-                else max(consumed_through, to_sequence_no)
-            )
-    return consumed_through
-
-
-def _completed_tool_call_ids_from_execution_chain(
     execution_query: ExecutionContinuationQueryPort | None,
     turn_id: str,
-) -> tuple[str, ...] | None:
+) -> dict[str, object]:
+    execution_refs = _execution_chain_protocol_required_refs(
+        execution_query,
+        turn_id,
+    )
+    if not execution_refs:
+        return budget
+    merged = dict(budget)
+    existing_refs = tuple(
+        dict(ref)
+        for ref in merged.get("protocol_required_refs", ())
+        if isinstance(ref, dict)
+    )
+    merged_refs = _dedupe_protocol_required_refs(
+        (*existing_refs, *execution_refs),
+    )
+    merged["protocol_required_refs"] = [dict(ref) for ref in merged_refs]
+    merged["execution_chain_protocol_required_refs"] = [
+        dict(ref) for ref in execution_refs
+    ]
+    merged["execution_chain_protocol_required_ref_count"] = len(execution_refs)
+    if "protocol_required_preserved" not in merged:
+        merged["protocol_required_preserved"] = True
+    return {
+        key: value
+        for key, value in merged.items()
+        if value not in (None, [], {})
+    }
+
+
+def _execution_chain_protocol_required_refs(
+    execution_query: ExecutionContinuationQueryPort | None,
+    turn_id: str,
+) -> tuple[dict[str, object], ...]:
     if execution_query is None:
-        return None
-    completed_tool_call_ids: list[str] = []
-    saw_tool_protocol_item = False
+        return ()
+    refs: list[dict[str, object]] = []
     for chain in execution_query.list_execution_chains(turn_id):
         chain_id = getattr(chain, "id", None)
         if not isinstance(chain_id, str) or not chain_id.strip():
@@ -1036,30 +1037,93 @@ def _completed_tool_call_ids_from_execution_chain(
             if not isinstance(step_id, str) or not step_id.strip():
                 continue
             for item in execution_query.list_execution_step_items(step_id):
-                kind = getattr(item, "kind", None)
-                status = getattr(item, "status", None)
-                if kind in {
-                    ExecutionStepItemKind.TOOL_CALL,
-                    ExecutionStepItemKind.TOOL_RUN,
-                    ExecutionStepItemKind.TOOL_RESULT,
-                }:
-                    saw_tool_protocol_item = True
-                if kind is not ExecutionStepItemKind.TOOL_RESULT:
-                    continue
-                if status not in {
-                    ExecutionStepItemStatus.COMPLETED,
-                    ExecutionStepItemStatus.LATE_OBSERVED,
-                }:
-                    continue
-                summary = getattr(item, "summary_payload", None)
-                if not isinstance(summary, dict):
-                    continue
-                tool_call_id = _optional_text(summary.get("tool_call_id"))
-                if tool_call_id is not None:
-                    completed_tool_call_ids.append(tool_call_id)
-    if not saw_tool_protocol_item:
+                ref = _execution_step_item_protocol_required_ref(item)
+                if ref is not None:
+                    refs.append(ref)
+    return _dedupe_protocol_required_refs(tuple(refs))
+
+
+def _execution_step_item_protocol_required_ref(
+    item: object,
+) -> dict[str, object] | None:
+    kind = getattr(item, "kind", None)
+    if kind not in {
+        ExecutionStepItemKind.TOOL_CALL,
+        ExecutionStepItemKind.TOOL_RESULT,
+    }:
         return None
-    return tuple(dict.fromkeys(completed_tool_call_ids))
+    summary = getattr(item, "summary_payload", None)
+    if not isinstance(summary, dict):
+        return None
+    tool_call_id = _optional_text(summary.get("tool_call_id"))
+    if tool_call_id is None:
+        return None
+    status = getattr(item, "status", None)
+    owner = getattr(item, "owner", None)
+    owner_kind = getattr(owner, "owner_kind", None)
+    owner_id = getattr(owner, "owner_id", None)
+    ref: dict[str, object] = {
+        "owner_module": "orchestration",
+        "owner_kind": "execution_step_item",
+        "owner_id": getattr(item, "id", ""),
+        "execution_step_item_id": getattr(item, "id", ""),
+        "execution_step_id": getattr(item, "step_id", ""),
+        "execution_chain_id": getattr(item, "chain_id", ""),
+        "turn_id": getattr(item, "turn_id", ""),
+        "kind": kind.value if isinstance(kind, ExecutionStepItemKind) else str(kind),
+        "tool_call_id": tool_call_id,
+        "protocol_required": True,
+        "budget_class": "protocol_required",
+        "render_mode": "ref",
+        "visibility": "model_visible",
+    }
+    if isinstance(status, ExecutionStepItemStatus):
+        ref["status"] = status.value
+    elif isinstance(status, str) and status.strip():
+        ref["status"] = status.strip()
+    if isinstance(owner_kind, str) and owner_kind.strip():
+        ref["source_owner_kind"] = owner_kind.strip()
+    if isinstance(owner_id, str) and owner_id.strip():
+        ref["source_owner_id"] = owner_id.strip()
+    for key in (
+        "tool_name",
+        "tool_id",
+        "tool_run_id",
+        "result_session_item_id",
+    ):
+        value = _optional_text(summary.get(key))
+        if value is not None:
+            ref[key] = value
+    tool_execution_plan = summary.get("tool_execution_plan")
+    if isinstance(tool_execution_plan, dict):
+        ref["tool_execution_plan"] = dict(tool_execution_plan)
+    tool_lifecycle = summary.get("tool_lifecycle")
+    if isinstance(tool_lifecycle, dict):
+        ref["tool_lifecycle"] = dict(tool_lifecycle)
+    return {
+        key: value
+        for key, value in ref.items()
+        if value not in (None, "", {}, [])
+    }
+
+
+def _dedupe_protocol_required_refs(
+    refs: tuple[dict[str, object], ...],
+) -> tuple[dict[str, object], ...]:
+    deduped: list[dict[str, object]] = []
+    seen: set[tuple[object, object, object, object]] = set()
+    for ref in refs:
+        identity = (
+            ref.get("owner_module"),
+            ref.get("owner_kind"),
+            ref.get("owner_id"),
+            ref.get("tool_call_id"),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(dict(ref))
+    return tuple(deduped)
 
 
 def _execution_step_item_summaries(

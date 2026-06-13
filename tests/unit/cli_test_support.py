@@ -33,7 +33,7 @@ from tests.unit.support import (
     seed_browser_state_root,
 )
 
-HEAD_REVISION = "0068_orchestration_run_wait_state_fields"
+HEAD_REVISION = "0076_tool_surface_snapshots"
 
 
 class CliModuleTestCase(unittest.TestCase):

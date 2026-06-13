@@ -20,6 +20,13 @@
 
 如果旧 read model 不能表达新的 agent loop，应直接替换 read model contract。
 
+## 施工进展 2026-06-12
+
+- Workbench/Trace/UI HTTP 测试已切到 `session_item_id` / `llm_response_item_id` / execution item refs，不再期待 `session_message_id` 或 `*_message_ids` 字段。
+- Daemon Operations 测试已对齐 read model 边界：页面 GET 不驱动 runtime refresh，缺失 process session 通过 materialized process row 表达。
+- Tool Operations 测试已对齐 projection/observation 边界：页面展示已物化 lifecycle，不从 UI 测试直接依赖裸 event bus 即时读取。
+- Workbench 主时间线隐藏无动作 continuation 决策，例如 `reason=none` 且 `follow_up=false`；这类事实仍保留在 steps/trace，用于调试，不作为用户可见进展。
+
 ## 定位
 
 Workbench 是 agent runtime 的操作台，不是 owner module raw entity viewer。它展示的是“当前 turn/run 如何推进”，而不是某一张业务表。
@@ -58,7 +65,7 @@ Events
 llm.result_payload.text
 llm.result_payload.tool_calls
 execution_item.summary_payload
-session_message.content_payload
+session_item.content_payload
 ```
 
 这些字段无法表达 reasoning summary、assistant phase、provider external item、tool argument delta、end_turn 等现代 response 能力。
@@ -276,6 +283,7 @@ tool_call
 - call_id 是关联主键之一。
 - tool_name 必须显示。
 - arguments/result 可折叠。
+- tool_result 优先使用 `result_session_item_id` / `session_item` owner 作为 source ref；`result_message_id` 只作为辅助追溯字段。
 - ToolRun status 以 Tool module truth 为准。
 
 ### Provider External Item
@@ -344,11 +352,11 @@ WorkbenchRunReadModel
   status_strip
   inspector
   linked_entities
-  diagnostics
   actions
 ```
 
 `steps` 可以保留给结构化执行链；`timeline` 专门服务用户阅读 agent 进展。
+timeline 投影诊断进入 `inspector.debug.timeline_diagnostics`，不另开顶层数据源。
 
 ## 前端调整
 
@@ -421,7 +429,7 @@ diagnostic 示例：
 - 不得让 `LlmResult.text` 作为 timeline 主来源。
 - 不得让 `LlmResult.tool_calls` 作为 tool timeline 主来源。
 - 不得保留 execution item fallback text。
-- 不得假设 session message == timeline item。
+- 不得假设 session item == timeline item。
 - 不得让 function_call message 伪装成 assistant progress。
 - 不得让 provider external item 伪装成 local ToolRun。
 - 不得保留旧 Operations projection schema。
@@ -430,41 +438,84 @@ diagnostic 示例：
 
 ### Operations Read Model
 
-- [ ] 定义 `WorkbenchTimelineItem`。
-- [ ] 定义 timeline `kind` 枚举。
-- [ ] 定义 `source_refs`。
-- [ ] 聚合 LLM response items。
-- [ ] 聚合 Session items。
-- [ ] 聚合 ToolRuns。
-- [ ] 聚合 Orchestration continuation decision。
-- [ ] 输出 diagnostics。
+- [x] 定义 `WorkbenchTimelineItem`。
+- [x] 定义 timeline `kind` 枚举。
+- [x] 定义 `source_refs`。
+- [x] 聚合 LLM response items。
+- [x] 聚合 SessionItem source refs。
+- [x] 聚合 ToolRuns。
+- [x] 聚合 tool execution plan summary。
+- [x] 聚合 context render snapshot source refs。
+- [x] 聚合 Orchestration continuation decision。
+- [x] 输出 diagnostics。
 
 ### Backend API
 
-- [ ] 更新 Workbench run DTO。
-- [ ] `/operations/workbench` 或现有 Workbench API 返回 timeline。
-- [ ] Inspector 支持 response item source refs。
-- [ ] Trace link 能跳到 LLM invocation / response item。
+- [x] 更新 Workbench run DTO，补充 `continuation_decision` step type。
+- [x] 现有 Workbench run API 返回 timeline。
+- [x] Trace inspector 支持 response item/source refs linked entities。
+- [x] Workbench linked entity detail API 支持 `session_item` / `llm_response_item`，旧 `session_message` detail surface 已退场。
+- [x] Trace link 可打开 `llm_response_item_id` detail。
 
 ### Frontend
 
-- [ ] 更新 runtime contracts/types。
-- [ ] 更新 Workbench timeline renderer。
-- [ ] 实现 assistant commentary 展示。
-- [ ] 实现 final answer 展示。
-- [ ] 实现 reasoning summary 折叠展示。
-- [ ] 实现 tool call/run/result 分组展示。
-- [ ] 实现 provider external item 展示。
-- [ ] 移除所有 progress 兜底文案。
-- [ ] i18n 补齐新文案。
+- [x] 更新 runtime contracts/types，补充 `continuation_decision`。
+- [x] 更新 Workbench API client，补充 linked entity detail loader。
+- [x] 更新 Workbench step renderer，展示 continuation decision。
+- [x] Workbench Step inspector 支持 `session_item` / `llm_response_item_id` linked entity 内联详情。
+- [x] Trace inspector 支持 `session_item` / `llm_response_item_id` linked entity 内联详情。
+- [x] Workbench timeline renderer 消费后端 `run.timeline`。
+- [x] 实现 assistant commentary 基础展示。
+- [x] 实现 final answer 基础展示。
+- [x] 实现 reasoning summary 基础折叠展示。
+- [x] 实现 tool call/run/result 基础展示。
+- [x] 实现 provider external item 基础展示。
+- [x] 移除 progress 兜底文案。
+- [x] i18n 补齐 timeline 基础文案。
 
 ### Verification
 
-- [ ] 用户输入单轮最终答复可展示。
-- [ ] commentary + tool_call + tool_result + final_answer 链路可展示。
-- [ ] reasoning summary 存在时默认折叠展示；仅在 explicit policy 禁止时隐藏正文并展示 presence/count。
-- [ ] provider external item 不生成 ToolRun。
-- [ ] tool_call 和 tool_result 通过 call_id 正确分组。
-- [ ] source_refs 可跳转 Trace/Inspector。
-- [ ] 没有真实 content 时不展示假 progress。
-- [ ] 清库重建后 Workbench fixture / build / typecheck 通过。
+- [x] 用户输入单轮最终答复可展示。
+- [x] commentary + tool_call + tool_result + final_answer 链路可展示。
+- [x] reasoning summary 进入 timeline 基础展示。
+- [x] reasoning summary 存在时默认折叠展示。
+- [x] explicit policy 禁止 reasoning 正文时隐藏正文并展示 presence/count。
+- [x] provider external item 不生成 ToolRun。
+- [x] tool_call 和 tool_result 通过 call_id 正确分组。
+- [x] tool_result timeline 优先暴露 `session_item_id` source ref。
+- [x] tool_run/tool_result timeline 暴露 `tool_execution_plan` summary。
+- [x] timeline trace/source refs 暴露 `context_render_snapshot_id`。
+- [x] source_refs 可进入 Trace linked entities。
+- [x] LLM step 可展示 terminal loop diagnostic badge 和 summary。
+- [x] 没有真实 content 时不展示假 progress。
+- [x] 清库重建后 Workbench / Operations UI HTTP fixture 通过：`test_ui_http.py`、`test_ui_operations_orchestration_http.py`、`test_operations_llm_read_model.py`、`test_operations_observation.py` 共 93 个测试通过。
+- [x] Workbench frontend build 通过。
+- [x] Workbench typecheck 通过。
+
+## 施工状态 2026-06-11
+
+- Workbench 现有 step view 已能从 execution chain item 投影 `continuation_decision`。
+- Workbench LLM step view 已能从失败 LLM execution item summary 投影 `llm_loop_diagnostic`，展示 `Loop diagnostic` badge 和诊断摘要。
+- `WorkbenchRunView` 已新增 `timeline`，HTTP DTO 和前端 runtime type 已同步。
+- 初始 timeline item 包含 `id/kind/status/title/content/phase/source_refs/trace`，并由 Workbench read model 从可信 execution projection 生成。
+- LLM invocation 存在 `response_items` 时，timeline 会优先展开 provider item stream，输出 assistant commentary、tool call、reasoning、provider external、final answer 等 item kind；没有 response items 时才退回 LLM step 摘要。单测已覆盖 provider external item 不生成 ToolRun timeline。
+- Workbench final-only 单测已覆盖 `user_input -> final_answer` 最小闭环，最终答复来自 LLM response item，不依赖旧 final step fallback。
+- 空 assistant response item 不再生成 `Agent Progress` 假内容；Workbench 只展示有真实文本、payload 或结构意义的 response item。
+- Assistant progress timeline 已使用 `session_item_id` source ref 和 TraceContext，不再暴露旧 `session_message_id` fallback。
+- Assistant progress step view 没有真实 `assistant_progress_text` 或 SessionItem 文本时不生成 timeline 行。
+- Workbench timeline read model 已修复 response item 显示污染：空 `reasoning` item 不再生成可见 timeline 行；LLM response item 已提供 `final_answer` 时，不再追加 legacy `final_response` step 造成重复回复；LLM step diagnostics 只统计 `message_kind=assistant_progress` 的 SessionItem，不再把 reasoning/final answer item 误报为 progress。
+- continuation decision step 展示 reason、end_turn、follow_up，并保留 `llm_invocation_id` / `trace_step_id` 追溯信息。
+- ToolRun timeline 已从 execution tool item / step view 投影，保留 `tool_run_id`、`execution_step_id` 和 `execution_item_id` source refs。
+- Tool lifecycle timeline 已从 execution `TOOL_CALL` / `TOOL_RUN` / `TOOL_RESULT` items 拆成三段，分别保留 `tool_call_id`、`tool_run_id`、`session_item_id` 等 source refs；tool result 已优先消费显式 `result_session_item_id`，不再从旧 message ref 推断主定位。
+- Tool run/result timeline content 已暴露 `tool_execution_plan` summary，用于解释 tool call 的 mode/strategy/environment/resource policy 和 arguments digest。
+- Timeline trace/source refs 已透出 `context_render_snapshot_id`，可以追溯本轮模型实际使用的 Context Snapshot。
+- Trace read model 已识别 timeline 使用的主要 source refs，并在 Trace linked entities 中输出。
+- 前端 Workbench 已补充 `continuation_decision` 类型、图标和视觉 tone。
+- 前端 Workbench 时间线已开始优先消费后端 `run.timeline`，并把 assistant commentary、final answer、tool lifecycle、reasoning/provider external 等 timeline item 映射到现有 step card 视觉层；缺少 timeline 时才退回旧 steps。
+- Reasoning summary timeline item 已标记 `Reasoning Summary` badge，默认只展示摘要文本，response/provider/session refs 进入折叠详情面板；provider external item 已标记 `Provider Item` badge。
+- `user_visible=false` 的 reasoning item 会保留 timeline presence/count，但不会把正文或原始 payload 暴露给 Workbench。
+- Frontend `npm run build` 已通过；清库重建后 Workbench / Operations UI HTTP fixture 已通过。
+- Workbench/Trace Context snapshot 卡片已展示 render snapshot 一等 refs 的 included/collapsed/protocol 计数和 protocol refs 预览。
+- `session_item_id` 已进入 `TraceContext`、Trace linked entities 和 Workbench timeline `source_refs`，owner detail drilldown 具备稳定定位字段。
+- Workbench linked entity detail API 已支持 `session_item` / `llm_response_item`，旧 `session_message` detail surface 已从当前主路径退场；Workbench Step inspector 和 Trace inspector 内联详情已接入。
+- 当前落地范围完成了 timeline contract 外壳、LLM response item 聚合、SessionItem source refs、SessionItem replay 可见性、Tool call/run/result 三段生命周期、Trace source refs、continuation 基础投影、Context snapshot refs 观察入口，以及 Session/LLM owner detail 读取/展示入口。

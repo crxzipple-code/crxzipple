@@ -27,7 +27,7 @@ from crxzipple.modules.orchestration.infrastructure.persistence.repositories imp
     SqlAlchemyOrchestrationRunWaitRepository,
 )
 from crxzipple.modules.session.infrastructure.persistence.repositories import (
-    SqlAlchemySessionMessageRepository,
+    SqlAlchemySessionItemRepository,
     SqlAlchemySessionInstanceRepository,
     SqlAlchemySessionRepository,
 )
@@ -39,6 +39,7 @@ from crxzipple.modules.tool.infrastructure.persistence.repositories import (
     SqlAlchemyToolRunRepository,
     SqlAlchemyToolSourceDiscoveryRunRepository,
     SqlAlchemyToolSourceRepository,
+    SqlAlchemyToolSurfaceRepository,
     SqlAlchemyToolWorkerRepository,
 )
 from crxzipple.shared.application.unit_of_work import UnitOfWork
@@ -68,13 +69,14 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.tool_provider_backends = SqlAlchemyToolProviderBackendRepository(
             self.session,
         )
+        self.tool_surfaces = SqlAlchemyToolSurfaceRepository(self.session)
         self.tool_runs = SqlAlchemyToolRunRepository(self.session)
         self.tool_run_assignments = SqlAlchemyToolRunAssignmentRepository(
             self.session,
         )
         self.tool_workers = SqlAlchemyToolWorkerRepository(self.session)
         self.sessions = SqlAlchemySessionRepository(self.session)
-        self.session_messages = SqlAlchemySessionMessageRepository(self.session)
+        self.session_items = SqlAlchemySessionItemRepository(self.session)
         self.session_instances = SqlAlchemySessionInstanceRepository(self.session)
         self.llm_profiles = SqlAlchemyLlmProfileRepository(self.session)
         self.llm_invocations = SqlAlchemyLlmInvocationRepository(self.session)

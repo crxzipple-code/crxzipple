@@ -152,6 +152,14 @@ class OperationsLlmQueryPort(Protocol):
 
     def list_invocations(self, *, limit: int = 100) -> list[Any]: ...
 
+    def list_response_events(
+        self,
+        invocation_id: str,
+        *,
+        limit: int | None = None,
+        after_sequence: int | None = None,
+    ) -> list[Any]: ...
+
 
 class OperationsAgentProfilePort(Protocol):
     def list_profiles(self) -> list[Any]: ...

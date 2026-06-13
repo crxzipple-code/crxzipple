@@ -335,6 +335,9 @@ class ContextRenderService:
             estimate=data.estimate,
             included_node_ids=data.included_node_ids,
             mirrored_node_ids=data.mirrored_node_ids,
+            included_refs=data.included_refs,
+            collapsed_refs=data.collapsed_refs,
+            protocol_required_refs=data.protocol_required_refs,
             metadata=metadata,
         )
         self._snapshots.add(snapshot)
@@ -555,7 +558,7 @@ def _state_for_existing_seed(
     node: ContextNode,
     existing: ContextNode,
 ) -> ContextNodeState:
-    if node.id in {"context.priority", "context.tree_usage", "session.messages.current"}:
+    if node.id in {"context.priority", "context.tree_usage", "session.items.current"}:
         if node.revision != existing.revision:
             return node.state.with_updates(pinned=existing.state.pinned)
         return existing.state

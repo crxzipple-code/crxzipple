@@ -25,6 +25,9 @@ if TYPE_CHECKING:
         ResolvedToolSet,
         ToolExecutionDecision,
     )
+    from crxzipple.modules.orchestration.application.query import (
+        ExecutionChainSnapshot,
+    )
     from crxzipple.modules.orchestration.domain import (
         ExecutionChain,
         ExecutionChainStatus,
@@ -155,6 +158,16 @@ class OrchestrationRunQueryPort(OrchestrationRunLookupPort, Protocol):
         self,
         correlation_key: str,
     ) -> "ExecutionStep | None":
+        ...
+
+    def list_execution_chain_snapshots(
+        self,
+        turn_id: str,
+        *,
+        chain_status: "ExecutionChainStatus | None" = None,
+        step_status: "ExecutionStepStatus | None" = None,
+        item_status: "ExecutionStepItemStatus | None" = None,
+    ) -> "list[ExecutionChainSnapshot]":
         ...
 
     def list_execution_steps(

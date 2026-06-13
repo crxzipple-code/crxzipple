@@ -116,6 +116,8 @@ def test_tool_run_detail_exposes_browser_profile_resolution() -> None:
     run = ToolRun.create(
         run_id="run-browser-1",
         tool_id="browser.navigate",
+        call_id="call-browser-1",
+        tool_surface_id="tool_surface:browser",
         function_id="browser.navigate",
         source_id="bundled.local_package.browser",
         input_payload={"url": "https://example.com"},
@@ -159,9 +161,13 @@ def test_tool_run_detail_exposes_browser_profile_resolution() -> None:
     ).page()
 
     row = page.tool_runs.rows[0]
+    assert row.cells["call_id"] == "call-browser-1"
+    assert row.cells["tool_surface_id"] == "tool_surface:browser"
     assert row.cells["browser"] == "user · pool:collector · alloc:browser_alloc_1 · example.com"
     detail = page.tool_run_details[0]
     summary = {item.label: item.value for item in detail.summary}
+    assert summary["Call ID"] == "call-browser-1"
+    assert summary["ToolSurface"] == "tool_surface:browser"
     assert summary["Browser Profile"] == "user"
     assert summary["Profile Source"] == "browser.default_profile"
     assert summary["Browser Profile Pool"] == "collector"

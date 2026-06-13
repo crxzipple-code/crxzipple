@@ -51,6 +51,8 @@ class ExecuteToolInput:
     tool_id: str
     arguments: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    call_id: str | None = None
+    tool_surface_id: str | None = None
     mode: ToolMode = ToolMode.INLINE
     strategy: ToolExecutionStrategy = ToolExecutionStrategy.ASYNC
     environment: ToolEnvironment = ToolEnvironment.LOCAL
@@ -90,6 +92,7 @@ class ToolUnitOfWork(Protocol):
     tool_sources: Any
     tool_functions: Any
     tool_provider_backends: Any
+    tool_surfaces: Any
     tool_runs: Any
     tool_run_assignments: Any
     tool_workers: Any

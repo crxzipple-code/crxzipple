@@ -60,11 +60,11 @@ class WorkbenchEventRelayObserver:
             refresh=("home", "run", "steps"),
         )
 
-    def observe_session_message_event(self, event: Event) -> None:
+    def observe_session_item_event(self, event: Event) -> None:
         session_key = _optional_text(event.payload.get("session_key"))
         if session_key is None:
             logger.debug(
-                "skipping workbench relay session observation without session_key",
+                "skipping workbench relay session item observation without session_key",
                 extra={"event_name": event.name, "payload": event.payload},
             )
             return

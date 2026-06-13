@@ -7,6 +7,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
+    AgentLlmPolicy,
     AgentLlmRoutingPolicy,
     AgentMemoryBinding,
     AgentRuntimePreferences,
@@ -68,6 +69,29 @@ class AgentLlmRoutingPolicyDTO:
             fallback_llm_ids=value.fallback_llm_ids,
             image_llm_id=value.image_llm_id,
             document_llm_id=value.document_llm_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentLlmPolicyDTO:
+    reasoning_summary_policy: str
+    raw_reasoning_policy: str
+    tool_use_policy: str
+    parallel_tool_calls_policy: str
+    final_answer_policy: str
+    commentary_visibility_policy: str
+    provider_external_item_policy: str
+
+    @classmethod
+    def from_value(cls, value: AgentLlmPolicy) -> "AgentLlmPolicyDTO":
+        return cls(
+            reasoning_summary_policy=value.reasoning_summary_policy,
+            raw_reasoning_policy=value.raw_reasoning_policy,
+            tool_use_policy=value.tool_use_policy,
+            parallel_tool_calls_policy=value.parallel_tool_calls_policy,
+            final_answer_policy=value.final_answer_policy,
+            commentary_visibility_policy=value.commentary_visibility_policy,
+            provider_external_item_policy=value.provider_external_item_policy,
         )
 
 
@@ -134,6 +158,7 @@ class AgentProfileDTO:
     identity: AgentIdentityDTO
     instruction_policy: AgentInstructionPolicyDTO
     llm_routing_policy: AgentLlmRoutingPolicyDTO
+    llm_policy: AgentLlmPolicyDTO
     execution_policy: AgentExecutionPolicyDTO
     runtime_preferences: AgentRuntimePreferencesDTO
     memory: AgentMemoryBindingDTO
@@ -153,6 +178,7 @@ class AgentProfileDTO:
             llm_routing_policy=AgentLlmRoutingPolicyDTO.from_value(
                 profile.llm_routing_policy,
             ),
+            llm_policy=AgentLlmPolicyDTO.from_value(profile.llm_policy),
             execution_policy=AgentExecutionPolicyDTO.from_value(
                 profile.execution_policy,
             ),

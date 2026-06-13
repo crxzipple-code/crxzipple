@@ -55,6 +55,7 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                 "worker_service",
                 "submission_service",
                 "runtime_pool_service",
+                "surface_query_service",
             ),
         )
 
@@ -290,10 +291,14 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                 ExecuteToolInput(
                     tool_id="large_text_tool",
                     arguments={},
+                    call_id="call-large-text",
+                    tool_surface_id="tool_surface:large-text",
                 ),
             ),
         )
 
+        self.assertEqual(tool_run.call_id, "call-large-text")
+        self.assertEqual(tool_run.tool_surface_id, "tool_surface:large-text")
         assert tool_run.result is not None
         result_text = tool_run.result.blocks[0]["text"]
         self.assertIn("[large tool result externalized]", result_text)
@@ -308,11 +313,24 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(envelope["status"], "ok")
         self.assertTrue(envelope["truncated"])
         self.assertEqual(envelope["evidence_refs"], artifact_ids)
+        self.assertEqual(
+            [ref["artifact_id"] for ref in envelope["artifact_refs"]],
+            artifact_ids,
+        )
         self.assertEqual(envelope["omitted_count"], 1)
         self.assertGreater(envelope["omitted_chars"], 0)
         self.assertEqual(
             envelope["key_facts"]["externalized_text_block_count"],
             1,
+        )
+        self.assertEqual(
+            envelope["model_visible_payload"]["artifact_refs"],
+            artifact_ids,
+        )
+        self.assertEqual(envelope["user_visible_payload"]["artifact_count"], 1)
+        self.assertEqual(
+            envelope["trace_payload"]["externalized_text_artifacts"][0]["artifact_id"],
+            artifact_ids[0],
         )
         self.assertEqual(envelope["read_handles"][0]["kind"], "artifact")
         artifact = self.artifact_service.get_artifact(str(artifact_ids[0]))
@@ -320,6 +338,22 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         self.assertEqual(artifact.metadata["source"], "tool.large_text_result")
         resolved = self.artifact_service.resolve_variant(artifact.id)
         self.assertEqual(resolved.path.read_text(), large_text)
+        self.assertIsNotNone(tool_run.result_envelope_payload)
+        assert tool_run.result_envelope_payload is not None
+        self.assertEqual(
+            tool_run.result_envelope_payload["model_visible_payload"]["artifact_refs"],
+            artifact_ids,
+        )
+        with self.uow_factory() as uow:
+            persisted_large = uow.tool_runs.get(tool_run.id)
+        self.assertIsNotNone(persisted_large)
+        assert persisted_large is not None
+        self.assertEqual(persisted_large.call_id, "call-large-text")
+        self.assertEqual(persisted_large.tool_surface_id, "tool_surface:large-text")
+        self.assertEqual(
+            persisted_large.result_envelope_payload["artifact_refs"][0]["artifact_id"],
+            artifact_ids[0],
+        )
 
     def test_execute_fails_when_tool_result_details_exceed_budget(self) -> None:
         self.tool_service.details_max_chars = 128
@@ -361,11 +395,15 @@ class ToolExecutionTestCase(ToolTestCaseBase):
                 ExecuteToolInput(
                     tool_id="echo",
                     arguments={"message": "hello"},
+                    call_id="call-echo",
+                    tool_surface_id="tool_surface:echo",
                 ),
             ),
         )
 
         self.assertEqual(tool_run.status, ToolRunStatus.SUCCEEDED)
+        self.assertEqual(tool_run.call_id, "call-echo")
+        self.assertEqual(tool_run.tool_surface_id, "tool_surface:echo")
         self.assertEqual(tool_run.output_payload["message"], "hello")
         self.assertIsNotNone(tool_run.started_at)
         self.assertIsNotNone(tool_run.completed_at)
@@ -382,6 +420,8 @@ class ToolExecutionTestCase(ToolTestCaseBase):
         assert persisted is not None
         self.assertEqual(persisted.status, ToolRunStatus.SUCCEEDED)
         self.assertEqual(persisted.function_id, "echo")
+        self.assertEqual(persisted.call_id, "call-echo")
+        self.assertEqual(persisted.tool_surface_id, "tool_surface:echo")
         self.assertEqual(persisted.source_id, "bundled.local_package.debug")
         self.assertIsNotNone(persisted.schema_hash)
         self.assertEqual(persisted.output_payload["received"]["message"], "hello")

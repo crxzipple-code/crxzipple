@@ -87,6 +87,13 @@ from crxzipple.modules.tool.application.runtime_pool_service import (
     ToolRuntimePool,
     ToolRuntimePoolService,
 )
+from crxzipple.modules.tool.application.surface import (
+    ToolSurface,
+    ToolSurfaceFunction,
+    ToolSurfaceGroup,
+    ToolSurfaceQueryService,
+    ToolSurfaceSource,
+)
 from crxzipple.modules.tool.application.specifications import ToolSpec
 from crxzipple.modules.tool.application.source_service import (
     ToolFunctionCommandResult,
@@ -160,6 +167,11 @@ __all__ = [
     "ToolRuntimeReadiness",
     "ToolRuntimeReadinessCheck",
     "ToolRuntimeReadinessPort",
+    "ToolSurface",
+    "ToolSurfaceFunction",
+    "ToolSurfaceGroup",
+    "ToolSurfaceQueryService",
+    "ToolSurfaceSource",
     "ToolQueryPort",
     "ToolRunControlPort",
     "ToolOrchestrationDispatchClaim",

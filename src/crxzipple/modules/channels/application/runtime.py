@@ -55,9 +55,9 @@ from crxzipple.modules.orchestration.application import (
     turn_session_topic,
 )
 from crxzipple.shared import (
-    ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
     ORCHESTRATION_RUN_TOOL_UPDATED_EVENT,
     ReplyAddress,
+    SESSION_ITEM_APPENDED_SOURCE_EVENT,
 )
 from crxzipple.shared.content_blocks import (
     content_blocks_from_payload,
@@ -106,6 +106,21 @@ def _resolve_channel_account_profile(
         if item.account_id.strip() == normalized_account:
             return item
     return None
+
+
+def _session_item_fact_as_message_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return payload
+    normalized = dict(payload)
+    item_id = str(payload.get("item_id") or item.get("id") or "").strip()
+    normalized["message_id"] = item_id
+    normalized["role"] = payload.get("role") or item.get("role")
+    normalized["kind"] = payload.get("kind") or item.get("kind")
+    normalized["source_kind"] = payload.get("source_kind") or item.get("source_kind")
+    normalized["source_id"] = payload.get("source_id") or item.get("source_id")
+    normalized["message"] = dict(item)
+    return normalized
 
 
 def _extract_text_message(message: dict[str, Any]) -> str:
@@ -1147,7 +1162,7 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
         event_name = record.envelope.event_name or ""
         if not event_name:
             return interaction
-        if event_name == ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT:
+        if event_name == SESSION_ITEM_APPENDED_SOURCE_EVENT:
             observation = self._observe_session_message_fact(payload)
             return replace(
                 interaction,
@@ -1223,6 +1238,7 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        payload = _session_item_fact_as_message_payload(payload)
         message = dict(payload.get("message") or {})
         content_payload = dict(message.get("content_payload") or {})
         blocks = content_blocks_from_payload(content_payload)
@@ -1314,8 +1330,9 @@ class LarkChannelRuntimeService(ChannelRuntimeBootstrapService):
     ) -> ChannelInteraction:
         payload = dict(record.envelope.payload or {})
         event_name = record.envelope.event_name or ""
-        if event_name != ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT:
+        if event_name != SESSION_ITEM_APPENDED_SOURCE_EVENT:
             return interaction
+        payload = _session_item_fact_as_message_payload(payload)
         role = str(payload.get("role") or "").strip().lower()
         kind = str(payload.get("kind") or "").strip().lower()
         if role != "assistant" and kind != "tool_result":
@@ -2731,7 +2748,8 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
         event_name = record.envelope.event_name or ""
         if not event_name:
             return interaction
-        if event_name == ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT:
+        if event_name == SESSION_ITEM_APPENDED_SOURCE_EVENT:
+            payload = _session_item_fact_as_message_payload(payload)
             message = dict(payload.get("message") or {})
             return replace(
                 interaction,
@@ -2815,8 +2833,9 @@ class WebhookChannelRuntimeService(ChannelRuntimeBootstrapService):
     ) -> ChannelInteraction:
         payload = dict(record.envelope.payload or {})
         event_name = record.envelope.event_name or ""
-        if event_name != ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT:
+        if event_name != SESSION_ITEM_APPENDED_SOURCE_EVENT:
             return interaction
+        payload = _session_item_fact_as_message_payload(payload)
         role = str(payload.get("role") or "").strip().lower()
         kind = str(payload.get("kind") or "").strip().lower()
         if role != "assistant" and kind != "tool_result":

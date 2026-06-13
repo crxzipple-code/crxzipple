@@ -55,6 +55,10 @@ from crxzipple.modules.orchestration.application import (
 from crxzipple.modules.orchestration.application.event_contracts import (
     orchestration_event_topic_contracts,
 )
+from crxzipple.modules.session.application.event_contracts import (
+    session_event_definitions,
+    session_event_surfaces,
+)
 from crxzipple.modules.skills.application.event_contracts import (
     skill_event_definitions,
     skill_event_surfaces,
@@ -148,6 +152,8 @@ def build_event_definition_registry() -> EventDefinitionRegistry:
     registry.register_observers(orchestration_event_observers())
     registry.register_many(memory_event_definitions())
     registry.register_surfaces(memory_event_surfaces())
+    registry.register_many(session_event_definitions())
+    registry.register_surfaces(session_event_surfaces())
     registry.register_many(access_event_definitions())
     registry.register_surfaces(access_event_surfaces())
     registry.register_many(skill_event_definitions())

@@ -21,7 +21,6 @@ from crxzipple.modules.orchestration.domain.value_objects import (
 from crxzipple.modules.tool.domain.exceptions import ToolRunNotFoundError
 from crxzipple.shared.domain.events import Event
 from crxzipple.shared.orchestration_observation import (
-    ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
     ORCHESTRATION_RUN_OBSERVATION_EVENT_NAMES,
     ORCHESTRATION_RUN_TOOL_UPDATED_EVENT,
     ORCHESTRATION_RUNTIME_STATUS_EVENT,
@@ -179,39 +178,6 @@ class RunObservationObserver:
                 kind="fact",
                 ordering_key=run.id,
                 dedupe_key=dedupe_key,
-                payload=payload,
-            ),
-        )
-
-
-@dataclass(slots=True)
-class SessionMessageObservationObserver:
-    events_service: EventPublishPort
-
-    def observe_message_appended(self, event: Event) -> None:
-        session_key = event.payload.get("session_key")
-        message_id = event.payload.get("message_id")
-        if (
-            not isinstance(message_id, str)
-            or not message_id.strip()
-            or not isinstance(session_key, str)
-            or not session_key.strip()
-        ):
-            logger.debug(
-                "skipping message observation observation without complete message fact",
-                extra={"event_name": event.name, "payload": event.payload},
-            )
-            return
-        payload = {
-            "event_name": ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
-            **dict(event.payload),
-        }
-        self.events_service.publish(
-            Event(
-                topic=turn_session_topic(session_key),
-                kind="fact",
-                ordering_key=session_key,
-                dedupe_key=f"{event.name}:{message_id}",
                 payload=payload,
             ),
         )

@@ -20,6 +20,7 @@ from crxzipple.modules.llm.domain.exceptions import (
     LlmInvocationNotAllowedError,
     LlmInvocationNotFoundError,
     LlmNotFoundError,
+    LlmResponseItemNotFoundError,
     LlmValidationError,
 )
 from crxzipple.modules.llm.domain.repositories import (
@@ -34,6 +35,10 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmMessage,
     LlmModelFamily,
     LlmProviderKind,
+    LlmContinuationSignal,
+    LlmResponseEvent,
+    LlmResponseEventType,
+    LlmResponseItem,
     LlmResult,
     LlmSourceKind,
     ToolSchema,
@@ -479,7 +484,9 @@ class LlmApplicationService:
                     f"LLM invocation '{invocation.id}' was not found.",
                 )
             stored.succeed(
-                response.result,
+                _result_summary_from_adapter_response(response),
+                response_items=response.response_items,
+                continuation=response.continuation,
                 provider_request_id=response.provider_request_id,
             )
             stored.record_event(
@@ -534,7 +541,9 @@ class LlmApplicationService:
             return invocation
 
         invocation.succeed(
-            response.result,
+            _result_summary_from_adapter_response(response),
+            response_items=response.response_items,
+            continuation=response.continuation,
             provider_request_id=response.provider_request_id,
         )
         return invocation
@@ -588,7 +597,9 @@ class LlmApplicationService:
         return await asyncio.to_thread(
             self._complete_invocation,
             invocation.id,
-            response.result,
+            _result_summary_from_adapter_response(response),
+            response_items=response.response_items,
+            continuation=response.continuation,
             provider_request_id=response.provider_request_id,
         )
 
@@ -653,6 +664,15 @@ class LlmApplicationService:
                         "status": invocation.status.value,
                     },
                 )
+                self._record_response_event(
+                    invocation.id,
+                    sequence=sequence,
+                    event_type="invocation_started",
+                    data={
+                        "llm_id": invocation.llm_id,
+                        "status": invocation.status.value,
+                    },
+                )
                 sequence += 1
 
                 try:
@@ -664,10 +684,22 @@ class LlmApplicationService:
                             invocation_id=invocation.id,
                             data=dict(event.data),
                         )
+                        self._record_response_event(
+                            invocation.id,
+                            sequence=sequence,
+                            event_type=normalized_event.type,
+                            data=normalized_event.data,
+                        )
                         sequence += 1
 
                         if normalized_event.type == "completed":
                             result_payload = normalized_event.data.get("result")
+                            response_items = _response_items_from_completed_payload(
+                                normalized_event.data,
+                            )
+                            continuation = _continuation_from_completed_payload(
+                                normalized_event.data,
+                            )
                             provider_request_id = normalized_event.data.get(
                                 "provider_request_id",
                             )
@@ -683,6 +715,8 @@ class LlmApplicationService:
                             self._complete_stream_invocation(
                                 invocation.id,
                                 result,
+                                response_items=response_items,
+                                continuation=continuation,
                                 provider_request_id=(
                                     str(provider_request_id)
                                     if provider_request_id is not None
@@ -711,6 +745,12 @@ class LlmApplicationService:
                                 ),
                             },
                         )
+                        self._record_response_event(
+                            invocation.id,
+                            sequence=sequence,
+                            event_type="failed",
+                            data={"error": failed.error.to_payload() if failed.error else {}},
+                        )
                 except Exception as exc:
                     failed = self._fail_invocation(
                         invocation.id,
@@ -727,6 +767,12 @@ class LlmApplicationService:
                         data={
                             "error": failed.error.to_payload() if failed.error else {},
                         },
+                    )
+                    self._record_response_event(
+                        invocation.id,
+                        sequence=sequence,
+                        event_type="failed",
+                        data={"error": failed.error.to_payload() if failed.error else {}},
                     )
 
         return _generator()
@@ -784,6 +830,16 @@ class LlmApplicationService:
                     "status": invocation.status.value,
                 },
             )
+            await asyncio.to_thread(
+                self._record_response_event,
+                invocation.id,
+                sequence=sequence,
+                event_type="invocation_started",
+                data={
+                    "llm_id": invocation.llm_id,
+                    "status": invocation.status.value,
+                },
+            )
             sequence += 1
 
             try:
@@ -795,10 +851,23 @@ class LlmApplicationService:
                         invocation_id=invocation.id,
                         data=dict(event.data),
                     )
+                    await asyncio.to_thread(
+                        self._record_response_event,
+                        invocation.id,
+                        sequence=sequence,
+                        event_type=normalized_event.type,
+                        data=normalized_event.data,
+                    )
                     sequence += 1
 
                     if normalized_event.type == "completed":
                         result_payload = normalized_event.data.get("result")
+                        response_items = _response_items_from_completed_payload(
+                            normalized_event.data,
+                        )
+                        continuation = _continuation_from_completed_payload(
+                            normalized_event.data,
+                        )
                         provider_request_id = normalized_event.data.get(
                             "provider_request_id",
                         )
@@ -815,6 +884,8 @@ class LlmApplicationService:
                             self._complete_stream_invocation,
                             invocation.id,
                             result,
+                            response_items=response_items,
+                            continuation=continuation,
                             provider_request_id=(
                                 str(provider_request_id)
                                 if provider_request_id is not None
@@ -842,6 +913,13 @@ class LlmApplicationService:
                             "error": failed.error.to_payload() if failed.error else {},
                         },
                     )
+                    await asyncio.to_thread(
+                        self._record_response_event,
+                        invocation.id,
+                        sequence=sequence,
+                        event_type="failed",
+                        data={"error": failed.error.to_payload() if failed.error else {}},
+                    )
             except Exception as exc:
                 failed = await asyncio.to_thread(
                     self._fail_invocation,
@@ -860,6 +938,13 @@ class LlmApplicationService:
                         "error": failed.error.to_payload() if failed.error else {},
                     },
                 )
+                await asyncio.to_thread(
+                    self._record_response_event,
+                    invocation.id,
+                    sequence=sequence,
+                    event_type="failed",
+                    data={"error": failed.error.to_payload() if failed.error else {}},
+                )
 
     def get_invocation(self, invocation_id: str) -> LlmInvocation:
         with self.uow_factory() as uow:
@@ -869,6 +954,15 @@ class LlmApplicationService:
                     f"LLM invocation '{invocation_id}' was not found.",
                 )
             return invocation
+
+    def get_response_item(self, item_id: str) -> LlmResponseItem:
+        with self.uow_factory() as uow:
+            item = uow.llm_invocations.get_response_item(item_id)
+            if item is None:
+                raise LlmResponseItemNotFoundError(
+                    f"LLM response item '{item_id}' was not found.",
+                )
+            return item
 
     def list_invocations(
         self,
@@ -884,6 +978,52 @@ class LlmApplicationService:
                 offset=offset,
             )
 
+    def list_response_events(
+        self,
+        invocation_id: str,
+        *,
+        limit: int | None = None,
+        after_sequence: int | None = None,
+    ) -> list[LlmResponseEvent]:
+        with self.uow_factory() as uow:
+            if uow.llm_invocations.get(invocation_id) is None:
+                raise LlmInvocationNotFoundError(
+                    f"LLM invocation '{invocation_id}' was not found.",
+                )
+            return uow.llm_invocations.list_response_events(
+                invocation_id,
+                limit=limit,
+                after_sequence=after_sequence,
+            )
+
+    def _record_response_event(
+        self,
+        invocation_id: str,
+        *,
+        sequence: int,
+        event_type: str,
+        data: Mapping[str, Any],
+    ) -> None:
+        with self.uow_factory() as uow:
+            uow.llm_invocations.add_response_event(
+                LlmResponseEvent(
+                    id=f"{invocation_id}:event:{sequence}",
+                    invocation_id=invocation_id,
+                    sequence_no=sequence,
+                    type=_coerce_response_event_type(event_type),
+                    item_id=(
+                        str(data["item_id"])
+                        if data.get("item_id") not in {None, ""}
+                        else None
+                    ),
+                    delta_payload=dict(data),
+                    provider_payload=dict(data.get("provider_payload", {}))
+                    if isinstance(data.get("provider_payload"), dict)
+                    else {},
+                ),
+            )
+            uow.commit()
+
     def _store_started_invocation(self, invocation: LlmInvocation) -> None:
         with self.uow_factory() as uow:
             uow.llm_invocations.add(invocation)
@@ -895,6 +1035,8 @@ class LlmApplicationService:
         invocation_id: str,
         result: LlmResult,
         *,
+        response_items: tuple[LlmResponseItem, ...] = (),
+        continuation: LlmContinuationSignal | None = None,
         provider_request_id: str | None = None,
     ) -> LlmInvocation:
         with self.uow_factory() as uow:
@@ -903,7 +1045,23 @@ class LlmApplicationService:
                 raise LlmInvocationNotFoundError(
                     f"LLM invocation '{invocation_id}' was not found.",
                 )
-            stored.succeed(result, provider_request_id=provider_request_id)
+            result_summary = (
+                LlmResult.from_response_items(
+                    response_items,
+                    usage=result.usage,
+                    finish_reason=result.finish_reason,
+                    metadata=result.metadata,
+                    structured_output=result.structured_output,
+                )
+                if response_items
+                else result
+            )
+            stored.succeed(
+                result_summary,
+                response_items=response_items,
+                continuation=continuation,
+                provider_request_id=provider_request_id,
+            )
             profile = uow.llm_profiles.get(stored.llm_id)
             stored.record_event(
                 Event(
@@ -1005,6 +1163,8 @@ class LlmApplicationService:
         invocation_id: str,
         result: LlmResult,
         *,
+        response_items: tuple[LlmResponseItem, ...] = (),
+        continuation: LlmContinuationSignal | None = None,
         provider_request_id: str | None = None,
     ) -> LlmInvocation:
         with self.uow_factory() as uow:
@@ -1013,7 +1173,23 @@ class LlmApplicationService:
                 raise LlmInvocationNotFoundError(
                     f"LLM invocation '{invocation_id}' was not found.",
                 )
-            stored.succeed(result, provider_request_id=provider_request_id)
+            result_summary = (
+                LlmResult.from_response_items(
+                    response_items,
+                    usage=result.usage,
+                    finish_reason=result.finish_reason,
+                    metadata=result.metadata,
+                    structured_output=result.structured_output,
+                )
+                if response_items
+                else result
+            )
+            stored.succeed(
+                result_summary,
+                response_items=response_items,
+                continuation=continuation,
+                provider_request_id=provider_request_id,
+            )
             profile = uow.llm_profiles.get(stored.llm_id)
             stored.record_event(
                 Event(
@@ -1036,6 +1212,7 @@ class LlmApplicationService:
         invocation: LlmInvocation,
     ) -> LlmAdapterRequest:
         return LlmAdapterRequest(
+            invocation_id=invocation.id,
             messages=invocation.messages,
             tool_schemas=invocation.tool_schemas,
             response_format=invocation.response_format,
@@ -1365,6 +1542,43 @@ def _invocation_succeeded_event_payload(
     return payload
 
 
+def _result_summary_from_adapter_response(
+    response: LlmAdapterResponse,
+) -> LlmResult:
+    if not response.response_items:
+        return response.result
+    return LlmResult.from_response_items(
+        response.response_items,
+        usage=response.result.usage,
+        finish_reason=response.result.finish_reason,
+        metadata=response.result.metadata,
+        structured_output=response.result.structured_output,
+    )
+
+
+def _response_items_from_completed_payload(
+    payload: Mapping[str, Any],
+) -> tuple[LlmResponseItem, ...]:
+    raw_items = payload.get("response_items")
+    if not isinstance(raw_items, (list, tuple)):
+        return ()
+    items: list[LlmResponseItem] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        items.append(LlmResponseItem.from_payload(raw_item))
+    return tuple(items)
+
+
+def _continuation_from_completed_payload(
+    payload: Mapping[str, Any],
+) -> LlmContinuationSignal | None:
+    raw_continuation = payload.get("continuation")
+    if not isinstance(raw_continuation, dict):
+        return None
+    return LlmContinuationSignal.from_payload(raw_continuation)
+
+
 def _invocation_failed_event_payload(
     invocation: LlmInvocation,
     profile: LlmProfile | None,
@@ -1421,6 +1635,21 @@ def _invocation_duration_seconds(invocation: LlmInvocation) -> float | None:
     if invocation.started_at is None or invocation.completed_at is None:
         return None
     return max((invocation.completed_at - invocation.started_at).total_seconds(), 0.0)
+
+
+def _coerce_response_event_type(event_type: str) -> LlmResponseEventType:
+    try:
+        return LlmResponseEventType(event_type)
+    except ValueError:
+        if event_type == "text_delta":
+            return LlmResponseEventType.TEXT_DELTA
+        if event_type == "completed":
+            return LlmResponseEventType.COMPLETED
+        if event_type == "failed":
+            return LlmResponseEventType.FAILED
+        if event_type == "invocation_started":
+            return LlmResponseEventType.INVOCATION_STARTED
+        return LlmResponseEventType.ITEM_COMPLETED
 
 
 def _llm_error_family(error_code: str) -> str:

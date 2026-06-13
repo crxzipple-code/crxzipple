@@ -30,11 +30,14 @@ class OrchestrationEngineLlmInvoker:
         llm_id: str,
         messages: tuple,
         tool_schemas: tuple,
+        response_format: dict[str, object] | None = None,
+        request_overrides: dict[str, object] | None = None,
         require_tool_call: bool = False,
         request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
     ):
-        overrides = self.request_overrides(
+        overrides = self._merged_request_overrides(
+            base_overrides=request_overrides,
             llm_id=llm_id,
             tool_schemas=tool_schemas,
             require_tool_call=require_tool_call,
@@ -48,6 +51,7 @@ class OrchestrationEngineLlmInvoker:
                             llm_id=llm_id,
                             messages=messages,
                             tool_schemas=tool_schemas,
+                            response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
                         ),
@@ -58,6 +62,7 @@ class OrchestrationEngineLlmInvoker:
                             llm_id=llm_id,
                             messages=messages,
                             tool_schemas=tool_schemas,
+                            response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
                         ),
@@ -102,11 +107,14 @@ class OrchestrationEngineLlmInvoker:
         llm_id: str,
         messages: tuple,
         tool_schemas: tuple,
+        response_format: dict[str, object] | None = None,
+        request_overrides: dict[str, object] | None = None,
         require_tool_call: bool = False,
         request_metadata: dict[str, object] | None = None,
         on_llm_stream_update: Callable[[str, str, str | None], None] | None = None,
     ):
-        overrides = self.request_overrides(
+        overrides = self._merged_request_overrides(
+            base_overrides=request_overrides,
             llm_id=llm_id,
             tool_schemas=tool_schemas,
             require_tool_call=require_tool_call,
@@ -120,6 +128,7 @@ class OrchestrationEngineLlmInvoker:
                             llm_id=llm_id,
                             messages=messages,
                             tool_schemas=tool_schemas,
+                            response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
                         ),
@@ -130,6 +139,7 @@ class OrchestrationEngineLlmInvoker:
                             llm_id=llm_id,
                             messages=messages,
                             tool_schemas=tool_schemas,
+                            response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
                         ),
@@ -168,6 +178,7 @@ class OrchestrationEngineLlmInvoker:
                             llm_id=llm_id,
                             messages=messages,
                             tool_schemas=tool_schemas,
+                            response_format=response_format,
                             overrides=overrides,
                             request_metadata=dict(request_metadata or {}),
                         ),
@@ -181,6 +192,24 @@ class OrchestrationEngineLlmInvoker:
                     self.llm_port.get_invocation,
                     invocation_id,
                 )
+
+    def _merged_request_overrides(
+        self,
+        *,
+        base_overrides: dict[str, object] | None,
+        llm_id: str,
+        tool_schemas: tuple,
+        require_tool_call: bool,
+    ) -> dict[str, object]:
+        overrides = dict(base_overrides or {})
+        overrides.update(
+            self.request_overrides(
+                llm_id=llm_id,
+                tool_schemas=tool_schemas,
+                require_tool_call=require_tool_call,
+            ),
+        )
+        return overrides
 
     def request_overrides(
         self,

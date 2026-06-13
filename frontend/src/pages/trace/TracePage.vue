@@ -27,7 +27,12 @@ import {
   stringifyPromptPreviewJson,
   type RunPromptInputPreview,
 } from "@/shared/runtime/promptPreview";
-import type { TraceEventView, TraceLinkedEntity, TraceSummaryView } from "@/shared/runtime/types";
+import type {
+  TraceEventView,
+  TraceLinkedEntity,
+  TraceSummaryView,
+  WorkbenchLinkedEntityDetail,
+} from "@/shared/runtime/types";
 import UiBadge from "@/shared/ui/UiBadge.vue";
 import UiButton from "@/shared/ui/UiButton.vue";
 import UiCard from "@/shared/ui/UiCard.vue";
@@ -38,6 +43,7 @@ import {
   loadTraceContextRenderSnapshot,
   loadTraceData,
   loadTraceInvocationPromptPreview,
+  loadTraceLinkedEntityDetail,
   loadTracePromptPreview,
   type TraceContextRenderSnapshot,
 } from "./api";
@@ -56,6 +62,10 @@ const contextRenderSnapshot = ref<TraceContextRenderSnapshot | null>(null);
 const contextPromptPreview = ref<RunPromptInputPreview | null>(null);
 const loadingContextSnapshot = ref(false);
 const contextActualRequestTab = ref<ContextActualRequestTabId>("xml");
+const selectedEntityDetailKey = ref<string | null>(null);
+const selectedEntityDetail = ref<WorkbenchLinkedEntityDetail | null>(null);
+const entityDetailLoading = ref(false);
+const entityDetailError = ref<string | null>(null);
 let contextSnapshotSerial = 0;
 
 type ContextActualRequestTabId = "xml" | "messages" | "tool_schemas" | "options" | "attachments";
@@ -176,6 +186,9 @@ const contextSnapshotRows = computed(() => {
     { label: t("workbench.context.runtimeContractHash"), value: shortId(textValue(requestMetadata.runtime_contract_hash, ""), 16) },
     { label: t("workbench.context.includedNodes"), value: formatNumber(snapshot.included_node_ids.length) },
     { label: t("workbench.context.mirroredNodes"), value: formatNumber(snapshot.mirrored_node_ids.length) },
+    { label: t("workbench.context.includedRefs"), value: formatNumber(snapshot.included_refs.length) },
+    { label: t("workbench.context.protocolRefs"), value: formatNumber(snapshot.protocol_required_refs.length) },
+    { label: t("workbench.context.collapsedRefs"), value: formatNumber(snapshot.collapsed_refs.length) },
     { label: t("workbench.context.renderedPromptTokens"), value: formatNumber(renderedTokens) },
     { label: t("workbench.context.providerPromptTokens"), value: formatOptionalNumber(metadata.estimated_provider_prompt_tokens) },
     { label: t("workbench.context.directTranscriptTokens"), value: formatOptionalNumber(metadata.direct_transcript_estimated_tokens) },
@@ -654,6 +667,32 @@ const contextSnapshotSessionNodePreviewRows = computed(() => (
 const contextSnapshotHiddenSessionNodeCount = computed(() => (
   Math.max(contextSnapshotSessionNodeRows.value.length - contextSnapshotSessionNodePreviewRows.value.length, 0)
 ));
+const contextSnapshotRefRows = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return [];
+  const refs = snapshot.protocol_required_refs.length
+    ? snapshot.protocol_required_refs
+    : snapshot.included_refs;
+  return refs
+    .filter(isRecord)
+    .map((ref, index) => ({
+      id: textValue(ref.item_id ?? ref.owner_id ?? ref.node_id, `ref-${index}`),
+      kind: titleize(ref.kind ?? ref.owner_kind, "-"),
+      sequence: textValue(ref.sequence_no, "-"),
+      owner: textValue(ref.owner_module ?? ref.source_module, "-"),
+      callId: shortId(textValue(ref.tool_call_id, ""), 24),
+    }))
+    .filter((row) => row.id)
+    .slice(0, 4);
+});
+const contextSnapshotHiddenRefCount = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return 0;
+  const sourceCount = snapshot.protocol_required_refs.length
+    ? snapshot.protocol_required_refs.length
+    : snapshot.included_refs.length;
+  return Math.max(sourceCount - contextSnapshotRefRows.value.length, 0);
+});
 const graphVisibleEvents = computed(() => graphTraceEvents.value.filter((event) => event.key_event));
 const timelineAxisStyle = computed(() => ({
   "--trace-axis-height": `${Math.max(traceEvents.value.length - 1, 0) * 72}px`,
@@ -750,6 +789,7 @@ watch(
       traceEvents.value = loaded.events;
       graphTraceEvents.value = loaded.graphEvents;
       selectedEventId.value = preferredEventId(activeTraceView.value);
+      resetLinkedEntityDetail();
     } catch (error) {
       loadError.value = error instanceof Error ? error.message : String(error);
     } finally {
@@ -764,8 +804,13 @@ watch(
   (view) => {
     activeTraceView.value = traceViewFromQuery(view);
     selectedEventId.value = preferredEventId(activeTraceView.value);
+    resetLinkedEntityDetail();
   },
 );
+
+watch(selectedEventId, () => {
+  resetLinkedEntityDetail();
+});
 
 watch(
   () => [runId.value, selectedLlmInvocationId.value],
@@ -1291,6 +1336,51 @@ function linkedEntity(type: string): TraceLinkedEntity | null {
   return traceSummary.value?.linked_entities.find((entity) => entity.type === type) ?? null;
 }
 
+function resetLinkedEntityDetail(): void {
+  selectedEntityDetailKey.value = null;
+  selectedEntityDetail.value = null;
+  entityDetailLoading.value = false;
+  entityDetailError.value = null;
+}
+
+function linkedEntityDetailKey(entity: TraceLinkedEntity): string {
+  return `${entity.type}:${entity.id}`;
+}
+
+function linkedEntitySupportsDetail(entity: TraceLinkedEntity): boolean {
+  return (
+    entity.type === "session_item"
+    || entity.type === "session_message"
+    || entity.type === "llm_response_item"
+    || entity.type === "llm_response_item_id"
+  );
+}
+
+async function showLinkedEntityDetail(entity: TraceLinkedEntity): Promise<void> {
+  if (!linkedEntitySupportsDetail(entity)) return;
+  const key = linkedEntityDetailKey(entity);
+  if (selectedEntityDetailKey.value === key && selectedEntityDetail.value) return;
+  selectedEntityDetailKey.value = key;
+  selectedEntityDetail.value = null;
+  entityDetailLoading.value = true;
+  entityDetailError.value = null;
+  try {
+    selectedEntityDetail.value = await loadTraceLinkedEntityDetail(entity.type, entity.id);
+  } catch (error) {
+    entityDetailError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    entityDetailLoading.value = false;
+  }
+}
+
+function linkedEntityDetailSummary(detail: WorkbenchLinkedEntityDetail | null): string {
+  if (!detail) return "";
+  if (detail.summary.trim()) return detail.summary;
+  const content = detail.payload.content_payload;
+  if (isRecord(content) && typeof content.text === "string") return content.text;
+  return detail.label;
+}
+
 function familyLabel(family: string): string {
   return t(`trace.family.${laneForFamily(family)}`);
 }
@@ -1334,6 +1424,9 @@ function formatTraceDateTime(value: string | null | undefined): string {
 }
 
 function timelineEntities(event: TraceEventView): TraceLinkedEntity[] {
+  if (event.linked_entities.length > 0) {
+    return event.linked_entities;
+  }
   const common = {
     event_id: { type: "event_id", id: "evt_01H8XK3Q..." },
     run_id: { type: "run_id", id: runId.value ?? "run_01H8XK3Q..." },
@@ -1833,8 +1926,23 @@ function selectOffset(offset: number): void {
         </dl>
 
         <h3>{{ t("trace.linkedEntities") }}</h3>
+        <button
+          v-for="entity in timelineEntities(selectedEvent).filter((item) => linkedEntitySupportsDetail(item))"
+          :key="`detail:${entity.type}:${entity.id}`"
+          class="entity-link"
+          type="button"
+          :disabled="entityDetailLoading && selectedEntityDetailKey === linkedEntityDetailKey(entity)"
+          @click="showLinkedEntityDetail(entity)"
+        >
+          <span>{{ entity.type }}</span>
+          <code>{{ entity.id }}</code>
+          <small v-if="entityDetailLoading && selectedEntityDetailKey === linkedEntityDetailKey(entity)">
+            {{ t("common.loading") }}
+          </small>
+          <ExternalLink v-else :size="14" />
+        </button>
         <RouterLink
-          v-for="entity in timelineEntities(selectedEvent)"
+          v-for="entity in timelineEntities(selectedEvent).filter((item) => !linkedEntitySupportsDetail(item))"
           :key="entity.type"
           class="entity-link"
           :to="`/trace/${selectedEvent.trace.trace_id}`"
@@ -1843,6 +1951,26 @@ function selectOffset(offset: number): void {
           <code>{{ entity.id }}</code>
           <ExternalLink :size="14" />
         </RouterLink>
+        <div v-if="selectedEntityDetail || entityDetailError" class="entity-detail-card">
+          <template v-if="selectedEntityDetail">
+            <header>
+              <span>{{ selectedEntityDetail.owner }}</span>
+              <strong>{{ selectedEntityDetail.label }}</strong>
+            </header>
+            <p>{{ linkedEntityDetailSummary(selectedEntityDetail) }}</p>
+            <dl>
+              <div>
+                <dt>{{ t("table.kind") }}</dt>
+                <dd>{{ selectedEntityDetail.type }}</dd>
+              </div>
+              <div>
+                <dt>ID</dt>
+                <dd>{{ selectedEntityDetail.id }}</dd>
+              </div>
+            </dl>
+          </template>
+          <p v-else>{{ entityDetailError }}</p>
+        </div>
 
         <h3>{{ t("trace.quickActions") }}</h3>
         <div class="quick-actions">
@@ -2015,6 +2143,23 @@ function selectOffset(offset: number): void {
             >
               <span>{{ row.label }}</span>
               <strong :title="row.value">{{ row.value }}</strong>
+            </div>
+          </div>
+
+          <div v-if="contextSnapshotRefRows.length" class="trace-context-snapshot-node-refs">
+            <div class="trace-context-snapshot-node-refs__head">
+              <span>{{ t("workbench.context.protocolRefs") }}</span>
+              <small v-if="contextSnapshotHiddenRefCount > 0">
+                {{ t("workbench.context.moreRefs", { count: formatNumber(contextSnapshotHiddenRefCount) }) }}
+              </small>
+            </div>
+            <div
+              v-for="row in contextSnapshotRefRows"
+              :key="row.id"
+              class="trace-context-snapshot-node-ref"
+            >
+              <span>{{ row.kind }} · #{{ row.sequence }}</span>
+              <code :title="`${row.id} · ${row.owner} · ${row.callId}`">{{ shortId(row.id, 34) }}</code>
             </div>
           </div>
 
@@ -3178,16 +3323,96 @@ dd {
 .entity-link {
   gap: var(--space-2);
   min-height: 34px;
+  width: 100%;
+  border: 0;
   font-size: 12px;
   color: var(--text-secondary);
   text-decoration: none;
   border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  cursor: pointer;
 }
 
 .entity-link code {
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.entity-link small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.entity-link:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
+.entity-detail-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.entity-detail-card header {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.entity-detail-card header span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.entity-detail-card header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entity-detail-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.entity-detail-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.entity-detail-card dl div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.entity-detail-card dt,
+.entity-detail-card dd {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.entity-detail-card dt {
+  color: var(--text-muted);
+}
+
+.entity-detail-card dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
 }
 
 .quick-actions {

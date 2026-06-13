@@ -181,6 +181,9 @@ class ContextRenderSnapshot(AggregateRoot[str]):
     estimate: ContextEstimate = field(default_factory=ContextEstimate)
     included_node_ids: tuple[str, ...] = ()
     mirrored_node_ids: tuple[str, ...] = ()
+    included_refs: tuple[JsonObject, ...] = ()
+    collapsed_refs: tuple[JsonObject, ...] = ()
+    protocol_required_refs: tuple[JsonObject, ...] = ()
     metadata: JsonObject = field(default_factory=dict)
     created_at: datetime = field(default_factory=utcnow)
 
@@ -195,6 +198,11 @@ class ContextRenderSnapshot(AggregateRoot[str]):
         self.provider_attachments = dict(self.provider_attachments)
         self.included_node_ids = tuple(self.included_node_ids)
         self.mirrored_node_ids = tuple(self.mirrored_node_ids)
+        self.included_refs = _normalize_ref_tuple(self.included_refs)
+        self.collapsed_refs = _normalize_ref_tuple(self.collapsed_refs)
+        self.protocol_required_refs = _normalize_ref_tuple(
+            self.protocol_required_refs,
+        )
         self.metadata = dict(self.metadata)
         self.created_at = normalize_timestamp(self.created_at)
 
@@ -204,6 +212,10 @@ def _require_text(value: str, label: str) -> str:
     if not normalized:
         raise ContextWorkspaceValidationError(f"{label} cannot be blank.")
     return normalized
+
+
+def _normalize_ref_tuple(refs: tuple[JsonObject, ...]) -> tuple[JsonObject, ...]:
+    return tuple(dict(ref) for ref in refs if isinstance(ref, dict))
 
 
 __all__ = [

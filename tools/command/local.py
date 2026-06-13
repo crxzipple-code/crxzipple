@@ -535,12 +535,19 @@ def _start_prepared_process(
 ) -> ProcessSession:
     return process_service.start_command(
         session_key=session_key,
-        command=prepared_command.command,
+        command=prepared_command.shell_command,
         shell=prepared_command.shell,
         working_directory=prepared_command.working_directory,
+        env=prepared_command.env,
         metadata={
             "workspace_root": prepared_command.workspace_root,
             "working_directory_relative": prepared_command.working_directory_relative,
+            "command": prepared_command.command,
+            "crxzipple_python": (
+                (prepared_command.env or {}).get("CRXZIPPLE_PYTHON")
+                if prepared_command.env
+                else None
+            ),
         },
     )
 
@@ -550,7 +557,7 @@ def render_process_started(session: ProcessSession) -> RenderedWorkspaceExec:
         "# Background Process Started",
         "",
         f"- process_id: {session.id}",
-        f"- command: {session.command}",
+        f"- command: {_process_command(session)}",
         f"- cwd: {_process_cwd(session)}",
         f"- pid: {session.pid}",
         f"- status: {session.status.value}",
@@ -872,7 +879,7 @@ def _process_metadata(
         "workspace_dir": workspace_root,
         "cwd": _process_cwd(session),
         "absolute_cwd": session.working_directory,
-        "command": session.command,
+        "command": _process_command(session),
         "shell": session.shell,
         "pid": session.pid,
         "status": session.status.value,
@@ -891,6 +898,13 @@ def _process_workspace_root(session: ProcessSession) -> str | None:
         if normalized:
             return normalized
     return None
+
+
+def _process_command(session: ProcessSession) -> str:
+    value = session.metadata.get("command")
+    if isinstance(value, str) and value.strip():
+        return value
+    return session.command
 
 
 def _process_cwd(session: ProcessSession) -> str:

@@ -1,0 +1,16 @@
+id: openai_codex.gpt-5.5
+provider: openai_codex
+api_family: openai_codex_responses
+model_name: gpt-5.5
+context_window_tokens: 1050000
+model_family: reasoning
+capabilities:
+  - tool_calling
+  - vision_input
+  - reasoning
+default_params:
+  reasoning_effort: medium
+credential_binding_id: codex-oauth-default
+timeout_seconds: 120
+source_kind: imported
+enabled: true

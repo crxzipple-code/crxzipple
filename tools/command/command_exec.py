@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
+import shlex
 import time
 
 from tools.workspace.fs_safe import (
@@ -27,7 +28,9 @@ class PreparedWorkspaceCommand:
     working_directory: str
     working_directory_relative: str | None
     shell: str
+    env: dict[str, str] | None
     command: str
+    shell_command: str
     timeout_seconds: int
     max_output_tokens: int | None
     max_output_chars: int
@@ -105,12 +108,16 @@ def prepare_workspace_command(
         cwd=cwd,
     )
     shell = _resolve_shell_executable()
+    env = _resolve_command_environment()
+    shell_command = _command_with_environment_prelude(normalized_command, env=env)
     return PreparedWorkspaceCommand(
         workspace_root=str(root),
         working_directory=str(working_directory),
         working_directory_relative=working_directory_relative,
         shell=shell,
+        env=env,
         command=normalized_command,
+        shell_command=shell_command,
         timeout_seconds=normalized_timeout,
         max_output_tokens=output_budget_tokens,
         max_output_chars=output_budget_chars,
@@ -125,8 +132,9 @@ async def execute_prepared_workspace_command(
         process = await asyncio.create_subprocess_exec(
             prepared.shell,
             "-lc",
-            prepared.command,
+            prepared.shell_command,
             cwd=prepared.working_directory,
+            env=prepared.env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -213,6 +221,39 @@ def _resolve_shell_executable() -> str:
     if fallback:
         return fallback
     raise ValueError("No POSIX shell is available for workspace exec.")
+
+
+def _resolve_command_environment() -> dict[str, str] | None:
+    runtime_python = os.environ.get("CRXZIPPLE_PYTHON", "").strip()
+    if not runtime_python:
+        return None
+    python_path = Path(runtime_python).expanduser()
+    if not python_path.is_file():
+        return None
+    python_bin = str(python_path.parent)
+    current_path = os.environ.get("PATH", "")
+    path_parts = [part for part in current_path.split(os.pathsep) if part]
+    env = dict(os.environ)
+    if path_parts and path_parts[0] == python_bin:
+        env["CRXZIPPLE_PYTHON"] = str(python_path)
+        return env
+    filtered_path = [part for part in path_parts if part != python_bin]
+    env["CRXZIPPLE_PYTHON"] = str(python_path)
+    env["PATH"] = os.pathsep.join([python_bin, *filtered_path])
+    return env
+
+
+def _command_with_environment_prelude(command: str, *, env: dict[str, str] | None) -> str:
+    if not env:
+        return command
+    exports: list[str] = []
+    for key in ("CRXZIPPLE_PYTHON", "PATH"):
+        value = env.get(key)
+        if value:
+            exports.append(f"export {key}={shlex.quote(value)}")
+    if not exports:
+        return command
+    return f"{'; '.join(exports)}; {command}"
 
 
 def _decode_output(raw: bytes | None) -> str:

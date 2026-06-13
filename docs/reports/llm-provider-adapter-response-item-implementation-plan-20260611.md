@@ -147,14 +147,14 @@ provider_request_id
 
 ## Checklist
 
-- [ ] 定义 adapter 输出 item/event/continuation 的公共接口。
-- [ ] OpenAI Codex Responses request envelope mapping。
-- [ ] OpenAI Codex Responses stream item lifecycle mapping。
-- [ ] reasoning summary delta/item mapping。
-- [ ] tool argument delta mapping。
-- [ ] `end_turn=false` continuation mapping。
-- [ ] provider external item mapping。
-- [ ] Chat compatible 最小 item mapping。
-- [ ] Anthropic/Gemini 最小 item mapping。
-- [ ] unknown item raw payload retention。
-- [ ] derived `LlmResult` summary 单测。
+- [x] 定义 adapter 输出 item/event/continuation 的公共接口。
+- [x] OpenAI Codex Responses request envelope mapping。
+- [x] OpenAI Codex Responses stream item lifecycle mapping。
+- [x] reasoning summary delta/item mapping。
+- [x] tool argument delta mapping。
+- [x] `end_turn=false` continuation mapping。
+- [x] provider external item mapping。
+- [x] Chat compatible 最小 item mapping。
+- [x] Anthropic/Gemini 最小 item mapping。
+- [x] unknown item raw payload retention。
+- [x] derived `LlmResult` summary 单测。

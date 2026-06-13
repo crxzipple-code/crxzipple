@@ -422,6 +422,7 @@ def build_orchestration_runtime(
         llm_image_max_bytes=settings.artifact_image_llm_max_bytes,
         llm_file_max_bytes=settings.artifact_file_llm_max_bytes,
         llm_text_file_max_chars=settings.artifact_text_file_llm_max_chars,
+        runtime_llm_defaults=settings.llm_request_defaults.to_payload(),
     )
     tool_resolver = ToolResolver(
         tool_catalog=tool_port,

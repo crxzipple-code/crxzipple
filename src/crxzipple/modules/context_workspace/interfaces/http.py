@@ -50,6 +50,9 @@ class RecordSnapshotRequest(BaseModel):
     estimate: dict[str, object] = Field(default_factory=dict)
     included_node_ids: list[str] = Field(default_factory=list)
     mirrored_node_ids: list[str] = Field(default_factory=list)
+    included_refs: list[dict[str, object]] = Field(default_factory=list)
+    collapsed_refs: list[dict[str, object]] = Field(default_factory=list)
+    protocol_required_refs: list[dict[str, object]] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
@@ -143,6 +146,11 @@ def record_render_snapshot(
                 estimate=ContextEstimate.from_payload(payload.estimate),
                 included_node_ids=tuple(payload.included_node_ids),
                 mirrored_node_ids=tuple(payload.mirrored_node_ids),
+                included_refs=tuple(dict(ref) for ref in payload.included_refs),
+                collapsed_refs=tuple(dict(ref) for ref in payload.collapsed_refs),
+                protocol_required_refs=tuple(
+                    dict(ref) for ref in payload.protocol_required_refs
+                ),
                 metadata=payload.metadata,
             ),
         )
@@ -289,6 +297,11 @@ def _snapshot_payload(snapshot: ContextRenderSnapshot) -> dict[str, object]:
         "estimate": snapshot.estimate.to_payload(),
         "included_node_ids": list(snapshot.included_node_ids),
         "mirrored_node_ids": list(snapshot.mirrored_node_ids),
+        "included_refs": [dict(ref) for ref in snapshot.included_refs],
+        "collapsed_refs": [dict(ref) for ref in snapshot.collapsed_refs],
+        "protocol_required_refs": [
+            dict(ref) for ref in snapshot.protocol_required_refs
+        ],
         "metadata": dict(snapshot.metadata),
         "created_at": snapshot.created_at.isoformat(),
     }

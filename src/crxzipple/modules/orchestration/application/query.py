@@ -37,6 +37,18 @@ from crxzipple.modules.orchestration.domain.value_objects import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionStepSnapshot:
+    step: ExecutionStep
+    items: tuple[ExecutionStepItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionChainSnapshot:
+    chain: ExecutionChain
+    steps: tuple[ExecutionStepSnapshot, ...]
+
+
 @dataclass(slots=True)
 class OrchestrationRunQueryService:
     uow_factory: Callable[[], OrchestrationUnitOfWork]
@@ -81,6 +93,45 @@ class OrchestrationRunQueryService:
     ) -> ExecutionStep | None:
         with self.uow_factory() as uow:
             return uow.execution_steps.get_by_correlation_key(correlation_key)
+
+    def list_execution_chain_snapshots(
+        self,
+        turn_id: str,
+        *,
+        chain_status: ExecutionChainStatus | None = None,
+        step_status: ExecutionStepStatus | None = None,
+        item_status: ExecutionStepItemStatus | None = None,
+    ) -> list[ExecutionChainSnapshot]:
+        with self.uow_factory() as uow:
+            snapshots: list[ExecutionChainSnapshot] = []
+            chains = uow.execution_chains.list_for_turn(
+                turn_id,
+                status=chain_status,
+            )
+            for chain in chains:
+                step_snapshots: list[ExecutionStepSnapshot] = []
+                steps = uow.execution_steps.list_for_chain(
+                    chain.id,
+                    status=step_status,
+                )
+                for step in steps:
+                    items = uow.execution_step_items.list_for_step(
+                        step.id,
+                        status=item_status,
+                    )
+                    step_snapshots.append(
+                        ExecutionStepSnapshot(
+                            step=step,
+                            items=tuple(items),
+                        ),
+                    )
+                snapshots.append(
+                    ExecutionChainSnapshot(
+                        chain=chain,
+                        steps=tuple(step_snapshots),
+                    ),
+                )
+            return snapshots
 
     def list_execution_steps(
         self,

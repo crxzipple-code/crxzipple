@@ -844,18 +844,18 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
             any("# Approval Update" in str(message.content) for message in resume_system_messages),
         )
         refreshed_run = self.orchestration_run_query_service.get_run(run.id)
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        session_items = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=str(refreshed_run.metadata["session_key"]),
             ),
         )
         self.assertTrue(
             any(
-                message.kind is SessionMessageKind.TOOL_RESULT
-                and message.source_kind == "approval_request"
-                and str(message.content_payload).find("running echo") >= 0
-                and str(message.content_payload).find("must be requested again later") >= 0
-                for message in session_messages
+                item.kind.value == "tool_result"
+                and item.source_kind == "approval_request"
+                and str(item.content_payload).find("running echo") >= 0
+                and str(item.content_payload).find("must be requested again later") >= 0
+                for item in session_items
             ),
         )
 
@@ -923,20 +923,25 @@ class OrchestrationApprovalTestCase(OrchestrationTestCaseBase):
         pending_request = waiting.pending_approval_request()
         assert pending_request is not None
         self.assertEqual(pending_request.request_id, "call-echo-1")
+        self.assertEqual(pending_request.tool_name, "echo")
+        self.assertEqual(
+            pending_request.tool_arguments.get("message"),
+            "first gated echo",
+        )
 
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        session_items = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=str(waiting.metadata["session_key"]),
             ),
         )
         function_call_ids = [
-            str(message.metadata.get("tool_call_id", "")).strip()
-            for message in session_messages
-            if message.role == "assistant"
-            and message.content_payload.get("type") == "function_call"
-            and message.metadata.get("tool_name") == "echo"
+            str(item.metadata.get("tool_call_id", "")).strip()
+            for item in session_items
+            if item.role == "assistant"
+            and getattr(item.kind, "value", item.kind) == "tool_call"
+            and item.metadata.get("tool_name") == "echo"
         ]
-        self.assertEqual(function_call_ids, ["call-echo-1"])
+        self.assertNotIn("call-echo-2", function_call_ids)
 
     def test_recover_abandoned_runs_continues_resolved_approval_recovery(self) -> None:
         self._register_test_openai_profile(

@@ -414,6 +414,12 @@ continuation: LlmContinuationSignal | None
 
 response events 可先不挂 entity 全量加载，避免大对象膨胀；通过 query service 分页读取。
 
+施工状态 2026-06-11：
+
+- 已落地 `LlmResponseItemKind`、`LlmMessagePhase`、`LlmResponseEventType`、`LlmContinuationReason`。
+- 已落地 `LlmResponseItem`、`LlmResponseEvent`、`LlmContinuationSignal` payload roundtrip。
+- 已让 `LlmInvocation` 持有 completed `response_items` 和 invocation-level `continuation`。
+
 ### Phase 2: Persistence
 
 新增表：
@@ -450,6 +456,13 @@ llm_invocation_response_events
 
 `llm_invocations.result_payload` 若继续存在，只能作为 summary cache；也可以在施工时改名或拆分，只要 runtime 主路径不依赖压扁结果。
 
+施工状态 2026-06-11：
+
+- 已新增 Alembic `0072_llm_response_items`。
+- 已新增 `llm_invocation_response_items`、`llm_invocation_response_events`。
+- 已新增 `llm_invocations.continuation_payload`。
+- 已实现 SQLAlchemy / in-memory repository 的 response item/event/continuation roundtrip。
+
 ### Phase 3: Application service
 
 - `stream_invoke()` 持久化 normalized events/items。
@@ -461,6 +474,16 @@ list_response_items(invocation_id)
 list_response_events(invocation_id, limit, after_sequence)
 get_continuation(invocation_id)
 ```
+
+施工状态 2026-06-11：
+
+- 已扩展 `LlmAdapterRequest.invocation_id`，让 adapter 可生成 invocation-scoped response items。
+- 已扩展 `LlmAdapterResponse.response_items` / `continuation`。
+- 已让同步/异步 `invoke()` 持久化 adapter 返回的 response items 和 continuation。
+- 已让非流式 `invoke()` / `invoke_async()` / `test_profile()` 在 adapter 返回 response items 时，用 response items 重建 `LlmResult` summary；adapter 原始 `result.text/tool_calls` 不再覆盖 item-derived summary。
+- 已增加 `list_response_events(invocation_id, limit, after_sequence)` query method。
+- 已让 `stream_invoke()` / `stream_invoke_async()` 将 normalized stream events 持久化为 durable `LlmResponseEvent`。
+- Streaming `completed` event 若带 `response_items`，LLM service 已持久化 response item snapshot、continuation，并用 response items 重建 `LlmResult` summary；无 `response_items` 的 completed event 仍作为 legacy result fallback。
 
 ### Phase 4: Adapter migration
 
@@ -480,6 +503,16 @@ tool_call
 completed
 ```
 
+施工状态 2026-06-11：
+
+- 已让 OpenAI Responses / Codex Responses `invoke()` 从 completed response output 映射 `response_items` 和 `continuation`。
+- 已覆盖 `message`、`reasoning`、`function_call`、provider hosted item 和 `end_turn=false`。
+- 已保持 provider hosted item 为 `provider_external_item`，不创建 CRXZipple ToolRun。
+- streaming 对外事件序列暂不破坏；application service 已开始把 stream event 投影为 durable `LlmResponseEvent`。
+- 已完成 provider native `response.output_item.added/done`、reasoning summary/raw delta、tool argument delta 到 `LlmResponseEvent` 的基础映射和持久化。
+- LLM Operations read model / detail drawer 已能展示 response items、response events、continuation reason 和 end_turn。
+- Workbench timeline 与 Trace inspector 已完成 response item/source refs 的基础展示和 linked entity drilldown；response event 长期保留窗口仍待单独设计。
+
 ### Phase 5: Orchestration integration
 
 - `EngineLlmInvoker` 返回包含 response item summary 的 invocation。
@@ -494,6 +527,14 @@ elif continuation.needs_follow_up:
 else:
     message-only completion path
 ```
+
+施工状态 2026-06-11：
+
+- 已让 engine 优先从 `LlmResponseItem(kind=tool_call)` 派生本地 tool call execution。
+- Orchestration 已不再用旧 `LlmResult.tool_calls` 作为 ToolRun 创建 fallback；inline tool loop 由 `LlmResponseItem(kind=tool_call)` 驱动。
+- 已让 `continuation.needs_follow_up` 驱动无 tool call 的下一轮 LLM invocation。
+- 已在 execution payload / result payload 中记录 `continuation_reason` 和 `continuation_end_turn`。
+- 独立 `ContinuationDecision` value object、execution item response item refs 和 SessionItem 投影迁移已完成；剩余为真实长链 baseline 验证。
 
 ### Phase 6: Session integration
 
@@ -529,34 +570,36 @@ else:
 
 ### Unit
 
-- [ ] `LlmResponseItem.to_payload/from_payload` roundtrip。
-- [ ] `LlmResponseEvent.to_payload/from_payload` roundtrip。
-- [ ] `LlmContinuationSignal` reason/end_turn roundtrip。
-- [ ] OpenAI Codex Responses SSE: message item 映射。
-- [ ] OpenAI Codex Responses SSE: reasoning summary delta/item 映射。
-- [ ] OpenAI Codex Responses SSE: function_call 映射。
-- [ ] OpenAI Codex Responses SSE: `end_turn=false` 映射。
-- [ ] `LlmResult` 从 response items 派生 text/tool_calls/usage。
-- [ ] persistence repository 保存/读取 response items。
-- [ ] query service 分页读取 response events。
+- [x] `LlmResponseItem.to_payload/from_payload` roundtrip。
+- [x] `LlmResponseEvent.to_payload/from_payload` roundtrip。
+- [x] `LlmContinuationSignal` reason/end_turn roundtrip。
+- [x] OpenAI Codex Responses SSE: message item 映射。
+- [x] OpenAI Codex Responses SSE: reasoning summary delta/item 映射。
+- [x] OpenAI Codex Responses SSE: function_call 映射。
+- [x] OpenAI Codex Responses SSE: `end_turn=false` 映射。
+- [x] `LlmResult` 从 response items 派生 text/tool_calls/usage。
+- [x] persistence repository 保存/读取 response items。
+- [x] query service 分页读取 response events。
 
 ### Integration
 
-- [ ] streaming invoke 能由 `LlmResponseEvent` 投影输出摘要 `text_delta/completed`。
-- [ ] streaming invoke 同时输出新 `item_started/item_completed/reasoning_summary_delta`。
-- [ ] orchestration 仍可执行普通 tool call。
-- [ ] orchestration 对 `end_turn=false` 不误判完成。
-- [ ] Workbench 能展示 response item 列表。
-- [ ] Operations LLM read model 能显示 item/event counts。
+- [x] streaming invoke 能由 `LlmResponseEvent` 投影输出摘要 `text_delta/completed`。
+- [x] streaming invoke 同时输出新 `item_started/item_completed/reasoning_summary_delta`。
+- [x] orchestration 仍可执行普通 tool call。
+- [x] orchestration 能从 `LlmResponseItem(kind=tool_call)` 驱动工具执行。
+- [x] orchestration 对 `end_turn=false` 不误判完成。
+- [x] Workbench 能展示 response item 列表。
+- [x] Operations LLM read model 能显示 item/event counts。
 
 ### Regression
 
-- [ ] `PYTHONPATH=src pytest -q tests/unit/test_llm_adapters.py`
-- [ ] `PYTHONPATH=src pytest -q tests/unit/test_llm.py`
-- [ ] `PYTHONPATH=src pytest -q tests/unit/test_orchestration_context.py`
-- [ ] `PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py`
-- [ ] `PYTHONPATH=src pytest -q tests/unit/test_operations_llm_read_model.py`
-- [ ] `cd frontend && npm run typecheck`
+- [x] `PYTHONPATH=src pytest -q tests/unit/test_llm_adapters.py`
+- [x] `PYTHONPATH=src pytest -q tests/unit/test_llm.py`
+- [x] `PYTHONPATH=src pytest -q tests/unit/test_orchestration_context.py`
+- [x] `PYTHONPATH=src pytest -q tests/unit/test_orchestration_execution_chain.py`
+- [x] `PYTHONPATH=src pytest -q tests/unit/test_operations_llm_read_model.py`
+- [x] `PYTHONPATH=src pytest -q tests/unit/test_orchestration_tools.py::OrchestrationToolsTestCase::test_process_next_orchestration_assignment_completes_inline_tool_loop tests/unit/test_orchestration_tools.py::OrchestrationToolsTestCase::test_response_items_tool_calls_drive_inline_tool_loop tests/unit/test_orchestration_tools.py::OrchestrationToolsTestCase::test_provider_continuation_without_tool_calls_keeps_loop_open`
+- [x] `cd frontend && npm run typecheck`
 
 ## Codex Parity Baseline
 

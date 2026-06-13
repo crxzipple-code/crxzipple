@@ -164,6 +164,15 @@ class ContextWorkspacePromptSnapshotAdapter:
             mirrored_node_ids=rendered.mirrored_node_ids,
             tool_schema_count=len(provider_attachments.get("tool_schemas", ())),
         )
+        included_refs = _snapshot_ref_tuple(
+            snapshot_metadata.get("direct_session_item_refs"),
+        )
+        collapsed_refs = _snapshot_ref_tuple(
+            _snapshot_budget_dict(snapshot_metadata).get("collapsed_refs"),
+        )
+        protocol_required_refs = _snapshot_ref_tuple(
+            snapshot_metadata.get("protocol_required_refs"),
+        )
         estimate_payload = rendered.estimate.to_payload()
         if rendered.estimate_breakdown:
             estimate_payload["breakdown"] = dict(rendered.estimate_breakdown)
@@ -178,6 +187,9 @@ class ContextWorkspacePromptSnapshotAdapter:
                     estimate=rendered.estimate,
                     included_node_ids=rendered.included_node_ids,
                     mirrored_node_ids=rendered.mirrored_node_ids,
+                    included_refs=included_refs,
+                    collapsed_refs=collapsed_refs,
+                    protocol_required_refs=protocol_required_refs,
                     metadata=snapshot_metadata,
                 ),
             )
@@ -188,6 +200,9 @@ class ContextWorkspacePromptSnapshotAdapter:
             estimate=estimate_payload,
             included_node_ids=rendered.included_node_ids,
             mirrored_node_ids=rendered.mirrored_node_ids,
+            included_refs=included_refs,
+            collapsed_refs=collapsed_refs,
+            protocol_required_refs=protocol_required_refs,
             metadata=snapshot_metadata,
             provider_attachments=provider_attachments,
             tool_schemas=mirrored_tool_schemas(
@@ -216,6 +231,9 @@ class ContextWorkspacePromptSnapshotAdapter:
             estimate=snapshot.estimate.to_payload(),
             included_node_ids=snapshot.included_node_ids,
             mirrored_node_ids=snapshot.mirrored_node_ids,
+            included_refs=snapshot.included_refs,
+            collapsed_refs=snapshot.collapsed_refs,
+            protocol_required_refs=snapshot.protocol_required_refs,
             metadata=metadata,
             provider_attachments=provider_attachments,
             tool_schemas=mirrored_tool_schemas(
@@ -231,5 +249,17 @@ class ContextWorkspacePromptSnapshotAdapter:
         )
 
 
-__all__ = ["ContextWorkspacePromptSnapshotAdapter"]
+def _snapshot_ref_tuple(value: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(dict(ref) for ref in value if isinstance(ref, dict))
 
+
+def _snapshot_budget_dict(metadata: dict[str, object]) -> dict[str, object]:
+    value = metadata.get("direct_transcript_budget")
+    if not isinstance(value, dict):
+        return {}
+    return dict(value)
+
+
+__all__ = ["ContextWorkspacePromptSnapshotAdapter"]

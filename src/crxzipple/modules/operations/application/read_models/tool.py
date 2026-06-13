@@ -1048,6 +1048,8 @@ def _tool_runs_section(
             ("time", "Time"),
             ("tool", "Tool"),
             ("run_id", "Run ID"),
+            ("call_id", "Call ID"),
+            ("tool_surface_id", "ToolSurface"),
             ("source", "Source"),
             ("orchestration_run_id", "Turn ID"),
             ("chain_id", "Chain ID"),
@@ -1094,6 +1096,8 @@ def _active_tool_runs_section(
         title="Active Tool Runs",
         columns=_columns(
             ("run_id", "Tool Run ID"),
+            ("call_id", "Call ID"),
+            ("tool_surface_id", "ToolSurface"),
             ("tool", "Tool"),
             ("source", "Source"),
             ("orchestration_run_id", "Turn ID"),
@@ -1134,6 +1138,8 @@ def _tool_run_row(
                 "tool_id": run.tool_id,
                 "provider": _tool_provider_key(tool).lower(),
                 "run_id": run.id,
+                "call_id": _display(run.call_id),
+                "tool_surface_id": _display(run.tool_surface_id),
                 "source": _source_label(run, run_context=run_context),
                 "orchestration_run_id": _orchestration_run_id(
                     run,
@@ -1194,6 +1200,8 @@ def _tool_run_search_text(
         for item in (
             run.id,
             run.tool_id,
+            _display(run.call_id),
+            _display(run.tool_surface_id),
             tool.name if tool is not None else "",
             _display(run.worker_id),
             _source_label(run, run_context=run_context),
@@ -2124,6 +2132,7 @@ def _auth_missing_section(
                 tone="danger",
             ),
         )
+    rows.sort(key=_auth_missing_row_sort_key)
     return OperationsTableSectionModel(
         id="auth_missing",
         title="Runtime Risk / Access",
@@ -2144,6 +2153,13 @@ def _auth_missing_section(
         view_all_route="/operations/tool?tab=risk",
         empty_state="No access or runtime readiness risks detected.",
     )
+
+
+def _auth_missing_row_sort_key(row: OperationsTableRowModel) -> tuple[int, int, str]:
+    cells = row.cells
+    affected = _int_value(cells.get("affected_24h"))
+    failures = _int_value(cells.get("access_failures"))
+    return (-affected, -failures, row.id)
 
 
 def _worker_pool_section(
@@ -4458,6 +4474,14 @@ def _tool_run_detail_summary(
         OperationsKeyValueItemModel(
             label="Source",
             value=_source_label(run, run_context=run_context),
+        ),
+        OperationsKeyValueItemModel(
+            label="Call ID",
+            value=_display(run.call_id),
+        ),
+        OperationsKeyValueItemModel(
+            label="ToolSurface",
+            value=_display(run.tool_surface_id),
         ),
         OperationsKeyValueItemModel(
             label="Turn ID",

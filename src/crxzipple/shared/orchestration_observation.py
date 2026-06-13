@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-SESSION_MESSAGE_APPENDED_SOURCE_EVENT = "session.message.appended"
-ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT = "orchestration.run.message.appended"
+SESSION_ITEM_APPENDED_SOURCE_EVENT = "session.item.appended"
 ORCHESTRATION_RUN_QUEUED_EVENT = "orchestration.run.queued"
 ORCHESTRATION_RUN_CLAIMED_EVENT = "orchestration.run.claimed"
 ORCHESTRATION_RUN_ADVANCED_EVENT = "orchestration.run.advanced"

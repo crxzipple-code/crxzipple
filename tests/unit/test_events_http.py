@@ -8,7 +8,6 @@ import time
 from crxzipple.modules.events import Event, EventSubscriptionCursor
 from crxzipple.modules.orchestration.application import RUN_OBSERVATION_EVENT_NAMES
 from crxzipple.shared import (
-    ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
     ORCHESTRATION_RUN_TOOL_UPDATED_EVENT,
     ORCHESTRATION_RUNTIME_STATUS_EVENT,
 )
@@ -60,12 +59,12 @@ class EventsHttpTestCase(HttpModuleTestCase):
         self.assertIn("channel.observation.dead_lettered", definition_ids)
         self.assertIn("orchestration.run.completed", definition_ids)
         self.assertIn("orchestration.run.llm_text_delta", definition_ids)
-        self.assertIn(ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT, definition_ids)
+        self.assertNotIn("orchestration.run.message_appended", definition_ids)
         self.assertIn(ORCHESTRATION_RUN_TOOL_UPDATED_EVENT, definition_ids)
         self.assertIn(ORCHESTRATION_RUNTIME_STATUS_EVENT, definition_ids)
         self.assertIn("dispatch.wakeup", observer_ids)
         self.assertIn("orchestration.run.observation", observer_ids)
-        self.assertIn("orchestration.session.message_observation", observer_ids)
+        self.assertNotIn("orchestration.session.message_observation", observer_ids)
         self.assertIn("orchestration.tool.observation", observer_ids)
         self.assertIn("orchestration.runtime.observation", observer_ids)
         self.assertEqual(
@@ -89,10 +88,6 @@ class EventsHttpTestCase(HttpModuleTestCase):
             ["orchestration.run.completed"],
         )
         self.assertEqual(
-            definitions_by_id[ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT]["publication_mode"],
-            "translated",
-        )
-        self.assertEqual(
             definitions_by_id[ORCHESTRATION_RUN_TOOL_UPDATED_EVENT]["publication_mode"],
             "translated",
         )
@@ -111,10 +106,6 @@ class EventsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(
             observers_by_id["orchestration.run.observation"]["output_definition_ids"],
             list(RUN_OBSERVATION_EVENT_NAMES),
-        )
-        self.assertEqual(
-            observers_by_id["orchestration.session.message_observation"]["handlers"],
-            ["SessionMessageObservationObserver.observe_message_appended"],
         )
         self.assertEqual(
             observers_by_id["orchestration.tool.observation"]["handlers"],

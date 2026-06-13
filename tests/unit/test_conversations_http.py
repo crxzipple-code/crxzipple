@@ -122,6 +122,16 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
         self.assertEqual(history_response.status_code, 200)
         history_payload = history_response.json()
         self.assertEqual([item["role"] for item in history_payload], ["user", "assistant"])
+        self.assertEqual(
+            [item["kind"] for item in history_payload],
+            ["user_message", "assistant_message"],
+        )
+        self.assertEqual(
+            [item["source_module"] for item in history_payload],
+            ["orchestration", "llm"],
+        )
+        self.assertTrue(history_payload[0]["visibility"]["chat_visible"])
+        self.assertTrue(history_payload[1]["visibility"]["chat_visible"])
         self.assertNotIn("content", history_payload[0])
         self.assertTrue(history_payload[0]["created_at"].endswith("+00:00"))
         self.assertTrue(history_payload[1]["created_at"].endswith("+00:00"))
@@ -131,8 +141,8 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
         )
         self.assertNotIn("content", history_payload[1])
         self.assertEqual(
-            history_payload[1]["content_payload"]["blocks"],
-            [{"type": "text", "text": "hello from sample llm"}],
+            history_payload[1]["content_payload"]["text"],
+            "hello from sample llm",
         )
 
     def test_conversations_endpoints_list_and_get_summaries(self) -> None:
@@ -208,6 +218,7 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
         history_payload = history_response.json()
         self.assertEqual(len(history_payload), 1)
         self.assertEqual(history_payload[0]["role"], "assistant")
+        self.assertEqual(history_payload[0]["kind"], "assistant_message")
         self.assertEqual(history_payload[0]["sequence_no"], 2)
 
     def test_conversation_messages_endpoint_supports_before_sequence_no(self) -> None:
@@ -239,6 +250,10 @@ class ConversationsHttpTestCase(HttpModuleTestCase):
         history_payload = history_response.json()
         self.assertEqual([item["sequence_no"] for item in history_payload], [1, 2])
         self.assertEqual([item["role"] for item in history_payload], ["user", "assistant"])
+        self.assertEqual(
+            [item["kind"] for item in history_payload],
+            ["user_message", "assistant_message"],
+        )
 
     def test_conversation_runs_endpoint_lists_session_turns(self) -> None:
         self._register_local_chat("hello from sample llm", "hello from sample llm")

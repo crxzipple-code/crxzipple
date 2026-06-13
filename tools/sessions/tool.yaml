@@ -120,7 +120,7 @@ local_tools:
         required: false
       - name: limit
         data_type: integer
-        description: Maximum number of messages to return after trimming.
+        description: Maximum number of session items to return after trimming.
         required: false
       - name: active_session_only
         data_type: boolean
@@ -128,11 +128,11 @@ local_tools:
         required: false
       - name: include_archived
         data_type: boolean
-        description: Include archived messages.
+        description: Include archived session items.
         required: false
       - name: include_internal
         data_type: boolean
-        description: Include internal-only messages.
+        description: Include non-model-visible internal session items.
         required: false
     tags:
       - session
@@ -160,7 +160,7 @@ local_tools:
         required: false
       - name: text
         data_type: string
-        description: Exact message text to append into the target session.
+        description: Exact text to append as a user session item into the target session.
         required: true
       - name: enqueue
         data_type: boolean
@@ -189,7 +189,7 @@ local_tools:
     parameters:
       - name: text
         data_type: string
-        description: Exact kickoff text for the child session's first inbound message.
+        description: Exact kickoff text for the child session's first inbound session item.
         required: true
     tags:
       - session

@@ -11,6 +11,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
+    AgentLlmPolicy,
     AgentLlmRoutingPolicy,
     AgentMemoryBinding,
     AgentRuntimePreferences,
@@ -62,6 +63,7 @@ def profile_from_agent_home_config_payload(
     identity_payload = _section_payload(payload, "identity")
     instruction_payload = _section_payload(payload, "instruction_policy")
     llm_payload = _section_payload(payload, "llm_routing_policy")
+    llm_policy_payload = _section_payload(payload, "llm_policy")
     execution_payload = _section_payload(payload, "execution_policy")
     runtime_payload = _section_payload(payload, "runtime_preferences")
     memory_payload = _memory_payload(payload, runtime_payload)
@@ -123,6 +125,7 @@ def profile_from_agent_home_config_payload(
         identity=AgentIdentity.from_payload(identity_payload),
         instruction_policy=AgentInstructionPolicy.from_payload(instruction_payload),
         llm_routing_policy=AgentLlmRoutingPolicy.from_payload(llm_payload),
+        llm_policy=AgentLlmPolicy.from_payload(llm_policy_payload),
         execution_policy=AgentExecutionPolicy.from_payload(execution_payload),
         runtime_preferences=AgentRuntimePreferences.from_payload(runtime_payload),
         memory=AgentMemoryBinding.from_payload(memory_payload),
@@ -146,6 +149,7 @@ def apply_agent_home_config_payload(
     identity_payload = _section_payload(payload, "identity")
     instruction_payload = _section_payload(payload, "instruction_policy")
     llm_payload = _section_payload(payload, "llm_routing_policy")
+    llm_policy_payload = _section_payload(payload, "llm_policy")
     execution_payload = _section_payload(payload, "execution_policy")
     raw_runtime_payload = _section_payload(payload, "runtime_preferences")
     memory_payload = _memory_payload(payload, raw_runtime_payload)
@@ -180,6 +184,11 @@ def apply_agent_home_config_payload(
             AgentLlmRoutingPolicy.from_payload(llm_payload)
             if llm_payload
             else profile.llm_routing_policy
+        ),
+        llm_policy=(
+            AgentLlmPolicy.from_payload(llm_policy_payload)
+            if llm_policy_payload
+            else profile.llm_policy
         ),
         execution_policy=(
             AgentExecutionPolicy.from_payload(execution_payload)
@@ -225,6 +234,7 @@ def build_agent_home_config_payload(
         "identity": profile.identity.to_payload(),
         "instruction_policy": profile.instruction_policy.to_payload(),
         "llm_routing_policy": profile.llm_routing_policy.to_payload(),
+        "llm_policy": profile.llm_policy.to_payload(),
         "execution_policy": profile.execution_policy.to_payload(),
         "runtime_preferences": runtime_payload,
         "memory": profile.memory.to_payload(),

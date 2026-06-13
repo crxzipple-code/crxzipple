@@ -3,21 +3,22 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
+    AppendSessionItemInput,
     EnsureSessionInput,
     ResolveSessionInput,
     ResetSessionInput,
 )
 from crxzipple.modules.session.domain import (
     DirectSessionScope,
-    SessionMessageKind,
-    SessionMessageVisibility,
+    SessionItemKind,
+    SessionItemPhase,
+    SessionItemVisibility,
 )
 from crxzipple.modules.session.interfaces.dto import (
     ResolveSessionDTO,
     SessionDTO,
+    SessionItemDTO,
     SessionInstanceDTO,
-    SessionMessageDTO,
     SessionRuntimeBindingDTO,
 )
 from crxzipple.modules.session.interfaces.shared import (
@@ -109,46 +110,89 @@ class SessionResponse(BaseModel):
         )
 
 
-class AppendSessionMessageRequest(BaseModel):
-    role: str
-    kind: SessionMessageKind = SessionMessageKind.MESSAGE
+class SessionItemVisibilityPayload(BaseModel):
+    model_visible: bool = True
+    user_visible: bool = False
+    chat_visible: bool = False
+    trace_visible: bool = True
+
+    @classmethod
+    def from_value_object(
+        cls,
+        visibility: dict[str, bool],
+    ) -> "SessionItemVisibilityPayload":
+        return cls(**visibility)
+
+    def to_value_object(self) -> SessionItemVisibility:
+        return SessionItemVisibility(
+            model_visible=self.model_visible,
+            user_visible=self.user_visible,
+            chat_visible=self.chat_visible,
+            trace_visible=self.trace_visible,
+        )
+
+
+class AppendSessionItemRequest(BaseModel):
+    kind: SessionItemKind
+    role: str | None = None
+    phase: SessionItemPhase = SessionItemPhase.UNKNOWN
     content_payload: dict[str, object] = Field(default_factory=dict)
+    visibility: SessionItemVisibilityPayload = Field(
+        default_factory=SessionItemVisibilityPayload,
+    )
+    source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
-    visibility: SessionMessageVisibility = SessionMessageVisibility.DEFAULT
+    provider_item_id: str | None = None
+    provider_item_type: str | None = None
+    call_id: str | None = None
+    tool_name: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
     session_id: str | None = None
 
-    def to_input(self, *, session_key: str) -> AppendSessionMessageInput:
-        return AppendSessionMessageInput(
+    def to_input(self, *, session_key: str) -> AppendSessionItemInput:
+        return AppendSessionItemInput(
             session_key=session_key,
-            role=self.role,
             kind=self.kind,
+            role=self.role,
+            phase=self.phase,
             content_payload=self.content_payload,
+            visibility=self.visibility.to_value_object(),
+            source_module=self.source_module,
             source_kind=self.source_kind,
             source_id=self.source_id,
-            visibility=self.visibility,
+            provider_item_id=self.provider_item_id,
+            provider_item_type=self.provider_item_type,
+            call_id=self.call_id,
+            tool_name=self.tool_name,
             metadata=self.metadata,
             session_id=self.session_id,
         )
 
 
-class SessionMessageResponse(BaseModel):
+class SessionItemResponse(BaseModel):
     id: str
     session_key: str
     session_id: str
     sequence_no: int
-    role: str
+    role: str | None = None
     kind: str
+    phase: str
     content_payload: dict[str, object] = Field(default_factory=dict)
+    visibility: SessionItemVisibilityPayload
+    visibility_state: str = "active"
+    source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
-    visibility: str
+    provider_item_id: str | None = None
+    provider_item_type: str | None = None
+    call_id: str | None = None
+    tool_name: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
     created_at: str
 
     @classmethod
-    def from_dto(cls, dto: SessionMessageDTO) -> "SessionMessageResponse":
+    def from_dto(cls, dto: SessionItemDTO) -> "SessionItemResponse":
         return cls(
             id=dto.id,
             session_key=dto.session_key,
@@ -156,13 +200,24 @@ class SessionMessageResponse(BaseModel):
             sequence_no=dto.sequence_no,
             role=dto.role,
             kind=dto.kind,
+            phase=dto.phase,
             content_payload=dto.content_payload,
+            visibility=SessionItemVisibilityPayload.from_value_object(dto.visibility),
+            visibility_state=_session_item_visibility_state(dto),
+            source_module=dto.source_module,
             source_kind=dto.source_kind,
             source_id=dto.source_id,
-            visibility=dto.visibility,
+            provider_item_id=dto.provider_item_id,
+            provider_item_type=dto.provider_item_type,
+            call_id=dto.call_id,
+            tool_name=dto.tool_name,
             metadata=dto.metadata,
             created_at=format_datetime_utc(dto.created_at),
         )
+
+
+def _session_item_visibility_state(dto: SessionItemDTO) -> str:
+    return "archived" if dto.metadata.get("archived_by_compaction_run_id") else "active"
 
 
 class SessionInstanceResponse(BaseModel):

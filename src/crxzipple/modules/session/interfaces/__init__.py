@@ -1,13 +1,13 @@
 from crxzipple.modules.session.interfaces.dto import (
     ResolveSessionDTO,
     SessionDTO,
+    SessionItemDTO,
     SessionInstanceDTO,
-    SessionMessageDTO,
 )
 
 __all__ = [
     "ResolveSessionDTO",
     "SessionDTO",
+    "SessionItemDTO",
     "SessionInstanceDTO",
-    "SessionMessageDTO",
 ]

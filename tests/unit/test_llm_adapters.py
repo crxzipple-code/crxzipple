@@ -12,12 +12,15 @@ from crxzipple.modules.llm.application import LlmAdapterRequest
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
+    LlmContinuationReason,
     LlmDefaults,
     LlmMessage,
+    LlmMessagePhase,
     LlmMessageRole,
     LlmModelFamily,
     LlmProfile,
     LlmProviderKind,
+    LlmResponseItemKind,
     ToolSchema,
 )
 from crxzipple.modules.llm.infrastructure import (
@@ -30,6 +33,7 @@ from crxzipple.modules.llm.infrastructure import (
 
 
 def _adapter_request(**kwargs) -> LlmAdapterRequest:  # noqa: ANN003
+    kwargs.setdefault("invocation_id", "adapter-test-invocation")
     kwargs.setdefault("resolved_credential", "adapter-test-token")
     return LlmAdapterRequest(**kwargs)
 
@@ -197,6 +201,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                 ),
             ),
             response_format={"type": "json_schema", "name": "answer"},
+            overrides={"reasoning": {"summary": "auto"}},
         )
 
         with patch(
@@ -238,13 +243,21 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.tool_calls[0].name, "search_docs")
         self.assertEqual(response.result.tool_calls[0].arguments, {"query": "ddd"})
         self.assertEqual(response.result.usage.total_tokens, 33)
+        self.assertEqual(response.response_items[0].kind, LlmResponseItemKind.TOOL_CALL)
+        self.assertEqual(response.response_items[0].invocation_id, request.invocation_id)
+        self.assertEqual(response.response_items[0].tool_name, "search_docs")
+        self.assertEqual(response.continuation.reason, LlmContinuationReason.TOOL_CALL)
+        self.assertTrue(response.continuation.needs_follow_up)
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
         self.assertEqual(kwargs["json"]["model"], "gpt-5")
         self.assertEqual(kwargs["json"]["tools"][0]["name"], "search_docs")
         self.assertEqual(kwargs["json"]["text"]["format"]["name"], "answer")
-        self.assertEqual(kwargs["json"]["reasoning"]["effort"], "medium")
+        self.assertEqual(
+            kwargs["json"]["reasoning"],
+            {"effort": "medium", "summary": "auto"},
+        )
         self.assertTrue(kwargs["json"]["stream"])
         self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
 
@@ -307,6 +320,72 @@ class LlmAdapterTestCase(unittest.TestCase):
             "sample_api_search_docs",
         )
 
+    def test_openai_responses_adapter_maps_reasoning_external_items_and_end_turn(self) -> None:
+        profile = LlmProfile(
+            id="writer-structured-items",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding_id="inline-openai-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Search and explain."),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_responses.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "response.completed",
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_structured_items_1",
+                                "model": "gpt-5",
+                                "status": "completed",
+                                "end_turn": False,
+                                "output": [
+                                    {
+                                        "type": "reasoning",
+                                        "id": "rs_1",
+                                        "summary": [
+                                            {
+                                                "type": "summary_text",
+                                                "text": "Need current facts.",
+                                            },
+                                        ],
+                                    },
+                                    {
+                                        "type": "web_search_call",
+                                        "id": "ws_1",
+                                        "status": "completed",
+                                        "query": "CRXZipple",
+                                    },
+                                ],
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ):
+            response = OpenAIResponsesAdapter().invoke(profile, request)
+
+        self.assertEqual(response.response_items[0].kind, LlmResponseItemKind.REASONING)
+        self.assertEqual(response.response_items[0].content_payload["text"], "Need current facts.")
+        self.assertEqual(
+            response.response_items[1].kind,
+            LlmResponseItemKind.PROVIDER_EXTERNAL_ITEM,
+        )
+        self.assertIsNone(response.response_items[1].tool_name)
+        self.assertEqual(
+            response.continuation.reason,
+            LlmContinuationReason.PROVIDER_END_TURN_FALSE,
+        )
+        self.assertTrue(response.continuation.needs_follow_up)
+
     def test_openai_responses_adapter_uses_resolved_request_credential(self) -> None:
         profile = LlmProfile(
             id="writer-access-provider",
@@ -359,6 +438,7 @@ class LlmAdapterTestCase(unittest.TestCase):
             credential_binding_id="openai-api-key",
         )
         request = LlmAdapterRequest(
+            invocation_id="no-private-fallback-invocation",
             messages=(
                 LlmMessage(role=LlmMessageRole.USER, content="No private fallback."),
             ),
@@ -425,6 +505,101 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["text_delta", "completed"])
         self.assertEqual(events[0].data["text"], "stream-")
         self.assertEqual(events[1].data["result"]["text"], "stream-openai")
+
+    def test_openai_responses_adapter_stream_invoke_emits_native_lifecycle_events(self) -> None:
+        profile = LlmProfile(
+            id="writer-stream-native",
+            provider=LlmProviderKind.OPENAI,
+            api_family=LlmApiFamily.OPENAI_RESPONSES,
+            model_name="gpt-5",
+            credential_binding_id="inline-openai-token",
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(role=LlmMessageRole.USER, content="Use native events."),
+            ),
+        )
+
+        with patch(
+            "crxzipple.modules.llm.infrastructure.adapters.openai_responses.requests.post",
+            return_value=_FakeStreamResponse(
+                events=(
+                    (
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "id": "fc_native_1",
+                                "type": "function_call",
+                                "call_id": "call_native_1",
+                                "name": "search_docs",
+                            },
+                        },
+                    ),
+                    (
+                        "response.function_call_arguments.delta",
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": "fc_native_1",
+                            "delta": '{"query"',
+                        },
+                    ),
+                    (
+                        "response.reasoning_summary_text.delta",
+                        {
+                            "type": "response.reasoning_summary_text.delta",
+                            "item_id": "rs_native_1",
+                            "delta": "Need docs.",
+                        },
+                    ),
+                    (
+                        "response.output_item.done",
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": {
+                                "id": "fc_native_1",
+                                "type": "function_call",
+                                "call_id": "call_native_1",
+                                "name": "search_docs",
+                                "arguments": '{"query":"native"}',
+                            },
+                        },
+                    ),
+                    (
+                        "response.completed",
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_native_stream",
+                                "model": "gpt-5",
+                                "status": "completed",
+                                "output": [],
+                            },
+                        },
+                    ),
+                ),
+            ),
+        ):
+            events = list(OpenAIResponsesAdapter().stream_invoke(profile, request))
+
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                "item_started",
+                "tool_argument_delta",
+                "reasoning_summary_delta",
+                "item_completed",
+                "completed",
+            ],
+        )
+        self.assertEqual(events[0].data["item_id"], "fc_native_1")
+        self.assertEqual(events[1].data["delta"], '{"query"')
+        self.assertEqual(events[2].data["text"], "Need docs.")
+        self.assertEqual(events[3].data["item_id"], "fc_native_1")
+        self.assertEqual(events[4].data["response_items"][0]["kind"], "tool_call")
+        self.assertEqual(events[4].data["result"]["tool_calls"][0]["name"], "search_docs")
 
     def test_openai_responses_adapter_stream_invoke_async_uses_async_stream(self) -> None:
         profile = LlmProfile(
@@ -1099,6 +1274,17 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.tool_calls[0].name, "echo_tool")
         self.assertEqual(response.result.tool_calls[0].arguments, {"message": "hello"})
         self.assertEqual(response.result.finish_reason, "tool_calls")
+        self.assertEqual(
+            [item.kind for item in response.response_items],
+            [
+                LlmResponseItemKind.ASSISTANT_MESSAGE,
+                LlmResponseItemKind.TOOL_CALL,
+            ],
+        )
+        self.assertEqual(response.response_items[0].content_payload["text"], "hello")
+        self.assertEqual(response.response_items[1].call_id, "call_chat_1")
+        self.assertEqual(response.response_items[1].tool_name, "echo_tool")
+        self.assertFalse(response.response_items[1].user_visible)
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
@@ -1195,6 +1381,14 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(result["text"], "你好")
         self.assertEqual(result["finish_reason"], "stop")
         self.assertEqual(result["usage"]["total_tokens"], 6)
+        self.assertEqual(
+            events[2].data["response_items"][0]["kind"],
+            "assistant_message",
+        )
+        self.assertEqual(
+            events[2].data["response_items"][0]["content_payload"]["text"],
+            "你好",
+        )
 
         _, kwargs = post.call_args
         self.assertTrue(kwargs["stream"])
@@ -1248,6 +1442,14 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         self.assertEqual([event.type for event in events], ["completed"])
         self.assertEqual(events[0].data["result"]["text"], "async hello")
+        self.assertEqual(
+            events[0].data["response_items"][0]["kind"],
+            "assistant_message",
+        )
+        self.assertEqual(
+            events[0].data["response_items"][0]["content_payload"]["text"],
+            "async hello",
+        )
         method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
         self.assertEqual(method, "POST")
         self.assertEqual(url, "http://localhost:8010/v1/chat/completions")
@@ -1736,6 +1938,7 @@ class LlmAdapterTestCase(unittest.TestCase):
                         content="Reply with codex-ok.",
                     ),
                 ),
+                overrides={"reasoning": {"summary": "auto"}},
             )
 
             with patch(
@@ -1800,11 +2003,20 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.tool_calls[0].arguments, {"query": "codex"})
         self.assertEqual(response.result.usage.reasoning_tokens, 2)
         self.assertEqual(response.result.metadata["transport"], "sse")
+        self.assertEqual(response.response_items[0].kind, LlmResponseItemKind.ASSISTANT_MESSAGE)
+        self.assertEqual(response.response_items[0].phase, LlmMessagePhase.FINAL_ANSWER)
+        self.assertEqual(response.response_items[1].kind, LlmResponseItemKind.TOOL_CALL)
+        self.assertEqual(response.response_items[1].tool_name, "search_docs")
+        self.assertEqual(response.continuation.reason, LlmContinuationReason.TOOL_CALL)
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer adapter-test-token")
         self.assertEqual(kwargs["headers"]["Accept"], "text/event-stream")
         self.assertEqual(kwargs["json"]["instructions"], "You are a concise coding assistant.")
+        self.assertEqual(
+            kwargs["json"]["reasoning"],
+            {"effort": "medium", "summary": "auto"},
+        )
         self.assertEqual(
             kwargs["json"]["input"],
             [
@@ -1941,9 +2153,13 @@ class LlmAdapterTestCase(unittest.TestCase):
         ):
             events = list(OpenAICodexResponsesAdapter().stream_invoke(profile, request))
 
-        self.assertEqual([event.type for event in events], ["text_delta", "completed"])
+        self.assertEqual(
+            [event.type for event in events],
+            ["text_delta", "item_completed", "completed"],
+        )
         self.assertEqual(events[0].data["text"], "codex-")
-        self.assertEqual(events[1].data["result"]["text"], "codex-stream")
+        self.assertEqual(events[1].data["item_id"], "msg_codex_stream")
+        self.assertEqual(events[2].data["result"]["text"], "codex-stream")
 
     def test_openai_codex_responses_adapter_stream_invoke_async_uses_async_stream(self) -> None:
         profile = LlmProfile(
@@ -2014,8 +2230,9 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         events = asyncio.run(collect_events())
 
-        self.assertEqual([event.type for event in events], ["completed"])
-        self.assertEqual(events[0].data["result"]["text"], "async-codex-stream")
+        self.assertEqual([event.type for event in events], ["item_completed", "completed"])
+        self.assertEqual(events[0].data["item_id"], "msg_codex_stream_async")
+        self.assertEqual(events[1].data["result"]["text"], "async-codex-stream")
         method, url, kwargs = _FakeAsyncClient.instances[0].requests[0]
         self.assertEqual(method, "POST")
         self.assertEqual(url, "https://chatgpt.com/backend-api/codex/responses")
@@ -2096,11 +2313,12 @@ class LlmAdapterTestCase(unittest.TestCase):
 
         self.assertEqual(
             [event.type for event in events],
-            ["text_delta", "text_delta", "completed"],
+            ["text_delta", "text_delta", "item_completed", "completed"],
         )
         self.assertEqual(events[0].data["text"], "data-")
         self.assertEqual(events[1].data["text"], "type")
-        self.assertEqual(events[2].data["result"]["text"], "data-type")
+        self.assertEqual(events[2].data["item_id"], "msg_codex_stream_data_type")
+        self.assertEqual(events[3].data["result"]["text"], "data-type")
         self.assertEqual(stream_response.iter_lines_chunk_size, 1)
 
     def test_openai_codex_responses_adapter_retries_transient_server_error_before_output(self) -> None:
@@ -2243,6 +2461,19 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.tool_calls[0].arguments, {"query": "ddd"})
         self.assertEqual(response.result.usage.input_tokens, 17)
         self.assertEqual(response.result.finish_reason, "tool_use")
+        self.assertEqual(
+            [item.kind for item in response.response_items],
+            [
+                LlmResponseItemKind.ASSISTANT_MESSAGE,
+                LlmResponseItemKind.TOOL_CALL,
+            ],
+        )
+        self.assertEqual(
+            response.response_items[0].content_payload["text"],
+            "I'll inspect the docs.",
+        )
+        self.assertEqual(response.response_items[1].call_id, "toolu_123")
+        self.assertEqual(response.response_items[1].tool_name, "search_docs")
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["x-api-key"], "adapter-test-token")
@@ -2613,6 +2844,22 @@ class LlmAdapterTestCase(unittest.TestCase):
         self.assertEqual(response.result.tool_calls[0].name, "search_docs")
         self.assertEqual(response.result.tool_calls[0].arguments, {"query": "ddd"})
         self.assertEqual(response.result.usage.total_tokens, 20)
+        self.assertEqual(
+            [item.kind for item in response.response_items],
+            [
+                LlmResponseItemKind.ASSISTANT_MESSAGE,
+                LlmResponseItemKind.TOOL_CALL,
+            ],
+        )
+        self.assertEqual(
+            response.response_items[0].content_payload["text"],
+            "I'll search the docs.",
+        )
+        self.assertEqual(response.response_items[1].tool_name, "search_docs")
+        self.assertEqual(
+            response.response_items[1].content_payload["arguments"],
+            {"query": "ddd"},
+        )
 
         _, kwargs = post.call_args
         self.assertEqual(kwargs["headers"]["x-goog-api-key"], "adapter-test-token")

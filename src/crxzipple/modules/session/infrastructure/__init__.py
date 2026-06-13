@@ -1,19 +1,19 @@
 from crxzipple.modules.session.infrastructure.in_memory_repository import (
-    InMemorySessionMessageRepository,
+    InMemorySessionItemRepository,
     InMemorySessionInstanceRepository,
     InMemorySessionRepository,
 )
 from crxzipple.modules.session.infrastructure.persistence import (
-    SqlAlchemySessionMessageRepository,
+    SqlAlchemySessionItemRepository,
     SqlAlchemySessionInstanceRepository,
     SqlAlchemySessionRepository,
 )
 
 __all__ = [
-    "InMemorySessionMessageRepository",
+    "InMemorySessionItemRepository",
     "InMemorySessionInstanceRepository",
     "InMemorySessionRepository",
-    "SqlAlchemySessionMessageRepository",
+    "SqlAlchemySessionItemRepository",
     "SqlAlchemySessionInstanceRepository",
     "SqlAlchemySessionRepository",
 ]

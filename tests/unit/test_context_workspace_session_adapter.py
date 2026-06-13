@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
+from types import SimpleNamespace
+from typing import Any
+
 from crxzipple.app.integration.context_workspace_session import (
     SessionContextNodeProvider,
     _evidence_type,
@@ -22,22 +27,54 @@ from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextWorkspaceRepository,
 )
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
-    ArchiveSessionMessagesInput,
+    AppendSessionItemInput,
     CompactSessionSegmentInput,
     EnsureSessionInput,
+    ListSessionItemsInput,
+    MergeSessionItemMetadataInput,
     ResetSessionInput,
     SessionApplicationService,
 )
+
 from crxzipple.modules.session.infrastructure import (
     InMemorySessionInstanceRepository,
-    InMemorySessionMessageRepository,
+    InMemorySessionItemRepository,
     InMemorySessionRepository,
 )
-from crxzipple.modules.session.domain import SessionMessageKind
+from crxzipple.modules.session.domain import (
+    SessionItem,
+    SessionItemKind,
+    SessionItemVisibility,
+)
 from crxzipple.modules.tool.application.result_envelope import (
     TOOL_RESULT_ENVELOPE_METADATA_KEY,
 )
+
+
+class SessionItemFixtureKind(StrEnum):
+    MESSAGE = "message"
+    TOOL_RESULT = "tool_result"
+    EVENT = "event"
+
+
+@dataclass(frozen=True, slots=True)
+class AppendSessionItemFixtureInput:
+    session_key: str
+    role: str
+    content_payload: dict[str, object]
+    kind: SessionItemFixtureKind = SessionItemFixtureKind.MESSAGE
+    metadata: dict[str, object] = field(default_factory=dict)
+    source_kind: str | None = None
+    source_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveSessionItemsFixtureInput:
+    session_key: str
+    archived_through_sequence_no: int | None = None
+    max_sequence_no: int | None = None
+    session_id: str | None = None
+    reason: str = "test"
 
 
 def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
@@ -48,15 +85,15 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:tree",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "hello tree"}]},
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:tree",
             role="assistant",
             content_payload={"blocks": [{"type": "text", "text": "tree received"}]},
@@ -74,11 +111,11 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
 
     assert {node.id for node in tree.nodes} >= {
         "session.segment.current",
-        "session.messages.current",
+        "session.items.current",
     }
     current_segment = next(node for node in tree.nodes if node.id == "session.segment.current")
     assert current_segment.parent_id == "session.current"
-    messages_node = next(node for node in tree.nodes if node.id == "session.messages.current")
+    messages_node = next(node for node in tree.nodes if node.id == "session.items.current")
     assert messages_node.parent_id == "session.segment.current"
     assert messages_node.owner_ref["from_sequence_no"] == 1
     assert messages_node.owner_ref["to_sequence_no"] == 2
@@ -87,7 +124,7 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:tree",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -95,7 +132,7 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
     message_nodes = [
         node
         for node in expanded_tree.nodes
-        if node.parent_id == "session.messages.current"
+        if node.parent_id == "session.items.current"
     ]
 
     assert [node.owner_ref["sequence_no"] for node in message_nodes] == [1, 2]
@@ -103,6 +140,88 @@ def test_session_adapter_populates_current_instance_and_message_nodes() -> None:
     assert "hello tree" in message_nodes[0].content
     assert message_nodes[0].metadata["role"] == "user"
     assert message_nodes[0].metadata["content_block_types"] == ["text"]
+
+
+def test_session_adapter_keeps_assistant_item_source_refs_when_collapsed() -> None:
+    session_service = _session_service()
+    session_service.ensure_session(
+        EnsureSessionInput(
+            key="session:item-commentary",
+            agent_id="assistant",
+        ),
+    )
+    session_service.append_item(
+        AppendSessionItemInput(
+            session_key="session:item-commentary",
+            kind=SessionItemKind.USER_MESSAGE,
+            role="user",
+            content_payload={"blocks": [{"type": "text", "text": "continue"}]},
+            visibility=SessionItemVisibility(model_visible=True),
+            source_module="orchestration",
+            source_kind="orchestration_run",
+            source_id="run-item-commentary",
+        ),
+    )
+    assistant_item = session_service.append_item(
+        AppendSessionItemInput(
+            session_key="session:item-commentary",
+            kind=SessionItemKind.ASSISTANT_MESSAGE,
+            role="assistant",
+            content_payload={
+                "blocks": [
+                    {
+                        "type": "text",
+                        "text": "HISTORICAL_ASSISTANT_COMMENTARY",
+                    },
+                ],
+            },
+            visibility=SessionItemVisibility(model_visible=True),
+            source_module="llm",
+            source_kind="llm_response_item",
+            source_id="llm-item-commentary-1",
+            provider_item_id="provider-commentary-1",
+        ),
+    )
+    services = _context_services(session_service)
+    services["workspace"].ensure_workspace(
+        EnsureContextWorkspaceInput(
+            session_key="session:item-commentary",
+            agent_id="assistant",
+        ),
+    )
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:item-commentary",
+            node_id="session.items.current",
+            action=ContextAction.EXPAND,
+        ),
+    )
+    expanded_tree = services["tree"].list_tree("session:item-commentary")
+    assistant_node = next(
+        node
+        for node in expanded_tree.nodes
+        if node.owner_ref.get("session_item_id") == assistant_item.id
+    )
+
+    services["tree"].apply_action(
+        ContextActionInput(
+            session_key="session:item-commentary",
+            node_id=assistant_node.id,
+            action=ContextAction.COLLAPSE,
+        ),
+    )
+    collapsed_tree = services["tree"].list_tree("session:item-commentary")
+    collapsed_node = next(
+        node for node in collapsed_tree.nodes if node.id == assistant_node.id
+    )
+
+    assert collapsed_node.state.collapsed is True
+    assert collapsed_node.owner_ref["session_item_id"] == assistant_item.id
+    assert collapsed_node.owner_ref["source_module"] == "llm"
+    assert collapsed_node.owner_ref["source_kind"] == "llm_response_item"
+    assert collapsed_node.owner_ref["source_id"] == "llm-item-commentary-1"
+    assert collapsed_node.metadata["source_kind"] == "llm_response_item"
+    assert collapsed_node.metadata["source_id"] == "llm-item-commentary-1"
 
 
 def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
@@ -113,15 +232,15 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:render",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "render me"}]},
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:render",
             role="assistant",
             content_payload={
@@ -136,11 +255,11 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:render",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "echo",
                 "tool_call_id": "call-1",
@@ -164,7 +283,7 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:render",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -173,7 +292,7 @@ def test_session_adapter_renders_expanded_messages_as_prompt_xml() -> None:
         RenderContextPromptInput(session_key="session:render"),
     )
 
-    assert '<message role="user" sequence="1" kind="message"' in rendered.prompt_body
+    assert '<item role="user" sequence="1" kind="message"' in rendered.prompt_body
     assert "render me" in rendered.prompt_body
     assert '<tool_interaction tool_name="echo"' in rendered.prompt_body
     tool_interaction_line = next(
@@ -238,15 +357,15 @@ def test_session_adapter_renders_assistant_progress_before_tool_interaction() ->
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:assistant-progress",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "inspect page"}]},
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:assistant-progress",
             role="assistant",
             content_payload={
@@ -263,8 +382,8 @@ def test_session_adapter_renders_assistant_progress_before_tool_interaction() ->
             source_id="inv-progress",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:assistant-progress",
             role="assistant",
             content_payload={
@@ -281,11 +400,11 @@ def test_session_adapter_renders_assistant_progress_before_tool_interaction() ->
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:assistant-progress",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.snapshot",
                 "tool_call_id": "call-1",
@@ -309,7 +428,7 @@ def test_session_adapter_renders_assistant_progress_before_tool_interaction() ->
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:assistant-progress",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -318,7 +437,7 @@ def test_session_adapter_renders_assistant_progress_before_tool_interaction() ->
         RenderContextPromptInput(session_key="session:assistant-progress"),
     )
 
-    assert '<message role="assistant" sequence="2" kind="message"' in rendered.prompt_body
+    assert '<item role="assistant" sequence="2" kind="message"' in rendered.prompt_body
     assert "我先检查页面状态。" in rendered.prompt_body
     assert '<tool_interaction tool_name="browser.snapshot"' in rendered.prompt_body
     assert 'sequence="3-4"' in rendered.prompt_body
@@ -332,8 +451,8 @@ def test_session_adapter_expands_current_run_frontier_tool_interactions_by_defau
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:current-tool-tail",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "inspect current run"}]},
@@ -341,8 +460,8 @@ def test_session_adapter_expands_current_run_frontier_tool_interactions_by_defau
             source_id="run-current-tool-tail",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:current-tool-tail",
             role="assistant",
             content_payload={
@@ -357,11 +476,11 @@ def test_session_adapter_expands_current_run_frontier_tool_interactions_by_defau
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:current-tool-tail",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.observe",
                 "tool_call_id": "call-current",
@@ -396,7 +515,7 @@ def test_session_adapter_expands_current_run_frontier_tool_interactions_by_defau
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:current-tool-tail",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -438,8 +557,8 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-consumed",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "continue tool chain"}]},
@@ -447,8 +566,8 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
             source_id="run-execution-consumed",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-consumed",
             role="assistant",
             content_payload={
@@ -463,11 +582,11 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-consumed",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "context_tree.expand",
                 "tool_call_id": "call-consumed",
@@ -485,8 +604,8 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-consumed",
             role="assistant",
             content_payload={
@@ -501,11 +620,11 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-consumed",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.runtime.evaluate",
                 "tool_call_id": "call-frontier",
@@ -528,7 +647,7 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
                             "session_id": session.active_session_id,
                             "from_sequence_no": 1,
                             "to_sequence_no": 3,
-                            "message_count": 3,
+                            "item_count": 3,
                         },
                     ],
                 },
@@ -547,7 +666,7 @@ def test_session_adapter_uses_execution_consumption_for_current_run_frontier() -
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:execution-consumed",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -603,8 +722,8 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:legacy-frontier",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "continue browser task"}]},
@@ -614,8 +733,8 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
     )
     for index in range(1, 4):
         call_id = f"call-legacy-{index}"
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:legacy-frontier",
                 role="assistant",
                 content_payload={
@@ -630,11 +749,11 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
                 },
             ),
         )
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:legacy-frontier",
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.observe",
                     "tool_call_id": call_id,
@@ -664,7 +783,7 @@ def test_session_adapter_without_execution_fact_keeps_only_latest_legacy_tool_re
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:legacy-frontier",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -696,8 +815,8 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:latest-source-frontier",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "continue browser task"}]},
@@ -711,8 +830,8 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
     )
     for source_id, call_ids in batches:
         for call_id in call_ids:
-            session_service.append_message(
-                AppendSessionMessageInput(
+            session_service.append_item_fixture(
+                AppendSessionItemFixtureInput(
                     session_key="session:latest-source-frontier",
                     role="assistant",
                     content_payload={
@@ -730,11 +849,11 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
                 ),
             )
         for call_id in call_ids:
-            session_service.append_message(
-                AppendSessionMessageInput(
+            session_service.append_item_fixture(
+                AppendSessionItemFixtureInput(
                     session_key="session:latest-source-frontier",
                     role="tool",
-                    kind=SessionMessageKind.TOOL_RESULT,
+                    kind=SessionItemFixtureKind.TOOL_RESULT,
                     content_payload={
                         "tool_name": "browser.evaluate",
                         "tool_call_id": call_id,
@@ -759,7 +878,7 @@ def test_session_adapter_without_execution_fact_keeps_latest_llm_tool_batch_fron
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:latest-source-frontier",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -788,8 +907,8 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:long-browser-chain",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "inspect airline fares"}]},
@@ -799,8 +918,8 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
     )
     for index in range(1, 56):
         call_id = f"call-browser-{index}"
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:long-browser-chain",
                 role="assistant",
                 content_payload={
@@ -818,11 +937,11 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
                 },
             ),
         )
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:long-browser-chain",
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.network.fetch",
                     "tool_call_id": call_id,
@@ -880,7 +999,7 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
                             "session_id": session.active_session_id,
                             "from_sequence_no": 1,
                             "to_sequence_no": 109,
-                            "message_count": 109,
+                            "item_count": 109,
                         },
                     ],
                 },
@@ -899,7 +1018,7 @@ def test_session_adapter_keeps_long_browser_tool_chain_under_prompt_budget() -> 
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:long-browser-chain",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -965,8 +1084,8 @@ def test_session_adapter_keeps_plain_tool_history_results_compact_by_default() -
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:plain-tool-history",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "keep going"}]},
@@ -993,7 +1112,7 @@ def test_session_adapter_keeps_plain_tool_history_results_compact_by_default() -
                             "session_id": session.active_session_id,
                             "from_sequence_no": 1,
                             "to_sequence_no": 99,
-                            "message_count": 99,
+                            "item_count": 99,
                         },
                     ],
                 },
@@ -1012,7 +1131,7 @@ def test_session_adapter_keeps_plain_tool_history_results_compact_by_default() -
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:plain-tool-history",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -1040,8 +1159,8 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "verify airfare"}]},
@@ -1049,8 +1168,8 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
             source_id="run-evidence",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence",
             role="assistant",
             content_payload={
@@ -1065,11 +1184,11 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "context_tree.expand",
                 "tool_call_id": "call-expand",
@@ -1082,8 +1201,8 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence",
             role="assistant",
             content_payload={
@@ -1098,11 +1217,11 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.network.fetch",
                 "tool_call_id": "call-network",
@@ -1206,7 +1325,7 @@ def test_session_adapter_projects_current_run_evidence_ledger_from_tool_results(
     assert evidence.metadata["facts"]["ref"] == "ref-flight-date"
     read_hints = evidence.metadata["read_hints"]
     assert any(hint["owner"] == "tool" and hint["http"] == "/tools/runs/tool-run-network" for hint in read_hints)
-    assert any(hint["owner"] == "session" and "/sessions/session:evidence/messages" in hint["http"] for hint in read_hints)
+    assert any(hint["owner"] == "session" and "/sessions/session:evidence/items" in hint["http"] for hint in read_hints)
     assert any(hint["owner"] == "artifact" and hint["http"] == "/artifacts/artifact-network-body/download" for hint in read_hints)
     assert any(
         hint["owner"] == "browser"
@@ -1264,8 +1383,8 @@ def test_session_adapter_renders_tool_result_envelope_refs() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:tool-result-envelope",
             role="assistant",
             content_payload={
@@ -1280,11 +1399,11 @@ def test_session_adapter_renders_tool_result_envelope_refs() -> None:
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:tool-result-envelope",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "debug.large_result",
                 "tool_call_id": "call-large-result",
@@ -1418,8 +1537,8 @@ def test_evidence_ledger_honors_explicit_superseded_lifecycle() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence-superseded",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "check endpoint"}]},
@@ -1427,8 +1546,8 @@ def test_evidence_ledger_honors_explicit_superseded_lifecycle() -> None:
             source_id="run-evidence-superseded",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence-superseded",
             role="assistant",
             content_payload={
@@ -1443,11 +1562,11 @@ def test_evidence_ledger_honors_explicit_superseded_lifecycle() -> None:
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:evidence-superseded",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.network.fetch",
                 "tool_call_id": "call-old-endpoint",
@@ -1507,8 +1626,8 @@ def test_session_adapter_keeps_orphan_function_call_as_message_node() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:orphan-call",
             role="assistant",
             content_payload={
@@ -1535,7 +1654,7 @@ def test_session_adapter_keeps_orphan_function_call_as_message_node() -> None:
         RenderContextPromptInput(session_key="session:orphan-call"),
     )
 
-    assert '<message role="assistant" sequence="1" kind="message"' in rendered.prompt_body
+    assert '<item role="assistant" sequence="1" kind="message"' in rendered.prompt_body
     assert "tool_call:" in rendered.prompt_body
     assert "name: slow_tool" in rendered.prompt_body
     assert "tool_interaction" not in rendered.prompt_body
@@ -1549,8 +1668,8 @@ def test_session_adapter_renders_failed_tool_interaction_error_details() -> None
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:failed-tool",
             role="assistant",
             content_payload={
@@ -1565,11 +1684,11 @@ def test_session_adapter_renders_failed_tool_interaction_error_details() -> None
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:failed-tool",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.snapshot",
                 "tool_call_id": "call-failed",
@@ -1660,8 +1779,8 @@ def test_session_adapter_renders_explicit_superseded_tool_interaction_lifecycle(
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:superseded-tool",
             role="assistant",
             content_payload={
@@ -1676,11 +1795,11 @@ def test_session_adapter_renders_explicit_superseded_tool_interaction_lifecycle(
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:superseded-tool",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.network.inspect",
                 "tool_call_id": "call-old-endpoint",
@@ -1713,7 +1832,7 @@ def test_session_adapter_renders_explicit_superseded_tool_interaction_lifecycle(
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:superseded-tool",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -1741,8 +1860,8 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-superseded-tool",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "inspect endpoint"}]},
@@ -1750,8 +1869,8 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
             source_id="run-execution-superseded",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-superseded-tool",
             role="assistant",
             content_payload={
@@ -1766,11 +1885,11 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
             },
         ),
     )
-    result_message = session_service.append_message(
-        AppendSessionMessageInput(
+    result_message = session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-superseded-tool",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.network.inspect",
                 "tool_call_id": "call-old-endpoint",
@@ -1799,14 +1918,14 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
                             "session_id": session.active_session_id,
                             "from_sequence_no": 1,
                             "to_sequence_no": 3,
-                            "message_count": 3,
+                            "item_count": 3,
                         },
                     ],
                 },
             },
             "tool_call_id": "call-old-endpoint",
             "tool_run_id": "tool-run-old-endpoint",
-            "result_message_id": result_message.id,
+            "result_session_item_id": result_message.id,
             "tool_lifecycle": {
                 "superseded": True,
                 "superseded_by_tool_call_id": "call-new-endpoint",
@@ -1825,7 +1944,7 @@ def test_session_adapter_uses_execution_lifecycle_fact_for_superseded_tool_inter
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:execution-superseded-tool",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -1854,8 +1973,8 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-replacement-tool",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "inspect endpoint"}]},
@@ -1863,8 +1982,8 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
             source_id="run-execution-replacement",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-replacement-tool",
             role="assistant",
             content_payload={
@@ -1879,11 +1998,11 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:execution-replacement-tool",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "browser.network.inspect",
                 "tool_call_id": "call-old-endpoint",
@@ -1912,7 +2031,7 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
                             "session_id": session.active_session_id,
                             "from_sequence_no": 1,
                             "to_sequence_no": 3,
-                            "message_count": 3,
+                            "item_count": 3,
                         },
                     ],
                 },
@@ -1936,7 +2055,7 @@ def test_session_adapter_maps_explicit_replacement_fact_to_superseded_target() -
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:execution-replacement-tool",
-            node_id="session.messages.current",
+            node_id="session.items.current",
             action=ContextAction.EXPAND,
         ),
     )
@@ -1964,8 +2083,8 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:async-control",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "start async work"}]},
@@ -1973,8 +2092,8 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             source_id="run-async-control",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:async-control",
             role="assistant",
             content_payload={
@@ -1991,11 +2110,11 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:async-control",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "sessions_yield",
                 "tool_call_id": "call-yield-1",
@@ -2015,8 +2134,8 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:async-control",
             role="assistant",
             content_payload={
@@ -2033,11 +2152,11 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:async-control",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "background_echo",
                 "tool_call_id": "call-bg-1",
@@ -2054,11 +2173,11 @@ def test_session_adapter_renders_async_control_history_as_traceable_prompt_xml()
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:async-control",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "background_echo",
                 "tool_call_id": "approval-background-1",
@@ -2107,8 +2226,8 @@ def test_session_adapter_renders_attachment_history_as_handles() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:attachments",
             role="user",
             content_payload={
@@ -2141,7 +2260,7 @@ def test_session_adapter_renders_attachment_history_as_handles() -> None:
     )
     tree = services["tree"].list_tree("session:attachments")
     attachment_node = next(
-        node for node in tree.nodes if node.id.startswith("session.message.")
+        node for node in tree.nodes if node.id.startswith("session.item.")
     )
     rendered = services["render"].render_prompt_body(
         RenderContextPromptInput(session_key="session:attachments"),
@@ -2167,8 +2286,8 @@ def test_session_adapter_renders_current_segment_without_active_pagination() -> 
         ),
     )
     for index in range(1, 4):
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:current-render",
                 role="user",
                 content_payload={
@@ -2202,8 +2321,8 @@ def test_session_adapter_does_not_synthesize_compacted_segment_from_active_archi
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:archive-only",
             role="user",
             content_payload={
@@ -2211,8 +2330,8 @@ def test_session_adapter_does_not_synthesize_compacted_segment_from_active_archi
             },
         ),
     )
-    session_service.archive_messages(
-        ArchiveSessionMessagesInput(
+    session_service.archive_item_fixtures(
+        ArchiveSessionItemsFixtureInput(
             session_key="session:archive-only",
             session_id=session.active_session_id,
             max_sequence_no=1,
@@ -2235,7 +2354,7 @@ def test_session_adapter_does_not_synthesize_compacted_segment_from_active_archi
     )
 
     assert f"session.segment.compacted.{session.active_session_id}" not in node_ids
-    assert current_segment.owner_ref["message_count"] == 0
+    assert current_segment.owner_ref["item_count"] == 0
     assert "legacy archived body" not in rendered.prompt_body
 
 
@@ -2249,8 +2368,8 @@ def test_session_adapter_renders_folded_history_only_after_range_expand() -> Non
     )
     old_session_id = session.active_session_id
     for index in range(1, 3):
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:folded-render",
                 role="user",
                 content_payload={
@@ -2265,8 +2384,8 @@ def test_session_adapter_renders_folded_history_only_after_range_expand() -> Non
         summary_text="Compacted folded render history.",
         archived_through_sequence_no=2,
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:folded-render",
             role="user",
             content_payload={
@@ -2310,7 +2429,7 @@ def test_session_adapter_renders_folded_history_only_after_range_expand() -> Non
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:folded-render",
-            node_id=f"session.segment.messages.{old_session_id}.1.2",
+            node_id=f"session.segment.items.{old_session_id}.1.2",
             action=ContextAction.EXPAND,
         ),
     )
@@ -2331,8 +2450,8 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
         ),
     )
     old_session_id = session.active_session_id
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:segment-tool-history",
             role="user",
             content_payload={
@@ -2340,8 +2459,8 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:segment-tool-history",
             role="assistant",
             content_payload={
@@ -2356,11 +2475,11 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             },
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:segment-tool-history",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "fetch_weather",
                 "tool_call_id": "call-weather-1",
@@ -2373,8 +2492,8 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
             },
         ),
     )
-    summary = session_service.append_message(
-        AppendSessionMessageInput(
+    summary = session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:segment-tool-history",
             role="assistant",
             content_payload={
@@ -2391,15 +2510,15 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
         CompactSessionSegmentInput(
             session_key="session:segment-tool-history",
             session_id=old_session_id,
-            summary_message_id=summary.id,
+            summary_item_id=summary.id,
             summary_text="The old segment checked Kunming weather.",
             compaction_run_id="run-compact-weather",
-            archived_through_sequence_no=3,
+            archived_through_item_sequence_no=3,
             reason="test_compaction",
         ),
     )
-    new_message = session_service.append_message(
-        AppendSessionMessageInput(
+    new_message = session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:segment-tool-history",
             role="user",
             content_payload={
@@ -2438,7 +2557,7 @@ def test_session_segment_compaction_keeps_tool_history_folded_until_range_expand
     assert runtime_contract_index < current_user_intent_index < folded_summary_index
 
     compacted_node_id = f"session.segment.compacted.{old_session_id}"
-    range_node_id = f"session.segment.messages.{old_session_id}.1.3"
+    range_node_id = f"session.segment.items.{old_session_id}.1.3"
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:segment-tool-history",
@@ -2530,8 +2649,8 @@ def test_session_adapter_current_segment_remains_stable_after_tool_messages() ->
         ),
     )
     for index in range(1, 6):
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:stable-current",
                 role="user",
                 content_payload={
@@ -2539,8 +2658,8 @@ def test_session_adapter_current_segment_remains_stable_after_tool_messages() ->
                 },
             ),
         )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:stable-current",
             role="user",
             content_payload={
@@ -2559,8 +2678,8 @@ def test_session_adapter_current_segment_remains_stable_after_tool_messages() ->
     first_render = services["render"].render_prompt_body(
         RenderContextPromptInput(session_key="session:stable-current"),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:stable-current",
             role="assistant",
             content_payload={
@@ -2572,11 +2691,11 @@ def test_session_adapter_current_segment_remains_stable_after_tool_messages() ->
             metadata={"tool_call_id": "call-extra", "tool_name": "context_tree.list"},
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:stable-current",
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": "context_tree.list",
                 "tool_call_id": "call-extra",
@@ -2617,8 +2736,8 @@ def test_session_adapter_warns_browser_investigation_no_gain_loop() -> None:
             agent_id="assistant",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:browser-no-gain",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "inspect browser"}]},
@@ -2702,8 +2821,8 @@ def test_session_adapter_exposes_folded_history_as_exact_archived_ranges() -> No
     )
     old_session_id = session.active_session_id
     for index in range(1, 6):
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:folded",
                 role="user",
                 content_payload={
@@ -2747,7 +2866,7 @@ def test_session_adapter_exposes_folded_history_as_exact_archived_ranges() -> No
         node for node in expanded_tree.nodes if node.parent_id == folded_node.id
     ]
 
-    assert all(node.id.startswith("session.segment.messages.") for node in range_nodes)
+    assert all(node.id.startswith("session.segment.items.") for node in range_nodes)
     assert [node.owner_ref["from_sequence_no"] for node in range_nodes] == [1, 3, 5]
     assert [node.owner_ref["to_sequence_no"] for node in range_nodes] == [2, 4, 5]
 
@@ -2780,8 +2899,8 @@ def test_session_adapter_caps_folded_history_range_pages() -> None:
     )
     old_session_id = session.active_session_id
     for index in range(1, 8):
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:folded-range-cap",
                 role="user",
                 content_payload={
@@ -2818,14 +2937,14 @@ def test_session_adapter_caps_folded_history_range_pages() -> None:
     )
     expanded_tree = services["tree"].list_tree("session:folded-range-cap")
     children = [node for node in expanded_tree.nodes if node.parent_id == compacted_node_id]
-    range_nodes = [node for node in children if node.kind == "session_message_range"]
+    range_nodes = [node for node in children if node.kind == "session_item_range"]
     notice = next(node for node in children if node.kind == "session_range_notice")
 
     assert [node.owner_ref["from_sequence_no"] for node in range_nodes] == [1, 2, 3]
     assert notice.metadata["notice_kind"] == "range_limit"
     assert notice.metadata["range_reason_code"] == "range_page_limit"
     assert notice.metadata["omitted_range_count"] == 4
-    assert notice.metadata["omitted_message_count"] == 4
+    assert notice.metadata["omitted_item_count"] == 4
 
 
 def test_session_adapter_splits_over_budget_folded_range_before_messages() -> None:
@@ -2838,8 +2957,8 @@ def test_session_adapter_splits_over_budget_folded_range_before_messages() -> No
     )
     old_session_id = session.active_session_id
     for index in range(1, 5):
-        session_service.append_message(
-            AppendSessionMessageInput(
+        session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key="session:folded-budget",
                 role="user",
                 content_payload={
@@ -2884,7 +3003,7 @@ def test_session_adapter_splits_over_budget_folded_range_before_messages() -> No
         node
         for node in range_tree.nodes
         if node.parent_id == compacted_node_id
-        and node.kind == "session_message_range"
+        and node.kind == "session_item_range"
     )
 
     assert range_node.metadata["range_budget_status"] == "split_required"
@@ -2901,8 +3020,8 @@ def test_session_adapter_splits_over_budget_folded_range_before_messages() -> No
     split_ranges = [node for node in split_tree.nodes if node.parent_id == range_node.id]
 
     assert [node.kind for node in split_ranges] == [
-        "session_message_range",
-        "session_message_range",
+        "session_item_range",
+        "session_item_range",
     ]
     assert [node.owner_ref["from_sequence_no"] for node in split_ranges] == [1, 3]
     assert [node.owner_ref["to_sequence_no"] for node in split_ranges] == [2, 4]
@@ -2919,8 +3038,8 @@ def test_session_adapter_marks_single_message_over_budget_reason_code() -> None:
         ),
     )
     old_session_id = session.active_session_id
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:folded-budget-blocked",
             role="user",
             content_payload={
@@ -2965,7 +3084,7 @@ def test_session_adapter_marks_single_message_over_budget_reason_code() -> None:
         node
         for node in range_tree.nodes
         if node.parent_id == compacted_node_id
-        and node.kind == "session_message_range"
+        and node.kind == "session_item_range"
     )
 
     services["tree"].apply_action(
@@ -2997,8 +3116,8 @@ def test_session_adapter_keeps_reset_history_as_folded_ranges() -> None:
         ),
     )
     old_session_id = session.active_session_id
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:reset",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "before reset"}]},
@@ -3010,8 +3129,8 @@ def test_session_adapter_keeps_reset_history_as_folded_ranges() -> None:
             reason="manual",
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:reset",
             role="user",
             content_payload={"blocks": [{"type": "text", "text": "after reset"}]},
@@ -3046,7 +3165,7 @@ def test_session_adapter_keeps_reset_history_as_folded_ranges() -> None:
     range_tree = services["tree"].list_tree("session:reset")
     range_node = next(node for node in range_tree.nodes if node.parent_id == folded_node.id)
 
-    assert range_node.id.startswith("session.segment.messages.")
+    assert range_node.id.startswith("session.segment.items.")
     assert range_node.owner_ref["session_id"] == old_session_id
     assert range_node.owner_ref["segment_kind"] == "closed"
 
@@ -3076,8 +3195,8 @@ def test_session_adapter_uses_segment_summary_before_loading_compacted_messages(
         ),
     )
     old_session_id = session.active_session_id
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key="session:segment-summary",
             role="user",
             content_payload={
@@ -3125,7 +3244,7 @@ def test_session_adapter_uses_segment_summary_before_loading_compacted_messages(
     services["tree"].apply_action(
         ContextActionInput(
             session_key="session:segment-summary",
-            node_id=f"session.segment.messages.{old_session_id}.1.1",
+            node_id=f"session.segment.items.{old_session_id}.1.1",
             action=ContextAction.EXPAND,
         ),
     )
@@ -3178,9 +3297,72 @@ def _context_services(
     }
 
 
-def _session_service() -> SessionApplicationService:
+class _TestSessionService:
+    def __init__(self, inner: SessionApplicationService) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def append_item_fixture(self, data: AppendSessionItemFixtureInput) -> SessionItem:
+        item = self._inner.append_item(
+            AppendSessionItemInput(
+                session_key=data.session_key,
+                role=data.role,
+                kind=_session_item_kind_from_message_input(data),
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=data.role in {"assistant", "user"},
+                    chat_visible=data.role in {"assistant", "user"},
+                    trace_visible=True,
+                ),
+                content_payload=dict(data.content_payload),
+                source_module="session",
+                source_kind=data.source_kind,
+                source_id=data.source_id,
+                call_id=_message_input_tool_call_id(data),
+                tool_name=_message_input_tool_name(data),
+                metadata=dict(data.metadata),
+            ),
+        )
+        return item
+
+    def archive_item_fixtures(self, data: ArchiveSessionItemsFixtureInput) -> None:
+        archived_through_sequence_no = (
+            data.archived_through_sequence_no
+            if data.archived_through_sequence_no is not None
+            else data.max_sequence_no
+        )
+        if archived_through_sequence_no is None:
+            return
+        items = self._inner.list_items(
+            ListSessionItemsInput(
+                session_key=data.session_key,
+                active_session_only=True,
+            ),
+        )
+        for item in items:
+            if item.sequence_no <= archived_through_sequence_no:
+                self._inner.uow_factory().session_items.add(
+                    replace(
+                        item,
+                        visibility=replace(item.visibility, model_visible=False),
+                    ),
+                )
+                self._inner.merge_item_metadata(
+                    MergeSessionItemMetadataInput(
+                        item_id=item.id,
+                        metadata={
+                        "visibility_state": "archived",
+                        "archive_reason": data.reason,
+                        },
+                    ),
+                )
+
+
+def _session_service() -> _TestSessionService:
     uow = _FakeSessionUnitOfWork()
-    return SessionApplicationService(lambda: uow)
+    return _TestSessionService(SessionApplicationService(lambda: uow))
 
 
 def _append_tool_pair(
@@ -3193,8 +3375,8 @@ def _append_tool_pair(
     result_text: str,
     status: str = "succeeded",
 ) -> None:
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key=session_key,
             role="assistant",
             content_payload={
@@ -3206,11 +3388,11 @@ def _append_tool_pair(
             metadata={"tool_call_id": call_id, "tool_name": tool_name},
         ),
     )
-    session_service.append_message(
-        AppendSessionMessageInput(
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key=session_key,
             role="tool",
-            kind=SessionMessageKind.TOOL_RESULT,
+            kind=SessionItemFixtureKind.TOOL_RESULT,
             content_payload={
                 "tool_name": tool_name,
                 "tool_call_id": call_id,
@@ -3222,6 +3404,36 @@ def _append_tool_pair(
     )
 
 
+def _session_item_kind_from_message_input(
+    data: AppendSessionItemFixtureInput,
+) -> SessionItemKind:
+    if data.kind is SessionItemFixtureKind.TOOL_RESULT or data.role == "tool":
+        return SessionItemKind.TOOL_RESULT
+    if data.role == "assistant" and data.content_payload.get("type") == "function_call":
+        return SessionItemKind.TOOL_CALL
+    if data.role == "user":
+        return SessionItemKind.USER_MESSAGE
+    if data.role == "assistant":
+        return SessionItemKind.ASSISTANT_MESSAGE
+    return SessionItemKind.UNKNOWN
+
+
+def _message_input_tool_call_id(data: AppendSessionItemFixtureInput) -> str | None:
+    return (
+        _optional_text_for_test(data.metadata.get("tool_call_id"))
+        or _optional_text_for_test(data.content_payload.get("call_id"))
+        or _optional_text_for_test(data.content_payload.get("tool_call_id"))
+    )
+
+
+def _message_input_tool_name(data: AppendSessionItemFixtureInput) -> str | None:
+    return (
+        _optional_text_for_test(data.metadata.get("tool_name"))
+        or _optional_text_for_test(data.content_payload.get("name"))
+        or _optional_text_for_test(data.content_payload.get("tool_name"))
+    )
+
+
 def _compact_session_segment(
     session_service: SessionApplicationService,
     *,
@@ -3230,21 +3442,31 @@ def _compact_session_segment(
     summary_text: str = "Compacted session summary.",
     archived_through_sequence_no: int | None = None,
 ) -> None:
-    summary = session_service.append_message(
-        AppendSessionMessageInput(
+    summary = session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
             session_key=session_key,
             role="assistant",
             content_payload={"blocks": [{"type": "text", "text": summary_text}]},
         ),
     )
+    summary_item = next(
+        item
+        for item in session_service.list_items(
+            ListSessionItemsInput(
+                session_key=session_key,
+                active_session_only=True,
+            ),
+        )
+        if item.sequence_no == summary.sequence_no
+    )
     session_service.compact_active_segment(
         CompactSessionSegmentInput(
             session_key=session_key,
             session_id=session_id,
-            summary_message_id=summary.id,
+            summary_item_id=summary_item.id,
             summary_text=summary_text,
             compaction_run_id=f"run-compact-{session_key}",
-            archived_through_sequence_no=archived_through_sequence_no,
+            archived_through_item_sequence_no=archived_through_sequence_no,
             reason="test_compaction",
         ),
     )
@@ -3253,7 +3475,7 @@ def _compact_session_segment(
 class _FakeSessionUnitOfWork:
     def __init__(self) -> None:
         self.sessions = InMemorySessionRepository()
-        self.session_messages = InMemorySessionMessageRepository()
+        self.session_items = InMemorySessionItemRepository()
         self.session_instances = InMemorySessionInstanceRepository()
 
     def __enter__(self) -> "_FakeSessionUnitOfWork":
@@ -3273,6 +3495,13 @@ class _FakeSessionUnitOfWork:
 
     def rollback(self) -> None:
         return None
+
+
+def _optional_text_for_test(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 class _FakeExecutionQuery:

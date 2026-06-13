@@ -1,19 +1,19 @@
 from crxzipple.modules.session.infrastructure.persistence.models import (
+    SessionItemModel,
     SessionInstanceModel,
-    SessionMessageModel,
     SessionModel,
 )
 from crxzipple.modules.session.infrastructure.persistence.repositories import (
-    SqlAlchemySessionMessageRepository,
+    SqlAlchemySessionItemRepository,
     SqlAlchemySessionInstanceRepository,
     SqlAlchemySessionRepository,
 )
 
 __all__ = [
+    "SessionItemModel",
     "SessionInstanceModel",
-    "SessionMessageModel",
     "SessionModel",
-    "SqlAlchemySessionMessageRepository",
+    "SqlAlchemySessionItemRepository",
     "SqlAlchemySessionInstanceRepository",
     "SqlAlchemySessionRepository",
 ]

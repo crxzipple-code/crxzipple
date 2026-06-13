@@ -14,5 +14,5 @@ class SessionInstanceNotFoundError(SessionError):
     """Raised when the requested session instance does not exist."""
 
 
-class SessionMessageNotFoundError(SessionError):
-    """Raised when the requested session message does not exist."""
+class SessionItemNotFoundError(SessionError):
+    """Raised when the requested session item does not exist."""

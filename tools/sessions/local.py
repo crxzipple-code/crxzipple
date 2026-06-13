@@ -6,22 +6,23 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
+    AppendSessionItemInput,
     ListSessionInstancesInput,
-    ListSessionMessagesInput,
+    ListSessionItemsInput,
     SessionRuntimeControlPort,
     SessionRuntimeRunRecord,
     SubmitSessionBoundTurnInput,
     SubmitSessionSpawnTurnInput,
 )
 from crxzipple.modules.session.domain import (
-    SessionMessageVisibility,
+    SessionItemKind,
+    SessionItemVisibility,
     SessionNotFoundError,
 )
 from crxzipple.modules.session.interfaces.dto import (
     SessionDTO,
+    SessionItemDTO,
     SessionInstanceDTO,
-    SessionMessageDTO,
 )
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
@@ -91,23 +92,22 @@ def session_status(deps: SessionsToolDeps | Any):
             instances = session_service.list_instances(
                 ListSessionInstancesInput(session_key=session_key),
             )
-            all_messages = session_service.list_messages(
-                ListSessionMessagesInput(
+            all_items = session_service.list_items(
+                ListSessionItemsInput(
                     session_key=session_key,
-                    include_archived=True,
                 ),
             )
         except SessionNotFoundError as exc:
             raise ValueError(str(exc)) from exc
 
-        visible_messages = _filter_messages(
-            all_messages,
+        visible_items = _filter_items(
+            all_items,
             include_archived=False,
             include_internal=False,
         )
-        active_visible_messages = [
+        active_visible_items = [
             item
-            for item in visible_messages
+            for item in visible_items
             if item.session_id == session.active_session_id
         ]
         session_dto = SessionDTO.from_entity(session)
@@ -136,9 +136,9 @@ def session_status(deps: SessionsToolDeps | Any):
             "instances": [_serialize_instance(item) for item in instance_dtos],
             "counts": {
                 "instance_count": len(instance_dtos),
-                "active_visible_message_count": len(active_visible_messages),
-                "visible_message_count": len(visible_messages),
-                "total_message_count": len(all_messages),
+                "active_visible_item_count": len(active_visible_items),
+                "visible_item_count": len(visible_items),
+                "total_item_count": len(all_items),
             },
             "compaction": _extract_compaction_metadata(session_dto.metadata),
             "requester_tree": requester_tree,
@@ -148,9 +148,9 @@ def session_status(deps: SessionsToolDeps | Any):
                 session=session_dto,
                 active_instance=active_instance,
                 instance_count=len(instance_dtos),
-                active_visible_message_count=len(active_visible_messages),
-                visible_message_count=len(visible_messages),
-                total_message_count=len(all_messages),
+                active_visible_item_count=len(active_visible_items),
+                visible_item_count=len(visible_items),
+                total_item_count=len(all_items),
                 requester_tree=requester_tree,
             ),
             details=details,
@@ -238,10 +238,9 @@ def sessions_history(deps: SessionsToolDeps | Any):
             instances = session_service.list_instances(
                 ListSessionInstancesInput(session_key=session_key),
             )
-            messages = session_service.list_messages(
-                ListSessionMessagesInput(
+            items = session_service.list_items(
+                ListSessionItemsInput(
                     session_key=session_key,
-                    include_archived=True,
                 ),
             )
         except SessionNotFoundError as exc:
@@ -254,25 +253,25 @@ def sessions_history(deps: SessionsToolDeps | Any):
             )
 
         if requested_session_id is not None:
-            messages = [
-                item for item in messages if item.session_id == requested_session_id
+            items = [
+                item for item in items if item.session_id == requested_session_id
             ]
         elif active_session_only:
-            messages = [
-                item for item in messages if item.session_id == session.active_session_id
+            items = [
+                item for item in items if item.session_id == session.active_session_id
             ]
 
-        filtered_messages = _filter_messages(
-            messages,
+        filtered_items = _filter_items(
+            items,
             include_archived=include_archived,
             include_internal=include_internal,
         )
-        available_count = len(filtered_messages)
-        selected_messages = filtered_messages[-limit:]
-        message_dtos = [SessionMessageDTO.from_entity(item) for item in selected_messages]
+        available_count = len(filtered_items)
+        selected_items = filtered_items[-limit:]
+        item_dtos = [SessionItemDTO.from_entity(item) for item in selected_items]
         rendered_history, text_truncated = _render_sessions_history(
             session=SessionDTO.from_entity(session),
-            messages=message_dtos,
+            items=item_dtos,
             available_count=available_count,
             active_session_only=(
                 requested_session_id is None and active_session_only
@@ -287,10 +286,10 @@ def sessions_history(deps: SessionsToolDeps | Any):
             "active_session_only": requested_session_id is None and active_session_only,
             "include_archived": include_archived,
             "include_internal": include_internal,
-            "returned_count": len(message_dtos),
+            "returned_count": len(item_dtos),
             "available_count": available_count,
-            "truncated": text_truncated or available_count > len(message_dtos),
-            "messages": [_serialize_message(item) for item in message_dtos],
+            "truncated": text_truncated or available_count > len(item_dtos),
+            "items": [_serialize_item(item) for item in item_dtos],
         }
         return ToolRunResult.text(
             rendered_history,
@@ -343,10 +342,11 @@ def sessions_send(deps: SessionsToolDeps | Any):
                 "sessions_send only supports target sessions owned by the current agent.",
             )
 
-        message = session_service.append_message(
-            AppendSessionMessageInput(
+        item = session_service.append_item(
+            AppendSessionItemInput(
                 session_key=session.id,
                 session_id=session.active_session_id,
+                kind=SessionItemKind.USER_MESSAGE,
                 role="user",
                 content_payload={
                     "blocks": [
@@ -356,6 +356,13 @@ def sessions_send(deps: SessionsToolDeps | Any):
                         }
                     ]
                 },
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=True,
+                    trace_visible=True,
+                ),
+                source_module="session",
                 source_kind="sessions_send",
                 source_id=f"sessions_send:{uuid4().hex}",
                 metadata={
@@ -380,13 +387,13 @@ def sessions_send(deps: SessionsToolDeps | Any):
                     source=SESSIONS_SEND_TOOL_ID,
                     metadata={
                         "sessions_send": {
-                            "message_id": message.id,
+                            "session_item_id": item.id,
                             "sender_session_key": sender_session_key,
                             "sender_run_id": sender_run_id,
                         },
                     },
                     inbound_metadata={
-                        "message_id": message.id,
+                        "session_item_id": item.id,
                         "sender_session_key": sender_session_key,
                         "sender_run_id": sender_run_id,
                         "sender_agent_id": current_agent_id,
@@ -402,7 +409,7 @@ def sessions_send(deps: SessionsToolDeps | Any):
             "session_key": session.id,
             "target_active_session_id": session.active_session_id,
             "agent_id": target_agent_id,
-            "message": _serialize_message(SessionMessageDTO.from_entity(message)),
+            "item": _serialize_item(SessionItemDTO.from_entity(item)),
             "enqueued": enqueue,
             "run_id": queued_run.id if queued_run is not None else None,
             "run_status": queued_run.status if queued_run is not None else None,
@@ -413,7 +420,7 @@ def sessions_send(deps: SessionsToolDeps | Any):
             _render_sessions_send(
                 session_key=session.id,
                 active_session_id=session.active_session_id,
-                message_id=message.id,
+                item_id=item.id,
                 run_id=queued_run.id if queued_run is not None else None,
                 enqueue=enqueue,
             ),
@@ -784,23 +791,22 @@ def _require_text(arguments: dict[str, Any], *, key: str, label: str) -> str:
     return value
 
 
-def _filter_messages(
-    messages: list[Any],
+def _filter_items(
+    items: list[Any],
     *,
     include_archived: bool,
     include_internal: bool,
 ) -> list[Any]:
     filtered: list[Any] = []
-    for item in messages:
-        if (
-            not include_archived
-            and item.visibility is SessionMessageVisibility.ARCHIVED
+    for item in items:
+        metadata = dict(getattr(item, "metadata", {}) or {})
+        visibility = getattr(item, "visibility", SessionItemVisibility())
+        if not include_archived and (
+            metadata.get("archived_reason") is not None
+            or metadata.get("compacted_segment_id") is not None
         ):
             continue
-        if (
-            not include_internal
-            and item.visibility is SessionMessageVisibility.INTERNAL
-        ):
+        if not include_internal and not visibility.model_visible:
             continue
         filtered.append(item)
     return filtered
@@ -841,22 +847,27 @@ def _serialize_instance(instance: SessionInstanceDTO) -> dict[str, Any]:
     }
 
 
-def _serialize_message(message: SessionMessageDTO) -> dict[str, Any]:
+def _serialize_item(item: SessionItemDTO) -> dict[str, Any]:
     return {
-        "id": message.id,
-        "session_key": message.session_key,
-        "session_id": message.session_id,
-        "sequence_no": message.sequence_no,
-        "role": message.role,
-        "kind": message.kind,
-        "visibility": message.visibility,
+        "id": item.id,
+        "session_key": item.session_key,
+        "session_id": item.session_id,
+        "sequence_no": item.sequence_no,
+        "role": item.role,
+        "kind": item.kind,
+        "phase": item.phase,
+        "visibility": dict(item.visibility),
         "content": _truncate_text(
-            describe_content_for_text_fallback(message.content_payload),
+            describe_content_for_text_fallback(item.content_payload),
             limit=MAX_RENDERED_MESSAGE_CHARS,
         ),
-        "created_at": _isoformat(message.created_at),
-        "source_kind": message.source_kind,
-        "source_id": message.source_id,
+        "created_at": _isoformat(item.created_at),
+        "source_module": item.source_module,
+        "source_kind": item.source_kind,
+        "source_id": item.source_id,
+        "provider_item_type": item.provider_item_type,
+        "call_id": item.call_id,
+        "tool_name": item.tool_name,
     }
 
 
@@ -1110,9 +1121,9 @@ def _render_session_status(
     session: SessionDTO,
     active_instance: SessionInstanceDTO | None,
     instance_count: int,
-    active_visible_message_count: int,
-    visible_message_count: int,
-    total_message_count: int,
+    active_visible_item_count: int,
+    visible_item_count: int,
+    total_item_count: int,
     requester_tree: dict[str, Any] | None,
 ) -> str:
     lines = [
@@ -1127,9 +1138,9 @@ def _render_session_status(
         f"- updated_at: {_isoformat(session.updated_at)}",
         f"- last_reset_at: {_isoformat(session.last_reset_at)}",
         f"- instance_count: {instance_count}",
-        f"- active_visible_message_count: {active_visible_message_count}",
-        f"- visible_message_count: {visible_message_count}",
-        f"- total_message_count: {total_message_count}",
+        f"- active_visible_item_count: {active_visible_item_count}",
+        f"- visible_item_count: {visible_item_count}",
+        f"- total_item_count: {total_item_count}",
     ]
     compaction = _extract_compaction_metadata(session.metadata)
     if compaction is not None:
@@ -1227,7 +1238,7 @@ def _render_sessions_list(
 def _render_sessions_history(
     *,
     session: SessionDTO,
-    messages: list[SessionMessageDTO],
+    items: list[SessionItemDTO],
     available_count: int,
     active_session_only: bool,
     session_id: str | None,
@@ -1238,27 +1249,28 @@ def _render_sessions_history(
         f"- session_key: {session.key}",
         f"- requested_session_id: {session_id or 'active'}",
         f"- active_session_only: {'true' if active_session_only else 'false'}",
-        f"- returned: {len(messages)}",
+        f"- returned: {len(items)}",
         f"- available: {available_count}",
         "",
     ]
-    if not messages:
-        lines.append("No transcript messages matched the current filter.")
+    if not items:
+        lines.append("No transcript items matched the current filter.")
         return "\n".join(lines).strip(), False
 
     truncated = False
     rendered_chars = len("\n".join(lines))
-    for message in messages:
+    for item in items:
         content = _truncate_text(
-            describe_content_for_text_fallback(message.content_payload),
+            describe_content_for_text_fallback(item.content_payload),
             limit=MAX_RENDERED_MESSAGE_CHARS,
         )
         chunk = [
-            f"## {message.role} #{message.sequence_no}",
-            f"- session_id: {message.session_id}",
-            f"- kind: {message.kind}",
-            f"- visibility: {message.visibility}",
-            f"- created_at: {_isoformat(message.created_at)}",
+            f"## {item.role or item.kind} #{item.sequence_no}",
+            f"- session_id: {item.session_id}",
+            f"- kind: {item.kind}",
+            f"- phase: {item.phase}",
+            f"- visibility: {dict(item.visibility)}",
+            f"- created_at: {_isoformat(item.created_at)}",
             f"- content: {content or '[no textual content]'}",
             "",
         ]
@@ -1278,7 +1290,7 @@ def _render_sessions_send(
     *,
     session_key: str,
     active_session_id: str,
-    message_id: str,
+    item_id: str,
     run_id: str | None,
     enqueue: bool,
 ) -> str:
@@ -1287,7 +1299,7 @@ def _render_sessions_send(
         "",
         f"- session_key: {session_key}",
         f"- active_session_id: {active_session_id}",
-        f"- message_id: {message_id}",
+        f"- session_item_id: {item_id}",
         f"- enqueued: {'true' if enqueue else 'false'}",
     ]
     if run_id is not None:

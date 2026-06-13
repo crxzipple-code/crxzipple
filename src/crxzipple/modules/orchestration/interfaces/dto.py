@@ -209,6 +209,8 @@ class RunPromptInputPreviewDTO:
     context_render: dict[str, object] | None
     context_render_metadata: dict[str, object]
     provider_attachments: dict[str, object]
+    context_surface: dict[str, object]
+    tool_surface: dict[str, object]
     provider_request_options: dict[str, object]
 
     @classmethod
@@ -245,5 +247,7 @@ class RunPromptInputPreviewDTO:
             context_render=context_render,
             context_render_metadata=dict(preview.context_render_metadata),
             provider_attachments=dict(preview.provider_attachments),
+            context_surface=dict(preview.context_surface),
+            tool_surface=dict(preview.tool_surface),
             provider_request_options=dict(preview.provider_request_options),
         )

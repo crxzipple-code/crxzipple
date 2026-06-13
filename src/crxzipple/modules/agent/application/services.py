@@ -14,6 +14,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
+    AgentLlmPolicy,
     AgentLlmRoutingPolicy,
     AgentMemoryBinding,
     AgentRuntimePreferences,
@@ -37,6 +38,7 @@ class RegisterAgentProfileInput:
     llm_routing_policy: AgentLlmRoutingPolicy = field(
         default_factory=lambda: AgentLlmRoutingPolicy(default_llm_id=""),
     )
+    llm_policy: AgentLlmPolicy = field(default_factory=AgentLlmPolicy)
     execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
@@ -54,6 +56,7 @@ class UpdateAgentProfileInput:
     identity: object = _UNSET
     instruction_policy: object = _UNSET
     llm_routing_policy: object = _UNSET
+    llm_policy: object = _UNSET
     execution_policy: object = _UNSET
     runtime_preferences: object = _UNSET
     memory: object = _UNSET
@@ -208,6 +211,7 @@ class AgentApplicationService:
                 identity=data.identity,
                 instruction_policy=data.instruction_policy,
                 llm_routing_policy=data.llm_routing_policy,
+                llm_policy=data.llm_policy,
                 execution_policy=data.execution_policy,
                 runtime_preferences=self._normalize_runtime_preferences(
                     data.id,
@@ -252,6 +256,7 @@ class AgentApplicationService:
                     "identity": data.identity,
                     "instruction_policy": data.instruction_policy,
                     "llm_routing_policy": data.llm_routing_policy,
+                    "llm_policy": data.llm_policy,
                     "execution_policy": data.execution_policy,
                     "runtime_preferences": self._normalize_runtime_preferences(
                         data.id,
@@ -305,6 +310,11 @@ class AgentApplicationService:
                 llm_routing_policy=(
                     data.llm_routing_policy
                     if data.llm_routing_policy is not _UNSET
+                    else None
+                ),
+                llm_policy=(
+                    data.llm_policy
+                    if data.llm_policy is not _UNSET
                     else None
                 ),
                 execution_policy=(

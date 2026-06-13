@@ -1493,6 +1493,8 @@ def _execution_chain_section(
             ("last_step", "Last Step"),
             ("steps", "Steps"),
             ("items", "Items"),
+            ("continuation", "Continuation"),
+            ("latest_decision", "Latest Decision"),
             ("dispatch_status", "Dispatch"),
             ("updated_at", "Updated At"),
             ("actions", "Actions"),
@@ -1548,6 +1550,8 @@ def _execution_chain_row(
     active_item_count = len(
         [item for item in items if item.status in _ACTIVE_EXECUTION_ITEM_STATUSES],
     )
+    continuation_items = _continuation_decision_items(items)
+    latest_continuation = _latest_continuation_decision(continuation_items)
     dispatch_status = (
         dispatch_task.status.value if dispatch_task is not None else run.status.value
     )
@@ -1561,6 +1565,8 @@ def _execution_chain_row(
             "last_step": _execution_step_label(last_step),
             "steps": f"{len(steps)}",
             "items": f"{len(items)} / {active_item_count} active",
+            "continuation": _continuation_decision_count_label(continuation_items),
+            "latest_decision": _continuation_decision_label(latest_continuation),
             "dispatch_status": dispatch_status,
             "dispatch_task_id": dispatch_task.id if dispatch_task is not None else "-",
             "dispatch_worker": _dispatch_worker(dispatch_task),
@@ -1667,6 +1673,74 @@ def _execution_item_breakdown(items: list[ExecutionStepItem]) -> str:
     return " / ".join(
         f"{count} {key}" for key, count in sorted(counts.items())
     )
+
+
+def _continuation_decision_items(
+    items: list[ExecutionStepItem],
+) -> list[ExecutionStepItem]:
+    return [
+        item
+        for item in items
+        if item.kind.value == "continuation_decision"
+    ]
+
+
+def _latest_continuation_decision(
+    items: list[ExecutionStepItem],
+) -> ExecutionStepItem | None:
+    if not items:
+        return None
+    return max(items, key=lambda item: (item.created_at, item.item_index, item.id))
+
+
+def _continuation_decision_count_label(items: list[ExecutionStepItem]) -> str:
+    if not items:
+        return "-"
+    follow_up_count = sum(
+        1
+        for item in items
+        if _summary_bool(_execution_item_summary(item), "needs_follow_up")
+    )
+    return f"{len(items)} decisions / {follow_up_count} follow-up"
+
+
+def _continuation_decision_label(item: ExecutionStepItem | None) -> str:
+    if item is None:
+        return "-"
+    summary = _execution_item_summary(item)
+    reason = _summary_text(summary, "reason") or "unknown"
+    end_turn = summary.get("end_turn")
+    end_turn_label = (
+        f"end_turn={str(end_turn).lower()}"
+        if isinstance(end_turn, bool)
+        else "end_turn=-"
+    )
+    follow_up = _summary_bool(summary, "needs_follow_up")
+    return f"{reason}; {end_turn_label}; follow_up={str(follow_up).lower()}"
+
+
+def _execution_item_summary(item: ExecutionStepItem) -> dict[str, object]:
+    summary = item.summary_payload
+    return dict(summary) if isinstance(summary, dict) else {}
+
+
+def _summary_text(summary: dict[str, object], key: str) -> str | None:
+    value = summary.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _summary_bool(summary: dict[str, object], key: str) -> bool:
+    value = summary.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _tone_for_execution_chain_status(status: ExecutionChainStatus) -> str:

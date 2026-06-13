@@ -370,6 +370,8 @@ class ToolSubmissionService(ToolServiceBase):
                 run = ToolRun.create(
                     run_id=run_id,
                     tool_id=tool.id,
+                    call_id=_tool_call_id(data),
+                    tool_surface_id=_tool_surface_id(data),
                     function_id=function.function_id if function is not None else None,
                     function_revision=function.revision if function is not None else None,
                     source_id=function.source_id if function is not None else None,
@@ -414,6 +416,37 @@ def _readiness_payload(readiness: object) -> dict[str, object]:
         "setup_available": False,
         "checks": [],
     }
+
+
+def _tool_call_id(data: ExecuteToolInput) -> str | None:
+    explicit = _optional_text(data.call_id)
+    if explicit is not None:
+        return explicit
+    return _metadata_text(data.metadata, "tool_call_id")
+
+
+def _tool_surface_id(data: ExecuteToolInput) -> str | None:
+    explicit = _optional_text(data.tool_surface_id)
+    if explicit is not None:
+        return explicit
+    direct = _metadata_text(data.metadata, "tool_surface_id")
+    if direct is not None:
+        return direct
+    plan = data.metadata.get("tool_execution_plan")
+    if isinstance(plan, dict):
+        return _metadata_text(plan, "tool_surface_id")
+    return None
+
+
+def _metadata_text(metadata: dict[str, object], key: str) -> str | None:
+    return _optional_text(metadata.get(key))
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _execution_context_with_provider_backend(

@@ -14,8 +14,6 @@ from crxzipple.shared import (
     EventObserver,
     EventSurface,
     ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
-    ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
-    SESSION_MESSAGE_APPENDED_SOURCE_EVENT,
     ORCHESTRATION_RUN_TOOL_UPDATED_EVENT,
     ORCHESTRATION_RUNTIME_OBSERVATION_SOURCE_EVENT_NAMES,
     ORCHESTRATION_RUNTIME_STATUS_EVENT,
@@ -142,10 +140,12 @@ _LLM_STEP_COMPLETED_FIELDS: tuple[EventDefinitionField, ...] = (
     EventDefinitionField("stage", "Current orchestration stage before reduction.", "string", True),
     EventDefinitionField("current_step", "Current step counter for the run.", "integer", True),
     EventDefinitionField("llm_invocation_id", "LLM invocation completed for this execution step.", "string", True),
-    EventDefinitionField("assistant_message_ids", "Assistant session message ids recorded for this invocation.", "array"),
-    EventDefinitionField("assistant_progress_message_ids", "Assistant progress text session message ids.", "array"),
-    EventDefinitionField("tool_call_message_ids", "Assistant function_call session message ids.", "array"),
-    EventDefinitionField("tool_result_message_ids", "Tool result session message ids recorded during this outcome.", "array"),
+    EventDefinitionField("context_render_snapshot_id", "Context render snapshot used for this LLM invocation.", "string"),
+    EventDefinitionField("llm_response_item_ids", "LLM response item ids emitted by this invocation.", "array"),
+    EventDefinitionField("session_item_ids", "Session item ids persisted for this invocation.", "array"),
+    EventDefinitionField("assistant_progress_item_ids", "Assistant progress session item ids.", "array"),
+    EventDefinitionField("tool_call_session_item_ids", "Assistant function_call session item ids.", "array"),
+    EventDefinitionField("tool_result_session_item_ids", "Tool result session item ids recorded during this outcome.", "array"),
     EventDefinitionField("tool_call_names", "Tool call names requested by the model.", "array"),
     EventDefinitionField("text_present", "Whether the LLM result included assistant text.", "boolean"),
     EventDefinitionField("text_chars", "Character count of the LLM result text.", "integer"),
@@ -203,14 +203,9 @@ def orchestration_event_topic_contracts() -> tuple[EventTopicContract, ...]:
             contract_id="turn.session",
             topic_pattern=turn_session_topic("{session_key}"),
             owner="orchestration",
-            description=(
-                "Session scoped durable run facts and appended session messages."
-            ),
+            description="Session scoped durable run facts.",
             kinds=("fact",),
-            producers=(
-                "RunObservationObserver.observe_run_event",
-                "SessionMessageObservationObserver.observe_message_appended",
-            ),
+            producers=("RunObservationObserver.observe_run_event",),
             consumers=("WebChannel SSE /channels/web/events",),
             ordering="session_key | run_id",
             notes=("source topic for web observation",),
@@ -384,35 +379,6 @@ def orchestration_event_definitions() -> tuple[EventDefinition, ...]:
     )
     definitions.append(
         EventDefinition(
-            definition_id=ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
-            owner="orchestration",
-            event_name=ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
-            description="Run-scoped message fact forwarded into the orchestration observation surface.",
-            topics=("turn.session.{session_key}",),
-            producers=("SessionMessageObservationObserver.observe_message_appended",),
-            consumers=("channel runtimes", "web console", "diagnostics"),
-            fields=(
-                EventDefinitionField("event_name", "Stable session event name.", "string", True),
-                EventDefinitionField("message_id", "Session message identifier.", "string", True),
-                EventDefinitionField("session_key", "Owning session key.", "string", True),
-                EventDefinitionField("session_id", "Owning session instance id.", "string", True),
-                EventDefinitionField("role", "Message role.", "string", True),
-                EventDefinitionField("kind", "Message kind.", "string", True),
-                EventDefinitionField("source_kind", "Source entity type for this message.", "string"),
-                EventDefinitionField("source_id", "Source entity id for this message.", "string"),
-                EventDefinitionField("message", "Durable message payload including blocks and metadata.", "object", True),
-            ),
-            durability="persistent",
-            publication_mode="translated",
-            source_event_names=(SESSION_MESSAGE_APPENDED_SOURCE_EVENT,),
-            notes=(
-                "session emits a self-describing message fact and orchestration forwards it under an orchestration-owned contract name",
-                "channel runtimes should publish attachments/artifacts from the durable message payload",
-            ),
-        )
-    )
-    definitions.append(
-        EventDefinition(
             definition_id="orchestration.llm_resolved",
             owner="orchestration",
             event_name="orchestration.llm_resolved",
@@ -532,14 +498,13 @@ def orchestration_event_surfaces() -> tuple[EventSurface, ...]:
             owner="orchestration",
             description=(
                 "Unified orchestration observation surface for channel runtimes "
-                "and the web console. Durable run facts, durable appended "
-                "messages, translated tool lifecycle facts, and transient live "
+                "and the web console. Durable run facts, translated tool "
+                "lifecycle facts, and transient live "
                 "deltas belong to this single consumer-facing contract."
             ),
             definition_ids=(
                 *RUN_OBSERVATION_EVENT_NAMES,
                 ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
-                ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
                 ORCHESTRATION_RUN_TOOL_UPDATED_EVENT,
             ),
             topics=(
@@ -612,20 +577,6 @@ def orchestration_event_observers() -> tuple[EventObserver, ...]:
             handlers=("RunObservationObserver.observe_run_event",),
             notes=(
                 "Rehydrates the latest durable run state before publishing a reduced contract event.",
-            ),
-        ),
-        EventObserver(
-            observer_id="orchestration.session.message_observation",
-            owner="orchestration",
-            description=(
-                "Observes appended session message source events into translated "
-                "session-scoped observation facts."
-            ),
-            source_event_names=(SESSION_MESSAGE_APPENDED_SOURCE_EVENT,),
-            output_definition_ids=(ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,),
-            handlers=("SessionMessageObservationObserver.observe_message_appended",),
-            notes=(
-                "Translates the session-owned message fact into an orchestration-owned run observation contract.",
             ),
         ),
         EventObserver(

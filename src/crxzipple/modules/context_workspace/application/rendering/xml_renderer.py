@@ -69,8 +69,8 @@ def append_context_node_xml(
     *,
     depth: int,
 ) -> None:
-    if node.kind == "session_message":
-        _append_session_message_node_xml(
+    if node.kind == "session_item":
+        _append_session_item_node_xml(
             lines,
             node,
             children_by_parent,
@@ -160,7 +160,7 @@ def rendered_children(
     return sorted_nodes(tuple(children_by_parent.get(node.id, ())))
 
 
-def _append_session_message_node_xml(
+def _append_session_item_node_xml(
     lines: list[str],
     node: ContextNode,
     children_by_parent: dict[str | None, list[ContextNode]],
@@ -169,7 +169,7 @@ def _append_session_message_node_xml(
 ) -> None:
     indent = "  " * depth
     child_indent = "  " * (depth + 1)
-    message_indent = "  " * (depth + 2)
+    item_indent = "  " * (depth + 2)
     content_indent = "  " * (depth + 3)
     role = str(node.owner_ref.get("role") or node.metadata.get("role") or "").strip()
     kind = str(node.owner_ref.get("kind") or node.metadata.get("kind") or "").strip()
@@ -188,16 +188,16 @@ def _append_session_message_node_xml(
     if node.summary:
         lines.append(f"{child_indent}<summary>{escape(node.summary)}</summary>")
     lines.append(
-        f'{child_indent}<message role="{escape(role)}" '
+        f'{child_indent}<item role="{escape(role)}" '
         f'sequence="{escape(sequence_no)}" kind="{escape(kind)}" '
         f'visibility="{escape(visibility)}">',
     )
     if node.content and not node.state.collapsed:
-        lines.append(f"{message_indent}<content>")
+        lines.append(f"{item_indent}<content>")
         for content_line in node.content.splitlines() or [""]:
             lines.append(f"{content_indent}{escape(content_line)}")
-        lines.append(f"{message_indent}</content>")
-    lines.append(f"{child_indent}</message>")
+        lines.append(f"{item_indent}</content>")
+    lines.append(f"{child_indent}</item>")
     for child in rendered_children(node, children_by_parent):
         append_context_node_xml(lines, child, children_by_parent, depth=depth + 1)
     lines.append(f"{indent}</node>")
@@ -484,8 +484,8 @@ def _append_tool_interaction_refs(
 ) -> None:
     attrs: list[str] = []
     for attr_name, metadata_key in (
-        ("call_message_id", "call_message_id"),
-        ("result_message_id", "result_message_id"),
+        ("call_session_item_id", "call_session_item_id"),
+        ("result_session_item_id", "result_session_item_id"),
         ("call_sequence", "call_sequence_no"),
         ("result_sequence", "result_sequence_no"),
     ):
@@ -714,8 +714,8 @@ def _append_evidence_refs(
         if compact
         else (
             ("tool_run_id", "tool_run_id"),
-            ("call_message_id", "call_message_id"),
-            ("result_message_id", "result_message_id"),
+            ("call_session_item_id", "call_session_item_id"),
+            ("result_session_item_id", "result_session_item_id"),
             ("call_sequence", "call_sequence_no"),
             ("result_sequence", "result_sequence_no"),
         )

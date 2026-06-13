@@ -5,7 +5,12 @@ import {
 } from "@/mocks/fixtures/runtime";
 import { dataMode, requestJson } from "@/shared/api/client";
 import type { RunPromptInputPreview } from "@/shared/runtime/promptPreview";
-import type { TraceEventView, TraceLinkedEntity, TraceSummaryView } from "@/shared/runtime/types";
+import type {
+  TraceEventView,
+  TraceLinkedEntity,
+  TraceSummaryView,
+  WorkbenchLinkedEntityDetail,
+} from "@/shared/runtime/types";
 
 export interface TraceData {
   summary: TraceSummaryView;
@@ -35,6 +40,9 @@ export interface TraceContextRenderSnapshot {
   estimate: TraceContextEstimate;
   included_node_ids: string[];
   mirrored_node_ids: string[];
+  included_refs: Array<Record<string, unknown>>;
+  collapsed_refs: Array<Record<string, unknown>>;
+  protocol_required_refs: Array<Record<string, unknown>>;
   metadata: Record<string, unknown>;
   created_at: string;
 }
@@ -115,6 +123,15 @@ export async function loadTraceInvocationPromptPreview(
   } catch {
     return null;
   }
+}
+
+export function loadTraceLinkedEntityDetail(
+  entityType: string,
+  entityId: string,
+): Promise<WorkbenchLinkedEntityDetail> {
+  return requestJson<WorkbenchLinkedEntityDetail>(
+    `/ui/workbench/linked-entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`,
+  );
 }
 
 function fixtureSummary(): TraceSummaryView {

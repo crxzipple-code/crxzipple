@@ -13,6 +13,12 @@ from crxzipple.modules.tool.application.catalog_models import (
     ToolFunctionRequirements,
     ToolSourceDiscoveryRunRecord,
 )
+from crxzipple.modules.tool.application.surface import (
+    ToolSurface,
+    ToolSurfaceFunction,
+    ToolSurfaceGroup,
+    ToolSurfaceSource,
+)
 from crxzipple.modules.tool.domain.entities import (
     ToolFunction,
     ToolProviderBackend,
@@ -42,6 +48,7 @@ from crxzipple.modules.tool.infrastructure.persistence.models import (
     ToolProviderBackendModel,
     ToolRunAssignmentModel,
     ToolRunModel,
+    ToolSurfaceModel,
     ToolSourceDiscoveryRunModel,
     ToolSourceModel,
     ToolWorkerModel,
@@ -811,6 +818,116 @@ def _runtime_requirement_sets_from_payload(
     return tuple(requirement_sets)
 
 
+def _tool_surface_from_payload(
+    payload: dict[str, object],
+    *,
+    fallback_surface_id: str,
+    fallback_created_at: datetime,
+) -> ToolSurface:
+    return ToolSurface(
+        surface_id=str(payload.get("surface_id") or fallback_surface_id),
+        session_id=_optional_payload_text(payload.get("session_id")),
+        run_id=_optional_payload_text(payload.get("run_id")),
+        agent_id=_optional_payload_text(payload.get("agent_id")),
+        policy_version=str(payload.get("policy_version") or "tool_surface.v1"),
+        sources=tuple(
+            _tool_surface_source_from_payload(item)
+            for item in _mapping_list(payload.get("sources"))
+        ),
+        functions=tuple(
+            _tool_surface_function_from_payload(item)
+            for item in _mapping_list(payload.get("functions"))
+        ),
+        default_tool_choice=str(payload.get("default_tool_choice") or "auto"),
+        parallel_tool_calls=bool(payload.get("parallel_tool_calls", True)),
+        estimate=_dict_payload(payload.get("estimate")),
+        diagnostics=_dict_payload(payload.get("diagnostics")),
+        created_at=_datetime_payload(payload.get("created_at"), fallback_created_at),
+    )
+
+
+def _tool_surface_source_from_payload(payload: Mapping[str, object]) -> ToolSurfaceSource:
+    return ToolSurfaceSource(
+        source_id=str(payload.get("source_id") or ""),
+        source_key=str(payload.get("source_key") or payload.get("source_id") or ""),
+        source_kind=str(payload.get("source_kind") or ""),
+        title=str(payload.get("title") or ""),
+        summary=str(payload.get("summary") or ""),
+        groups=tuple(
+            _tool_surface_group_from_payload(item)
+            for item in _mapping_list(payload.get("groups"))
+        ),
+        readiness=_dict_payload(payload.get("readiness")),
+        authorization=_dict_payload(payload.get("authorization")),
+        runtime_requirements=tuple(_mapping_list(payload.get("runtime_requirements"))),
+        prompt_metadata=_dict_payload(payload.get("prompt_metadata")),
+        metadata=_dict_payload(payload.get("metadata")),
+    )
+
+
+def _tool_surface_group_from_payload(payload: Mapping[str, object]) -> ToolSurfaceGroup:
+    return ToolSurfaceGroup(
+        group_key=str(payload.get("group_key") or ""),
+        title=str(payload.get("title") or ""),
+        summary=str(payload.get("summary") or ""),
+        function_refs=_string_tuple_payload(payload.get("function_refs")),
+        default_expanded=bool(payload.get("default_expanded", False)),
+        schema_enabled=bool(payload.get("schema_enabled", True)),
+        estimate=_dict_payload(payload.get("estimate")),
+        metadata=_dict_payload(payload.get("metadata")),
+    )
+
+
+def _tool_surface_function_from_payload(
+    payload: Mapping[str, object],
+) -> ToolSurfaceFunction:
+    return ToolSurfaceFunction(
+        function_id=str(payload.get("function_id") or ""),
+        name=str(payload.get("name") or ""),
+        title=str(payload.get("title") or ""),
+        description=str(payload.get("description") or ""),
+        input_schema=_dict_payload(payload.get("input_schema")),
+        source_id=str(payload.get("source_id") or ""),
+        group_key=str(payload.get("group_key") or ""),
+        runtime_kind=str(payload.get("runtime_kind") or ""),
+        execution_modes=_string_tuple_payload(payload.get("execution_modes")),
+        execution_strategies=_string_tuple_payload(payload.get("execution_strategies")),
+        execution_environments=_string_tuple_payload(
+            payload.get("execution_environments"),
+        ),
+        requires_confirmation=bool(payload.get("requires_confirmation", False)),
+        mutates_state=bool(payload.get("mutates_state", False)),
+        supports_parallel=bool(payload.get("supports_parallel", True)),
+        readiness=_dict_payload(payload.get("readiness")),
+        authorization=_dict_payload(payload.get("authorization")),
+        concurrency_key=_optional_payload_text(payload.get("concurrency_key")),
+        provider_schema_hints=_dict_payload(payload.get("provider_schema_hints")),
+        metadata=_dict_payload(payload.get("metadata")),
+    )
+
+
+def _mapping_list(value: object | None) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(dict(item) for item in value if isinstance(item, Mapping))
+
+
+def _datetime_payload(value: object | None, fallback: datetime) -> datetime:
+    if isinstance(value, str) and value.strip():
+        try:
+            return coerce_utc_datetime(datetime.fromisoformat(value))
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def _optional_payload_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 class SqlAlchemyToolProviderBackendRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -915,6 +1032,73 @@ class SqlAlchemyToolProviderBackendRepository:
         )
 
 
+class SqlAlchemyToolSurfaceRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self._loaded_models: dict[str, ToolSurfaceModel] = {}
+
+    def add(self, surface: ToolSurface) -> None:
+        model = self._loaded_models.get(surface.surface_id)
+        if model is None:
+            model = self.session.get(ToolSurfaceModel, surface.surface_id)
+        if model is None:
+            model = self._to_model(surface)
+            self.session.add(model)
+        else:
+            self._apply_to_model(model, surface)
+        self._loaded_models[surface.surface_id] = model
+
+    def get(self, surface_id: str) -> ToolSurface | None:
+        model = self.session.get(ToolSurfaceModel, surface_id)
+        if model is None:
+            return None
+        self._loaded_models[model.surface_id] = model
+        return self._to_entity(model)
+
+    def list_for_run(self, run_id: str) -> list[ToolSurface]:
+        models = self.session.scalars(
+            select(ToolSurfaceModel)
+            .where(ToolSurfaceModel.run_id == run_id)
+            .order_by(ToolSurfaceModel.created_at.desc()),
+        ).all()
+        for model in models:
+            self._loaded_models[model.surface_id] = model
+        return [self._to_entity(model) for model in models]
+
+    @staticmethod
+    def _to_model(surface: ToolSurface) -> ToolSurfaceModel:
+        return ToolSurfaceModel(**SqlAlchemyToolSurfaceRepository._to_mapping(surface))
+
+    @staticmethod
+    def _to_mapping(surface: ToolSurface) -> dict[str, object]:
+        return {
+            "surface_id": surface.surface_id,
+            "session_id": surface.session_id,
+            "run_id": surface.run_id,
+            "agent_id": surface.agent_id,
+            "policy_version": surface.policy_version,
+            "surface_payload": surface.to_payload(),
+            "estimate_payload": dict(surface.estimate),
+            "diagnostics_payload": dict(surface.diagnostics),
+            "created_at": surface.created_at,
+        }
+
+    @staticmethod
+    def _apply_to_model(model: ToolSurfaceModel, surface: ToolSurface) -> None:
+        mapping = SqlAlchemyToolSurfaceRepository._to_mapping(surface)
+        for key, value in mapping.items():
+            setattr(model, key, value)
+
+    @staticmethod
+    def _to_entity(model: ToolSurfaceModel) -> ToolSurface:
+        payload = _dict_payload(model.surface_payload)
+        return _tool_surface_from_payload(
+            payload,
+            fallback_surface_id=model.surface_id,
+            fallback_created_at=coerce_utc_datetime(model.created_at),
+        )
+
+
 class SqlAlchemyToolRunRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -995,6 +1179,8 @@ class SqlAlchemyToolRunRepository:
         return {
             "id": tool_run.id,
             "tool_id": tool_run.tool_id,
+            "call_id": tool_run.call_id,
+            "tool_surface_id": tool_run.tool_surface_id,
             "function_id": tool_run.function_id,
             "function_revision": tool_run.function_revision,
             "source_id": tool_run.source_id,
@@ -1008,6 +1194,7 @@ class SqlAlchemyToolRunRepository:
             "metadata_payload": tool_run.metadata,
             "invocation_context_payload": tool_run.invocation_context_payload,
             "output_payload": tool_run.stored_output_payload,
+            "result_envelope_payload": tool_run.result_envelope_payload,
             "error_message": tool_run.stored_error_payload,
             "created_at": tool_run.created_at,
             "started_at": tool_run.started_at,
@@ -1023,6 +1210,8 @@ class SqlAlchemyToolRunRepository:
     @staticmethod
     def _apply_to_model(model: ToolRunModel, tool_run: ToolRun) -> None:
         model.tool_id = tool_run.tool_id
+        model.call_id = tool_run.call_id
+        model.tool_surface_id = tool_run.tool_surface_id
         model.function_id = tool_run.function_id
         model.function_revision = tool_run.function_revision
         model.source_id = tool_run.source_id
@@ -1036,6 +1225,7 @@ class SqlAlchemyToolRunRepository:
         model.metadata_payload = tool_run.metadata
         model.invocation_context_payload = tool_run.invocation_context_payload
         model.output_payload = tool_run.stored_output_payload
+        model.result_envelope_payload = tool_run.result_envelope_payload
         model.error_message = tool_run.stored_error_payload
         model.created_at = tool_run.created_at
         model.started_at = tool_run.started_at
@@ -1052,6 +1242,8 @@ class SqlAlchemyToolRunRepository:
         return ToolRun(
             id=model.id,
             tool_id=model.tool_id,
+            call_id=model.call_id,
+            tool_surface_id=model.tool_surface_id,
             function_id=model.function_id,
             function_revision=model.function_revision,
             source_id=model.source_id,
@@ -1071,6 +1263,11 @@ class SqlAlchemyToolRunRepository:
                 else None
             ),
             result_payload=model.output_payload,
+            result_envelope_payload=(
+                dict(model.result_envelope_payload)
+                if model.result_envelope_payload is not None
+                else None
+            ),
             error_payload=model.error_message,
             created_at=coerce_utc_datetime(model.created_at),
             started_at=coerce_optional_utc_datetime(model.started_at),

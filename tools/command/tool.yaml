@@ -14,7 +14,7 @@ prompt:
     run_and_verify:
       order: 10
       title: Run And Verify
-      summary: Prefer high-signal commands, narrow verification, explicit timeouts, and max_output_tokens for potentially long output. Execute focused tests, builds, linters, searches, and diagnostics from the bound workspace. Do not use long raw output as the default exploration surface.
+      summary: Prefer high-signal commands, narrow verification, explicit timeouts, and max_output_tokens for potentially long output. Execute focused tests, builds, linters, searches, and diagnostics from the bound workspace. Use $CRXZIPPLE_PYTHON for Python probes or scripts so dependency checks match the runtime environment. Do not use long raw output as the default exploration surface.
       function_ids:
         - exec
       default_tool_schema_ids:
@@ -45,7 +45,7 @@ dependencies:
 local_tools:
   - id: exec
     name: Workspace Exec
-    description: Run a local shell command from the current bound workspace. Prefer focused, high-signal commands and set max_output_tokens for commands that may produce long output.
+    description: Run a local shell command from the current bound workspace. Prefer focused, high-signal commands and set max_output_tokens for commands that may produce long output. Python commands inherit the CRXZipple runtime Python on PATH; use $CRXZIPPLE_PYTHON for precise interpreter checks.
     provider_name: local_system
     entrypoint: tools.command.local:exec
     tool_kind: function
@@ -56,7 +56,7 @@ local_tools:
         required: true
       - name: cwd
         data_type: string
-        description: Optional relative directory inside the workspace to use as the current working directory.
+        description: Optional relative directory inside the workspace to use as the current working directory. Use "." for the workspace root; absolute paths are rejected.
         required: false
       - name: timeout_seconds
         data_type: integer

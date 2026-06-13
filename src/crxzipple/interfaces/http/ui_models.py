@@ -22,6 +22,7 @@ from crxzipple.modules.orchestration.application.read_models.workbench import (
     WorkbenchKeyValueSection,
     WorkbenchLinkedEntity,
     WorkbenchRunView,
+    WorkbenchTimelineItem,
     WorkbenchThreadSummary,
 )
 from crxzipple.modules.events.application.read_models import (
@@ -45,8 +46,14 @@ class TraceContextResponse(BaseModel):
     turn_id: str | None = None
     run_id: str | None = None
     step_id: str | None = None
+    execution_item_id: str | None = None
     tool_run_id: str | None = None
+    tool_call_id: str | None = None
     llm_invocation_id: str | None = None
+    llm_response_item_id: str | None = None
+    context_render_snapshot_id: str | None = None
+    session_item_id: str | None = None
+    continuation_decision_id: str | None = None
     artifact_id: str | None = None
     approval_request_id: str | None = None
 
@@ -219,6 +226,15 @@ class WorkbenchLinkedEntityResponse(BaseModel):
                 else None
             ),
         )
+
+
+class WorkbenchLinkedEntityDetailResponse(BaseModel):
+    type: str
+    id: str
+    owner: str
+    label: str
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkbenchActionResponse(BaseModel):
@@ -453,6 +469,7 @@ class WorkbenchRunResponse(BaseModel):
     current_turn_id: str | None
     status_strip: RunStatusStripResponse | None
     cover_artifact: ArtifactPreviewResponse | None = None
+    timeline: list[WorkbenchTimelineItemResponse] = Field(default_factory=list)
     actions: list[WorkbenchActionResponse] = Field(default_factory=list)
     inspector: WorkbenchInspectorResponse
     trace: TraceContextResponse
@@ -482,9 +499,48 @@ class WorkbenchRunResponse(BaseModel):
                 if view.cover_artifact is not None
                 else None
             ),
+            timeline=[
+                WorkbenchTimelineItemResponse.from_value(item)
+                for item in view.timeline
+            ],
             actions=[WorkbenchActionResponse.from_value(item) for item in view.actions],
             inspector=WorkbenchInspectorResponse.from_value(view.inspector),
             trace=TraceContextResponse.from_value(view.trace),
+        )
+
+
+class WorkbenchTimelineItemResponse(BaseModel):
+    id: str
+    turn_id: str
+    run_id: str
+    kind: str
+    status: str
+    title: str
+    content: dict[str, Any] = Field(default_factory=dict)
+    phase: str | None = None
+    source_refs: dict[str, str] = Field(default_factory=dict)
+    started_at: str | None = None
+    completed_at: str | None = None
+    trace: TraceContextResponse
+
+    @classmethod
+    def from_value(
+        cls,
+        value: WorkbenchTimelineItem,
+    ) -> "WorkbenchTimelineItemResponse":
+        return cls(
+            id=value.id,
+            turn_id=value.turn_id,
+            run_id=value.run_id,
+            kind=value.kind,
+            status=value.status,
+            title=value.title,
+            content=dict(value.content),
+            phase=value.phase,
+            source_refs=dict(value.source_refs),
+            started_at=value.started_at,
+            completed_at=value.completed_at,
+            trace=TraceContextResponse.from_value(value.trace),
         )
 
 

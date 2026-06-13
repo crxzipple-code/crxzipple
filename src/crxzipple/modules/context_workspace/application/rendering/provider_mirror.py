@@ -233,6 +233,22 @@ def render_provider_attachments(
         if isinstance(candidate.get("node_id"), str)
     }
     for node in nodes:
+        for candidate in provider_artifact_candidates(
+            node.metadata.get("artifact_content_candidates"),
+        ):
+            node_id = candidate.get("node_id")
+            if not isinstance(node_id, str) or not node_id.strip():
+                node_id = node.id
+                candidate["node_id"] = node_id
+            if node_id in existing_artifact_node_ids:
+                continue
+            artifact_id = candidate.get("artifact_id")
+            if not isinstance(artifact_id, str) or not artifact_id.strip():
+                continue
+            artifact_candidates.append(dict(candidate))
+            existing_artifact_node_ids.add(node_id)
+            mirrored_node_ids.append(node.id)
+    for node in nodes:
         if node.owner != "artifacts":
             continue
         if node.kind not in {"artifact_image", "artifact_file"}:

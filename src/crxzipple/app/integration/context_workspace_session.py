@@ -23,13 +23,13 @@ from crxzipple.modules.context_workspace.domain import (
 )
 from crxzipple.modules.session.application import (
     ListSessionInstancesInput,
-    ListSessionMessagesInput,
+    ListSessionItemsInput,
 )
 from crxzipple.modules.session.domain import (
     Session,
     SessionInstance,
-    SessionMessage,
-    SessionMessageVisibility,
+    SessionItem,
+    SessionItemKind,
     SessionNotFoundError,
 )
 from crxzipple.modules.tool.application.result_envelope import (
@@ -57,10 +57,10 @@ class SessionContextService(Protocol):
     ) -> list[SessionInstance]:
         ...
 
-    def list_messages(
+    def list_items(
         self,
-        data: ListSessionMessagesInput,
-    ) -> list[SessionMessage]:
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
         ...
 
 
@@ -101,12 +101,12 @@ class SessionContextNodeProvider:
             return self._current_evidence_children(request)
         if _is_historical_segment_node_id(request.node.id):
             return self._historical_segment_range_children(request)
-        if request.node.id.startswith("session.segment.messages."):
-            return self._segment_range_message_children(request)
+        if request.node.id.startswith("session.segment.items."):
+            return self._segment_range_item_children(request)
         if request.node.id.startswith("session.tool_interactions.consumed."):
             return self._current_consumed_tool_history_children(request)
-        if request.node.id == "session.messages.current":
-            return self._current_message_children(request)
+        if request.node.id == "session.items.current":
+            return self._current_item_children(request)
         return ()
 
     def _current_session_children(
@@ -119,17 +119,11 @@ class SessionContextNodeProvider:
             instances = self._session_service.list_instances(
                 ListSessionInstancesInput(session_key=session_key),
             )
-            active_messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
-                    session_key=session_key,
-                    active_session_only=True,
-                    include_archived=False,
-                ),
-            )
+            active_messages = self._active_transcript_items_or_messages(session_key)
         except SessionNotFoundError:
             return ()
 
-        active_message_count = len(active_messages)
+        active_item_count = len(active_messages)
         active_instance = next(
             (item for item in instances if item.id == session.active_session_id),
             None,
@@ -139,7 +133,7 @@ class SessionContextNodeProvider:
             seeds.append(
                 _current_segment_seed(
                     instance=active_instance,
-                    message_count=active_message_count,
+                    item_count=active_item_count,
                     parent_id="session.current",
                     display_order=10,
                 ),
@@ -173,13 +167,7 @@ class SessionContextNodeProvider:
         session_key = request.workspace.session_key
         try:
             session = self._session_service.get_session(session_key)
-            active_messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
-                    session_key=session_key,
-                    active_session_only=True,
-                    include_archived=False,
-                ),
-            )
+            active_messages = self._active_transcript_items_or_messages(session_key)
         except SessionNotFoundError:
             return ()
         if not active_messages:
@@ -198,13 +186,13 @@ class SessionContextNodeProvider:
         )
         seeds = [
             ContextNodeSeed(
-                node_id="session.messages.current",
+                node_id="session.items.current",
                 parent_id=request.node.id,
                 owner="session",
-                kind="session_message_range",
-                title="Current Messages",
+                kind="session_item_range",
+                title="Current Items",
                 summary=(
-                    f"{len(active_messages)} visible messages in the active "
+                    f"{len(active_messages)} visible items in the active "
                     f"segment, sequences {first_sequence}-{last_sequence}."
                 ),
                 state=ContextNodeState(
@@ -219,7 +207,7 @@ class SessionContextNodeProvider:
                     "to_sequence_no": last_sequence,
                     "segment_id": request.node.id,
                 },
-                estimate=_messages_estimate(
+                estimate=_items_estimate(
                     tuple(active_messages),
                     current_run_id=current_run_id,
                 ),
@@ -229,7 +217,7 @@ class SessionContextNodeProvider:
                     else f"{_CURRENT_MESSAGES_RANGE_REVISION}.inspect"
                 ),
                 display_order=10,
-                metadata={"message_count": len(active_messages)},
+                metadata={"item_count": len(active_messages)},
             ),
         ]
         if evidence_items:
@@ -245,21 +233,78 @@ class SessionContextNodeProvider:
         )
         return tuple(seeds)
 
+    def _active_transcript_items_or_messages(
+        self,
+        session_key: str,
+    ) -> list[Any]:
+        return self._active_transcript_range_items_or_messages(
+            session_key,
+            after_sequence_no=None,
+            before_sequence_no=None,
+        )
+
+    def _active_transcript_range_items_or_messages(
+        self,
+        session_key: str,
+        *,
+        after_sequence_no: int | None,
+        before_sequence_no: int | None,
+    ) -> list[Any]:
+        list_items = getattr(self._session_service, "list_items", None)
+        if list_items is None:
+            return []
+        return list(
+            item
+            for item in list_items(
+                ListSessionItemsInput(
+                    session_key=session_key,
+                    active_session_only=True,
+                    model_visible=True,
+                    after_sequence_no=(
+                        after_sequence_no - 1
+                        if after_sequence_no is not None
+                        else None
+                    ),
+                    before_sequence_no=(
+                        before_sequence_no + 1
+                        if before_sequence_no is not None
+                        else None
+                    ),
+                ),
+            )
+            if not _is_archived_transcript_entry(item)
+        )
+
+    def _transcript_items_or_messages(
+        self,
+        session_key: str,
+        *,
+        active_session_only: bool,
+        after_sequence_no: int | None = None,
+        before_sequence_no: int | None = None,
+    ) -> list[Any]:
+        list_items = getattr(self._session_service, "list_items", None)
+        if list_items is None:
+            return []
+        return list(
+            list_items(
+                ListSessionItemsInput(
+                    session_key=session_key,
+                    active_session_only=active_session_only,
+                    model_visible=True,
+                    after_sequence_no=after_sequence_no,
+                    before_sequence_no=before_sequence_no,
+                ),
+            ),
+        )
+
     def _current_evidence_frontier_children(
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
         session_key = request.workspace.session_key
         try:
-            messages = tuple(
-                self._session_service.list_messages(
-                    ListSessionMessagesInput(
-                        session_key=session_key,
-                        active_session_only=True,
-                        include_archived=False,
-                    ),
-                ),
-            )
+            messages = tuple(self._active_transcript_items_or_messages(session_key))
         except SessionNotFoundError:
             return ()
         current_run_id = _optional_text(request.workspace.metadata.get("last_run_id"))
@@ -283,15 +328,7 @@ class SessionContextNodeProvider:
     ) -> tuple[ContextNodeSeed, ...]:
         session_key = request.workspace.session_key
         try:
-            messages = tuple(
-                self._session_service.list_messages(
-                    ListSessionMessagesInput(
-                        session_key=session_key,
-                        active_session_only=True,
-                        include_archived=False,
-                    ),
-                ),
-            )
+            messages = tuple(self._active_transcript_items_or_messages(session_key))
         except SessionNotFoundError:
             return ()
         current_run_id = _optional_text(request.workspace.metadata.get("last_run_id"))
@@ -313,7 +350,7 @@ class SessionContextNodeProvider:
             for index, item in enumerate(evidence_items)
         )
 
-    def _current_message_children(
+    def _current_item_children(
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
@@ -322,18 +359,10 @@ class SessionContextNodeProvider:
         after_sequence_no = _optional_int(owner_ref.get("from_sequence_no"))
         before_sequence_no = _optional_int(owner_ref.get("to_sequence_no"))
         try:
-            messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
-                    session_key=session_key,
-                    active_session_only=True,
-                    include_archived=False,
-                    after_sequence_no=(
-                        after_sequence_no - 1 if after_sequence_no is not None else None
-                    ),
-                    before_sequence_no=(
-                        before_sequence_no + 1 if before_sequence_no is not None else None
-                    ),
-                ),
+            messages = self._active_transcript_range_items_or_messages(
+                session_key,
+                after_sequence_no=after_sequence_no,
+                before_sequence_no=before_sequence_no,
             )
         except SessionNotFoundError:
             return ()
@@ -379,14 +408,11 @@ class SessionContextNodeProvider:
         if session_id is None or from_sequence_no is None or to_sequence_no is None:
             return ()
         try:
-            messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
-                    session_key=session_key,
-                    active_session_only=True,
-                    include_archived=False,
-                    after_sequence_no=from_sequence_no - 1,
-                    before_sequence_no=to_sequence_no + 1,
-                ),
+            messages = self._transcript_items_or_messages(
+                session_key,
+                active_session_only=True,
+                after_sequence_no=from_sequence_no - 1,
+                before_sequence_no=to_sequence_no + 1,
             )
         except SessionNotFoundError:
             return ()
@@ -433,12 +459,9 @@ class SessionContextNodeProvider:
         if session_id is None:
             return ()
         try:
-            messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
-                    session_key=session_key,
-                    active_session_only=False,
-                    include_archived=True,
-                ),
+            messages = self._transcript_items_or_messages(
+                session_key,
+                active_session_only=False,
             )
         except SessionNotFoundError:
             return ()
@@ -467,7 +490,7 @@ class SessionContextNodeProvider:
             display_order += 10
         omitted_chunks = chunks[self._historical_range_limit :]
         if omitted_chunks:
-            omitted_message_count = sum(len(chunk) for chunk in omitted_chunks)
+            omitted_item_count = sum(len(chunk) for chunk in omitted_chunks)
             ranges.append(
                 _range_notice_seed(
                     node_id=f"session.segment.ranges.more.{_node_part(session_id)}",
@@ -475,7 +498,7 @@ class SessionContextNodeProvider:
                     title="More Message Ranges",
                     summary=(
                         f"{len(omitted_chunks)} more range pages with "
-                        f"{omitted_message_count} messages are hidden by the "
+                        f"{omitted_item_count} messages are hidden by the "
                         "session range page limit."
                     ),
                     display_order=display_order,
@@ -485,14 +508,14 @@ class SessionContextNodeProvider:
                         "segment_kind": owner_ref.get("segment_kind"),
                         "message_visibility": message_visibility,
                         "omitted_range_count": len(omitted_chunks),
-                        "omitted_message_count": omitted_message_count,
+                        "omitted_item_count": omitted_item_count,
                         "range_page_limit": self._historical_range_limit,
                     },
                 ),
             )
         return tuple(ranges)
 
-    def _segment_range_message_children(
+    def _segment_range_item_children(
         self,
         request: ContextChildrenRequest,
     ) -> tuple[ContextNodeSeed, ...]:
@@ -505,14 +528,11 @@ class SessionContextNodeProvider:
         if session_id is None or from_sequence_no is None or to_sequence_no is None:
             return ()
         try:
-            messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
-                    session_key=session_key,
-                    active_session_only=False,
-                    include_archived=True,
-                    after_sequence_no=from_sequence_no - 1,
-                    before_sequence_no=to_sequence_no + 1,
-                ),
+            messages = self._transcript_items_or_messages(
+                session_key,
+                active_session_only=False,
+                after_sequence_no=from_sequence_no - 1,
+                before_sequence_no=to_sequence_no + 1,
             )
         except SessionNotFoundError:
             return ()
@@ -525,7 +545,7 @@ class SessionContextNodeProvider:
                 message_visibility=message_visibility,
             )
         )
-        range_estimate = _messages_estimate(
+        range_estimate = _items_estimate(
             range_messages,
             current_run_id=_optional_text(request.workspace.metadata.get("last_run_id")),
         )
@@ -558,7 +578,7 @@ class SessionContextNodeProvider:
                         "range_budget_soft_limit": self._range_token_soft_limit,
                         "estimated_expanded_text_tokens": range_estimate.text_tokens,
                         "estimated_expanded_text_chars": range_estimate.text_chars,
-                        "message_count": len(range_messages),
+                        "item_count": len(range_messages),
                         "segment_kind": owner_ref.get("segment_kind"),
                         "message_visibility": message_visibility,
                     },
@@ -674,8 +694,8 @@ def _evidence_item_seed(
             "superseded": bool(item.get("superseded")),
             "hypothesis": bool(item.get("hypothesis")),
             "unresolved": bool(item.get("unresolved")),
-            "call_message_id": _optional_text(item.get("call_message_id")) or "",
-            "result_message_id": _optional_text(item.get("result_message_id")) or "",
+            "call_session_item_id": _optional_text(item.get("call_session_item_id")) or "",
+            "result_session_item_id": _optional_text(item.get("result_session_item_id")) or "",
             "call_sequence_no": item.get("call_sequence_no") or 0,
             "result_sequence_no": item.get("result_sequence_no") or 0,
         },
@@ -759,7 +779,7 @@ def _browser_investigation_warning_types(
 
 
 def _evidence_items_for_current_run(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     *,
     current_run_id: str | None,
     tool_lifecycle_facts: dict[str, dict[str, object]] | None = None,
@@ -805,7 +825,7 @@ def _evidence_items_for_current_run(
 
 
 def _browser_tool_records_for_current_run(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     *,
     current_run_id: str | None,
 ) -> tuple[dict[str, object], ...]:
@@ -1110,8 +1130,8 @@ def _signature_from_arguments(
 
 def _tool_result_evidence_item(
     *,
-    result_message: SessionMessage,
-    call_message: SessionMessage | None,
+    result_message: SessionItem,
+    call_message: SessionItem | None,
     lifecycle_facts: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     tool_call_id = _tool_call_id(result_message) or (
@@ -1155,7 +1175,7 @@ def _tool_result_evidence_item(
         session_key=result_message.session_key,
         tool_run_id=_optional_text(payload.get("tool_run_id")) or "",
         tool_name=tool_name,
-        result_message_id=result_message.id,
+        result_session_item_id=result_message.id,
         result_sequence_no=result_message.sequence_no,
         facts=facts,
     )
@@ -1171,8 +1191,8 @@ def _tool_result_evidence_item(
         **evidence_flags,
         "summary": summary,
         "facts": facts,
-        "call_message_id": call_message.id if call_message is not None else "",
-        "result_message_id": result_message.id,
+        "call_session_item_id": call_message.id if call_message is not None else "",
+        "result_session_item_id": result_message.id,
         "call_sequence_no": (
             call_message.sequence_no if call_message is not None else 0
         ),
@@ -1346,7 +1366,7 @@ def _evidence_read_hints(
     session_key: str,
     tool_run_id: str,
     tool_name: str,
-    result_message_id: str,
+    result_session_item_id: str,
     result_sequence_no: int,
     facts: dict[str, object],
 ) -> tuple[dict[str, object], ...]:
@@ -1361,15 +1381,15 @@ def _evidence_read_hints(
                 "cli": f"python -m crxzipple.main tool get-run {tool_run_id}",
             },
         )
-    if session_key and result_message_id:
+    if session_key and result_session_item_id:
         before_sequence_no = max(result_sequence_no - 1, 1)
         hints.append(
             {
                 "owner": "session",
-                "label": "Read raw session result message",
-                "ref": result_message_id,
+                "label": "Read raw session result item",
+                "ref": result_session_item_id,
                 "http": (
-                    f"/sessions/{session_key}/messages"
+                    f"/sessions/{session_key}/items"
                     f"?after_sequence_no={before_sequence_no - 1}"
                     f"&before_sequence_no={result_sequence_no + 1}"
                 ),
@@ -1459,7 +1479,7 @@ def _tool_interaction_verified(
     *,
     tool_name: str,
     status: str,
-    result_message: SessionMessage,
+    result_message: SessionItem,
 ) -> bool:
     if _is_failed_tool_status(status):
         return False
@@ -1481,7 +1501,7 @@ def _tool_interaction_verified(
 
 
 def _tool_interaction_superseded(
-    result_message: SessionMessage,
+    result_message: SessionItem,
     lifecycle_facts: dict[str, object] | None = None,
 ) -> bool:
     for source in _tool_interaction_fact_sources(
@@ -1497,7 +1517,7 @@ def _tool_interaction_superseded(
 
 
 def _tool_interaction_superseded_by_tool_call_id(
-    result_message: SessionMessage,
+    result_message: SessionItem,
     lifecycle_facts: dict[str, object] | None = None,
 ) -> str | None:
     for source in _tool_interaction_fact_sources(
@@ -1520,7 +1540,7 @@ def _evidence_lifecycle_status(
     evidence_type: str,
     status: str,
     facts: dict[str, object],
-    result_message: SessionMessage,
+    result_message: SessionItem,
     lifecycle_facts: dict[str, object] | None = None,
 ) -> str:
     explicit = _explicit_evidence_lifecycle_status(
@@ -1552,7 +1572,7 @@ def _evidence_lifecycle_status(
 
 
 def _explicit_evidence_lifecycle_status(
-    result_message: SessionMessage,
+    result_message: SessionItem,
     lifecycle_facts: dict[str, object] | None = None,
 ) -> str | None:
     for source in _tool_interaction_fact_sources(
@@ -1629,7 +1649,7 @@ def _evidence_lifecycle_flags(lifecycle_status: str) -> dict[str, object]:
 
 
 def _tool_interaction_fact_sources(
-    result_message: SessionMessage,
+    result_message: SessionItem,
     lifecycle_facts: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], ...]:
     sources: list[dict[str, object]] = []
@@ -1722,8 +1742,8 @@ def _evidence_item_content(item: dict[str, object]) -> str:
     for key in (
         "tool_call_id",
         "tool_run_id",
-        "call_message_id",
-        "result_message_id",
+        "call_session_item_id",
+        "result_session_item_id",
         "call_sequence_no",
         "result_sequence_no",
     ):
@@ -1779,13 +1799,13 @@ def _scalar_text(value: object) -> str | None:
 def _current_segment_seed(
     *,
     instance: SessionInstance,
-    message_count: int,
+    item_count: int,
     parent_id: str,
     display_order: int,
 ) -> ContextNodeSeed:
     summary = (
         f"Active {instance.kind.value} segment #{instance.sequence_no} has "
-        f"{message_count} visible messages."
+        f"{item_count} visible items."
     )
     return ContextNodeSeed(
         node_id="session.segment.current",
@@ -1802,7 +1822,7 @@ def _current_segment_seed(
             "sequence_no": instance.sequence_no,
             "status": instance.status,
             "segment_kind": "current",
-            "message_count": message_count,
+            "item_count": item_count,
         },
         estimate=_text_estimate(summary),
         display_order=display_order,
@@ -1813,7 +1833,7 @@ def _current_segment_seed(
                 if instance.closed_at is not None
                 else None
             ),
-            "message_count": message_count,
+            "item_count": item_count,
         },
     )
 
@@ -1821,7 +1841,7 @@ def _current_segment_seed(
 def _historical_segment_seed(
     *,
     instance: SessionInstance,
-    messages: tuple[SessionMessage, ...] | None,
+    messages: tuple[SessionItem, ...] | None,
     parent_id: str,
     segment_kind: str,
     message_visibility: str,
@@ -1829,17 +1849,17 @@ def _historical_segment_seed(
     display_order: int,
 ) -> ContextNodeSeed:
     summary_text = _segment_summary_text(instance.metadata) or fallback_summary
-    message_count = len(messages) if messages is not None else None
+    item_count = len(messages) if messages is not None else None
     archived_count = sum(
         1
         for message in messages or ()
-        if message.visibility is SessionMessageVisibility.ARCHIVED
+        if _is_archived_transcript_entry(message)
     )
     fallback = f"{segment_kind.title()} segment #{instance.sequence_no} is available."
-    if message_count is not None:
+    if item_count is not None:
         fallback = (
             f"{segment_kind.title()} segment #{instance.sequence_no} has "
-            f"{message_count} messages."
+            f"{item_count} messages."
         )
     if archived_count > 0:
         fallback = (
@@ -1869,9 +1889,9 @@ def _historical_segment_seed(
         "message_visibility": message_visibility,
         "has_summary": bool(summary_text),
     }
-    if message_count is not None:
-        owner_ref["message_count"] = message_count
-        metadata["message_count"] = message_count
+    if item_count is not None:
+        owner_ref["item_count"] = item_count
+        metadata["item_count"] = item_count
     return ContextNodeSeed(
         node_id=f"session.segment.{segment_kind}.{_node_part(instance.id)}",
         parent_id=parent_id,
@@ -1894,7 +1914,7 @@ def _segment_message_range_seed(
     parent_id: str,
     session_key: str,
     session_id: str,
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     segment_kind: object,
     message_visibility: str,
     range_token_soft_limit: int,
@@ -1902,10 +1922,10 @@ def _segment_message_range_seed(
 ) -> ContextNodeSeed:
     first_sequence_no = messages[0].sequence_no
     last_sequence_no = messages[-1].sequence_no
-    estimate = _messages_estimate(messages, current_run_id=None)
+    estimate = _items_estimate(messages, current_run_id=None)
     budget_status = _range_budget_status(
         estimate=estimate,
-        message_count=len(messages),
+        item_count=len(messages),
         soft_limit=range_token_soft_limit,
     )
     summary = (
@@ -1918,12 +1938,12 @@ def _segment_message_range_seed(
         summary = f"{summary} Expanding this range is blocked by the session budget."
     return ContextNodeSeed(
         node_id=(
-            f"session.segment.messages.{_node_part(session_id)}."
+            f"session.segment.items.{_node_part(session_id)}."
             f"{first_sequence_no}.{last_sequence_no}"
         ),
         parent_id=parent_id,
         owner="session",
-        kind="session_message_range",
+        kind="session_item_range",
         title=f"Messages {first_sequence_no}-{last_sequence_no}",
         summary=summary,
         actions=_BASIC_ACTIONS,
@@ -1932,20 +1952,20 @@ def _segment_message_range_seed(
             "session_id": session_id,
             "from_sequence_no": first_sequence_no,
             "to_sequence_no": last_sequence_no,
-            "message_count": len(messages),
+            "item_count": len(messages),
             "segment_kind": segment_kind,
             "message_visibility": message_visibility,
         },
         estimate=ContextEstimate(text_chars=80, text_tokens=20),
         display_order=display_order,
         metadata={
-            "message_count": len(messages),
+            "item_count": len(messages),
             "segment_kind": segment_kind,
             "message_visibility": message_visibility,
             "archived_count": sum(
                 1
                 for message in messages
-                if message.visibility is SessionMessageVisibility.ARCHIVED
+                if _is_archived_transcript_entry(message)
             ),
             "range_budget_status": budget_status,
             "range_reason_code": _range_reason_code(budget_status),
@@ -1961,7 +1981,7 @@ def _split_segment_message_range_seeds(
     parent_id: str,
     session_key: str,
     session_id: str,
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     segment_kind: object,
     message_visibility: str,
     range_token_soft_limit: int,
@@ -2014,12 +2034,12 @@ def _range_notice_seed(
 def _range_budget_status(
     *,
     estimate: ContextEstimate,
-    message_count: int,
+    item_count: int,
     soft_limit: int,
 ) -> str:
     if estimate.text_tokens <= soft_limit:
         return "ok"
-    if message_count > 1:
+    if item_count > 1:
         return "split_required"
     return "blocked"
 
@@ -2033,7 +2053,7 @@ def _range_reason_code(budget_status: str) -> str:
 
 
 def _message_node_seeds(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     *,
     parent_id: str,
     current_run_id: str | None = None,
@@ -2245,7 +2265,7 @@ def _count_label(counts: dict[str, int], *, limit: int = 4) -> str:
 
 
 def _message_node_seed(
-    message: SessionMessage,
+    message: SessionItem,
     *,
     parent_id: str,
     current_run_id: str | None = None,
@@ -2261,10 +2281,10 @@ def _message_node_seed(
     )
     content = "" if current_inbound else _message_prompt_content(message)
     return ContextNodeSeed(
-        node_id=f"session.message.{message.session_id}.{message.sequence_no}",
+        node_id=f"session.item.{message.session_id}.{message.sequence_no}",
         parent_id=parent_id,
         owner="session",
-        kind="session_message",
+        kind="session_item",
         title=f"{message.sequence_no}. {message.role}",
         summary=preview,
         content=content,
@@ -2273,11 +2293,14 @@ def _message_node_seed(
         owner_ref={
             "session_key": message.session_key,
             "session_id": message.session_id,
-            "message_id": message.id,
+            "session_item_id": message.id,
             "sequence_no": message.sequence_no,
             "role": message.role,
-            "kind": message.kind.value,
-            "visibility": message.visibility.value,
+            "kind": _kind_label(message),
+            "visibility": _visibility_label(message),
+            "source_module": getattr(message, "source_module", "") or "",
+            "source_kind": message.source_kind or "",
+            "source_id": message.source_id or "",
         },
         estimate=_message_estimate(message, content),
         display_order=message.sequence_no,
@@ -2286,9 +2309,9 @@ def _message_node_seed(
             "source_kind": message.source_kind,
             "source_id": message.source_id,
             "role": message.role,
-            "kind": message.kind.value,
+            "kind": _kind_label(message),
             "sequence_no": message.sequence_no,
-            "visibility": message.visibility.value,
+            "visibility": _visibility_label(message),
             "current_inbound": current_inbound,
             "content_block_types": _content_block_types(message),
             "content_digest": hashlib.sha256(content.encode("utf-8")).hexdigest(),
@@ -2298,8 +2321,8 @@ def _message_node_seed(
 
 def _tool_interaction_node_seed(
     *,
-    call_message: SessionMessage,
-    result_message: SessionMessage,
+    call_message: SessionItem,
+    result_message: SessionItem,
     parent_id: str,
     frontier: bool = False,
     consumed_through_sequence_no: int | None = None,
@@ -2402,12 +2425,12 @@ def _tool_interaction_node_seed(
             "verified": verified,
             "superseded": superseded,
             "superseded_by_tool_call_id": superseded_by_tool_call_id or "",
-            "call_message_id": call_message.id,
-            "result_message_id": result_message.id,
+            "call_session_item_id": call_message.id,
+            "result_session_item_id": result_message.id,
             "call_sequence_no": call_message.sequence_no,
             "result_sequence_no": result_message.sequence_no,
             "consumed_through_sequence_no": consumed_through_sequence_no,
-            "visibility": result_message.visibility.value,
+            "visibility": _visibility_label(result_message),
         },
         estimate=_text_estimate(content if not collapsed_by_default else summary),
         revision=_TOOL_INTERACTION_NODE_REVISION,
@@ -2419,6 +2442,9 @@ def _tool_interaction_node_seed(
             "status": status,
             "arguments_json": arguments_json,
             "result_content": result_content,
+            "artifact_content_candidates": (
+                _tool_result_artifact_content_candidates(result_message)
+            ),
             "tool_result_envelope": result_envelope,
             "tool_result_browser_evidence": result_browser_evidence,
             "error_json": error_json,
@@ -2494,8 +2520,8 @@ def _short_digest(value: str) -> str | None:
 
 def _is_tool_interaction_frontier(
     *,
-    call_message: SessionMessage,
-    result_message: SessionMessage,
+    call_message: SessionItem,
+    result_message: SessionItem,
     current_inbound_sequence_no: int | None,
     consumed_through_sequence_no: int | None,
     fallback_frontier_tool_call_ids: frozenset[str] = frozenset(),
@@ -2511,10 +2537,10 @@ def _is_tool_interaction_frontier(
 
 
 def _fallback_frontier_tool_call_ids(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     *,
     current_inbound_sequence_no: int | None,
-    tool_results_by_call_id: dict[str, SessionMessage],
+    tool_results_by_call_id: dict[str, SessionItem],
 ) -> frozenset[str]:
     if current_inbound_sequence_no is None:
         return frozenset()
@@ -2551,14 +2577,14 @@ def _fallback_frontier_tool_call_ids(
     return frozenset({latest_call_id})
 
 
-def _message_preview(message: SessionMessage) -> str:
+def _message_preview(message: SessionItem) -> str:
     if message.role == "tool":
         return _tool_result_message_preview(message)
     text = describe_content_for_text_fallback(message.content_payload)
     return _truncate(text.replace("\n", " "), 320)
 
 
-def _tool_result_message_preview(message: SessionMessage) -> str:
+def _tool_result_message_preview(message: SessionItem) -> str:
     payload = message.content_payload
     tool_name = _optional_text(message.metadata.get("tool_name")) or _optional_text(
         payload.get("tool_name"),
@@ -2582,7 +2608,7 @@ def _tool_result_message_preview(message: SessionMessage) -> str:
 
 
 def _current_inbound_sequence_no(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     *,
     current_run_id: str | None,
 ) -> int | None:
@@ -2596,7 +2622,7 @@ def _current_inbound_sequence_no(
     return min(sequences) if sequences else None
 
 
-def _message_prompt_content(message: SessionMessage) -> str:
+def _message_prompt_content(message: SessionItem) -> str:
     if (
         message.role == "assistant"
         and message.content_payload.get("type") == "function_call"
@@ -2607,7 +2633,7 @@ def _message_prompt_content(message: SessionMessage) -> str:
     return _blocks_prompt_content(content_blocks_from_payload(message.content_payload))
 
 
-def _function_call_prompt_content(message: SessionMessage) -> str:
+def _function_call_prompt_content(message: SessionItem) -> str:
     payload = message.content_payload
     tool_call_id = _optional_text(message.metadata.get("tool_call_id")) or _optional_text(
         payload.get("call_id"),
@@ -2626,7 +2652,7 @@ def _function_call_prompt_content(message: SessionMessage) -> str:
     return "\n".join(lines)
 
 
-def _tool_result_prompt_content(message: SessionMessage) -> str:
+def _tool_result_prompt_content(message: SessionItem) -> str:
     payload = message.content_payload
     tool_call_id = _optional_text(message.metadata.get("tool_call_id")) or _optional_text(
         payload.get("tool_call_id"),
@@ -2678,14 +2704,14 @@ def _tool_interaction_prompt_content(
     return "\n".join(lines)
 
 
-def _is_function_call_message(message: SessionMessage) -> bool:
-    return (
-        message.role == "assistant"
-        and message.content_payload.get("type") == "function_call"
+def _is_function_call_message(message: SessionItem) -> bool:
+    return message.role == "assistant" and (
+        message.kind is SessionItemKind.TOOL_CALL
+        or message.content_payload.get("type") == "function_call"
     )
 
 
-def _tool_call_id(message: SessionMessage) -> str | None:
+def _tool_call_id(message: SessionItem) -> str | None:
     return (
         _optional_text(message.metadata.get("tool_call_id"))
         or _optional_text(message.content_payload.get("call_id"))
@@ -2693,7 +2719,7 @@ def _tool_call_id(message: SessionMessage) -> str | None:
     )
 
 
-def _tool_name(message: SessionMessage) -> str | None:
+def _tool_name(message: SessionItem) -> str | None:
     return (
         _optional_text(message.metadata.get("tool_name"))
         or _optional_text(message.content_payload.get("name"))
@@ -2701,18 +2727,18 @@ def _tool_name(message: SessionMessage) -> str | None:
     )
 
 
-def _tool_result_status(message: SessionMessage) -> str | None:
+def _tool_result_status(message: SessionItem) -> str | None:
     return _optional_text(message.content_payload.get("status"))
 
 
-def _tool_result_content(message: SessionMessage) -> str:
+def _tool_result_content(message: SessionItem) -> str:
     compact_content = _large_tool_result_ref_content(message)
     if compact_content is not None:
         return compact_content
     return _blocks_prompt_content(content_blocks_from_payload(message.content_payload))
 
 
-def _tool_result_envelope_metadata(message: SessionMessage) -> dict[str, object] | None:
+def _tool_result_envelope_metadata(message: SessionItem) -> dict[str, object] | None:
     metadata = message.content_payload.get("metadata")
     if not isinstance(metadata, dict):
         return None
@@ -2723,7 +2749,7 @@ def _tool_result_envelope_metadata(message: SessionMessage) -> dict[str, object]
 
 
 def _tool_result_browser_evidence_metadata(
-    message: SessionMessage,
+    message: SessionItem,
 ) -> dict[str, object] | None:
     metadata = message.content_payload.get("metadata")
     if not isinstance(metadata, dict):
@@ -2734,7 +2760,7 @@ def _tool_result_browser_evidence_metadata(
     return dict(evidence)
 
 
-def _large_tool_result_ref_content(message: SessionMessage) -> str | None:
+def _large_tool_result_ref_content(message: SessionItem) -> str | None:
     payload = message.content_payload
     details = payload.get("details")
     metadata = payload.get("metadata")
@@ -2854,6 +2880,37 @@ def _metadata_artifact_ids(metadata: dict[str, object]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in values if item is not None))
 
 
+def _tool_result_artifact_content_candidates(
+    message: SessionItem,
+) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for index, block in enumerate(content_blocks_from_payload(message.content_payload)):
+        artifact_id = _optional_text(block.get("artifact_id"))
+        mime_type = _optional_text(block.get("mime_type"))
+        if artifact_id is None or mime_type is None:
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {IMAGE_BLOCK_TYPE, IMAGE_REF_BLOCK_TYPE}:
+            kind = "artifact_image"
+        elif block_type in {FILE_BLOCK_TYPE, FILE_REF_BLOCK_TYPE}:
+            kind = "artifact_file"
+        elif mime_type.lower().startswith("image/"):
+            kind = "artifact_image"
+        else:
+            kind = "artifact_file"
+        candidate: dict[str, object] = {
+            "node_id": f"{message.id}.artifact.{index}",
+            "artifact_id": artifact_id,
+            "kind": kind,
+            "mime_type": mime_type,
+        }
+        name = _optional_text(block.get("name"))
+        if name is not None:
+            candidate["name"] = name
+        candidates.append(candidate)
+    return candidates
+
+
 def _envelope_text_list(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -2870,7 +2927,7 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
-def _tool_result_error_json(message: SessionMessage) -> str | None:
+def _tool_result_error_json(message: SessionItem) -> str | None:
     error = message.content_payload.get("error")
     if error is None:
         return None
@@ -2912,7 +2969,7 @@ def _attachment_prompt_line(label: str, block: dict[str, object]) -> str:
     return f"[{label}]"
 
 
-def _content_block_types(message: SessionMessage) -> list[str]:
+def _content_block_types(message: SessionItem) -> list[str]:
     return [
         str(block.get("type") or "").strip()
         for block in content_blocks_from_payload(message.content_payload)
@@ -2920,7 +2977,35 @@ def _content_block_types(message: SessionMessage) -> list[str]:
     ]
 
 
-def _message_estimate(message: SessionMessage, content: str) -> ContextEstimate:
+def _kind_label(message: Any) -> str:
+    value = getattr(message, "kind", "")
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        if enum_value in {"user_message", "assistant_message", "tool_call"}:
+            return "message"
+        return str(enum_value)
+    return str(value)
+
+
+def _visibility_label(message: Any) -> str:
+    if _is_archived_transcript_entry(message):
+        return "archived"
+    visibility = getattr(message, "visibility", "")
+    enum_value = getattr(visibility, "value", None)
+    if enum_value is not None:
+        return str(enum_value)
+    to_payload = getattr(visibility, "to_payload", None)
+    if callable(to_payload):
+        payload = to_payload()
+        if payload.get("model_visible") is True:
+            return "default"
+        if payload.get("trace_visible") is True:
+            return "internal"
+        return "internal"
+    return str(visibility)
+
+
+def _message_estimate(message: SessionItem, content: str) -> ContextEstimate:
     base = _text_estimate(content or _message_preview(message))
     block_types = set(_content_block_types(message))
     return ContextEstimate(
@@ -2935,8 +3020,8 @@ def _json_fragment(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _messages_estimate(
-    messages: tuple[SessionMessage, ...],
+def _items_estimate(
+    messages: tuple[SessionItem, ...],
     *,
     current_run_id: str | None = None,
 ) -> ContextEstimate:
@@ -2952,7 +3037,7 @@ def _messages_estimate(
 
 
 def _is_current_inbound_message(
-    message: SessionMessage,
+    message: SessionItem,
     *,
     current_run_id: str | None,
 ) -> bool:
@@ -3038,7 +3123,7 @@ def _explicit_tool_lifecycle_fact_payload(
             "replacement_tool_call_id",
             "supersedes_tool_call_id",
             "supersedes_tool_run_id",
-            "supersedes_result_message_id",
+            "supersedes_result_session_item_id",
             "lifecycle_status",
             "evidence_lifecycle_status",
             "evidence_lifecycle",
@@ -3065,7 +3150,7 @@ def _tool_lifecycle_fact_refs(
 ) -> tuple[str, ...]:
     refs: list[str] = []
     for source in (summary, facts):
-        for key in ("tool_call_id", "result_message_id", "tool_run_id"):
+        for key in ("tool_call_id", "result_session_item_id", "tool_run_id"):
             value = _optional_text(source.get(key))
             if value is not None:
                 refs.append(value)
@@ -3079,7 +3164,7 @@ def _tool_lifecycle_superseded_target_refs(
     for key in (
         "supersedes_tool_call_id",
         "supersedes_tool_run_id",
-        "supersedes_result_message_id",
+        "supersedes_result_session_item_id",
     ):
         value = _optional_text(facts.get(key))
         if value is not None:
@@ -3107,7 +3192,7 @@ def _replacement_tool_lifecycle_fact_payload(
 
 
 def _tool_lifecycle_facts_for_result(
-    result_message: SessionMessage,
+    result_message: SessionItem,
     facts_by_ref: dict[str, dict[str, object]],
 ) -> dict[str, object] | None:
     if not facts_by_ref:
@@ -3190,11 +3275,11 @@ def _truthy(value: object) -> bool:
 
 
 def _segment_messages(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     *,
     session_id: str,
     message_visibility: str,
-) -> tuple[SessionMessage, ...]:
+) -> tuple[SessionItem, ...]:
     return tuple(
         message
         for message in messages
@@ -3207,13 +3292,23 @@ def _segment_messages(
 
 
 def _matches_message_visibility(
-    message: SessionMessage,
+    message: Any,
     *,
     message_visibility: str,
 ) -> bool:
     if message_visibility == "archived":
-        return message.visibility is SessionMessageVisibility.ARCHIVED
+        return _is_archived_transcript_entry(message)
     return True
+
+
+def _is_archived_transcript_entry(message: Any) -> bool:
+    metadata = getattr(message, "metadata", None)
+    if not isinstance(metadata, dict):
+        return False
+    return (
+        metadata.get("archived_reason") is not None
+        or metadata.get("compacted_segment_id") is not None
+    )
 
 
 def _is_historical_segment_node_id(node_id: str) -> bool:
@@ -3244,9 +3339,9 @@ def _segment_summary_text(metadata: dict[str, object]) -> str | None:
 
 
 def _chunks(
-    messages: tuple[SessionMessage, ...],
+    messages: tuple[SessionItem, ...],
     size: int,
-) -> tuple[tuple[SessionMessage, ...], ...]:
+) -> tuple[tuple[SessionItem, ...], ...]:
     chunk_size = max(int(size), 1)
     return tuple(
         messages[index : index + chunk_size]

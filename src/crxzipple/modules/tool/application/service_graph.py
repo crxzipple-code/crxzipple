@@ -12,6 +12,7 @@ from crxzipple.modules.tool.application.runtime_pool_service import (
 )
 from crxzipple.modules.tool.application.service_support import ToolServiceDependencies
 from crxzipple.modules.tool.application.services import ToolApplicationService
+from crxzipple.modules.tool.application.surface import ToolSurfaceQueryService
 from crxzipple.modules.tool.application.submission_service import ToolSubmissionService
 from crxzipple.modules.tool.application.worker_service import ToolWorkerService
 
@@ -24,6 +25,7 @@ class ToolServiceGraph:
     worker_service: ToolWorkerService
     submission_service: ToolSubmissionService
     runtime_pool_service: ToolRuntimePoolService
+    surface_query_service: ToolSurfaceQueryService
     application_service: ToolApplicationService
 
 
@@ -49,11 +51,16 @@ def build_tool_service_graph(deps: ToolServiceDependencies) -> ToolServiceGraph:
         worker_service=worker_service,
     )
     runtime_pool_service = ToolRuntimePoolService(deps)
+    surface_query_service = ToolSurfaceQueryService(
+        deps,
+        runtime_pool_service=runtime_pool_service,
+    )
     application_service = ToolApplicationService(
         catalog_service=catalog_service,
         worker_service=worker_service,
         submission_service=submission_service,
         runtime_pool_service=runtime_pool_service,
+        surface_query_service=surface_query_service,
     )
     return ToolServiceGraph(
         deps=deps,
@@ -62,5 +69,6 @@ def build_tool_service_graph(deps: ToolServiceDependencies) -> ToolServiceGraph:
         worker_service=worker_service,
         submission_service=submission_service,
         runtime_pool_service=runtime_pool_service,
+        surface_query_service=surface_query_service,
         application_service=application_service,
     )

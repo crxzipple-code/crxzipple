@@ -60,7 +60,7 @@ class WorkbenchAgentQueryPort(Protocol):
 
 
 class WorkbenchSessionQueryPort(Protocol):
-    def get_message(self, message_id: str) -> Any:
+    def get_item(self, item_id: str) -> Any:
         ...
 
 
@@ -252,8 +252,25 @@ class WorkbenchRunView:
     current_turn_id: str | None
     status_strip: RunStatusStrip | None
     cover_artifact: ArtifactPreview | None
+    timeline: tuple[WorkbenchTimelineItem, ...]
     actions: tuple[WorkbenchAction, ...]
     inspector: WorkbenchInspectorView
+    trace: TraceContext
+
+
+@dataclass(frozen=True, slots=True)
+class WorkbenchTimelineItem:
+    id: str
+    turn_id: str
+    run_id: str
+    kind: str
+    status: str
+    title: str
+    content: dict[str, Any]
+    phase: str | None
+    source_refs: dict[str, str]
+    started_at: str | None
+    completed_at: str | None
     trace: TraceContext
 
 
@@ -381,14 +398,6 @@ class WorkbenchReadModelProvider:
         trace = _trace_for_run(run, turn_id=turn_id)
         agent_ref = _agent_ref(run, self.agent_query)
         model_ref = _llm_ref(run, self.llm_query, run_query=self.run_query)
-        metrics = _metrics_for_runs(
-            session_runs,
-            related_tool_runs=tuple(
-                display_tool_run.tool_run
-                for display_tool_run in session_display_tool_runs
-            ),
-            llm_invocations=llm_invocations,
-        )
         cover_artifact = _cover_artifact(
             tuple(
                 display_tool_run.tool_run
@@ -397,6 +406,38 @@ class WorkbenchReadModelProvider:
             artifact_query=self.artifact_query,
         )
         actions = _run_actions(run, trace=trace)
+        timeline_steps: list[TurnStepView] = []
+        for session_run in session_runs:
+            timeline_steps.extend(
+                self._list_step_views_for_run(
+                    session_run,
+                    candidate_runs=candidate_runs,
+                    tool_runs=tool_runs,
+                ),
+            )
+        timeline = _timeline_items_from_steps(
+            tuple(timeline_steps),
+            llm_invocations_by_id={
+                invocation_id: invocation
+                for invocation in llm_invocations
+                if (invocation_id := _optional_text(getattr(invocation, "id", None)))
+                is not None
+            },
+        )
+        timeline = _timeline_items_with_tool_lifecycle(
+            timeline,
+            run_query=self.run_query,
+            runs=session_runs,
+        )
+        metrics = _metrics_for_runs(
+            session_runs,
+            related_tool_runs=tuple(
+                display_tool_run.tool_run
+                for display_tool_run in session_display_tool_runs
+            ),
+            llm_invocations=llm_invocations,
+            timeline=timeline,
+        )
         inspector = _inspector_for_run(
             run,
             session_runs=session_runs,
@@ -408,6 +449,7 @@ class WorkbenchReadModelProvider:
             model_ref=model_ref,
             trace=trace,
             agent_query=self.agent_query,
+            timeline=timeline,
         )
         return WorkbenchRunView(
             run_id=run.id,
@@ -424,6 +466,7 @@ class WorkbenchReadModelProvider:
             current_turn_id=turn_id,
             status_strip=_status_strip(run),
             cover_artifact=cover_artifact,
+            timeline=timeline,
             actions=actions,
             inspector=inspector,
             trace=trace,
@@ -864,8 +907,13 @@ def _trace_for_run(
     step_id: str | None = None,
     tool_run_id: str | None = None,
     llm_invocation_id: str | None = None,
+    context_render_snapshot_id: str | None = None,
+    session_item_id: str | None = None,
     artifact_id: str | None = None,
     approval_request_id: str | None = None,
+    source_owner: str | None = None,
+    source_event_id: str | None = None,
+    source_event_name: str | None = None,
 ) -> TraceContext:
     trace_id = _metadata_str(run, "trace_id") or run.id
     return TraceContext(
@@ -878,8 +926,13 @@ def _trace_for_run(
         step_id=step_id,
         tool_run_id=tool_run_id,
         llm_invocation_id=llm_invocation_id,
+        context_render_snapshot_id=context_render_snapshot_id,
+        session_item_id=session_item_id,
         artifact_id=artifact_id,
         approval_request_id=approval_request_id,
+        source_owner=source_owner,
+        source_event_id=source_event_id,
+        source_event_name=source_event_name,
     )
 
 
@@ -902,9 +955,14 @@ def _step(
     approval: ApprovalRequestDetail | None = None,
     tool_run_id: str | None = None,
     llm_invocation_id: str | None = None,
+    context_render_snapshot_id: str | None = None,
+    session_item_id: str | None = None,
     artifact_id: str | None = None,
     approval_request_id: str | None = None,
     trace_step_id: str | None = None,
+    source_owner: str | None = None,
+    source_event_id: str | None = None,
+    source_event_name: str | None = None,
 ) -> TurnStepView:
     stable_step_id = f"{run.id}:{step_id}"
     trace = _trace_for_run(
@@ -913,8 +971,13 @@ def _step(
         step_id=trace_step_id or stable_step_id,
         tool_run_id=tool_run_id,
         llm_invocation_id=llm_invocation_id,
+        context_render_snapshot_id=context_render_snapshot_id,
+        session_item_id=session_item_id,
         artifact_id=artifact_id,
         approval_request_id=approval_request_id,
+        source_owner=source_owner,
+        source_event_id=source_event_id,
+        source_event_name=source_event_name,
     )
     resolved_linked_entities = _dedupe_linked_entities(
         (
@@ -949,6 +1012,784 @@ def _step(
         details_available=True,
         trace=trace,
     )
+
+
+def _timeline_items_from_steps(
+    steps: tuple[TurnStepView, ...],
+    *,
+    llm_invocations_by_id: dict[str, Any] | None = None,
+) -> tuple[WorkbenchTimelineItem, ...]:
+    invocations_by_id = llm_invocations_by_id or {}
+    items: list[WorkbenchTimelineItem] = []
+    for index, step in enumerate(steps):
+        llm_invocation_id = step.trace.llm_invocation_id
+        invocation = (
+            invocations_by_id.get(llm_invocation_id)
+            if llm_invocation_id is not None
+            else None
+        )
+        if step.type == "llm" and invocation is not None:
+            response_items = tuple(getattr(invocation, "response_items", ()) or ())
+            if response_items:
+                items.extend(
+                    _timeline_items_from_llm_response_items(
+                        step,
+                        response_items=response_items,
+                        base_index=index,
+                    ),
+                )
+                continue
+        if not _step_should_be_visible_in_timeline(step):
+            continue
+        items.append(_timeline_item_from_step(step, index=index))
+    return _deduplicate_timeline_items(tuple(items))
+
+
+def _step_should_be_visible_in_timeline(step: TurnStepView) -> bool:
+    if step.type != "continuation_decision":
+        return True
+    return _continuation_decision_is_actionable(step)
+
+
+def _continuation_decision_is_actionable(step: TurnStepView) -> bool:
+    if step.status not in {"success", "completed"}:
+        return True
+    summary = (step.summary or "").strip().lower()
+    if not summary:
+        return False
+    parts = [part.strip() for part in summary.split(";")]
+    reason = parts[0] if parts else ""
+    has_follow_up = "follow_up=true" in summary
+    continues_turn = "end_turn=false" in summary
+    if has_follow_up or continues_turn:
+        return True
+    return reason not in {"none", "unknown", ""}
+
+
+def _deduplicate_timeline_items(
+    items: tuple[WorkbenchTimelineItem, ...],
+) -> tuple[WorkbenchTimelineItem, ...]:
+    response_final_turns = {
+        item.turn_id
+        for item in items
+        if item.kind == "final_answer"
+        and item.source_refs.get("llm_response_item_id")
+    }
+    if not response_final_turns:
+        return items
+    return tuple(
+        item
+        for item in items
+        if not (
+            item.kind == "final_answer"
+            and item.turn_id in response_final_turns
+            and not item.source_refs.get("llm_response_item_id")
+        )
+    )
+
+
+def _timeline_items_with_tool_lifecycle(
+    timeline: tuple[WorkbenchTimelineItem, ...],
+    *,
+    run_query: OrchestrationRunQueryPort,
+    runs: tuple[OrchestrationRun, ...],
+) -> tuple[WorkbenchTimelineItem, ...]:
+    lifecycle_items: list[WorkbenchTimelineItem] = []
+    replaced_tool_run_item_ids: set[str] = set()
+    replaced_tool_run_ids: set[str] = set()
+    for run in runs:
+        turn_id = _turn_id(run)
+        for bundle in _execution_step_bundles(run_query, run.id):
+            if bundle.step.kind is not ExecutionStepKind.TOOL_BATCH:
+                continue
+            for item in bundle.items:
+                if item.kind not in {
+                    ExecutionStepItemKind.TOOL_CALL,
+                    ExecutionStepItemKind.TOOL_RUN,
+                    ExecutionStepItemKind.TOOL_RESULT,
+                }:
+                    continue
+                lifecycle_item = _timeline_item_from_tool_execution_item(
+                    run,
+                    turn_id=turn_id,
+                    bundle=bundle,
+                    item=item,
+                )
+                lifecycle_items.append(lifecycle_item)
+                if item.kind is ExecutionStepItemKind.TOOL_RUN:
+                    replaced_tool_run_item_ids.add(item.id)
+                    tool_run_id = lifecycle_item.source_refs.get("tool_run_id")
+                    if tool_run_id:
+                        replaced_tool_run_ids.add(tool_run_id)
+    if not lifecycle_items:
+        return _suppress_loop_control_timeline_items(timeline)
+    retained = tuple(
+        item
+        for item in timeline
+        if not (
+            item.kind == "tool_run"
+            and (
+                item.source_refs.get("execution_item_id") in replaced_tool_run_item_ids
+                or _timeline_ref(item, "tool_run_id") in replaced_tool_run_ids
+            )
+        )
+    )
+    merged = _merge_tool_interaction_timeline_items(
+        tuple(
+            sorted(
+                (*retained, *lifecycle_items),
+                key=_timeline_sort_key,
+            ),
+        ),
+    )
+    return _suppress_loop_control_timeline_items(merged)
+
+
+def _timeline_ref(item: WorkbenchTimelineItem, key: str) -> str | None:
+    if key == "tool_call_id":
+        return (
+            item.source_refs.get("tool_call_id")
+            or item.source_refs.get("call_id")
+            or getattr(item.trace, "tool_call_id", None)
+        )
+    return item.source_refs.get(key) or getattr(item.trace, key, None)
+
+
+def _suppress_loop_control_timeline_items(
+    items: tuple[WorkbenchTimelineItem, ...],
+) -> tuple[WorkbenchTimelineItem, ...]:
+    return tuple(
+        item
+        for item in items
+        if not _timeline_item_is_debug_only_continuation(item)
+    )
+
+
+def _timeline_item_is_debug_only_continuation(item: WorkbenchTimelineItem) -> bool:
+    if item.kind != "continuation":
+        return False
+    text = str(item.content.get("text") or item.content.get("summary") or "").strip()
+    if not text:
+        text = item.title.strip()
+    normalized = text.lower()
+    return normalized.startswith("none;") or normalized.startswith("tool_call;")
+
+
+def _merge_tool_interaction_timeline_items(
+    items: tuple[WorkbenchTimelineItem, ...],
+) -> tuple[WorkbenchTimelineItem, ...]:
+    groups: dict[str, list[WorkbenchTimelineItem]] = {}
+    ungrouped: list[WorkbenchTimelineItem] = []
+    for item in items:
+        tool_call_id = _timeline_ref(item, "tool_call_id")
+        if item.kind in {"tool_call", "tool_run", "tool_result"} and tool_call_id:
+            groups.setdefault(tool_call_id, []).append(item)
+        else:
+            ungrouped.append(item)
+
+    merged: list[WorkbenchTimelineItem] = []
+    for tool_call_id, group_items in groups.items():
+        if len(group_items) <= 1:
+            merged.extend(group_items)
+            continue
+        merged.append(
+            _merge_tool_interaction_group(
+                tool_call_id=tool_call_id,
+                items=tuple(sorted(group_items, key=_timeline_sort_key)),
+            ),
+        )
+    return tuple(
+        sorted(
+            (*ungrouped, *merged),
+            key=_timeline_sort_key,
+        ),
+    )
+
+
+def _merge_tool_interaction_group(
+    *,
+    tool_call_id: str,
+    items: tuple[WorkbenchTimelineItem, ...],
+) -> WorkbenchTimelineItem:
+    primary = _primary_tool_interaction_item(items)
+    source_refs = dict(primary.source_refs)
+    for item in items:
+        for key, value in item.source_refs.items():
+            source_refs.setdefault(key, value)
+    source_refs["tool_call_id"] = tool_call_id
+    tool_name = _tool_interaction_name(items)
+    lifecycle = tuple(_tool_interaction_lifecycle_entry(item) for item in items)
+    content = dict(primary.content)
+    content.update(
+        {
+            "tool_name": tool_name,
+            "text": _tool_interaction_text(items, tool_name=tool_name),
+            "lifecycle": list(lifecycle),
+            "lifecycle_item_count": len(lifecycle),
+        },
+    )
+    tool_execution_plan = _tool_interaction_plan(items)
+    if tool_execution_plan is not None:
+        content["tool_execution_plan"] = tool_execution_plan
+    return WorkbenchTimelineItem(
+        id=f"timeline:{primary.run_id}:tool-interaction:{tool_call_id}",
+        turn_id=primary.turn_id,
+        run_id=primary.run_id,
+        kind="tool_call",
+        status=_tool_interaction_status(items),
+        title=f"Tool Interaction: {tool_name}",
+        content=content,
+        phase=primary.phase,
+        source_refs=source_refs,
+        started_at=_first_timeline_timestamp(items),
+        completed_at=_last_timeline_timestamp(items),
+        trace=primary.trace,
+    )
+
+
+def _primary_tool_interaction_item(
+    items: tuple[WorkbenchTimelineItem, ...],
+) -> WorkbenchTimelineItem:
+    for item in items:
+        if item.kind == "tool_call" and item.source_refs.get("llm_response_item_id"):
+            return item
+    for item in items:
+        if item.kind == "tool_call":
+            return item
+    return items[0]
+
+
+def _tool_interaction_name(items: tuple[WorkbenchTimelineItem, ...]) -> str:
+    for item in items:
+        name = item.content.get("tool_name") or item.source_refs.get("tool_id")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return "tool"
+
+
+def _tool_interaction_plan(
+    items: tuple[WorkbenchTimelineItem, ...],
+) -> dict[str, Any] | None:
+    for item in items:
+        plan = item.content.get("tool_execution_plan")
+        if isinstance(plan, dict) and plan:
+            return dict(plan)
+    return None
+
+
+def _tool_interaction_status(items: tuple[WorkbenchTimelineItem, ...]) -> str:
+    statuses = {item.status for item in items}
+    if statuses & {"failed", "error", "cancelled"}:
+        return "failed"
+    if statuses & {"waiting", "running", "queued"}:
+        return "running"
+    if "success" in statuses or "completed" in statuses:
+        return "success"
+    return items[-1].status
+
+
+def _tool_interaction_text(
+    items: tuple[WorkbenchTimelineItem, ...],
+    *,
+    tool_name: str,
+) -> str:
+    status = _tool_interaction_status(items)
+    if status == "failed":
+        return f"Tool interaction failed: {tool_name}."
+    if status == "running":
+        return f"Tool interaction running: {tool_name}."
+    return f"Tool interaction completed: {tool_name}."
+
+
+def _tool_interaction_lifecycle_entry(
+    item: WorkbenchTimelineItem,
+) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "kind": item.kind,
+        "status": item.status,
+        "title": item.title,
+        "source_refs": dict(item.source_refs),
+        "started_at": item.started_at,
+        "completed_at": item.completed_at,
+        "content": dict(item.content),
+    }
+
+
+def _first_timeline_timestamp(items: tuple[WorkbenchTimelineItem, ...]) -> str | None:
+    for item in items:
+        if item.started_at:
+            return item.started_at
+    return None
+
+
+def _last_timeline_timestamp(items: tuple[WorkbenchTimelineItem, ...]) -> str | None:
+    for item in reversed(items):
+        if item.completed_at or item.started_at:
+            return item.completed_at or item.started_at
+    return None
+
+
+def _timeline_item_from_tool_execution_item(
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+    item: ExecutionStepItem,
+) -> WorkbenchTimelineItem:
+    summary = _execution_item_summary(item)
+    context_render_snapshot_id = _context_render_snapshot_id(run, summary=summary)
+    tool_run_id = _summary_text(summary, "tool_run_id")
+    tool_call_id = _summary_text(summary, "tool_call_id") or item.correlation_key
+    result_session_item_id = _summary_text(summary, "result_session_item_id")
+    session_item_ids = _summary_text_list(summary, "session_item_ids")
+    session_item_id = result_session_item_id or (
+        session_item_ids[0] if session_item_ids else None
+    )
+    tool_name = (
+        _summary_text(summary, "tool_name")
+        or _summary_text(summary, "tool_id")
+        or "tool"
+    )
+    source_refs = {
+        "run_id": run.id,
+        "turn_id": turn_id,
+        "execution_step_id": bundle.step.id,
+        "execution_item_id": item.id,
+    }
+    if tool_call_id:
+        source_refs["tool_call_id"] = tool_call_id
+    if tool_run_id:
+        source_refs["tool_run_id"] = tool_run_id
+    if session_item_id:
+        source_refs["session_item_id"] = session_item_id
+    if context_render_snapshot_id:
+        source_refs["context_render_snapshot_id"] = context_render_snapshot_id
+    tool_id = _summary_text(summary, "tool_id")
+    if tool_id:
+        source_refs["tool_id"] = tool_id
+    trace = _trace_for_run(
+        run,
+        turn_id=turn_id,
+        step_id=bundle.step.id,
+        tool_run_id=tool_run_id,
+        context_render_snapshot_id=context_render_snapshot_id,
+        session_item_id=session_item_id,
+        source_owner=item.owner.owner_kind if item.owner is not None else None,
+        source_event_id=item.owner.owner_id if item.owner is not None else item.id,
+        source_event_name=item.kind.value,
+    )
+    return WorkbenchTimelineItem(
+        id=f"timeline:{run.id}:execution:{bundle.step.id}:{item.id}",
+        turn_id=turn_id,
+        run_id=run.id,
+        kind=_timeline_kind_for_tool_execution_item(item),
+        status=_execution_item_view_status(item),
+        title=_timeline_title_for_tool_execution_item(item, tool_name=tool_name),
+        content=_timeline_content_for_tool_execution_item(
+            item,
+            summary=summary,
+            tool_name=tool_name,
+        ),
+        phase=None,
+        source_refs=source_refs,
+        started_at=format_optional_datetime_utc(item.created_at),
+        completed_at=format_optional_datetime_utc(item.completed_at),
+        trace=trace,
+    )
+
+
+def _timeline_kind_for_tool_execution_item(item: ExecutionStepItem) -> str:
+    if item.kind is ExecutionStepItemKind.TOOL_CALL:
+        return "tool_call"
+    if item.kind is ExecutionStepItemKind.TOOL_RESULT:
+        return "tool_result"
+    return "tool_run"
+
+
+def _timeline_title_for_tool_execution_item(
+    item: ExecutionStepItem,
+    *,
+    tool_name: str,
+) -> str:
+    if item.kind is ExecutionStepItemKind.TOOL_CALL:
+        return f"Tool Call: {tool_name}"
+    if item.kind is ExecutionStepItemKind.TOOL_RESULT:
+        return f"Tool Result: {tool_name}"
+    return f"Tool Run: {tool_name}"
+
+
+def _timeline_content_for_tool_execution_item(
+    item: ExecutionStepItem,
+    *,
+    summary: dict[str, object],
+    tool_name: str,
+) -> dict[str, Any]:
+    content: dict[str, Any] = {
+        "tool_name": tool_name,
+        "payload": dict(summary),
+    }
+    tool_execution_plan = summary.get("tool_execution_plan")
+    if isinstance(tool_execution_plan, dict) and tool_execution_plan:
+        content["tool_execution_plan"] = dict(tool_execution_plan)
+    if item.kind is ExecutionStepItemKind.TOOL_CALL:
+        content["text"] = f"Tool call requested: {tool_name}."
+    elif item.kind is ExecutionStepItemKind.TOOL_RESULT:
+        result_session_item_id = _summary_text(summary, "result_session_item_id")
+        if result_session_item_id:
+            suffix = f" Result item: {result_session_item_id}."
+        else:
+            suffix = ""
+        content["text"] = f"Tool result recorded for {tool_name}.{suffix}"
+    else:
+        status = _summary_text(summary, "status") or _execution_item_view_status(item)
+        content["text"] = f"Tool run {status}: {tool_name}."
+    return content
+
+
+def _timeline_sort_key(item: WorkbenchTimelineItem) -> tuple[str, str, str]:
+    return (
+        item.started_at or "",
+        item.source_refs.get("execution_step_id", ""),
+        item.id,
+    )
+
+
+def _timeline_items_from_llm_response_items(
+    step: TurnStepView,
+    *,
+    response_items: tuple[Any, ...],
+    base_index: int,
+) -> tuple[WorkbenchTimelineItem, ...]:
+    items: list[WorkbenchTimelineItem] = []
+    for item_index, response_item in enumerate(response_items):
+        update_plan_progress = _timeline_item_from_update_plan_response_item(
+            step,
+            response_item=response_item,
+            base_index=base_index,
+            item_index=item_index,
+        )
+        if update_plan_progress is not None:
+            items.append(update_plan_progress)
+            continue
+        content = _timeline_content_from_response_item(response_item)
+        if not _response_item_has_timeline_content(response_item, content):
+            continue
+        source_refs = _timeline_source_refs(step)
+        response_item_id = _optional_text(getattr(response_item, "id", None))
+        provider_item_id = _optional_text(getattr(response_item, "provider_item_id", None))
+        call_id = _optional_text(getattr(response_item, "call_id", None))
+        if response_item_id is not None:
+            source_refs["llm_response_item_id"] = response_item_id
+        if provider_item_id is not None:
+            source_refs["provider_item_id"] = provider_item_id
+        if call_id is not None:
+            source_refs["call_id"] = call_id
+        items.append(
+            WorkbenchTimelineItem(
+                id=f"timeline:{step.step_id}:response:{base_index}:{item_index}",
+                turn_id=step.turn_id,
+                run_id=step.run_id,
+                kind=_timeline_kind_for_response_item(response_item),
+                status="success" if getattr(response_item, "completed_at", None) else step.status,
+                title=_timeline_title_for_response_item(response_item),
+                content=content,
+                phase=_enum_value(getattr(response_item, "phase", None)),
+                source_refs=source_refs,
+                started_at=format_optional_datetime_utc(
+                    getattr(response_item, "created_at", None),
+                ),
+                completed_at=format_optional_datetime_utc(
+                    getattr(response_item, "completed_at", None),
+                ),
+                trace=step.trace,
+            ),
+        )
+    return tuple(items)
+
+
+def _timeline_item_from_update_plan_response_item(
+    step: TurnStepView,
+    *,
+    response_item: Any,
+    base_index: int,
+    item_index: int,
+) -> WorkbenchTimelineItem | None:
+    if not _response_item_is_update_plan_call(response_item):
+        return None
+    payload = dict(getattr(response_item, "content_payload", {}) or {})
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    text = _update_plan_progress_text(arguments)
+    if text is None:
+        return None
+    source_refs = _timeline_source_refs(step)
+    response_item_id = _optional_text(getattr(response_item, "id", None))
+    provider_item_id = _optional_text(getattr(response_item, "provider_item_id", None))
+    call_id = _optional_text(getattr(response_item, "call_id", None))
+    if response_item_id is not None:
+        source_refs["llm_response_item_id"] = response_item_id
+    if provider_item_id is not None:
+        source_refs["provider_item_id"] = provider_item_id
+    if call_id is not None:
+        source_refs["call_id"] = call_id
+        source_refs["tool_call_id"] = call_id
+    source_refs["tool_id"] = "context_tree.update_plan"
+    return WorkbenchTimelineItem(
+        id=f"timeline:{step.step_id}:response:{base_index}:{item_index}:progress",
+        turn_id=step.turn_id,
+        run_id=step.run_id,
+        kind="agent_progress",
+        status="success" if getattr(response_item, "completed_at", None) else step.status,
+        title="Agent Progress",
+        content={
+            "text": text,
+            "payload": {
+                "tool_name": "context_tree.update_plan",
+                "arguments": arguments,
+            },
+            "tool_name": "context_tree.update_plan",
+            "call_id": call_id,
+        },
+        phase=_enum_value(getattr(response_item, "phase", None)),
+        source_refs=source_refs,
+        started_at=format_optional_datetime_utc(
+            getattr(response_item, "created_at", None),
+        ),
+        completed_at=format_optional_datetime_utc(
+            getattr(response_item, "completed_at", None),
+        ),
+        trace=step.trace,
+    )
+
+
+def _response_item_is_update_plan_call(response_item: Any) -> bool:
+    if _enum_value(getattr(response_item, "kind", None)) != "tool_call":
+        return False
+    tool_name = _optional_text(getattr(response_item, "tool_name", None))
+    return tool_name == "context_tree.update_plan"
+
+
+def _update_plan_progress_text(arguments: dict[str, object]) -> str | None:
+    objective = _optional_text(arguments.get("objective"))
+    status = _optional_text(arguments.get("status"))
+    current_step = _optional_text(arguments.get("current_step"))
+    next_steps = _optional_text(arguments.get("next_steps"))
+    parts: list[str] = []
+    if objective:
+        parts.append(f"目标：{objective}")
+    if status or current_step:
+        current = current_step or status
+        if current:
+            parts.append(f"当前：{current}")
+    if next_steps:
+        parts.append(f"下一步：{next_steps}")
+    return "\n".join(parts) if parts else None
+
+
+def _timeline_content_from_response_item(response_item: Any) -> dict[str, Any]:
+    kind = _enum_value(getattr(response_item, "kind", None))
+    if kind == "reasoning" and not bool(getattr(response_item, "user_visible", False)):
+        return {
+            "reasoning_present": True,
+            "reasoning_item_count": 1,
+            "reasoning_hidden": True,
+            "hidden_reason": "policy",
+        }
+    payload = dict(getattr(response_item, "content_payload", {}) or {})
+    content: dict[str, Any] = {}
+    text = _optional_text(payload.get("text")) or _optional_text(payload.get("summary"))
+    if text is not None:
+        content["text"] = text
+    if payload:
+        content["payload"] = payload
+    tool_name = _optional_text(getattr(response_item, "tool_name", None))
+    call_id = _optional_text(getattr(response_item, "call_id", None))
+    if tool_name is not None:
+        content["tool_name"] = tool_name
+    if call_id is not None:
+        content["call_id"] = call_id
+    return content
+
+
+def _response_item_has_timeline_content(
+    response_item: Any,
+    content: dict[str, Any],
+) -> bool:
+    kind = _enum_value(getattr(response_item, "kind", None))
+    if kind == "reasoning":
+        if bool(content.get("reasoning_hidden")):
+            return True
+        return _timeline_content_has_visible_value(content)
+    if kind != "assistant_message":
+        return True
+    text = _optional_text(content.get("text"))
+    markdown = _optional_text(content.get("markdown"))
+    payload = content.get("payload")
+    return bool(text or markdown or _payload_has_visible_value(payload))
+
+
+def _timeline_content_has_visible_value(content: dict[str, Any]) -> bool:
+    if _optional_text(content.get("text")) is not None:
+        return True
+    if _optional_text(content.get("markdown")) is not None:
+        return True
+    return _payload_has_visible_value(content.get("payload"))
+
+
+def _payload_has_visible_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bool | int | float):
+        return True
+    if isinstance(value, dict):
+        return any(_payload_has_visible_value(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_payload_has_visible_value(item) for item in value)
+    return True
+
+
+def _timeline_kind_for_response_item(response_item: Any) -> str:
+    kind = _enum_value(getattr(response_item, "kind", None))
+    phase = _enum_value(getattr(response_item, "phase", None))
+    if kind == "assistant_message":
+        return "final_answer" if phase == "final_answer" else "assistant_commentary"
+    if kind == "reasoning":
+        return "reasoning_summary"
+    if kind == "provider_external_item":
+        return "provider_external_item"
+    if kind == "structured_output":
+        return "structured_output"
+    if kind == "compaction":
+        return "compaction"
+    return kind or "unknown"
+
+
+def _timeline_title_for_response_item(response_item: Any) -> str:
+    kind = _timeline_kind_for_response_item(response_item)
+    if kind == "assistant_commentary":
+        return "Agent Progress"
+    if kind == "final_answer":
+        return "Final Response"
+    if kind == "reasoning_summary":
+        return "Reasoning Summary"
+    if kind == "tool_call":
+        tool_name = _optional_text(getattr(response_item, "tool_name", None))
+        return f"Tool Call: {tool_name}" if tool_name else "Tool Call"
+    if kind == "tool_result":
+        return "Tool Result"
+    if kind == "provider_external_item":
+        provider_type = _optional_text(getattr(response_item, "provider_item_type", None))
+        return f"Provider Item: {provider_type}" if provider_type else "Provider Item"
+    return kind.replace("_", " ").title()
+
+
+def _enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str):
+        return enum_value
+    text = str(value).strip()
+    return text or None
+
+
+def _timeline_item_from_step(
+    step: TurnStepView,
+    *,
+    index: int,
+) -> WorkbenchTimelineItem:
+    content: dict[str, Any] = {}
+    if step.markdown:
+        content["markdown"] = step.markdown
+    if step.summary:
+        content["text"] = step.summary
+    source_refs = _timeline_source_refs(step)
+    return WorkbenchTimelineItem(
+        id=f"timeline:{step.step_id}:{index}",
+        turn_id=step.turn_id,
+        run_id=step.run_id,
+        kind=_timeline_kind_for_step(step),
+        status=step.status,
+        title=step.title,
+        content=content,
+        phase=_timeline_phase_for_step(step),
+        source_refs=source_refs,
+        started_at=step.started_at,
+        completed_at=step.completed_at,
+        trace=step.trace,
+    )
+
+
+def _timeline_source_refs(step: TurnStepView) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    trace = step.trace
+    if trace.run_id:
+        refs["run_id"] = trace.run_id
+    if trace.turn_id:
+        refs["turn_id"] = trace.turn_id
+    if trace.source_event_id:
+        refs["source_event_id"] = trace.source_event_id
+    if trace.source_owner:
+        refs["source_owner"] = trace.source_owner
+    if trace.source_event_name:
+        refs["source_event_name"] = trace.source_event_name
+    if trace.session_item_id:
+        refs["session_item_id"] = trace.session_item_id
+    if trace.step_id:
+        refs["execution_step_id"] = trace.step_id
+    execution_item_id = _execution_item_id_from_step_id(step.step_id)
+    if execution_item_id is not None:
+        refs["execution_item_id"] = execution_item_id
+    if trace.llm_invocation_id:
+        refs["llm_invocation_id"] = trace.llm_invocation_id
+    if trace.context_render_snapshot_id:
+        refs["context_render_snapshot_id"] = trace.context_render_snapshot_id
+    if trace.tool_run_id:
+        refs["tool_run_id"] = trace.tool_run_id
+    if trace.artifact_id:
+        refs["artifact_id"] = trace.artifact_id
+    return refs
+
+
+def _execution_item_id_from_step_id(step_id: str) -> str | None:
+    marker = ":item-"
+    if marker not in step_id:
+        return None
+    return step_id.rsplit(":", 1)[-1] or None
+
+
+def _timeline_kind_for_step(step: TurnStepView) -> str:
+    if step.type == "agent_progress":
+        return "assistant_commentary"
+    if step.type == "agent_thinking":
+        return "assistant_reasoning"
+    if step.type == "llm":
+        return "llm_invocation"
+    if step.type == "continuation_decision":
+        return "continuation"
+    if step.type == "tool_call":
+        if step.trace.tool_run_id:
+            return "tool_run"
+        return "tool_call"
+    if step.type == "tool_result":
+        return "tool_result"
+    if step.type == "final_response":
+        return "final_answer"
+    return step.type
+
+
+def _timeline_phase_for_step(step: TurnStepView) -> str | None:
+    if step.type == "agent_progress":
+        return "commentary"
+    if step.type in {"agent_thinking", "llm"}:
+        return "reasoning"
+    if step.type == "final_response":
+        return "final"
+    return None
 
 
 def _chain_step_views_for_run(
@@ -1080,7 +1921,59 @@ def _chain_llm_step_views(
             bundle=bundle,
             tool_only_streak=tool_only_streak,
         ),
+        *_continuation_decision_step_views(
+            run,
+            turn_id=turn_id,
+            bundle=bundle,
+        ),
     )
+
+
+def _continuation_decision_step_views(
+    run: OrchestrationRun,
+    *,
+    turn_id: str,
+    bundle: _ExecutionStepBundle,
+) -> tuple[TurnStepView, ...]:
+    views: list[TurnStepView] = []
+    for index, item in enumerate(bundle.items):
+        if item.kind is not ExecutionStepItemKind.CONTINUATION_DECISION:
+            continue
+        summary = _execution_item_summary(item)
+        context_render_snapshot_id = _context_render_snapshot_id(run, summary=summary)
+        reason = _summary_text(summary, "reason") or "unknown"
+        needs_follow_up = _summary_bool(summary, "needs_follow_up")
+        end_turn = summary.get("end_turn")
+        end_turn_label = (
+            f"end_turn={str(end_turn).lower()}"
+            if isinstance(end_turn, bool)
+            else "end_turn=-"
+        )
+        follow_up_label = f"follow_up={str(needs_follow_up).lower()}"
+        views.append(
+            _step(
+                run=run,
+                turn_id=turn_id,
+                step_id=f"execution:{bundle.step.id}:continuation:{index}",
+                step_type="continuation_decision",
+                status="running" if needs_follow_up else "success",
+                title="Continuation Decision",
+                summary=f"{reason}; {end_turn_label}; {follow_up_label}",
+                started_at=item.created_at,
+                completed_at=item.completed_at or bundle.step.completed_at,
+                badges=(
+                    StatusBadgeModel(
+                        label="Follow-up" if needs_follow_up else "End turn",
+                        tone="info" if needs_follow_up else "success",
+                    ),
+                    StatusBadgeModel(label=reason, tone="neutral"),
+                ),
+                llm_invocation_id=_summary_text(summary, "llm_invocation_id"),
+                context_render_snapshot_id=context_render_snapshot_id,
+                trace_step_id=bundle.step.id,
+            ),
+        )
+    return tuple(views)
 
 
 def _assistant_progress_step_views(
@@ -1095,16 +1988,24 @@ def _assistant_progress_step_views(
         if item.kind is not ExecutionStepItemKind.SESSION_MESSAGE:
             continue
         summary = _execution_item_summary(item)
+        context_render_snapshot_id = _context_render_snapshot_id(run, summary=summary)
         if _summary_text(summary, "message_kind") != "assistant_progress":
             continue
         progress_text = _summary_text(summary, "assistant_progress_text")
+        session_item_ids = _summary_text_list(summary, "session_item_ids")
+        session_item_id = (
+            _summary_text(summary, "session_item_id")
+            or (session_item_ids[0] if session_item_ids else None)
+        )
         if progress_text is None:
-            progress_text = _session_message_text(
+            progress_text = _session_item_text(
                 session_query,
-                _summary_text(summary, "session_message_id"),
+                session_item_id,
             )
         if progress_text is None:
             continue
+        source_owner = "session_item"
+        source_event_id = session_item_id
         views.append(
             _step(
                 run=run,
@@ -1119,23 +2020,28 @@ def _assistant_progress_step_views(
                 completed_at=item.completed_at or bundle.step.completed_at,
                 badges=(StatusBadgeModel(label="Assistant", tone="info"),),
                 llm_invocation_id=_summary_text(summary, "llm_invocation_id"),
+                context_render_snapshot_id=context_render_snapshot_id,
+                session_item_id=session_item_id,
                 trace_step_id=bundle.step.id,
+                source_owner=source_owner,
+                source_event_id=source_event_id,
+                source_event_name="assistant_progress",
             ),
         )
     return tuple(views)
 
 
-def _session_message_text(
+def _session_item_text(
     session_query: WorkbenchSessionQueryPort | None,
-    message_id: str | None,
+    item_id: str | None,
 ) -> str | None:
-    if session_query is None or not message_id:
+    if session_query is None or not item_id:
         return None
     try:
-        message = session_query.get_message(message_id)
+        item = session_query.get_item(item_id)
     except Exception:
         return None
-    content_payload = getattr(message, "content_payload", None)
+    content_payload = getattr(item, "content_payload", None)
     text = extract_text_content(content_blocks_from_payload(content_payload))
     if isinstance(text, str) and text.strip():
         return text.strip()
@@ -1172,6 +2078,10 @@ def _chain_llm_step_view(
             trace_step_id=step.id,
         )
     diagnostics = _llm_step_diagnostics(llm_invocation, bundle.items)
+    context_render_snapshot_id = (
+        _summary_text_from_items(bundle.items, "context_render_snapshot_id")
+        or _metadata_str(run, "context_render_snapshot_id")
+    )
     summary = _llm_summary(run, llm_invocation=llm_invocation)
     if diagnostics:
         summary = f"{summary} {_llm_diagnostics_sentence(diagnostics)}"
@@ -1213,6 +2123,7 @@ def _chain_llm_step_view(
         ),
         badges=badges,
         llm_invocation_id=invocation_id,
+        context_render_snapshot_id=context_render_snapshot_id,
         trace_step_id=step.id,
     )
 
@@ -1337,7 +2248,7 @@ def _chain_approval_step_view(
 def _llm_step_diagnostics(
     llm_invocation: Any | None,
     items: tuple[ExecutionStepItem, ...],
-) -> dict[str, int | bool]:
+) -> dict[str, object]:
     result = getattr(llm_invocation, "result", None)
     text = getattr(result, "text", None)
     text_chars = len(text.strip()) if isinstance(text, str) and text.strip() else 0
@@ -1345,21 +2256,29 @@ def _llm_step_diagnostics(
     tool_calls_count = len(raw_tool_calls) if isinstance(raw_tool_calls, (tuple, list)) else 0
     if tool_calls_count == 0:
         tool_calls_count = len(_tool_call_names_from_execution_items(items))
-    tool_call_message_count = len(_tool_call_message_ids_from_execution_items(items))
-    progress_count = len(_assistant_progress_message_ids_from_execution_items(items))
+    tool_call_item_count = len(_tool_call_session_item_ids_from_execution_items(items))
+    progress_count = len(_assistant_progress_session_item_ids_from_execution_items(items))
     if progress_count == 0 and _summary_text_from_items(items, "assistant_progress_text"):
         progress_count = 1
     if text_chars == 0:
         progress_text = _summary_text_from_items(items, "assistant_progress_text")
         text_chars = len(progress_text) if progress_text is not None else 0
-    return {
+    diagnostics: dict[str, object] = {
         "text_present": text_chars > 0,
         "text_chars": text_chars,
         "tool_calls_count": tool_calls_count,
-        "tool_call_message_count": tool_call_message_count,
+        "tool_call_session_item_count": tool_call_item_count,
         "progress_recorded": progress_count > 0,
-        "assistant_progress_message_count": progress_count,
+        "assistant_progress_item_count": progress_count,
     }
+    loop_diagnostic = _summary_dict_from_items(items, "llm_loop_diagnostic")
+    code = _summary_text(loop_diagnostic, "code") if loop_diagnostic else None
+    reason = _summary_text(loop_diagnostic, "reason") if loop_diagnostic else None
+    if code is not None:
+        diagnostics["loop_diagnostic_code"] = code
+    if reason is not None:
+        diagnostics["loop_diagnostic_reason"] = reason
+    return diagnostics
 
 
 def _llm_bundle_is_tool_only(bundle: _ExecutionStepBundle) -> bool:
@@ -1371,11 +2290,11 @@ def _llm_bundle_is_tool_only(bundle: _ExecutionStepBundle) -> bool:
     )
 
 
-def _llm_diagnostics_sentence(diagnostics: dict[str, int | bool]) -> str:
+def _llm_diagnostics_sentence(diagnostics: dict[str, object]) -> str:
     text_chars = diagnostics.get("text_chars")
     tool_calls_count = diagnostics.get("tool_calls_count")
-    tool_call_message_count = diagnostics.get("tool_call_message_count")
-    progress_count = diagnostics.get("assistant_progress_message_count")
+    tool_call_item_count = diagnostics.get("tool_call_session_item_count")
+    progress_count = diagnostics.get("assistant_progress_item_count")
     parts: list[str] = []
     if isinstance(text_chars, int) and text_chars > 0:
         parts.append(f"text: {text_chars} chars")
@@ -1383,20 +2302,23 @@ def _llm_diagnostics_sentence(diagnostics: dict[str, int | bool]) -> str:
         parts.append("text: none")
     if isinstance(tool_calls_count, int) and tool_calls_count > 0:
         parts.append(f"tool calls: {tool_calls_count}")
-    if isinstance(tool_call_message_count, int) and tool_call_message_count > 0:
-        parts.append(f"tool call messages: {tool_call_message_count}")
+    if isinstance(tool_call_item_count, int) and tool_call_item_count > 0:
+        parts.append(f"tool call items: {tool_call_item_count}")
     if isinstance(progress_count, int) and progress_count > 0:
         parts.append(f"progress recorded: {progress_count}")
+    loop_code = diagnostics.get("loop_diagnostic_code")
+    if isinstance(loop_code, str) and loop_code:
+        parts.append(f"loop diagnostic: {loop_code}")
     if not parts:
         return ""
     return "Diagnostics: " + "; ".join(parts) + "."
 
 
 def _llm_diagnostic_badges(
-    diagnostics: dict[str, int | bool],
+    diagnostics: dict[str, object],
 ) -> tuple[StatusBadgeModel, ...]:
     tool_calls_count = diagnostics.get("tool_calls_count")
-    tool_call_message_count = diagnostics.get("tool_call_message_count")
+    tool_call_item_count = diagnostics.get("tool_call_session_item_count")
     text_present = diagnostics.get("text_present") is True
     progress_recorded = diagnostics.get("progress_recorded") is True
     badges: list[StatusBadgeModel] = []
@@ -1411,13 +2333,16 @@ def _llm_diagnostic_badges(
         badges.append(StatusBadgeModel(label="Text", tone="success"))
     if progress_recorded:
         badges.append(StatusBadgeModel(label="Progress recorded", tone="info"))
-    if isinstance(tool_call_message_count, int) and tool_call_message_count > 0:
+    if isinstance(tool_call_item_count, int) and tool_call_item_count > 0:
         badges.append(
             StatusBadgeModel(
-                label=f"Tool messages: {tool_call_message_count}",
+                label=f"Tool items: {tool_call_item_count}",
                 tone="info",
             ),
         )
+    loop_code = diagnostics.get("loop_diagnostic_code")
+    if isinstance(loop_code, str) and loop_code:
+        badges.append(StatusBadgeModel(label="Loop diagnostic", tone="danger"))
     return tuple(badges)
 
 
@@ -1565,6 +2490,40 @@ def _summary_text(payload: dict[str, object], key: str) -> str | None:
     return normalized or None
 
 
+def _summary_text_list(payload: dict[str, object], key: str) -> list[str]:
+    value = payload.get(key)
+    if not isinstance(value, list | tuple):
+        return []
+    values = [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ]
+    return list(dict.fromkeys(values))
+
+
+def _summary_bool(payload: dict[str, object], key: str) -> bool:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _context_render_snapshot_id(
+    run: OrchestrationRun,
+    *,
+    summary: dict[str, object],
+) -> str | None:
+    return (
+        _summary_text(summary, "context_render_snapshot_id")
+        or _metadata_str(run, "context_render_snapshot_id")
+    )
+
+
 def _summary_text_from_items(
     items: tuple[ExecutionStepItem, ...],
     key: str,
@@ -1574,6 +2533,17 @@ def _summary_text_from_items(
         if value is not None:
             return value
     return None
+
+
+def _summary_dict_from_items(
+    items: tuple[ExecutionStepItem, ...],
+    key: str,
+) -> dict[str, object]:
+    for item in items:
+        value = _execution_item_summary(item).get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
 
 
 def _llm_invocation_id_from_execution_items(
@@ -1625,43 +2595,45 @@ def _tool_call_names_from_execution_items(
     return tuple(names)
 
 
-def _assistant_progress_message_ids_from_execution_items(
+def _assistant_progress_session_item_ids_from_execution_items(
     items: tuple[ExecutionStepItem, ...],
 ) -> tuple[str, ...]:
     ids: list[str] = []
     for item in items:
         summary = _execution_item_summary(item)
-        raw_ids = summary.get("assistant_progress_message_ids")
+        if _summary_text(summary, "message_kind") != "assistant_progress":
+            continue
+        raw_ids = summary.get("assistant_progress_item_ids")
+        if not isinstance(raw_ids, (list, tuple)):
+            raw_ids = summary.get("session_item_ids")
         if isinstance(raw_ids, (list, tuple)):
             for raw_id in raw_ids:
                 if not isinstance(raw_id, str):
                     continue
-                message_id = raw_id.strip()
-                if message_id and message_id not in ids:
-                    ids.append(message_id)
-        if _summary_text(summary, "message_kind") != "assistant_progress":
-            continue
-        message_id = _summary_text(summary, "session_message_id")
-        if message_id is not None and message_id not in ids:
-            ids.append(message_id)
+                item_id = raw_id.strip()
+                if item_id and item_id not in ids:
+                    ids.append(item_id)
+        item_id = _summary_text(summary, "session_item_id")
+        if item_id is not None and item_id not in ids:
+            ids.append(item_id)
     return tuple(ids)
 
 
-def _tool_call_message_ids_from_execution_items(
+def _tool_call_session_item_ids_from_execution_items(
     items: tuple[ExecutionStepItem, ...],
 ) -> tuple[str, ...]:
     ids: list[str] = []
     for item in items:
         summary = _execution_item_summary(item)
-        raw_ids = summary.get("tool_call_message_ids")
+        raw_ids = summary.get("tool_call_session_item_ids")
         if not isinstance(raw_ids, (list, tuple)):
             continue
         for raw_id in raw_ids:
             if not isinstance(raw_id, str):
                 continue
-            message_id = raw_id.strip()
-            if message_id and message_id not in ids:
-                ids.append(message_id)
+            item_id = raw_id.strip()
+            if item_id and item_id not in ids:
+                ids.append(item_id)
     return tuple(ids)
 
 
@@ -1819,6 +2791,17 @@ def _linked_entities_for_trace(
                 entity_id=trace.llm_invocation_id,
                 label="LLM invocation",
                 owner="llm",
+                route=_trace_route(trace),
+                trace=trace,
+            ),
+        )
+    if trace.session_item_id:
+        entities.append(
+            _linked_entity(
+                entity_type="session_item",
+                entity_id=trace.session_item_id,
+                label="Session item",
+                owner="session",
                 route=_trace_route(trace),
                 trace=trace,
             ),
@@ -2485,12 +3468,15 @@ def _llm_invocations_for_runs(
     invocations: list[Any] = []
     seen: set[str] = set()
     for run in runs:
-        invocation = _llm_invocation_for_run(run_query, llm_query, run)
-        invocation_id = _optional_text(getattr(invocation, "id", None))
-        if invocation is None or invocation_id is None or invocation_id in seen:
-            continue
-        invocations.append(invocation)
-        seen.add(invocation_id)
+        for invocation_id in _execution_llm_invocation_ids_for_run(run_query, run.id):
+            if invocation_id in seen:
+                continue
+            invocation = _safe_llm_invocation(llm_query, invocation_id)
+            resolved_invocation_id = _optional_text(getattr(invocation, "id", None))
+            if invocation is None or resolved_invocation_id is None:
+                continue
+            invocations.append(invocation)
+            seen.add(resolved_invocation_id)
     return tuple(invocations)
 
 
@@ -2520,6 +3506,7 @@ def _inspector_for_run(
     model_ref: RuntimeRef,
     trace: TraceContext,
     agent_query: WorkbenchAgentQueryPort | None,
+    timeline: tuple[WorkbenchTimelineItem, ...] = (),
 ) -> WorkbenchInspectorView:
     agent_profile = _safe_agent_profile(agent_query, run.agent_id)
     linked_assets = _linked_assets_for_run(
@@ -2589,6 +3576,11 @@ def _inspector_for_run(
                     _kv("LLM invocations", str(len(llm_invocations))),
                 ),
             ),
+            WorkbenchKeyValueSection(
+                id="timeline_diagnostics",
+                title="Timeline Diagnostics",
+                items=_timeline_diagnostic_items(timeline),
+            ),
         ),
         memory=(
             WorkbenchKeyValueSection(
@@ -2640,6 +3632,33 @@ def _kv(
         tone=tone,
         route=route,
         copy_value=str(value),
+    )
+
+
+def _timeline_diagnostic_items(
+    timeline: tuple[WorkbenchTimelineItem, ...],
+) -> tuple[WorkbenchKeyValueItem, ...]:
+    response_item_count = sum(
+        1 for item in timeline if item.source_refs.get("llm_response_item_id")
+    )
+    tool_lifecycle_count = sum(
+        1 for item in timeline if item.kind in {"tool_call", "tool_run", "tool_result"}
+    )
+    hidden_reasoning_count = sum(
+        1
+        for item in timeline
+        if item.kind == "reasoning_summary"
+        and bool(item.content.get("reasoning_hidden"))
+    )
+    provider_external_count = sum(
+        1 for item in timeline if item.kind == "provider_external_item"
+    )
+    return (
+        _kv("Timeline items", str(len(timeline))),
+        _kv("LLM response items", str(response_item_count)),
+        _kv("Tool lifecycle items", str(tool_lifecycle_count)),
+        _kv("Hidden reasoning items", str(hidden_reasoning_count)),
+        _kv("Provider external items", str(provider_external_count)),
     )
 
 
@@ -3048,21 +4067,36 @@ def _metrics_for_runs(
     *,
     related_tool_runs: tuple[ToolRun, ...] = (),
     llm_invocations: tuple[Any, ...] = (),
+    timeline: tuple[WorkbenchTimelineItem, ...] = (),
 ) -> RunMetrics:
     known_tool_ids = {tool_run.id for tool_run in related_tool_runs}
+    known_tool_call_ids: set[str] = set()
+    known_llm_invocation_ids = {
+        invocation_id
+        for invocation in llm_invocations
+        if (invocation_id := _optional_text(getattr(invocation, "id", None)))
+        is not None
+    }
+    for item in timeline:
+        if tool_call_id := _timeline_ref(item, "tool_call_id"):
+            known_tool_call_ids.add(tool_call_id)
+        if tool_run_id := _timeline_ref(item, "tool_run_id"):
+            known_tool_ids.add(tool_run_id)
+        if llm_invocation_id := _timeline_ref(item, "llm_invocation_id"):
+            known_llm_invocation_ids.add(llm_invocation_id)
     token_total = _token_total_from_invocations(llm_invocations)
-    llm_calls = len(llm_invocations)
+    llm_calls = len(known_llm_invocation_ids)
     for run in runs:
         known_tool_ids.update(run.pending_tool_run_ids)
         prompt_report = run.metadata.get("prompt_report")
-        if not llm_invocations and isinstance(prompt_report, dict):
+        if not known_llm_invocation_ids and isinstance(prompt_report, dict):
             raw_total = prompt_report.get("token_total") or prompt_report.get("total_tokens")
             if isinstance(raw_total, int):
                 token_total += max(raw_total, 0)
-        if not llm_invocations:
+        if not known_llm_invocation_ids:
             llm_calls += max(run.current_step, 1 if _llm_id(run) else 0)
     return RunMetrics(
-        tool_calls=len(known_tool_ids),
+        tool_calls=len(known_tool_call_ids) if known_tool_call_ids else len(known_tool_ids),
         llm_calls=llm_calls,
         tokens=token_total,
         estimated_cost_usd=None,

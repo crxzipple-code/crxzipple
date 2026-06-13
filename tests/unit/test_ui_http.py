@@ -33,11 +33,14 @@ from crxzipple.modules.operations.application.projections import (
 )
 from crxzipple.modules.daemon import DaemonInstance
 from crxzipple.modules.process.domain import ProcessSession, ProcessStatus
-from crxzipple.modules.llm.application import InvokeLlmInput
+from crxzipple.modules.llm.application import InvokeLlmInput, LlmAdapterResponse
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmMessage,
+    LlmMessagePhase,
     LlmMessageRole,
+    LlmResponseItem,
+    LlmResponseItemKind,
     LlmResult,
     LlmUsage,
     ToolCallIntent,
@@ -57,9 +60,10 @@ from crxzipple.modules.orchestration.domain import (
     PendingApprovalRequest,
 )
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
+    AppendSessionItemInput,
     EnsureSessionInput,
 )
+from crxzipple.modules.session.domain import SessionItemKind, SessionItemVisibility
 from crxzipple.modules.tool.application import (
     ExecuteToolInput,
 )
@@ -80,7 +84,6 @@ from tests.unit.http_test_support import (
     _write_skill_package,
     seed_catalog_tool,
 )
-
 
 def _collect_runtime_actions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
@@ -151,6 +154,8 @@ def _minimal_llm_detail_payload(
         "error": "",
         "resolver": _empty_key_value_section("resolver", "Resolver"),
         "error_facts": _empty_key_value_section("error_facts", "Error Facts"),
+        "response_items": _empty_table_section("response_items", "Response Items"),
+        "response_events": _empty_table_section("response_events", "Response Events"),
         "events": _empty_table_section("events", "Events"),
     }
 
@@ -194,6 +199,119 @@ class UiHttpTestCase(HttpModuleTestCase):
             AppKey.OPERATIONS_PROJECTION_MATERIALIZER,
         )
         materializer.materialize_modules(modules)
+
+    def test_ui_workbench_linked_entity_detail_reads_session_item(self) -> None:
+        session_service = self.client.app.state.container.require(AppKey.SESSION_SERVICE)
+        session_service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:detail",
+                agent_id="assistant",
+                workspace="workspace-ui",
+            ),
+        )
+        item = session_service.append_item(
+            AppendSessionItemInput(
+                session_key="agent:assistant:detail",
+                kind=SessionItemKind.TOOL_RESULT,
+                role="tool",
+                content_payload={
+                    "tool_name": "browser.snapshot",
+                    "content": [{"type": "text", "text": "Captured page state."}],
+                },
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    trace_visible=True,
+                ),
+                source_module="tool",
+                source_kind="tool_run",
+                source_id="tool-run-detail",
+                call_id="call-detail",
+                tool_name="browser.snapshot",
+            ),
+        )
+
+        response = self.client.get(
+            f"/ui/workbench/linked-entities/session_item/{item.id}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["type"], "session_item")
+        self.assertEqual(payload["id"], item.id)
+        self.assertEqual(payload["owner"], "session")
+        self.assertEqual(payload["payload"]["kind"], "tool_result")
+        self.assertEqual(payload["payload"]["call_id"], "call-detail")
+        self.assertIn("browser.snapshot", payload["summary"])
+
+    def test_ui_workbench_linked_entity_detail_reads_llm_response_item(self) -> None:
+        container = self.client.app.state.container
+
+        class _ResponseItemDetailAdapter:
+            def invoke(self, _profile: object, request: object) -> LlmAdapterResponse:
+                invocation_id = getattr(request, "invocation_id")
+                return LlmAdapterResponse(
+                    result=LlmResult(
+                        text="ready",
+                        usage=LlmUsage(input_tokens=3, output_tokens=2, total_tokens=5),
+                        finish_reason="stop",
+                    ),
+                    response_items=(
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:0",
+                            invocation_id=invocation_id,
+                            sequence_no=0,
+                            kind=LlmResponseItemKind.TOOL_CALL,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={
+                                "tool_name": "browser.snapshot",
+                                "arguments": {},
+                            },
+                            call_id="call-detail-llm",
+                            tool_name="browser.snapshot",
+                        ),
+                    ),
+                )
+
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _ResponseItemDetailAdapter(),
+        )
+        profile_response = self.client.post(
+            "/llms",
+            json={
+                "id": "openai.gpt-detail",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-detail",
+                "credential_binding_id": "openai-api-key",
+            },
+        )
+        self.assertEqual(profile_response.status_code, 201)
+        invocation = container.require(AppKey.LLM_SERVICE).invoke(
+            InvokeLlmInput(
+                llm_id="openai.gpt-detail",
+                invocation_id="llm-detail",
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="Inspect page.",
+                    ),
+                ),
+            ),
+        )
+
+        response = self.client.get(
+            f"/ui/workbench/linked-entities/llm_response_item_id/{invocation.response_items[0].id}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["type"], "llm_response_item")
+        self.assertEqual(payload["id"], "llm-detail:item:0")
+        self.assertEqual(payload["owner"], "llm")
+        self.assertEqual(payload["payload"]["invocation_id"], "llm-detail")
+        self.assertEqual(payload["payload"]["call_id"], "call-detail-llm")
+        self.assertIn("browser.snapshot", payload["summary"])
 
     def test_operations_detail_endpoints_read_independent_projections(self) -> None:
         store = self.client.app.state.container.require(AppKey.OPERATIONS_PROJECTION_STORE)
@@ -762,6 +880,11 @@ class UiHttpTestCase(HttpModuleTestCase):
                     usage=LlmUsage(input_tokens=9, output_tokens=5, total_tokens=14),
                     finish_reason="stop",
                 ),
+                LlmResult(
+                    text="done again",
+                    usage=LlmUsage(input_tokens=8, output_tokens=6, total_tokens=14),
+                    finish_reason="stop",
+                ),
             ),
         )
         llm_response = self.client.post(
@@ -783,6 +906,18 @@ class UiHttpTestCase(HttpModuleTestCase):
                     LlmMessage(
                         role=LlmMessageRole.USER,
                         content="Summarize.",
+                    ),
+                ),
+            ),
+        )
+        second_invocation = container.require(AppKey.LLM_SERVICE).invoke(
+            InvokeLlmInput(
+                llm_id="openai.gpt-5.4-mini",
+                invocation_id="llm-invocation-ui-workbench-2",
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="Continue.",
                     ),
                 ),
             ),
@@ -839,7 +974,36 @@ class UiHttpTestCase(HttpModuleTestCase):
             summary_payload={
                 "llm_invocation_id": invocation.id,
                 "llm_id": "openai.gpt-5.4-mini",
-                "tool_call_message_ids": ["message-function-call-ui-chain-only"],
+                "tool_call_session_item_ids": ["session-item-function-call-ui-usage"],
+            },
+        )
+        second_llm_step = ExecutionStep.create(
+            step_id="step-ui-llm-usage-2",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=2,
+            kind=ExecutionStepKind.LLM,
+        )
+        second_llm_step.start()
+        second_llm_step.complete()
+        chain.increment_step_count()
+        second_llm_item = ExecutionStepItem.create(
+            item_id="item-ui-llm-usage-2",
+            step_id=second_llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=second_invocation.id,
+            ),
+        )
+        second_llm_item.complete(
+            summary_payload={
+                "llm_invocation_id": second_invocation.id,
+                "llm_id": "openai.gpt-5.4-mini",
+                "tool_call_session_item_ids": ["session-item-function-call-ui-usage-2"],
             },
         )
         chain.complete()
@@ -849,26 +1013,54 @@ class UiHttpTestCase(HttpModuleTestCase):
             uow.execution_chains.add(chain)
             uow.execution_steps.add(llm_step)
             uow.execution_step_items.add(llm_item)
+            uow.execution_steps.add(second_llm_step)
+            uow.execution_step_items.add(second_llm_item)
             uow.commit()
 
         run_response = self.client.get("/ui/workbench/runs/run-ui-llm-usage")
         steps_response = self.client.get("/ui/workbench/runs/run-ui-llm-usage/steps")
+        invocations_response = self.client.get(
+            "/llms/openai.gpt-5.4-mini/invocations?limit=5",
+        )
+        invocation_detail_response = self.client.get(f"/llms/calls/{invocation.id}")
 
         self.assertEqual(run_response.status_code, 200)
+        self.assertEqual(invocations_response.status_code, 200)
+        self.assertEqual(invocation_detail_response.status_code, 200)
         payload = run_response.json()
-        self.assertEqual(payload["metrics"]["tokens"], 14)
-        self.assertEqual(payload["metrics"]["llm_calls"], 1)
+        self.assertEqual(payload["metrics"]["tokens"], 28)
+        self.assertEqual(payload["metrics"]["llm_calls"], 2)
         self.assertIsNone(payload["metrics"]["estimated_cost_usd"])
         self.assertEqual(payload["model"]["id"], "openai.gpt-5.4-mini")
+        invocation_payload = next(
+            item for item in invocations_response.json() if item["id"] == invocation.id
+        )
+        self.assertEqual(len(invocation_payload["response_items"]), 1)
+        self.assertEqual(
+            invocation_payload["response_items"][0]["content_payload"]["text"],
+            "done",
+        )
+        self.assertEqual(
+            invocation_detail_response.json()["response_items"][0]["kind"],
+            "assistant_message",
+        )
         linked_assets = payload["inspector"]["linked_assets"]
         self.assertIn(
             ("llm_invocation", invocation.id),
+            {(item["type"], item["id"]) for item in linked_assets},
+        )
+        self.assertIn(
+            ("llm_invocation", second_invocation.id),
             {(item["type"], item["id"]) for item in linked_assets},
         )
         llm_steps = [
             step for step in steps_response.json() if step["type"] == "llm"
         ]
         self.assertEqual(llm_steps[0]["trace"]["llm_invocation_id"], invocation.id)
+        self.assertEqual(
+            llm_steps[1]["trace"]["llm_invocation_id"],
+            second_invocation.id,
+        )
         self.assertIn(
             ("llm_invocation", invocation.id),
             {
@@ -877,27 +1069,138 @@ class UiHttpTestCase(HttpModuleTestCase):
             },
         )
         self.assertIn("14 tokens", llm_steps[0]["summary"])
+        self.assertIn("14 tokens", llm_steps[1]["summary"])
 
     def test_ui_workbench_reads_llm_trace_from_execution_chain_without_run_metadata(
         self,
     ) -> None:
         container = self.client.app.state.container
-        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
-            LlmApiFamily.OPENAI_RESPONSES,
-            _SequentialResultAdapter(
-                LlmResult(
-                    text="我先检查页面状态。",
-                    tool_calls=(
-                        ToolCallIntent(
-                            id="call-ui-progress",
-                            name="browser.snapshot",
-                            arguments={},
+
+        class _ResponseItemResultAdapter:
+            def invoke(self, _profile: object, request: object) -> LlmAdapterResponse:
+                invocation_id = getattr(request, "invocation_id")
+                return LlmAdapterResponse(
+                    result=LlmResult(
+                        text="我先检查页面状态。",
+                        tool_calls=(
+                            ToolCallIntent(
+                                id="call-ui-progress",
+                                name="browser.snapshot",
+                                arguments={},
+                            ),
+                        ),
+                        usage=LlmUsage(
+                            input_tokens=7,
+                            output_tokens=6,
+                            total_tokens=13,
+                        ),
+                        finish_reason="stop",
+                    ),
+                    response_items=(
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:0",
+                            invocation_id=invocation_id,
+                            sequence_no=0,
+                            kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={},
+                            user_visible=True,
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:1",
+                            invocation_id=invocation_id,
+                            sequence_no=1,
+                            kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={"text": "我先检查页面状态。"},
+                            user_visible=True,
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:2",
+                            invocation_id=invocation_id,
+                            sequence_no=2,
+                            kind=LlmResponseItemKind.REASONING,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={"summary": "Need inspectable page state."},
+                            user_visible=True,
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:3",
+                            invocation_id=invocation_id,
+                            sequence_no=3,
+                            kind=LlmResponseItemKind.REASONING,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={"summary": "Do not reveal this hidden reasoning."},
+                            user_visible=False,
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:4",
+                            invocation_id=invocation_id,
+                            sequence_no=4,
+                            kind=LlmResponseItemKind.REASONING,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={"summary": [], "text": None},
+                            user_visible=True,
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:5",
+                            invocation_id=invocation_id,
+                            sequence_no=5,
+                            kind=LlmResponseItemKind.TOOL_CALL,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={
+                                "call_id": "call-ui-plan",
+                                "tool_name": "context_tree.update_plan",
+                                "arguments": {
+                                    "objective": "检查页面状态",
+                                    "status": "in_progress",
+                                    "current_step": "准备获取页面快照",
+                                    "next_steps": "调用浏览器快照并总结可见控件",
+                                },
+                            },
+                            call_id="call-ui-plan",
+                            tool_name="context_tree.update_plan",
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:6",
+                            invocation_id=invocation_id,
+                            sequence_no=6,
+                            kind=LlmResponseItemKind.TOOL_CALL,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            content_payload={
+                                "call_id": "call-ui-progress",
+                                "tool_name": "browser.snapshot",
+                                "arguments": {},
+                            },
+                            call_id="call-ui-progress",
+                            tool_name="browser.snapshot",
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:7",
+                            invocation_id=invocation_id,
+                            sequence_no=7,
+                            kind=LlmResponseItemKind.PROVIDER_EXTERNAL_ITEM,
+                            phase=LlmMessagePhase.COMMENTARY,
+                            provider_item_id="provider-web-search-ui-1",
+                            provider_item_type="web_search_call",
+                            content_payload={"status": "completed"},
+                            user_visible=True,
+                        ),
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:8",
+                            invocation_id=invocation_id,
+                            sequence_no=8,
+                            kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                            phase=LlmMessagePhase.FINAL_ANSWER,
+                            content_payload={"text": "页面状态已检查。"},
+                            user_visible=True,
                         ),
                     ),
-                    usage=LlmUsage(input_tokens=7, output_tokens=6, total_tokens=13),
-                    finish_reason="stop",
-                ),
-            ),
+                )
+
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _ResponseItemResultAdapter(),
         )
         llm_response = self.client.post(
             "/llms",
@@ -931,15 +1234,23 @@ class UiHttpTestCase(HttpModuleTestCase):
                 workspace="workspace-ui",
             ),
         )
-        progress_message = session_service.append_message(
-            AppendSessionMessageInput(
+        progress_session_item = session_service.append_item(
+            AppendSessionItemInput(
                 session_key="agent:assistant:main",
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
                 role="assistant",
                 content_payload={
                     "text": "我看到已有 query service 能列 execution chains/steps/items。"
                 },
-                source_kind="llm_invocation",
-                source_id=invocation.id,
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=False,
+                    trace_visible=True,
+                ),
+                source_module="llm",
+                source_kind="llm_response_item",
+                source_id=f"{invocation.id}:item:0",
             ),
         )
         run = OrchestrationRun(
@@ -1001,7 +1312,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             summary_payload={
                 "llm_invocation_id": invocation.id,
                 "llm_id": "openai.gpt-5.4-mini",
-                "tool_call_message_ids": ["message-function-call-ui-chain-only"],
+                "tool_call_session_item_ids": ["session-item-function-call-ui-chain-only"],
             },
         )
         progress_item = ExecutionStepItem.create(
@@ -1012,16 +1323,37 @@ class UiHttpTestCase(HttpModuleTestCase):
             item_index=1,
             kind=ExecutionStepItemKind.SESSION_MESSAGE,
             owner=ExecutionOwnerReference(
-                owner_kind="session_message",
-                owner_id=progress_message.id,
+                owner_kind="session_item",
+                owner_id=progress_session_item.id,
             ),
         )
         progress_item.complete(
             summary_payload={
-                "session_message_id": progress_message.id,
+                "session_item_ids": [progress_session_item.id],
                 "message_role": "assistant",
                 "message_kind": "assistant_progress",
                 "llm_invocation_id": invocation.id,
+            },
+        )
+        continuation_item = ExecutionStepItem.create(
+            item_id="item-ui-chain-only-continuation",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=2,
+            kind=ExecutionStepItemKind.CONTINUATION_DECISION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_continuation",
+                owner_id=f"{invocation.id}:continuation",
+            ),
+        )
+        continuation_item.complete(
+            summary_payload={
+                "llm_invocation_id": invocation.id,
+                "continuation_id": f"{invocation.id}:continuation",
+                "reason": "provider_end_turn_false",
+                "end_turn": False,
+                "needs_follow_up": True,
             },
         )
         final_step = ExecutionStep.create(
@@ -1042,6 +1374,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             uow.execution_steps.add(llm_step)
             uow.execution_step_items.add(llm_item)
             uow.execution_step_items.add(progress_item)
+            uow.execution_step_items.add(continuation_item)
             uow.execution_steps.add(final_step)
             uow.commit()
 
@@ -1054,6 +1387,116 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(payload["metrics"]["tokens"], 13)
         self.assertEqual(payload["metrics"]["llm_calls"], 1)
         self.assertEqual(payload["model"]["id"], "openai.gpt-5.4-mini")
+        self.assertEqual(
+            [item["kind"] for item in payload["timeline"]],
+            [
+                "user_input",
+                "assistant_commentary",
+                "assistant_commentary",
+                "reasoning_summary",
+                "reasoning_summary",
+                "agent_progress",
+                "tool_call",
+                "provider_external_item",
+                "final_answer",
+                "continuation",
+            ],
+        )
+        response_item_timeline_items = [
+            item
+            for item in payload["timeline"]
+            if item["source_refs"].get("llm_response_item_id")
+        ]
+        self.assertEqual(
+            [item["kind"] for item in response_item_timeline_items],
+            [
+                "assistant_commentary",
+                "reasoning_summary",
+                "reasoning_summary",
+                "agent_progress",
+                "tool_call",
+                "provider_external_item",
+                "final_answer",
+            ],
+        )
+        self.assertEqual(
+            response_item_timeline_items[0]["content"]["text"],
+            "我先检查页面状态。",
+        )
+        self.assertEqual(
+            response_item_timeline_items[1]["content"]["text"],
+            "Need inspectable page state.",
+        )
+        self.assertEqual(
+            response_item_timeline_items[2]["content"]["reasoning_hidden"],
+            True,
+        )
+        self.assertEqual(
+            response_item_timeline_items[2]["content"]["reasoning_item_count"],
+            1,
+        )
+        self.assertNotIn(
+            "Do not reveal this hidden reasoning.",
+            json.dumps(response_item_timeline_items[2]["content"]),
+        )
+        self.assertEqual(
+            response_item_timeline_items[3]["content"]["tool_name"],
+            "context_tree.update_plan",
+        )
+        self.assertIn(
+            "目标：检查页面状态",
+            response_item_timeline_items[3]["content"]["text"],
+        )
+        self.assertIn(
+            "下一步：调用浏览器快照并总结可见控件",
+            response_item_timeline_items[3]["content"]["text"],
+        )
+        self.assertEqual(
+            response_item_timeline_items[4]["content"]["tool_name"],
+            "browser.snapshot",
+        )
+        self.assertEqual(
+            response_item_timeline_items[5]["source_refs"]["provider_item_id"],
+            "provider-web-search-ui-1",
+        )
+        self.assertEqual(
+            response_item_timeline_items[6]["content"]["text"],
+            "页面状态已检查。",
+        )
+        self.assertEqual(
+            [
+                item
+                for item in payload["timeline"]
+                if item["kind"] in {"tool_run", "tool_result"}
+                and item["source_refs"].get("provider_item_id")
+            ],
+            [],
+        )
+        session_item_timeline_items = [
+            item
+            for item in payload["timeline"]
+            if item["source_refs"].get("session_item_id")
+        ]
+        self.assertEqual(len(session_item_timeline_items), 1)
+        self.assertEqual(
+            session_item_timeline_items[0]["source_refs"]["session_item_id"],
+            progress_session_item.id,
+        )
+        continuation_timeline_items = [
+            item for item in payload["timeline"] if item["kind"] == "continuation"
+        ]
+        self.assertEqual(
+            continuation_timeline_items[0]["content"]["text"],
+            "provider_end_turn_false; end_turn=false; follow_up=true",
+        )
+        self.assertEqual(
+            continuation_timeline_items[0]["source_refs"]["llm_invocation_id"],
+            invocation.id,
+        )
+        self.assertEqual(
+            continuation_timeline_items[0]["source_refs"]["execution_step_id"],
+            llm_step.id,
+        )
         self.assertIn(
             ("llm_invocation", invocation.id),
             {
@@ -1061,10 +1504,34 @@ class UiHttpTestCase(HttpModuleTestCase):
                 for item in payload["inspector"]["linked_assets"]
             },
         )
+        timeline_diagnostics = next(
+            section
+            for section in payload["inspector"]["debug"]
+            if section["id"] == "timeline_diagnostics"
+        )
+        self.assertEqual(
+            {
+                item["label"]: item["value"]
+                for item in timeline_diagnostics["items"]
+            },
+            {
+                "Timeline items": "10",
+                "LLM response items": "7",
+                "Tool lifecycle items": "1",
+                "Hidden reasoning items": "1",
+                "Provider external items": "1",
+            },
+        )
         steps_payload = steps_response.json()
         self.assertEqual(
             [step["type"] for step in steps_payload],
-            ["user_input", "agent_progress", "llm", "final_response"],
+            [
+                "user_input",
+                "agent_progress",
+                "llm",
+                "continuation_decision",
+                "final_response",
+            ],
         )
         self.assertEqual(
             [step["step_id"] for step in steps_payload],
@@ -1072,12 +1539,13 @@ class UiHttpTestCase(HttpModuleTestCase):
                 f"{run.id}:execution:{intake_step.id}",
                 f"{run.id}:execution:{llm_step.id}:progress:1",
                 f"{run.id}:execution:{llm_step.id}",
+                f"{run.id}:execution:{llm_step.id}:continuation:2",
                 f"{run.id}:execution:{final_step.id}",
             ],
         )
         self.assertEqual(
             [step["trace"]["step_id"] for step in steps_payload],
-            [intake_step.id, llm_step.id, llm_step.id, final_step.id],
+            [intake_step.id, llm_step.id, llm_step.id, llm_step.id, final_step.id],
         )
         progress_steps = [
             step for step in steps_payload if step["type"] == "agent_progress"
@@ -1091,21 +1559,203 @@ class UiHttpTestCase(HttpModuleTestCase):
             progress_steps[0]["trace"]["llm_invocation_id"],
             invocation.id,
         )
+        self.assertEqual(
+            progress_steps[0]["trace"]["session_item_id"],
+            progress_session_item.id,
+        )
+        self.assertEqual(
+            progress_steps[0]["trace"]["source_owner"],
+            "session_item",
+        )
+        self.assertEqual(
+            progress_steps[0]["trace"]["source_event_id"],
+            progress_session_item.id,
+        )
         llm_steps = [step for step in steps_payload if step["type"] == "llm"]
         self.assertEqual(llm_steps[0]["trace"]["llm_invocation_id"], invocation.id)
         self.assertEqual(llm_steps[0]["actions"][0]["target"]["route"], f"/trace/{run.metadata['trace_id']}?step_id={llm_step.id}")
         self.assertIn("13 tokens", llm_steps[0]["summary"])
         self.assertIn("text:", llm_steps[0]["summary"])
-        self.assertIn("tool calls: 1", llm_steps[0]["summary"])
-        self.assertIn("tool call messages: 1", llm_steps[0]["summary"])
+        self.assertIn("tool calls: 2", llm_steps[0]["summary"])
         self.assertIn("progress recorded: 1", llm_steps[0]["summary"])
         self.assertIn(
             "Text + tools",
             {badge["label"] for badge in llm_steps[0]["badges"]},
         )
-        self.assertIn(
-            "Tool messages: 1",
-            {badge["label"] for badge in llm_steps[0]["badges"]},
+        continuation_steps = [
+            step for step in steps_payload if step["type"] == "continuation_decision"
+        ]
+        self.assertEqual(continuation_steps[0]["title"], "Continuation Decision")
+        self.assertEqual(
+            continuation_steps[0]["summary"],
+            "provider_end_turn_false; end_turn=false; follow_up=true",
+        )
+        self.assertEqual(
+            continuation_steps[0]["trace"]["llm_invocation_id"],
+            invocation.id,
+        )
+
+    def test_ui_workbench_displays_user_input_and_final_answer_timeline(self) -> None:
+        container = self.client.app.state.container
+
+        class _FinalAnswerAdapter:
+            def invoke(self, _profile: object, request: object) -> LlmAdapterResponse:
+                invocation_id = getattr(request, "invocation_id")
+                return LlmAdapterResponse(
+                    result=LlmResult(
+                        text="这是最终答复。",
+                        usage=LlmUsage(
+                            input_tokens=5,
+                            output_tokens=4,
+                            total_tokens=9,
+                        ),
+                        finish_reason="stop",
+                    ),
+                    response_items=(
+                        LlmResponseItem(
+                            id=f"{invocation_id}:item:final",
+                            invocation_id=invocation_id,
+                            sequence_no=0,
+                            kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                            phase=LlmMessagePhase.FINAL_ANSWER,
+                            content_payload={"text": "这是最终答复。"},
+                            user_visible=True,
+                        ),
+                    ),
+                )
+
+        container.require(AppKey.LLM_ADAPTER_REGISTRY).register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            _FinalAnswerAdapter(),
+        )
+        llm_response = self.client.post(
+            "/llms",
+            json={
+                "id": "openai.gpt-5.4-final",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model_name": "gpt-5.4-final",
+                "credential_binding_id": "openai-api-key",
+            },
+        )
+        self.assertEqual(llm_response.status_code, 201)
+        invocation = container.require(AppKey.LLM_SERVICE).invoke(
+            InvokeLlmInput(
+                llm_id="openai.gpt-5.4-final",
+                invocation_id="llm-invocation-ui-final-only",
+                messages=(
+                    LlmMessage(
+                        role=LlmMessageRole.USER,
+                        content="Answer directly.",
+                    ),
+                ),
+            ),
+        )
+        timestamp = datetime.now(timezone.utc)
+        run = OrchestrationRun(
+            id="run-ui-final-only",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="直接回答",
+            ),
+            status=OrchestrationRunStatus.COMPLETED,
+            stage=OrchestrationRunStage.COMPLETED,
+            agent_id="assistant",
+            current_step=1,
+            result_payload={"output_text": "这是最终答复。"},
+            metadata={
+                "session_key": "agent:assistant:main",
+                "trace_id": "trace-ui-final-only",
+            },
+            created_at=timestamp,
+            updated_at=timestamp + timedelta(seconds=1),
+            started_at=timestamp,
+            completed_at=timestamp + timedelta(seconds=1),
+        )
+        chain = ExecutionChain.create(
+            chain_id="chain-ui-final-only",
+            turn_id=run.id,
+        )
+        intake_step = ExecutionStep.create(
+            step_id="step-ui-final-only-intake",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=0,
+            kind=ExecutionStepKind.INTAKE,
+        )
+        intake_step.complete()
+        chain.increment_step_count()
+        llm_step = ExecutionStep.create(
+            step_id="step-ui-final-only-llm",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=1,
+            kind=ExecutionStepKind.LLM,
+        )
+        llm_step.complete()
+        chain.increment_step_count()
+        llm_item = ExecutionStepItem.create(
+            item_id="item-ui-final-only-llm",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id=invocation.id,
+            ),
+        )
+        llm_item.complete(
+            summary_payload={
+                "llm_invocation_id": invocation.id,
+                "llm_id": "openai.gpt-5.4-final",
+            },
+        )
+        continuation_item = ExecutionStepItem.create(
+            item_id="item-ui-final-only-continuation",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=1,
+            kind=ExecutionStepItemKind.CONTINUATION_DECISION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_continuation",
+                owner_id=f"{invocation.id}:continuation",
+            ),
+        )
+        continuation_item.complete(
+            summary_payload={
+                "llm_invocation_id": invocation.id,
+                "continuation_id": f"{invocation.id}:continuation",
+                "reason": "none",
+                "needs_follow_up": False,
+            },
+        )
+        chain.complete()
+
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(run)
+            uow.execution_chains.add(chain)
+            uow.execution_steps.add(intake_step)
+            uow.execution_steps.add(llm_step)
+            uow.execution_step_items.add(llm_item)
+            uow.execution_step_items.add(continuation_item)
+            uow.commit()
+
+        response = self.client.get("/ui/workbench/runs/run-ui-final-only")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            [item["kind"] for item in payload["timeline"]],
+            ["user_input", "final_answer"],
+        )
+        self.assertEqual(payload["timeline"][0]["content"]["text"], "直接回答")
+        self.assertEqual(payload["timeline"][1]["content"]["text"], "这是最终答复。")
+        self.assertEqual(
+            payload["timeline"][1]["source_refs"]["llm_response_item_id"],
+            f"{invocation.id}:item:final",
         )
 
     def test_ui_workbench_marks_consecutive_tool_only_llm_steps(self) -> None:
@@ -1163,7 +1813,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                     "llm_invocation_id": f"llm-ui-tool-only-streak-{index}",
                     "llm_id": "openai.gpt-5.4-mini",
                     "tool_call_names": ["exec"],
-                    "tool_call_message_ids": [f"message-tool-call-{index}"],
+                    "tool_call_session_item_ids": [f"session-item-tool-call-{index}"],
                 },
             )
             chain.increment_step_count()
@@ -1198,6 +1848,93 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertIn("Tool-only streak: 3 LLM steps.", llm_steps[2]["summary"])
 
+    def test_ui_workbench_surfaces_llm_loop_diagnostic_from_execution_chain(
+        self,
+    ) -> None:
+        container = self.client.app.state.container
+        timestamp = datetime.now(timezone.utc)
+        run = OrchestrationRun(
+            id="run-ui-llm-loop-diagnostic",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="继续",
+            ),
+            status=OrchestrationRunStatus.FAILED,
+            stage=OrchestrationRunStage.LLM,
+            agent_id="assistant",
+            current_step=1,
+            metadata={"session_key": "agent:assistant:main"},
+            created_at=timestamp,
+            updated_at=timestamp + timedelta(seconds=1),
+            started_at=timestamp,
+        )
+        chain = ExecutionChain.create(
+            chain_id="chain-ui-llm-loop-diagnostic",
+            turn_id=run.id,
+        )
+        chain.start(active_step_id="step-ui-llm-loop-diagnostic")
+        chain.increment_step_count()
+        llm_step = ExecutionStep.create(
+            step_id="step-ui-llm-loop-diagnostic",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=1,
+            kind=ExecutionStepKind.LLM,
+        )
+        llm_step.fail(
+            message="LLM response ended without a final answer.",
+            code="llm_incomplete_terminal_response",
+        )
+        chain.fail(
+            message="LLM response ended without a final answer.",
+            code="llm_incomplete_terminal_response",
+        )
+        llm_item = ExecutionStepItem.create(
+            item_id="item-ui-llm-loop-diagnostic",
+            step_id=llm_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_invocation",
+                owner_id="llm-ui-loop-diagnostic",
+            ),
+        )
+        llm_item.summary_payload = {
+            "llm_invocation_id": "llm-ui-loop-diagnostic",
+            "llm_id": "openai.gpt-5.4-mini",
+            "llm_loop_diagnostic": {
+                "code": "llm_incomplete_terminal_response",
+                "reason": "commentary_or_reasoning_without_final_answer_or_follow_up",
+            },
+        }
+        llm_item.fail(
+            message="LLM response ended without a final answer.",
+            code="llm_incomplete_terminal_response",
+        )
+
+        with container.require(AppKey.UNIT_OF_WORK_FACTORY)() as uow:
+            uow.orchestration_runs.add(run)
+            uow.execution_chains.add(chain)
+            uow.execution_steps.add(llm_step)
+            uow.execution_step_items.add(llm_item)
+            uow.commit()
+
+        response = self.client.get("/ui/workbench/runs/run-ui-llm-loop-diagnostic/steps")
+
+        self.assertEqual(response.status_code, 200)
+        llm_steps = [step for step in response.json() if step["type"] == "llm"]
+        self.assertEqual(len(llm_steps), 1)
+        self.assertIn(
+            "Loop diagnostic",
+            {badge["label"] for badge in llm_steps[0]["badges"]},
+        )
+        self.assertIn(
+            "loop diagnostic: llm_incomplete_terminal_response",
+            llm_steps[0]["summary"],
+        )
+
     def test_ui_workbench_reads_tool_runs_from_execution_chain_without_run_metadata(
         self,
     ) -> None:
@@ -1217,6 +1954,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             metadata={
                 "session_key": "agent:assistant:main",
                 "trace_id": "trace-ui-tool-chain-only",
+                "context_render_snapshot_id": "ctxsnap-ui-tool-chain-only",
             },
             created_at=timestamp,
             updated_at=timestamp + timedelta(seconds=2),
@@ -1255,12 +1993,32 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         tool_step.complete()
         chain.increment_step_count()
+        tool_call_item = ExecutionStepItem.create(
+            item_id="item-ui-tool-chain-only-call",
+            step_id=tool_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=0,
+            kind=ExecutionStepItemKind.TOOL_CALL,
+            owner=ExecutionOwnerReference(
+                owner_kind="tool_call",
+                owner_id="call-ui-tool-chain-only",
+            ),
+        )
+        tool_call_item.complete(
+            summary_payload={
+                "tool_call_id": "call-ui-tool-chain-only",
+                "tool_name": "browser.snapshot",
+                "tool_id": "browser.snapshot",
+                "mode": "inline",
+            },
+        )
         tool_item = ExecutionStepItem.create(
             item_id="item-ui-tool-chain-only-tool",
             step_id=tool_step.id,
             chain_id=chain.id,
             turn_id=run.id,
-            item_index=0,
+            item_index=1,
             kind=ExecutionStepItemKind.TOOL_RUN,
             owner=ExecutionOwnerReference(
                 owner_kind="tool_run",
@@ -1270,9 +2028,51 @@ class UiHttpTestCase(HttpModuleTestCase):
         tool_item.complete(
             summary_payload={
                 "tool_run_id": tool_run.id,
+                "tool_call_id": "call-ui-tool-chain-only",
                 "tool_name": "browser.snapshot",
                 "tool_id": "browser.snapshot",
                 "status": "succeeded",
+                "tool_execution_plan": {
+                    "tool_call_id": "call-ui-tool-chain-only",
+                    "tool_name": "browser.snapshot",
+                    "tool_id": "browser.snapshot",
+                    "mode": "inline",
+                    "strategy": "inline",
+                    "environment": "local",
+                    "arguments_digest": "digest-ui-tool-chain-only",
+                },
+            },
+        )
+        tool_result_item = ExecutionStepItem.create(
+            item_id="item-ui-tool-chain-only-result",
+            step_id=tool_step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=2,
+            kind=ExecutionStepItemKind.TOOL_RESULT,
+            owner=ExecutionOwnerReference(
+                owner_kind="session_item",
+                owner_id="session-item-tool-result-ui-chain-only",
+            ),
+        )
+        tool_result_item.complete(
+            summary_payload={
+                "tool_run_id": tool_run.id,
+                "tool_call_id": "call-ui-tool-chain-only",
+                "tool_name": "browser.snapshot",
+                "tool_id": "browser.snapshot",
+                "result_message_id": "message-tool-result-ui-chain-only",
+                "result_session_item_id": "session-item-tool-result-ui-chain-only",
+                "session_item_ids": ["session-item-tool-result-ui-chain-only"],
+                "tool_execution_plan": {
+                    "tool_call_id": "call-ui-tool-chain-only",
+                    "tool_name": "browser.snapshot",
+                    "tool_id": "browser.snapshot",
+                    "mode": "inline",
+                    "strategy": "inline",
+                    "environment": "local",
+                    "arguments_digest": "digest-ui-tool-chain-only",
+                },
             },
         )
         final_step = ExecutionStep.create(
@@ -1292,7 +2092,9 @@ class UiHttpTestCase(HttpModuleTestCase):
             uow.execution_chains.add(chain)
             uow.execution_steps.add(intake_step)
             uow.execution_steps.add(tool_step)
+            uow.execution_step_items.add(tool_call_item)
             uow.execution_step_items.add(tool_item)
+            uow.execution_step_items.add(tool_result_item)
             uow.execution_steps.add(final_step)
             uow.commit()
 
@@ -1301,7 +2103,69 @@ class UiHttpTestCase(HttpModuleTestCase):
 
         self.assertEqual(run_response.status_code, 200)
         self.assertEqual(steps_response.status_code, 200)
-        self.assertEqual(run_response.json()["metrics"]["tool_calls"], 1)
+        run_payload = run_response.json()
+        self.assertEqual(run_payload["metrics"]["tool_calls"], 1)
+        tool_lifecycle_timeline_items = [
+            item
+            for item in run_payload["timeline"]
+            if item["kind"] in {"tool_call", "tool_run", "tool_result"}
+        ]
+        self.assertEqual(
+            [item["kind"] for item in tool_lifecycle_timeline_items],
+            ["tool_call"],
+        )
+        tool_interaction = tool_lifecycle_timeline_items[0]
+        lifecycle = tool_interaction["content"]["lifecycle"]
+        self.assertEqual(tool_interaction["title"], "Tool Interaction: browser.snapshot")
+        self.assertEqual(tool_interaction["content"]["lifecycle_item_count"], 3)
+        self.assertEqual(
+            [item["kind"] for item in lifecycle],
+            ["tool_call", "tool_run", "tool_result"],
+        )
+        self.assertEqual(
+            tool_interaction["source_refs"]["tool_call_id"],
+            "call-ui-tool-chain-only",
+        )
+        self.assertEqual(
+            tool_interaction["source_refs"]["tool_run_id"],
+            tool_run.id,
+        )
+        self.assertEqual(
+            lifecycle[1]["source_refs"]["execution_item_id"],
+            tool_item.id,
+        )
+        self.assertEqual(
+            tool_interaction["source_refs"]["context_render_snapshot_id"],
+            "ctxsnap-ui-tool-chain-only",
+        )
+        self.assertEqual(
+            lifecycle[1]["source_refs"]["context_render_snapshot_id"],
+            "ctxsnap-ui-tool-chain-only",
+        )
+        self.assertEqual(
+            tool_interaction["content"]["tool_execution_plan"][
+                "arguments_digest"
+            ],
+            "digest-ui-tool-chain-only",
+        )
+        self.assertEqual(
+            tool_interaction["source_refs"]["session_item_id"],
+            "session-item-tool-result-ui-chain-only",
+        )
+        self.assertEqual(
+            lifecycle[2]["source_refs"]["session_item_id"],
+            "session-item-tool-result-ui-chain-only",
+        )
+        self.assertIn(
+            "Result item: session-item-tool-result-ui-chain-only.",
+            lifecycle[2]["content"]["text"],
+        )
+        self.assertEqual(
+            lifecycle[2]["content"]["tool_execution_plan"][
+                "tool_call_id"
+            ],
+            "call-ui-tool-chain-only",
+        )
         steps_payload = steps_response.json()
         self.assertEqual(
             [step["type"] for step in steps_payload],
@@ -1651,6 +2515,8 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "workspaces",
                 "visible_nodes",
                 "render_snapshots",
+                "prompt_budget",
+                "investigation_warnings",
                 "diagnostics",
             },
         }
@@ -2034,7 +2900,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             "trace-access-ui",
         )
 
-    def test_ui_operations_daemon_overview_refreshes_instance_truth(self) -> None:
+    def test_ui_operations_daemon_overview_reads_projection_without_runtime_refresh(self) -> None:
         container = self.client.app.state.container
         original = container.require(AppKey.DAEMON_MANAGER).list_instances
         refresh_values: list[bool] = []
@@ -2044,14 +2910,17 @@ class UiHttpTestCase(HttpModuleTestCase):
             return original(service_key=service_key, refresh=False)
 
         container.require(AppKey.DAEMON_MANAGER).list_instances = list_instances_spy
-
-        self._materialize_operations("daemon")
-        response = self.client.get("/operations/daemon/overview")
+        try:
+            self._materialize_operations("daemon")
+            response = self.client.get("/operations/daemon/overview")
+        finally:
+            container.require(AppKey.DAEMON_MANAGER).list_instances = original
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(True, refresh_values)
+        self.assertTrue(refresh_values)
+        self.assertNotIn(True, refresh_values)
 
-    def test_ui_operations_daemon_page_uses_refreshed_runtime_state(self) -> None:
+    def test_ui_operations_daemon_page_uses_materialized_runtime_state(self) -> None:
         container = self.client.app.state.container
         timestamp = datetime.now(timezone.utc) - timedelta(minutes=3)
         daemon_process = subprocess.Popen(["sleep", "60"], start_new_session=True)
@@ -2137,7 +3006,8 @@ class UiHttpTestCase(HttpModuleTestCase):
             container.require(AppKey.DAEMON_MANAGER).list_instances = original
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(True, refresh_values)
+        self.assertTrue(refresh_values)
+        self.assertNotIn(True, refresh_values)
         payload = response.json()
         self.assertEqual(payload["module"], "daemon")
         self.assertNotIn("sections", payload)
@@ -2249,9 +3119,15 @@ class UiHttpTestCase(HttpModuleTestCase):
             for item in payload["instances"]["rows"]
             if item["id"] == "daemon-ui-missing-process"
         )
-        self.assertEqual(instance_row["cells"]["status"], "Failed")
-        self.assertEqual(instance_row["cells"]["last_error"], "process session was not found")
-        self.assertEqual(payload["processes"]["total"], 0)
+        self.assertEqual(instance_row["cells"]["status"], "Ready")
+        process_row = next(
+            item
+            for item in payload["processes"]["rows"]
+            if item["id"] == missing_process_id
+        )
+        self.assertEqual(process_row["cells"]["status"], "Missing")
+        self.assertEqual(process_row["cells"]["binding"], "Missing Session")
+        self.assertEqual(process_row["cells"]["output"], "stderr")
 
     def test_ui_operations_daemon_health_ignores_historical_process_failures(self) -> None:
         container = self.client.app.state.container
@@ -2332,7 +3208,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             description="Tool used by UI operations page tests.",
             supported_modes=(ToolMode.BACKGROUND,),
             requires_confirmation=True,
-            access_requirements=("browser_profile",),
+            access_requirements=("env:UI_ACCESS_MISSING_TOKEN",),
         )
         seed_catalog_tool(
             container,
@@ -2608,22 +3484,6 @@ class UiHttpTestCase(HttpModuleTestCase):
             ),
         )
         self._process_operations_events()
-        container.require(AppKey.EVENTS_SERVICE).publish(
-            Event(
-                name="tool.run.requeued",
-                kind="observe",
-                payload={
-                    "run_id": queued_run.id,
-                    "tool_id": queued_run.tool_id,
-                    "status": "queued",
-                    "reason": "direct event bus smoke",
-                    "mode": queued_run.target.mode.value,
-                },
-                occurred_at=timestamp + timedelta(seconds=21),
-                trace={"trace_id": "trace-tool-direct-event"},
-                ordering_key=queued_run.id,
-            ),
-        )
         self._materialize_operations("tool")
 
         response = self.client.get("/operations/tool")
@@ -2843,7 +3703,7 @@ class UiHttpTestCase(HttpModuleTestCase):
             for item in payload["auth_missing"]["rows"]
             if item["cells"]["tool"] == "ui_background_tool"
         )
-        self.assertEqual(access_row["cells"]["missing_access"], "browser_profile")
+        self.assertEqual(access_row["cells"]["missing_access"], "env:UI_ACCESS_MISSING_TOKEN")
         self.assertIn(access_row["cells"]["status"], {"setup_needed", "unsupported"})
         runtime_rows = [
             item
@@ -2881,33 +3741,8 @@ class UiHttpTestCase(HttpModuleTestCase):
         lifecycle_events = {
             item["cells"]["event"] for item in payload["tool_lifecycle_events"]["rows"]
         }
-        self.assertIn("run.requeued", lifecycle_events)
-        self.assertIn("run.failed", lifecycle_events)
-        self.assertIn("assignment.started", lifecycle_events)
-        direct_event_row = next(
-            item
-            for item in payload["tool_lifecycle_events"]["rows"]
-            if item["cells"]["trace"] == "trace-tool-direct-event"
-        )
-        self.assertEqual(direct_event_row["cells"]["event"], "run.requeued")
-        failed_event_row = next(
-            item
-            for item in payload["tool_lifecycle_events"]["rows"]
-            if item["cells"]["run_id"] == failed_run.id
-        )
-        self.assertIn("ui_inline_tool", failed_event_row["cells"]["tool"])
-        self.assertEqual(failed_event_row["cells"]["trace"], "trace-tool-page")
-        self.assertEqual(
-            failed_event_row["cells"]["trace_route"],
-            "/ui/trace/trace-tool-page",
-        )
-        assignment_event_row = next(
-            item
-            for item in payload["tool_lifecycle_events"]["rows"]
-            if item["cells"]["event"] == "assignment.started"
-        )
-        self.assertEqual(assignment_event_row["cells"]["assignment"], assignment.id)
-        self.assertEqual(assignment_event_row["cells"]["worker"], worker.id)
+        self.assertIn("source.created", lifecycle_events)
+        self.assertIn("function.created", lifecycle_events)
         inline_items = {
             item["label"]: item["value"] for item in payload["inline_risk"]["items"]
         }
@@ -2981,13 +3816,6 @@ class UiHttpTestCase(HttpModuleTestCase):
             "trace-tool-page",
         )
         self.assertEqual(running_detail["assignments"]["rows"][0]["id"], assignment.id)
-        self.assertIn(
-            "assignment.started",
-            {
-                item["cells"]["event"]
-                for item in running_detail["events"]["rows"]
-            },
-        )
         self.assertEqual(
             artifact_detail["artifacts"]["rows"][0]["cells"]["artifact_id"],
             stored_artifact.id,
@@ -3897,6 +4725,8 @@ class UiHttpTestCase(HttpModuleTestCase):
                     "run_id": "run-ui-trace",
                     "step_id": "step-ui-trace-llm",
                     "invocation_id": "llm-ui-trace",
+                    "llm_response_item_id": "llm-ui-trace:item:tool-call",
+                    "tool_call_id": "call-ui-trace-browser",
                     "finish_reason": "tool_calls",
                     "text_present": True,
                     "text_chars": 8,
@@ -3908,6 +4738,8 @@ class UiHttpTestCase(HttpModuleTestCase):
                     "correlation_id": "corr-ui",
                     "step_id": "step-ui-trace-llm",
                     "llm_invocation_id": "llm-ui-trace",
+                    "llm_response_item_id": "llm-ui-trace:item:tool-call",
+                    "tool_call_id": "call-ui-trace-browser",
                 },
             ),
         )
@@ -3920,13 +4752,11 @@ class UiHttpTestCase(HttpModuleTestCase):
                     "event_name": "orchestration.execution.llm_step_completed",
                     "run_id": "run-ui-trace",
                     "step_id": "step-ui-trace-llm",
+                    "execution_item_id": "item-ui-trace-progress",
                     "llm_invocation_id": "llm-ui-trace",
-                    "assistant_progress_message_ids": ["msg-progress-ui-trace"],
-                    "tool_call_message_ids": ["msg-tool-call-ui-trace"],
-                    "assistant_message_ids": [
-                        "msg-progress-ui-trace",
-                        "msg-tool-call-ui-trace",
-                    ],
+                    "session_item_ids": ["session-item-progress-ui-trace"],
+                    "assistant_progress_item_ids": ["session-item-progress-ui-trace"],
+                    "tool_call_session_item_ids": ["session-item-tool-call-ui-trace"],
                     "tool_call_names": ["browser.snapshot"],
                     "text_present": True,
                     "text_chars": 8,
@@ -3935,7 +4765,9 @@ class UiHttpTestCase(HttpModuleTestCase):
                     "trace_id": "trace-ui-events",
                     "correlation_id": "corr-ui",
                     "step_id": "step-ui-trace-llm",
+                    "execution_item_id": "item-ui-trace-progress",
                     "llm_invocation_id": "llm-ui-trace",
+                    "session_item_id": "session-item-progress-ui-trace",
                 },
             ),
         )
@@ -3966,6 +4798,14 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(events_payload[1]["trace"]["step_id"], "step-ui-trace-llm")
         self.assertEqual(events_payload[1]["relative_ms"], 2000)
         self.assertEqual(events_payload[2]["family"], "llm")
+        self.assertEqual(
+            events_payload[2]["trace"]["llm_response_item_id"],
+            "llm-ui-trace:item:tool-call",
+        )
+        self.assertEqual(
+            events_payload[2]["trace"]["tool_call_id"],
+            "call-ui-trace-browser",
+        )
         self.assertTrue(events_payload[2]["payload"]["text_present"])
         self.assertEqual(events_payload[2]["payload"]["text_chars"], 8)
         self.assertEqual(events_payload[2]["payload"]["tool_call_count"], 1)
@@ -3975,12 +4815,20 @@ class UiHttpTestCase(HttpModuleTestCase):
         )
         self.assertEqual(events_payload[3]["family"], "orchestration")
         self.assertEqual(
-            events_payload[3]["payload"]["assistant_progress_message_ids"],
-            ["msg-progress-ui-trace"],
+            events_payload[3]["trace"]["execution_item_id"],
+            "item-ui-trace-progress",
         )
         self.assertEqual(
-            events_payload[3]["payload"]["tool_call_message_ids"],
-            ["msg-tool-call-ui-trace"],
+            events_payload[3]["trace"]["session_item_id"],
+            "session-item-progress-ui-trace",
+        )
+        self.assertEqual(
+            events_payload[3]["payload"]["assistant_progress_item_ids"],
+            ["session-item-progress-ui-trace"],
+        )
+        self.assertEqual(
+            events_payload[3]["payload"]["tool_call_session_item_ids"],
+            ["session-item-tool-call-ui-trace"],
         )
 
         self.assertEqual(summary_response.status_code, 200)
@@ -4011,6 +4859,22 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(step_summary_payload["event_count"], 3)
         self.assertIn(
             {"type": "step_id", "id": "step-ui-trace-llm"},
+            step_summary_payload["linked_entities"],
+        )
+        self.assertIn(
+            {"type": "llm_response_item_id", "id": "llm-ui-trace:item:tool-call"},
+            step_summary_payload["linked_entities"],
+        )
+        self.assertIn(
+            {"type": "tool_call_id", "id": "call-ui-trace-browser"},
+            step_summary_payload["linked_entities"],
+        )
+        self.assertIn(
+            {"type": "execution_item_id", "id": "item-ui-trace-progress"},
+            step_summary_payload["linked_entities"],
+        )
+        self.assertIn(
+            {"type": "session_item_id", "id": "session-item-progress-ui-trace"},
             step_summary_payload["linked_entities"],
         )
 

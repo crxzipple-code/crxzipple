@@ -16,11 +16,18 @@ from crxzipple.modules.llm.application import (
 from crxzipple.modules.llm.domain import (
     LlmApiFamily,
     LlmCapability,
+    LlmContinuationReason,
+    LlmContinuationSignal,
     LlmDefaults,
+    LlmMessagePhase,
     LlmMessage,
     LlmMessageRole,
     LlmModelFamily,
     LlmProviderKind,
+    LlmResponseEvent,
+    LlmResponseEventType,
+    LlmResponseItem,
+    LlmResponseItemKind,
     LlmResult,
     LlmSourceKind,
     LlmUsage,
@@ -40,7 +47,7 @@ class _FakeLlmAdapter:
         self.last_request = request
         return LlmAdapterResponse(
             result=LlmResult(
-                text="hello from fake adapter",
+                text="legacy adapter summary should be ignored",
                 tool_calls=(
                     ToolCallIntent(
                         id="tool-call-1",
@@ -51,6 +58,46 @@ class _FakeLlmAdapter:
                 usage=LlmUsage(input_tokens=12, output_tokens=8, total_tokens=20),
                 finish_reason="stop",
                 metadata={"adapter": "fake"},
+            ),
+            response_items=(
+                LlmResponseItem(
+                    id=f"{request.invocation_id}:message:1",
+                    invocation_id=request.invocation_id,
+                    sequence_no=1,
+                    kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                    role=LlmMessageRole.ASSISTANT,
+                    phase=LlmMessagePhase.FINAL_ANSWER,
+                    content_payload={"text": "hello from fake adapter"},
+                    provider_payload={"type": "message"},
+                    provider_item_type="message",
+                    model_visible=True,
+                    user_visible=True,
+                ),
+                LlmResponseItem(
+                    id=f"{request.invocation_id}:tool_call:1",
+                    invocation_id=request.invocation_id,
+                    sequence_no=2,
+                    kind=LlmResponseItemKind.TOOL_CALL,
+                    role=LlmMessageRole.ASSISTANT,
+                    phase=LlmMessagePhase.COMMENTARY,
+                    content_payload={
+                        "call_id": "tool-call-1",
+                        "tool_name": "search_docs",
+                        "arguments": {"query": "ddd"},
+                    },
+                    provider_payload={"type": "function_call"},
+                    provider_item_type="function_call",
+                    call_id="tool-call-1",
+                    tool_name="search_docs",
+                    model_visible=True,
+                    user_visible=False,
+                ),
+            ),
+            continuation=LlmContinuationSignal(
+                end_turn=False,
+                needs_follow_up=True,
+                reason=LlmContinuationReason.TOOL_CALL,
+                provider_payload={"finish_reason": "tool_calls"},
             ),
             provider_request_id="fake-request-123",
         )
@@ -76,6 +123,65 @@ class _FakeStreamingLlmAdapter:
                     metadata={"adapter": "streaming-fake"},
                 ).to_payload(),
                 "provider_request_id": "stream-request-123",
+            },
+        )
+
+
+class _FakeNativeStreamingLlmAdapter:
+    def stream_invoke(self, profile, request):  # noqa: ANN001
+        yield LlmStreamEvent(
+            type="item_started",
+            sequence=1,
+            data={
+                "item_id": "item-native-1",
+                "provider_event_type": "response.output_item.added",
+                "provider_payload": {"type": "response.output_item.added"},
+            },
+        )
+        yield LlmStreamEvent(
+            type="tool_argument_delta",
+            sequence=2,
+            data={
+                "item_id": "item-native-1",
+                "delta": '{"query"',
+                "provider_event_type": "response.function_call_arguments.delta",
+                "provider_payload": {"type": "response.function_call_arguments.delta"},
+            },
+        )
+        yield LlmStreamEvent(
+            type="completed",
+            sequence=3,
+            data={
+                "result": LlmResult(
+                    text="legacy stream summary should be ignored",
+                    finish_reason="completed",
+                ).to_payload(),
+                "response_items": [
+                    LlmResponseItem(
+                        id=f"{request.invocation_id}:native:item:1",
+                        invocation_id=request.invocation_id,
+                        sequence_no=1,
+                        kind=LlmResponseItemKind.TOOL_CALL,
+                        role=LlmMessageRole.ASSISTANT,
+                        phase=LlmMessagePhase.COMMENTARY,
+                        content_payload={
+                            "call_id": "call-native-1",
+                            "tool_name": "search_docs",
+                            "arguments": {"query": "native"},
+                        },
+                        provider_item_id="item-native-1",
+                        provider_item_type="function_call",
+                        call_id="call-native-1",
+                        tool_name="search_docs",
+                    ).to_payload(),
+                ],
+                "continuation": LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                    provider_payload={"status": "completed"},
+                ).to_payload(),
+                "provider_request_id": "native-stream-request-123",
             },
         )
 
@@ -187,6 +293,7 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(dto.created_at, "2026-04-18T07:00:00+00:00")
         self.assertEqual(dto.started_at, "2026-04-18T07:00:01+00:00")
         self.assertEqual(dto.completed_at, "2026-04-18T07:00:02+00:00")
+        self.assertEqual(dto.response_items, ())
 
     def test_llm_profile_dto_exposes_access_credential_binding_id(self) -> None:
         profile = LlmProfile(
@@ -200,6 +307,182 @@ class LlmServiceTestCase(unittest.TestCase):
         dto = LlmProfileDTO.from_entity(profile)
 
         self.assertEqual(dto.credential_binding_id, "openai-api-key")
+
+    def test_response_item_event_and_continuation_payload_roundtrip(self) -> None:
+        item = LlmResponseItem(
+            id="item-1",
+            invocation_id="inv-1",
+            sequence_no=2,
+            kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+            role=LlmMessageRole.ASSISTANT,
+            phase=LlmMessagePhase.COMMENTARY,
+            content_payload={"text": "I will inspect the repo."},
+            provider_payload={"type": "message", "id": "msg_1"},
+            provider_item_id="msg_1",
+            provider_item_type="message",
+            model_visible=True,
+            user_visible=True,
+        )
+        event = LlmResponseEvent(
+            id="event-1",
+            invocation_id="inv-1",
+            sequence_no=3,
+            type=LlmResponseEventType.REASONING_SUMMARY_DELTA,
+            item_id=item.id,
+            delta_payload={"text": "Inspecting"},
+            provider_payload={"type": "response.reasoning_summary_text.delta"},
+        )
+        continuation = LlmContinuationSignal(
+            end_turn=False,
+            needs_follow_up=True,
+            reason=LlmContinuationReason.PROVIDER_END_TURN_FALSE,
+            provider_payload={"end_turn": False},
+        )
+
+        restored_item = LlmResponseItem.from_payload(item.to_payload())
+        restored_event = LlmResponseEvent.from_payload(event.to_payload())
+        restored_continuation = LlmContinuationSignal.from_payload(
+            continuation.to_payload(),
+        )
+
+        self.assertEqual(restored_item.kind, LlmResponseItemKind.ASSISTANT_MESSAGE)
+        self.assertEqual(restored_item.phase, LlmMessagePhase.COMMENTARY)
+        self.assertEqual(restored_item.content_payload["text"], "I will inspect the repo.")
+        self.assertEqual(restored_event.type, LlmResponseEventType.REASONING_SUMMARY_DELTA)
+        self.assertEqual(restored_event.item_id, item.id)
+        self.assertEqual(
+            restored_continuation.reason,
+            LlmContinuationReason.PROVIDER_END_TURN_FALSE,
+        )
+        self.assertTrue(restored_continuation.needs_follow_up)
+
+    def test_result_summary_can_be_derived_from_response_items(self) -> None:
+        usage = LlmUsage(input_tokens=10, output_tokens=8, total_tokens=18)
+        result = LlmResult.from_response_items(
+            (
+                LlmResponseItem(
+                    id="inv-derived:item:1",
+                    invocation_id="inv-derived",
+                    sequence_no=1,
+                    kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                    role=LlmMessageRole.ASSISTANT,
+                    phase=LlmMessagePhase.COMMENTARY,
+                    content_payload={"text": "I will inspect. "},
+                    provider_item_type="message",
+                ),
+                LlmResponseItem(
+                    id="inv-derived:item:2",
+                    invocation_id="inv-derived",
+                    sequence_no=2,
+                    kind=LlmResponseItemKind.TOOL_CALL,
+                    role=LlmMessageRole.ASSISTANT,
+                    content_payload={
+                        "call_id": "call-search-1",
+                        "tool_name": "search_docs",
+                        "arguments": {"query": "response items"},
+                    },
+                    provider_item_id="fc_1",
+                    provider_item_type="function_call",
+                    call_id="call-search-1",
+                    tool_name="search_docs",
+                ),
+                LlmResponseItem(
+                    id="inv-derived:item:3",
+                    invocation_id="inv-derived",
+                    sequence_no=3,
+                    kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                    role=LlmMessageRole.ASSISTANT,
+                    phase=LlmMessagePhase.FINAL_ANSWER,
+                    content_payload={"text": "Done."},
+                    provider_item_type="message",
+                ),
+            ),
+            usage=usage,
+            finish_reason="completed",
+            metadata={"provider": "openai"},
+        )
+
+        self.assertEqual(result.text, "I will inspect. Done.")
+        self.assertEqual(result.tool_calls[0].id, "call-search-1")
+        self.assertEqual(result.tool_calls[0].name, "search_docs")
+        self.assertEqual(result.tool_calls[0].arguments, {"query": "response items"})
+        self.assertEqual(result.usage, usage)
+        self.assertEqual(result.finish_reason, "completed")
+        self.assertEqual(result.metadata["provider"], "openai")
+
+    def test_invocation_repository_persists_response_items_events_and_continuation(self) -> None:
+        profile = self.service.register_profile(
+            RegisterLlmProfileInput(
+                id="response-item-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+        invocation = LlmInvocation(
+            id="inv-response-items",
+            llm_id=profile.id,
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Need a staged plan.",
+                ),
+            ),
+        )
+        invocation.start()
+        response_item = LlmResponseItem(
+            id="item-message-1",
+            invocation_id=invocation.id,
+            sequence_no=1,
+            kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+            role=LlmMessageRole.ASSISTANT,
+            phase=LlmMessagePhase.FINAL_ANSWER,
+            content_payload={"text": "Done."},
+            provider_payload={"type": "message"},
+            provider_item_type="message",
+            model_visible=True,
+            user_visible=True,
+        )
+        continuation = LlmContinuationSignal(
+            end_turn=True,
+            needs_follow_up=False,
+            reason=LlmContinuationReason.NONE,
+            provider_payload={"status": "completed"},
+        )
+        invocation.succeed(
+            LlmResult(text="Done.", finish_reason="stop"),
+            response_items=(response_item,),
+            continuation=continuation,
+            provider_request_id="resp_123",
+        )
+
+        response_event = LlmResponseEvent(
+            id="event-text-1",
+            invocation_id=invocation.id,
+            sequence_no=1,
+            type=LlmResponseEventType.TEXT_DELTA,
+            item_id=response_item.id,
+            delta_payload={"text": "Done."},
+            provider_payload={"type": "response.output_text.delta"},
+        )
+
+        with self.uow_factory() as uow:
+            uow.llm_invocations.add(invocation)
+            uow.llm_invocations.add_response_event(response_event)
+            uow.commit()
+
+        fetched = self.service.get_invocation(invocation.id)
+        fetched_item = self.service.get_response_item(response_item.id)
+        events = self.service.list_response_events(invocation.id)
+
+        self.assertEqual(fetched.response_items[0].id, response_item.id)
+        self.assertEqual(fetched_item.id, response_item.id)
+        self.assertEqual(fetched_item.invocation_id, invocation.id)
+        self.assertEqual(fetched.response_items[0].phase, LlmMessagePhase.FINAL_ANSWER)
+        self.assertEqual(fetched.continuation.end_turn, True)
+        self.assertFalse(fetched.continuation.needs_follow_up)
+        self.assertEqual(events[0].type, LlmResponseEventType.TEXT_DELTA)
+        self.assertEqual(events[0].delta_payload["text"], "Done.")
 
     def test_register_profile_and_invoke_persists_new_llm_shapes(self) -> None:
         profile = self.service.register_profile(
@@ -293,6 +576,18 @@ class LlmServiceTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
+        self.assertEqual(
+            fetched_invocation.response_items[0].kind,
+            LlmResponseItemKind.ASSISTANT_MESSAGE,
+        )
+        self.assertEqual(
+            LlmInvocationDTO.from_entity(fetched_invocation).response_items[0][
+                "content_payload"
+            ],
+            {"text": "hello from fake adapter"},
+        )
+        self.assertEqual(fetched_invocation.response_items[0].invocation_id, invocation.id)
+        self.assertEqual(fetched_invocation.continuation.reason, LlmContinuationReason.TOOL_CALL)
         self.assertEqual([item.id for item in invocation_list], [invocation.id])
 
     def test_invocation_succeeded_event_exposes_text_and_tool_diagnostics(self) -> None:
@@ -536,6 +831,63 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(stored.status.value, "succeeded")
         self.assertEqual(stored.result.text, "hello from streaming adapter")
         self.assertEqual(stored.provider_request_id, "stream-request-123")
+        response_events = service.list_response_events(invocation_id)
+        self.assertEqual(
+            [event.type for event in response_events],
+            [
+                LlmResponseEventType.INVOCATION_STARTED,
+                LlmResponseEventType.TEXT_DELTA,
+                LlmResponseEventType.COMPLETED,
+            ],
+        )
+        self.assertEqual(response_events[1].delta_payload["text"], "hello ")
+
+    def test_stream_invoke_persists_native_response_events_with_item_refs(self) -> None:
+        registry = LlmAdapterRegistry()
+        registry.register(LlmApiFamily.OPENAI_RESPONSES, _FakeNativeStreamingLlmAdapter())
+        service = LlmApplicationService(self.uow_factory, registry)
+        profile = service.register_profile(
+            RegisterLlmProfileInput(
+                id="native-stream-writer",
+                provider=LlmProviderKind.OPENAI,
+                api_family=LlmApiFamily.OPENAI_RESPONSES,
+                model_name="gpt-5",
+            ),
+        )
+
+        events = list(
+            service.stream_invoke(
+                StreamLlmInput(
+                    llm_id=profile.id,
+                    messages=(LlmMessage(role=LlmMessageRole.USER, content="Use native."),),
+                ),
+            ),
+        )
+        invocation_id = events[0].invocation_id
+        response_events = service.list_response_events(invocation_id)
+
+        self.assertEqual(
+            [event.type for event in response_events],
+            [
+                LlmResponseEventType.INVOCATION_STARTED,
+                LlmResponseEventType.ITEM_STARTED,
+                LlmResponseEventType.TOOL_ARGUMENT_DELTA,
+                LlmResponseEventType.COMPLETED,
+            ],
+        )
+        self.assertEqual(response_events[1].item_id, "item-native-1")
+        self.assertEqual(response_events[2].item_id, "item-native-1")
+        self.assertEqual(
+            response_events[2].provider_payload["type"],
+            "response.function_call_arguments.delta",
+        )
+        stored = service.get_invocation(invocation_id)
+        self.assertEqual(len(stored.response_items), 1)
+        self.assertEqual(stored.response_items[0].kind, LlmResponseItemKind.TOOL_CALL)
+        self.assertEqual(stored.result.text, None)
+        self.assertEqual(stored.result.tool_calls[0].id, "call-native-1")
+        self.assertEqual(stored.result.tool_calls[0].name, "search_docs")
+        self.assertEqual(stored.continuation.reason, LlmContinuationReason.TOOL_CALL)
 
     def test_invoke_async_uses_async_adapter_and_persists_result(self) -> None:
         registry = LlmAdapterRegistry()

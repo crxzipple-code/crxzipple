@@ -4,8 +4,13 @@ from crxzipple.app.integration.context_workspace_orchestration.snapshot_metadata
     browser_investigation_affordance_metadata,
 )
 from crxzipple.modules.llm.domain import LlmMessage, LlmMessageRole, ToolSchema
+from crxzipple.modules.llm.domain import LlmCapability
 from crxzipple.modules.orchestration.application.ports import (
     ContextRenderSnapshotRecord,
+)
+from crxzipple.modules.orchestration.application.engine import (
+    _llm_request_options_from_run,
+    _llm_request_options_from_run_metadata,
 )
 from crxzipple.modules.orchestration.application.prompt_input import RunPromptInput
 from crxzipple.modules.orchestration.application.provider_request import (
@@ -19,6 +24,7 @@ from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedTool,
     ResolvedToolSet,
 )
+from crxzipple.modules.orchestration.domain import InboundInstruction, OrchestrationRun
 from crxzipple.modules.tool.domain import Tool, ToolExecutionTarget
 
 
@@ -89,6 +95,383 @@ def test_resolved_tools_for_prompt_clears_interactive_tools_without_snapshot_sch
     )
 
     assert result.tools == ()
+
+
+def test_request_envelope_carries_context_and_tool_surface() -> None:
+    builder = ProviderPromptRequestBuilder()
+    prompt = _prompt(
+        messages=(
+            LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+            LlmMessage(
+                role=LlmMessageRole.USER,
+                content="hello",
+                metadata={
+                    "session_item_id": "item-user-1",
+                    "session_id": "session-instance-1",
+                    "sequence_no": 3,
+                    "kind": "user_message",
+                },
+            ),
+        ),
+        tool_schemas=(ToolSchema(name="browser.network.inspect"),),
+    )
+    snapshot = ContextRenderSnapshotRecord(
+        snapshot_id="ctxsnap-envelope-1",
+        prompt_body="<context_tree><node id=\"tools\" /></context_tree>",
+        estimate={"estimated_tokens": 42},
+        included_node_ids=("runtime.contract",),
+        mirrored_node_ids=("tools.browser.network",),
+        included_refs=({"node_id": "runtime.contract", "kind": "runtime"},),
+        collapsed_refs=({"node_id": "history.old", "kind": "history"},),
+        protocol_required_refs=(
+            {"item_id": "item-tool-result-1", "call_id": "call-1"},
+        ),
+        metadata={
+            "tree_schema_version": "2026-06-11",
+            "tool_schema_mirror_budget_status": "ok",
+            "tool_schema_mirror_default_group_matches": [
+                {
+                    "source_id": "configured.browser",
+                    "group_key": "network",
+                    "matched_schema_names": ["browser.network.inspect"],
+                },
+            ],
+        },
+        provider_attachments={"files": [{"artifact_id": "artifact-1"}]},
+        tool_schemas=(ToolSchema(name="browser.network.inspect"),),
+    )
+    resolved_tools = ResolvedToolSet(
+        tools=(
+            _resolved_tool(
+                "tool.browser.network.inspect",
+                schema_name="browser.network.inspect",
+            ),
+        ),
+    )
+
+    envelope = builder.request_envelope(
+        prompt=prompt,
+        context_render_snapshot=snapshot,
+        resolved_tools=resolved_tools,
+        snapshot_metadata=snapshot.metadata,
+        provider_options={"service_tier": "default"},
+        reasoning_config={"summary": "auto"},
+        output_contract={"final_answer": "required"},
+    )
+
+    assert envelope.context_surface.snapshot_id == "ctxsnap-envelope-1"
+    assert envelope.context_surface.included_refs[0]["node_id"] == "runtime.contract"
+    assert envelope.context_surface.protocol_required_refs[0]["call_id"] == "call-1"
+    assert envelope.context_surface.diagnostics["tool_schema_mirror_budget_status"] == "ok"
+    assert envelope.tool_surface.id == "tool_surface:ctxsnap-envelope-1"
+    assert envelope.tool_surface.functions[0].source_id == "configured.browser"
+    assert envelope.tool_surface.functions[0].group_key == "network"
+    assert envelope.tool_surface.metadata["function_count"] == 1
+    assert envelope.tool_surface.metadata["source_refs"] == [
+        {
+            "tool_id": "tool.browser.network.inspect",
+            "name": "browser.network.inspect",
+            "enabled": True,
+            "always_visible": True,
+            "source_id": "configured.browser",
+            "group_key": "network",
+        }
+    ]
+    assert envelope.metadata["context_render_snapshot_id"] == "ctxsnap-envelope-1"
+    assert envelope.metadata["tool_surface_id"] == "tool_surface:ctxsnap-envelope-1"
+    assert envelope.metadata["direct_session_item_refs"][0]["item_id"] == "item-user-1"
+    payload = envelope.to_payload()
+    assert payload["context_surface"]["provider_attachment_mirror"] == {
+        "files": [{"artifact_id": "artifact-1"}],
+    }
+    assert payload["tool_surface"]["functions"][0]["schema"]["name"] == (
+        "browser.network.inspect"
+    )
+    assert payload["provider_options"]["service_tier"] == "default"
+    assert payload["reasoning_config"]["summary"] == "auto"
+    assert payload["output_contract"]["final_answer"] == "required"
+
+
+def test_request_envelope_persists_visible_tool_surface_snapshot() -> None:
+    calls: list[dict[str, object]] = []
+
+    def build_tool_surface(**kwargs: object) -> dict[str, object]:
+        calls.append(dict(kwargs))
+        return {"surface_id": str(kwargs["surface_id"])}
+
+    builder = ProviderPromptRequestBuilder(
+        tool_surface_snapshot_builder=build_tool_surface,
+    )
+    prompt = _prompt(
+        tool_schemas=(
+            ToolSchema(name="browser.network.inspect"),
+            ToolSchema(name="browser.form.fill"),
+        ),
+    )
+    snapshot = ContextRenderSnapshotRecord(
+        snapshot_id="ctxsnap-visible-tools",
+        tool_schemas=(ToolSchema(name="browser.network.inspect"),),
+    )
+    network = _resolved_tool(
+        "tool.browser.network.inspect",
+        schema_name="browser.network.inspect",
+    )
+    form = _resolved_tool("tool.browser.form.fill", schema_name="browser.form.fill")
+
+    envelope = builder.request_envelope(
+        prompt=prompt,
+        context_render_snapshot=snapshot,
+        resolved_tools=ResolvedToolSet(tools=(network, form)),
+        snapshot_metadata={},
+        run_id="run-visible-tools",
+        agent_id="assistant",
+    )
+
+    assert len(calls) == 1
+    assert str(calls[0]["surface_id"]).startswith(
+        "tool_surface:ctxsnap-visible-tools:",
+    )
+    assert calls[0]["session_id"] == "session-instance-1"
+    assert calls[0]["run_id"] == "run-visible-tools"
+    assert calls[0]["agent_id"] == "assistant"
+    assert calls[0]["tool_ids"] == ("tool.browser.network.inspect",)
+    assert calls[0]["persist"] is True
+    assert calls[0]["runtime_context"] == {
+        "agent_id": "assistant",
+        "run_id": "run-visible-tools",
+        "session_key": "session:test",
+        "active_session_id": "session-instance-1",
+        "context_render_snapshot_id": "ctxsnap-visible-tools",
+        "provider_visible_tool_count": 1,
+    }
+    assert envelope.metadata["tool_surface_snapshot_persisted"] is True
+    assert str(envelope.metadata["tool_surface_snapshot_id"]).startswith(
+        "tool_surface:ctxsnap-visible-tools:",
+    )
+    assert str(envelope.metadata["tool_surface_id"]).startswith(
+        "tool_surface:ctxsnap-visible-tools:",
+    )
+    assert envelope.tool_surface.metadata["base_tool_surface_id"] == (
+        "tool_surface:ctxsnap-visible-tools"
+    )
+    assert [function.tool_id for function in envelope.tool_surface.functions] == [
+        "tool.browser.network.inspect",
+    ]
+
+
+def test_request_envelope_can_skip_tool_surface_snapshot_persistence() -> None:
+    calls: list[dict[str, object]] = []
+    builder = ProviderPromptRequestBuilder(
+        tool_surface_snapshot_builder=lambda **kwargs: calls.append(dict(kwargs)),
+    )
+
+    envelope = builder.request_envelope(
+        prompt=_prompt(tool_schemas=(ToolSchema(name="browser.network.inspect"),)),
+        context_render_snapshot=ContextRenderSnapshotRecord(
+            snapshot_id="ctxsnap-preview",
+            tool_schemas=(ToolSchema(name="browser.network.inspect"),),
+        ),
+        resolved_tools=ResolvedToolSet(
+            tools=(
+                _resolved_tool(
+                    "tool.browser.network.inspect",
+                    schema_name="browser.network.inspect",
+                ),
+            ),
+        ),
+        snapshot_metadata={},
+        persist_tool_surface_snapshot=False,
+    )
+
+    assert calls == []
+    assert "tool_surface_snapshot_persisted" not in envelope.metadata
+    assert envelope.metadata["tool_surface_id"] == "tool_surface:ctxsnap-preview"
+
+
+def test_run_metadata_llm_request_options_split_provider_reasoning_and_output() -> None:
+    run = OrchestrationRun(
+        id="run-request-options",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        metadata={
+            "llm_request_options": {
+                "provider_options": {
+                    "service_tier": "default",
+                    "max_output_tokens": 1200,
+                },
+                "reasoning_config": {"effort": "medium", "summary": "auto"},
+                "output_contract": {"final_answer": "required"},
+                "response_format": {"type": "json_object"},
+                "output_schema": {"name": "flight_answer"},
+            },
+        },
+    )
+
+    options = _llm_request_options_from_run_metadata(run)
+
+    assert options["provider_options"]["service_tier"] == "default"
+    assert options["provider_options"]["max_output_tokens"] == 1200
+    assert options["reasoning_config"] == {"effort": "medium", "summary": "auto"}
+    assert options["output_contract"]["final_answer"] == "required"
+    assert options["output_contract"]["response_format"] == {"type": "json_object"}
+    assert options["output_contract"]["output_schema"] == {"name": "flight_answer"}
+
+
+def test_effective_llm_request_policy_merges_model_defaults_and_run_override() -> None:
+    run = OrchestrationRun(
+        id="run-effective-policy",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        metadata={
+            "llm_request_options": {
+                "provider_options": {"service_tier": "default"},
+                "reasoning_config": {"summary": "auto"},
+            },
+        },
+    )
+    prompt = _prompt(
+        llm_capabilities=(LlmCapability.REASONING,),
+        llm_defaults={
+            "max_output_tokens": 800,
+            "reasoning_effort": "medium",
+        },
+    )
+
+    options = _llm_request_options_from_run(run, prompt=prompt)
+
+    assert options["provider_options"] == {
+        "max_output_tokens": 800,
+        "service_tier": "default",
+    }
+    assert options["reasoning_config"] == {
+        "effort": "medium",
+        "summary": "auto",
+    }
+    policy_payload = options["policy"].to_payload()
+    assert policy_payload["resolution_trace"][0]["source"] == (
+        "model_profile.default_params"
+    )
+    assert {
+        item["field"]
+        for item in policy_payload["resolution_trace"]
+    } >= {
+        "provider_options.max_output_tokens",
+        "provider_options.service_tier",
+        "reasoning_config.effort",
+        "reasoning_config.summary",
+    }
+
+
+def test_effective_llm_request_policy_applies_runtime_defaults_before_model_and_run() -> None:
+    run = OrchestrationRun(
+        id="run-effective-runtime-defaults",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        metadata={
+            "llm_request_options": {
+                "provider_options": {"service_tier": "run-tier"},
+            },
+        },
+    )
+    prompt = _prompt(
+        llm_capabilities=(LlmCapability.REASONING,),
+        runtime_llm_defaults={
+            "max_output_tokens": 400,
+            "reasoning_effort": "low",
+            "service_tier": "runtime-tier",
+            "parallel_tool_calls": True,
+            "trace_raw_provider_payload": True,
+        },
+        llm_defaults={
+            "max_output_tokens": 800,
+            "reasoning_effort": "medium",
+        },
+    )
+
+    options = _llm_request_options_from_run(run, prompt=prompt)
+
+    assert options["provider_options"] == {
+        "max_output_tokens": 800,
+        "service_tier": "run-tier",
+        "parallel_tool_calls": True,
+        "trace_raw_provider_payload": True,
+    }
+    assert options["reasoning_config"] == {"effort": "medium"}
+    trace = options["policy"].to_payload()["resolution_trace"]
+    assert any(
+        item["source"] == "settings.llm_request_defaults"
+        and item["field"] == "provider_options.max_output_tokens"
+        for item in trace
+    )
+    assert trace[-1] == {
+        "field": "provider_options.service_tier",
+        "source": "run.metadata.llm_request_options.provider_options",
+        "status": "applied",
+        "value": "configured",
+    }
+
+
+def test_effective_llm_request_policy_applies_agent_llm_policy() -> None:
+    run = OrchestrationRun(
+        id="run-effective-agent-policy",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+    )
+    prompt = _prompt(
+        llm_capabilities=(LlmCapability.REASONING,),
+        llm_policy={
+            "reasoning_summary_policy": "visible_and_replay_when_provider_supports",
+            "final_answer_policy": "phase_or_codex_unknown_fallback",
+            "tool_use_policy": "auto",
+            "parallel_tool_calls_policy": "disabled",
+        },
+    )
+
+    options = _llm_request_options_from_run(run, prompt=prompt)
+
+    assert options["reasoning_config"] == {"summary": "auto"}
+    assert options["provider_options"] == {"parallel_tool_calls": False}
+    assert options["output_contract"] == {
+        "final_answer_policy": "phase_or_codex_unknown_fallback",
+        "tool_use_policy": "auto",
+    }
+    trace = options["policy"].to_payload()["resolution_trace"]
+    assert {
+        item["field"]
+        for item in trace
+        if item["source"] == "agent_profile.llm_policy"
+    } == {
+        "reasoning_config.summary",
+        "output_contract.final_answer_policy",
+        "output_contract.tool_use_policy",
+        "provider_options.parallel_tool_calls",
+    }
+
+
+def test_effective_llm_request_policy_downgrades_unsupported_reasoning() -> None:
+    run = OrchestrationRun(
+        id="run-effective-policy-downgrade",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        metadata={
+            "llm_request_options": {
+                "reasoning_config": {"summary": "auto"},
+            },
+        },
+    )
+    prompt = _prompt(
+        llm_capabilities=(),
+        llm_defaults={"reasoning_effort": "high"},
+    )
+
+    options = _llm_request_options_from_run(run, prompt=prompt)
+
+    assert options["reasoning_config"] == {}
+    trace = options["policy"].to_payload()["resolution_trace"]
+    downgraded = [item for item in trace if item["status"] == "downgraded"]
+    assert [item["field"] for item in downgraded] == [
+        "reasoning_config.effort",
+        "reasoning_config.summary",
+    ]
+    assert all(
+        item["reason"] == "llm_capability_not_supported"
+        for item in downgraded
+    )
 
 
 def test_request_metadata_carries_budget_fields_from_snapshot_metadata() -> None:
@@ -301,6 +684,10 @@ def _prompt(
     messages: tuple[LlmMessage, ...] | None = None,
     tool_schemas: tuple[ToolSchema, ...] = (),
     surface_policy: RunSurfacePolicy | None = None,
+    llm_capabilities: tuple[LlmCapability, ...] = (),
+    runtime_llm_defaults: dict[str, object] | None = None,
+    llm_defaults: dict[str, object] | None = None,
+    llm_policy: dict[str, object] | None = None,
 ) -> RunPromptInput:
     return RunPromptInput(
         llm_id="llm.test",
@@ -311,10 +698,18 @@ def _prompt(
             LlmMessage(
                 role=LlmMessageRole.USER,
                 content="hello",
-                metadata={"session_message_id": "message-1", "sequence_no": 1},
+                metadata={
+                    "session_item_id": "item-1",
+                    "session_id": "session-instance-1",
+                    "sequence_no": 1,
+                },
             ),
         ),
         mode=PromptMode.NORMAL_TURN,
+        llm_capabilities=llm_capabilities,
+        runtime_llm_defaults=dict(runtime_llm_defaults or {}),
+        llm_defaults=dict(llm_defaults or {}),
+        llm_policy=dict(llm_policy or {}),
         tool_schemas=tool_schemas,
         surface_policy=surface_policy or RunSurfacePolicy(),
     )

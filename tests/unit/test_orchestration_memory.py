@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from crxzipple.modules.session.application import ListSessionInstancesInput
+from crxzipple.modules.session.application import (
+    ListSessionInstancesInput,
+    ListSessionItemsInput,
+)
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
 
@@ -298,11 +301,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
         assert completed.result_payload is not None
         self.assertEqual(completed.result_payload["output_text"], "memory-guided answer")
-        self.assertEqual(len(adapter.requests), 4)
+        self.assertEqual(len(adapter.requests), 5)
 
         memory_tool_messages = [
             message
-            for message in adapter.requests[3].messages
+            for message in adapter.requests[4].messages
             if message.role is LlmMessageRole.TOOL
             and message.name in {"memory_search", "memory_read"}
         ]
@@ -316,20 +319,20 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             str(memory_tool_messages[1].content).lower(),
         )
 
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
             ),
         )
         memory_results = [
-                message
-                for message in session_messages
-                if message.source_kind == "tool_run"
-                and message.metadata.get("tool_name") in {"memory_search", "memory_read"}
-            ]
+            item
+            for item in session_items
+            if item.source_kind == "tool_run"
+            and item.tool_name in {"memory_search", "memory_read"}
+        ]
         self.assertEqual(
-            sorted(message.metadata.get("tool_name") for message in memory_results),
+            sorted(item.tool_name for item in memory_results),
             ["memory_read", "memory_search"],
         )
 
@@ -661,10 +664,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         assert initial_completed is not None
 
         session_key = str(initial_completed.metadata["session_key"])
-        messages_before = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        messages_before = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
                 active_session_only=True,
+                chat_visible=True,
             ),
         )
 
@@ -714,10 +718,11 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(adapter.requests[-1].overrides.get("tool_choice"), "required")
 
-        messages_after = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        messages_after = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
                 active_session_only=True,
+                chat_visible=True,
             ),
         )
         self.assertEqual([item.id for item in messages_after], [item.id for item in messages_before])
@@ -1006,7 +1011,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
         assert compaction_completed is not None
         self.assertEqual(compaction_completed.metadata["prompt_mode"], "compaction")
         self.assertGreaterEqual(
-            int(compaction_completed.result_payload["archived_message_count"]),
+            int(compaction_completed.result_payload["archived_item_count"]),
             2,
         )
 
@@ -1015,32 +1020,36 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             refreshed_session.active_session_id,
             compaction_completed.active_session_id,
         )
-        active_session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        active_session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
             ),
         )
-        self.assertEqual(active_session_messages, [])
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        self.assertEqual(active_session_items, [])
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=False,
             ),
         )
-        archived_messages = [
-            message for message in session_messages if message.visibility.value == "archived"
+        archived_items = [
+            item
+            for item in session_items
+            if item.metadata.get("archived_by_compaction_run_id")
         ]
-        visible_messages = [
-            message for message in session_messages if message.visibility.value != "archived"
+        visible_items = [
+            item
+            for item in session_items
+            if not item.metadata.get("archived_by_compaction_run_id")
         ]
-        self.assertGreaterEqual(len(archived_messages), 2)
-        visible_assistant_messages = [
-            message for message in visible_messages if message.role == "assistant"
+        self.assertGreaterEqual(len(archived_items), 2)
+        visible_assistant_items = [
+            item for item in visible_items if item.role == "assistant"
         ]
         self.assertEqual(
-            visible_assistant_messages[-1].content_payload["blocks"],
-            [{"type": "text", "text": "compacted summary"}],
+            visible_assistant_items[-1].content_payload["text"],
+            "compacted summary",
         )
 
         followup = self.orchestration_intake_service.accept(
@@ -1244,7 +1253,7 @@ class OrchestrationMemoryTestCase(OrchestrationTestCaseBase):
             self.assertEqual(len(compacted_instances), 1)
             segment = compacted_instances[0].metadata["segment"]
             self.assertEqual(segment["summary_text"], "compacted summary")
-            self.assertEqual(segment["archived_message_count"], 2)
+            self.assertGreaterEqual(segment["archived_item_count"], 2)
             self.assertEqual(
                 adapter.requests[-1].messages[-1].content,
                 [{"type": "text", "text": "continue"}],

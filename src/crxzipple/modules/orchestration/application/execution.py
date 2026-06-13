@@ -395,6 +395,31 @@ class RunExecutionService:
                 ),
             )
 
+        if outcome.loop_diagnostic:
+            return self.fail_assignment(
+                FailAssignmentInput(
+                    run_id=run_id,
+                    worker_id=worker_id,
+                    message=(
+                        "LLM response ended without a final answer, tool call, "
+                        "or follow-up continuation."
+                    ),
+                    code=str(
+                        outcome.loop_diagnostic.get(
+                            "code",
+                            "llm_incomplete_terminal_response",
+                        ),
+                    ),
+                    details={
+                        "llm_invocation_id": outcome.llm_invocation_id,
+                        "diagnostic": dict(outcome.loop_diagnostic),
+                        "execution_payload": self._execution_payload_from_outcome(
+                            outcome,
+                        ),
+                    },
+                ),
+            )
+
         return self.complete_assignment(
             CompleteAssignmentInput(
                 run_id=run_id,
@@ -427,16 +452,29 @@ class RunExecutionService:
             "text_present": bool(response_text.strip()),
             "text_chars": len(response_text),
         }
-        if outcome.assistant_message_ids:
-            payload["assistant_message_ids"] = list(outcome.assistant_message_ids)
-        if outcome.assistant_progress_message_ids:
-            payload["assistant_progress_message_ids"] = list(
-                outcome.assistant_progress_message_ids,
+        if (
+            outcome.context_render_snapshot_id is not None
+            and outcome.context_render_snapshot_id.strip()
+        ):
+            payload["context_render_snapshot_id"] = (
+                outcome.context_render_snapshot_id.strip()
             )
-        if outcome.tool_call_message_ids:
-            payload["tool_call_message_ids"] = list(outcome.tool_call_message_ids)
-        if outcome.tool_result_message_ids:
-            payload["tool_result_message_ids"] = list(outcome.tool_result_message_ids)
+        if outcome.llm_response_item_ids:
+            payload["llm_response_item_ids"] = list(outcome.llm_response_item_ids)
+        if outcome.session_item_ids:
+            payload["session_item_ids"] = list(outcome.session_item_ids)
+        if outcome.assistant_progress_item_ids:
+            payload["assistant_progress_item_ids"] = list(
+                outcome.assistant_progress_item_ids,
+            )
+        if outcome.tool_call_session_item_ids:
+            payload["tool_call_session_item_ids"] = list(
+                outcome.tool_call_session_item_ids,
+            )
+        if outcome.tool_result_session_item_ids:
+            payload["tool_result_session_item_ids"] = list(
+                outcome.tool_result_session_item_ids,
+            )
         if outcome.tool_call_names:
             payload["tool_call_names"] = list(outcome.tool_call_names)
         trace: dict[str, object] = {
@@ -528,17 +566,24 @@ class RunExecutionService:
         }
         if outcome.response_text is not None:
             payload["output_text"] = outcome.response_text
-        if outcome.user_message_id is not None:
-            payload["user_message_id"] = outcome.user_message_id
-        if outcome.assistant_message_ids:
-            payload["assistant_message_ids"] = list(outcome.assistant_message_ids)
-            payload["assistant_message_id"] = outcome.assistant_message_ids[-1]
-        if outcome.tool_result_message_ids:
-            payload["tool_result_message_ids"] = list(outcome.tool_result_message_ids)
+        if outcome.user_session_item_id is not None:
+            payload["user_session_item_id"] = outcome.user_session_item_id
+        if outcome.session_item_ids:
+            payload["session_item_ids"] = list(outcome.session_item_ids)
+        if outcome.user_session_item_id is not None:
+            payload["user_session_item_id"] = outcome.user_session_item_id
+        if outcome.tool_result_session_item_ids:
+            payload["tool_result_session_item_ids"] = list(
+                outcome.tool_result_session_item_ids,
+            )
         if outcome.yield_requested:
             payload["yield_requested"] = True
             if outcome.yield_reason is not None:
                 payload["yield_reason"] = outcome.yield_reason
+        if outcome.continuation_reason is not None:
+            payload["continuation_reason"] = outcome.continuation_reason
+        if outcome.continuation_end_turn is not None:
+            payload["continuation_end_turn"] = outcome.continuation_end_turn
         return payload
 
     @staticmethod
@@ -548,20 +593,43 @@ class RunExecutionService:
         payload: dict[str, object] = {
             "llm_invocation_id": outcome.llm_invocation_id,
         }
+        if outcome.llm_response_item_ids:
+            payload["llm_response_item_ids"] = list(outcome.llm_response_item_ids)
+        if (
+            outcome.context_render_snapshot_id is not None
+            and outcome.context_render_snapshot_id.strip()
+        ):
+            payload["context_render_snapshot_id"] = (
+                outcome.context_render_snapshot_id.strip()
+            )
+        if outcome.session_item_ids:
+            payload["session_item_ids"] = list(outcome.session_item_ids)
+        if outcome.assistant_progress_item_ids:
+            payload["assistant_progress_item_ids"] = list(
+                outcome.assistant_progress_item_ids,
+            )
         if outcome.tool_call_names:
             payload["tool_call_names"] = list(outcome.tool_call_names)
-            if outcome.assistant_progress_message_ids:
-                payload["assistant_progress_message_ids"] = list(
-                    outcome.assistant_progress_message_ids,
+            if outcome.assistant_progress_item_ids:
+                payload["assistant_progress_item_ids"] = list(
+                    outcome.assistant_progress_item_ids,
                 )
-            if outcome.tool_call_message_ids:
-                payload["tool_call_message_ids"] = list(
-                    outcome.tool_call_message_ids,
+            if outcome.tool_call_session_item_ids:
+                payload["tool_call_session_item_ids"] = list(
+                    outcome.tool_call_session_item_ids,
                 )
             if outcome.response_text is not None and outcome.response_text.strip():
                 payload["assistant_progress_text"] = outcome.response_text
         if outcome.tool_run_links:
             payload["tool_run_links"] = [dict(item) for item in outcome.tool_run_links]
+        if outcome.continuation_reason is not None:
+            payload["llm_continuation_reason"] = outcome.continuation_reason
+        if outcome.continuation_end_turn is not None:
+            payload["llm_continuation_end_turn"] = outcome.continuation_end_turn
+        if outcome.continue_loop:
+            payload["llm_continuation_follow_up"] = True
+        if outcome.loop_diagnostic:
+            payload["llm_loop_diagnostic"] = dict(outcome.loop_diagnostic)
         transcript_consumption = _transcript_consumption_from_request_metadata(
             outcome.llm_request_metadata,
         )
@@ -574,8 +642,8 @@ class RunExecutionService:
         outcome: EngineAdvanceOutcome,
     ) -> dict[str, object]:
         metadata: dict[str, object] = {}
-        if outcome.user_message_id is not None:
-            metadata["user_message_id"] = outcome.user_message_id
+        if outcome.user_session_item_id is not None:
+            metadata["user_session_item_id"] = outcome.user_session_item_id
         if outcome.prompt_report is not None:
             metadata["prompt_mode"] = outcome.prompt_report.mode.value
             metadata["prompt_report"] = outcome.prompt_report.to_payload()
@@ -604,9 +672,8 @@ def _transcript_consumption_from_request_metadata(
 ) -> dict[str, object]:
     payload: dict[str, object] = {}
     for key in (
-        "direct_transcript_message_refs",
-        "direct_transcript_sequence_range",
-        "direct_transcript_session_message_count",
+        "direct_session_item_refs",
+        "direct_session_item_count",
         "direct_tool_protocol_refs",
         "direct_tool_protocol_call_ids",
         "current_inbound_ref",

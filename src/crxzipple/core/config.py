@@ -139,6 +139,24 @@ def _optional_positive_int(value: object, *, label: str) -> int | None:
     return parsed
 
 
+def _optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if not stripped:
+            return None
+        return stripped in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _optional_env_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 def _load_memory_retrieval_backend() -> str:
     raw = os.getenv("APP_MEMORY_RETRIEVAL_BACKEND", "keyword").strip().lower()
     if not raw:
@@ -803,6 +821,7 @@ class AgentProfileDefaultsSettings:
     identity: dict[str, Any] = field(default_factory=dict)
     instruction_policy: dict[str, Any] = field(default_factory=dict)
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
+    llm_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
@@ -816,9 +835,47 @@ class AgentProfileSettings:
     identity: dict[str, Any] = field(default_factory=dict)
     instruction_policy: dict[str, Any] = field(default_factory=dict)
     llm_routing_policy: dict[str, Any] = field(default_factory=dict)
+    llm_policy: dict[str, Any] = field(default_factory=dict)
     execution_policy: dict[str, Any] = field(default_factory=dict)
     runtime_preferences: dict[str, Any] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LlmRequestDefaultsSettings:
+    max_output_tokens: int | None = None
+    reasoning_effort: str | None = None
+    service_tier: str | None = None
+    prompt_cache_enabled: bool | None = None
+    parallel_tool_calls: bool | None = None
+    trace_raw_provider_payload: bool = False
+    reasoning_summary_default_visibility: str = "model_and_user_visible"
+    extra_body: dict[str, Any] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if self.service_tier is not None:
+            payload["service_tier"] = self.service_tier
+        if self.prompt_cache_enabled is not None:
+            payload["prompt_cache_enabled"] = self.prompt_cache_enabled
+        if self.parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = self.parallel_tool_calls
+        if self.trace_raw_provider_payload:
+            payload["trace_raw_provider_payload"] = self.trace_raw_provider_payload
+        if (
+            self.reasoning_summary_default_visibility
+            != "model_and_user_visible"
+        ):
+            payload["reasoning_summary_default_visibility"] = (
+                self.reasoning_summary_default_visibility
+            )
+        if self.extra_body:
+            payload["extra_body"] = dict(self.extra_body)
+        return payload
 
 
 def _load_openapi_provider_settings() -> tuple[OpenApiProviderSettings, ...]:
@@ -1243,6 +1300,37 @@ def _load_llm_profile_settings() -> tuple[LlmProfileSettings, ...]:
         profiles_by_id[profile.id] = profile
 
     return tuple(profiles_by_id.values())
+
+
+def _load_llm_request_defaults_settings() -> LlmRequestDefaultsSettings:
+    raw = os.getenv("APP_LLM_REQUEST_DEFAULTS", "").strip()
+    if not raw:
+        return LlmRequestDefaultsSettings()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("APP_LLM_REQUEST_DEFAULTS must decode to a JSON object.")
+    extra_body = _coerce_object_payload(
+        payload.get("extra_body", {}),
+        source_description="APP_LLM_REQUEST_DEFAULTS.extra_body",
+    )
+    return LlmRequestDefaultsSettings(
+        max_output_tokens=_optional_positive_int(
+            payload.get("max_output_tokens"),
+            label="APP_LLM_REQUEST_DEFAULTS.max_output_tokens",
+        ),
+        reasoning_effort=_optional_env_text(payload.get("reasoning_effort")),
+        service_tier=_optional_env_text(payload.get("service_tier")),
+        prompt_cache_enabled=_optional_bool(payload.get("prompt_cache_enabled")),
+        parallel_tool_calls=_optional_bool(payload.get("parallel_tool_calls")),
+        trace_raw_provider_payload=bool(
+            payload.get("trace_raw_provider_payload", False),
+        ),
+        reasoning_summary_default_visibility=(
+            _optional_env_text(payload.get("reasoning_summary_default_visibility"))
+            or "model_and_user_visible"
+        ),
+        extra_body=extra_body,
+    )
 
 
 def _load_channel_profile_settings() -> tuple[ChannelProfile, ...]:
@@ -1766,6 +1854,10 @@ def _build_agent_profile_settings(
             f"Agent profile '{profile_id}' llm_routing_policy"
         ),
     )
+    llm_policy = _coerce_object_payload(
+        raw.get("llm_policy", {}),
+        source_description=f"Agent profile '{profile_id}' llm_policy",
+    )
     execution_policy = _coerce_object_payload(
         raw.get("execution_policy", {}),
         source_description=(
@@ -1789,6 +1881,7 @@ def _build_agent_profile_settings(
         identity=identity,
         instruction_policy=instruction_policy,
         llm_routing_policy=llm_routing_policy,
+        llm_policy=llm_policy,
         execution_policy=execution_policy,
         runtime_preferences=runtime_preferences,
         memory=memory,
@@ -1884,6 +1977,9 @@ class Settings:
     tool_openapi_providers: tuple[OpenApiProviderSettings, ...] = ()
     tool_mcp_providers: tuple[McpProviderSettings, ...] = ()
     llm_profiles: tuple[LlmProfileSettings, ...] = ()
+    llm_request_defaults: LlmRequestDefaultsSettings = field(
+        default_factory=LlmRequestDefaultsSettings,
+    )
     channel_profiles: tuple[ChannelProfile, ...] = ()
     agent_profiles: tuple[AgentProfileSettings, ...] = ()
     authorization_enabled: bool = True
@@ -2024,6 +2120,7 @@ def load_settings() -> Settings:
         tool_openapi_providers=_load_openapi_provider_settings(),
         tool_mcp_providers=_load_mcp_provider_settings(),
         llm_profiles=_load_llm_profile_settings(),
+        llm_request_defaults=_load_llm_request_defaults_settings(),
         channel_profiles=_load_channel_profile_settings(),
         agent_profiles=_load_agent_profile_settings(),
         authorization_enabled=_env_flag("APP_AUTHORIZATION_ENABLED", default=True),

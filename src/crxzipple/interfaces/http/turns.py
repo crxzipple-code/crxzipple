@@ -112,6 +112,8 @@ class RunPromptInputPreviewResponse(BaseModel):
     context_render: dict[str, Any] | None = None
     context_render_metadata: dict[str, Any] = Field(default_factory=dict)
     provider_attachments: dict[str, Any] = Field(default_factory=dict)
+    context_surface: dict[str, Any] = Field(default_factory=dict)
+    tool_surface: dict[str, Any] = Field(default_factory=dict)
     provider_request_options: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
@@ -151,6 +153,8 @@ class RunPromptInputPreviewResponse(BaseModel):
             ),
             context_render_metadata=dict(dto.context_render_metadata),
             provider_attachments=dict(dto.provider_attachments),
+            context_surface=dict(dto.context_surface),
+            tool_surface=dict(dto.tool_surface),
             provider_request_options=dict(dto.provider_request_options),
         )
 

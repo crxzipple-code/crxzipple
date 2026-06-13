@@ -1483,6 +1483,19 @@ def _artifact_result_envelope(
             large_text_artifacts=large_text_artifacts,
             raw_output_artifacts=raw_output_artifacts,
         ),
+        output_payload={
+            "externalized": True,
+            "artifact_count": len(evidence_refs),
+        },
+        artifact_refs=tuple(
+            {
+                "kind": "artifact",
+                "artifact_id": item.get("artifact_id"),
+                "mime_type": item.get("mime_type"),
+                "name": item.get("name"),
+            }
+            for item in artifacts
+        ),
         key_facts={
             "externalized_text_block_count": len(large_text_artifacts),
             "externalized_raw_output_block_count": len(raw_output_artifacts),
@@ -1502,6 +1515,28 @@ def _artifact_result_envelope(
         omitted_count=len(artifacts),
         omitted_chars=omitted_chars,
         truncated=True,
+        model_visible_payload={
+            "summary": _artifact_result_summary(
+                large_text_artifacts=large_text_artifacts,
+                raw_output_artifacts=raw_output_artifacts,
+            ),
+            "artifact_refs": list(evidence_refs),
+            "read_handles": [
+                {"kind": "artifact", "artifact_id": artifact_id}
+                for artifact_id in evidence_refs
+            ],
+        },
+        user_visible_payload={
+            "summary": _artifact_result_summary(
+                large_text_artifacts=large_text_artifacts,
+                raw_output_artifacts=raw_output_artifacts,
+            ),
+            "artifact_count": len(evidence_refs),
+        },
+        trace_payload={
+            "externalized_text_artifacts": large_text_artifacts,
+            "externalized_raw_output_artifacts": raw_output_artifacts,
+        },
     )
 
 

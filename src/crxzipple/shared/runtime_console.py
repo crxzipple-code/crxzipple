@@ -19,8 +19,14 @@ class TraceContext:
     turn_id: str | None = None
     run_id: str | None = None
     step_id: str | None = None
+    execution_item_id: str | None = None
     tool_run_id: str | None = None
+    tool_call_id: str | None = None
     llm_invocation_id: str | None = None
+    llm_response_item_id: str | None = None
+    context_render_snapshot_id: str | None = None
+    session_item_id: str | None = None
+    continuation_decision_id: str | None = None
     artifact_id: str | None = None
     approval_request_id: str | None = None
 
@@ -41,8 +47,14 @@ class TraceContext:
                 "turn_id": self.turn_id,
                 "run_id": self.run_id,
                 "step_id": self.step_id,
+                "execution_item_id": self.execution_item_id,
                 "tool_run_id": self.tool_run_id,
+                "tool_call_id": self.tool_call_id,
                 "llm_invocation_id": self.llm_invocation_id,
+                "llm_response_item_id": self.llm_response_item_id,
+                "context_render_snapshot_id": self.context_render_snapshot_id,
+                "session_item_id": self.session_item_id,
+                "continuation_decision_id": self.continuation_decision_id,
                 "artifact_id": self.artifact_id,
                 "approval_request_id": self.approval_request_id,
             }.items()

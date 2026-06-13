@@ -216,6 +216,8 @@ class ToolRunErrorDTO:
 class ToolRunDTO:
     id: str
     tool_id: str
+    call_id: str | None
+    tool_surface_id: str | None
     function_id: str | None
     function_revision: int | None
     source_id: str | None
@@ -228,6 +230,7 @@ class ToolRunDTO:
     result: ToolRunResultDTO | None
     error: ToolRunErrorDTO | None
     output_payload: Any | None
+    result_envelope_payload: dict[str, Any] | None
     error_message: str | None
     created_at: str
     started_at: str | None
@@ -244,6 +247,8 @@ class ToolRunDTO:
         return cls(
             id=tool_run.id,
             tool_id=tool_run.tool_id,
+            call_id=tool_run.call_id,
+            tool_surface_id=tool_run.tool_surface_id,
             function_id=tool_run.function_id,
             function_revision=tool_run.function_revision,
             source_id=tool_run.source_id,
@@ -268,6 +273,11 @@ class ToolRunDTO:
                 else None
             ),
             output_payload=tool_run.output_payload,
+            result_envelope_payload=(
+                dict(tool_run.result_envelope_payload)
+                if tool_run.result_envelope_payload is not None
+                else None
+            ),
             error_message=tool_run.error_message,
             created_at=format_datetime_utc(tool_run.created_at),
             started_at=format_optional_datetime_utc(tool_run.started_at),

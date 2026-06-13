@@ -21,9 +21,9 @@ class DbCliTestCase(CliModuleTestCase):
                             "SELECT name FROM sqlite_master WHERE type = 'table'",
                         )
                     }
-                    message_columns = {
+                    session_item_columns = {
                         row[1]
-                        for row in connection.execute("PRAGMA table_info(session_messages)")
+                        for row in connection.execute("PRAGMA table_info(session_items)")
                     }
                     session_columns = {
                         row[1]
@@ -63,7 +63,8 @@ class DbCliTestCase(CliModuleTestCase):
                     }.issubset(tool_run_columns),
                 )
                 self.assertIn("sessions", tables)
-                self.assertIn("session_messages", tables)
+                self.assertNotIn("session_messages", tables)
+                self.assertIn("session_items", tables)
                 self.assertIn("session_instances", tables)
                 self.assertIn("orchestration_runs", tables)
                 self.assertIn("orchestration_execution_chains", tables)
@@ -74,11 +75,22 @@ class DbCliTestCase(CliModuleTestCase):
                     {
                         "sequence_no",
                         "kind",
+                        "role",
+                        "phase",
                         "content_payload",
+                        "model_visible",
+                        "user_visible",
+                        "chat_visible",
+                        "trace_visible",
+                        "source_module",
                         "source_kind",
                         "source_id",
-                        "visibility",
-                    }.issubset(message_columns),
+                        "provider_item_id",
+                        "provider_item_type",
+                        "call_id",
+                        "tool_name",
+                        "metadata_payload",
+                    }.issubset(session_item_columns),
                 )
                 self.assertIn("reply_payload", session_columns)
                 self.assertNotIn("delivery_payload", session_columns)
@@ -242,6 +254,7 @@ class DbCliTestCase(CliModuleTestCase):
                 self.assertNotIn("tool_workers", tables)
                 self.assertNotIn("sessions", tables)
                 self.assertNotIn("session_messages", tables)
+                self.assertNotIn("session_items", tables)
                 self.assertNotIn("session_instances", tables)
                 self.assertNotIn("orchestration_runs", tables)
                 self.assertNotIn("orchestration_execution_chains", tables)

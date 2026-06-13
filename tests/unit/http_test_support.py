@@ -36,7 +36,6 @@ from crxzipple.modules.llm.domain import (
     LlmResult,
     ToolCallIntent,
 )
-from crxzipple.modules.session.application import ListSessionMessagesInput
 from crxzipple.modules.tool.domain import ToolEnvironment, ToolMode
 from tests.unit.skill_test_support import write_skill_package as _write_skill_package
 from tests.unit.support import (
@@ -49,6 +48,7 @@ from tests.unit.support import (
     openapi_fixture_path,
 )
 from tests.unit.orchestration_test_support import (
+    _adapter_response_from_result,
     _enable_tool_schema_call,
     _expand_tool_bundle_call,
     _has_tool_call_message,
@@ -126,8 +126,9 @@ class _FakeInlineToolAdapter:
             message for message in request.messages if message.role is LlmMessageRole.TOOL
         ]
         if not tool_messages:
-            return LlmAdapterResponse(
-                result=LlmResult(
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
                     tool_calls=(
                         ToolCallIntent(
                             id="call-echo-1",
@@ -137,7 +138,10 @@ class _FakeInlineToolAdapter:
                     ),
                 ),
             )
-        return LlmAdapterResponse(result=LlmResult(text="tool loop complete"))
+        return _adapter_response_from_result(
+            request,
+            LlmResult(text="tool loop complete"),
+        )
 
 
 class _FakeEffectApprovalAdapter:
@@ -149,8 +153,9 @@ class _FakeEffectApprovalAdapter:
     def invoke(self, _profile, request):  # noqa: ANN001
         if not self._expanded:
             self._expanded = True
-            return LlmAdapterResponse(
-                result=LlmResult(
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
                     tool_calls=(
                         _expand_tool_bundle_call(
                             call_id="call-expand-echo",
@@ -161,8 +166,9 @@ class _FakeEffectApprovalAdapter:
             )
         if not self._schema_enabled:
             self._schema_enabled = True
-            return LlmAdapterResponse(
-                result=LlmResult(
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
                     tool_calls=(
                         _enable_tool_schema_call(
                             call_id="call-enable-echo",
@@ -173,8 +179,9 @@ class _FakeEffectApprovalAdapter:
             )
         if not self._echo_requested:
             self._echo_requested = True
-            return LlmAdapterResponse(
-                result=LlmResult(
+            return _adapter_response_from_result(
+                request,
+                LlmResult(
                     tool_calls=(
                         ToolCallIntent(
                             id="call-echo-1",
@@ -186,7 +193,10 @@ class _FakeEffectApprovalAdapter:
             )
         if not _has_tool_message(request, "echo"):
             raise AssertionError("approval replay should provide an echo tool result")
-        return LlmAdapterResponse(result=LlmResult(text="approval flow complete"))
+        return _adapter_response_from_result(
+            request,
+            LlmResult(text="approval flow complete"),
+        )
 
 
 class _SequentialTextAdapter:
@@ -197,7 +207,7 @@ class _SequentialTextAdapter:
     def invoke(self, _profile, request):  # noqa: ANN001
         self.requests.append(request)
         text = self._texts.pop(0) if self._texts else ""
-        return LlmAdapterResponse(result=LlmResult(text=text))
+        return _adapter_response_from_result(request, LlmResult(text=text))
 
 
 class _SequentialResultAdapter:
@@ -209,7 +219,7 @@ class _SequentialResultAdapter:
         self.requests.append(request)
         item = self._results.pop(0) if self._results else ""
         result = item if isinstance(item, LlmResult) else LlmResult(text=item)
-        return LlmAdapterResponse(result=result)
+        return _adapter_response_from_result(request, result)
 
 
 class HttpModuleTestCase(unittest.TestCase):
@@ -341,7 +351,6 @@ __all__ = [
     "FakeCdpServer",
     "FakePlaywrightCdpSessionPool",
     "HttpModuleTestCase",
-    "ListSessionMessagesInput",
     "LlmAdapterResponse",
     "LlmApiFamily",
     "LlmMessageRole",

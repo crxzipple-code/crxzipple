@@ -21,6 +21,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
+    AgentLlmPolicy,
     AgentLlmRoutingPolicy,
     AgentMemoryBinding,
     AgentRuntimePreferences,
@@ -381,6 +382,7 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         llm_routing_policy=AgentLlmRoutingPolicy.from_payload(
             profile.llm_routing_policy,
         ),
+        llm_policy=AgentLlmPolicy.from_payload(profile.llm_policy),
         execution_policy=AgentExecutionPolicy.from_payload(profile.execution_policy),
         runtime_preferences=AgentRuntimePreferences.from_payload(
             profile.runtime_preferences,

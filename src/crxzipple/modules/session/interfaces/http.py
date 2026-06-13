@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from crxzipple.interfaces.runtime_container import AppContainer, AppKey
 from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.session.application import (
+    ListSessionItemsInput,
     ListSessionInstancesInput,
-    ListSessionMessagesInput,
     SessionResolutionService,
 )
 from crxzipple.modules.session.domain import (
@@ -18,18 +18,18 @@ from crxzipple.modules.session.domain import (
 from crxzipple.modules.session.interfaces.dto import (
     ResolveSessionDTO,
     SessionDTO,
+    SessionItemDTO,
     SessionInstanceDTO,
-    SessionMessageDTO,
 )
 from crxzipple.modules.session.interfaces.http_models import (
-    AppendSessionMessageRequest,
+    AppendSessionItemRequest,
     ResolveSessionRequest,
     ResolveSessionResponse,
     ResetSessionRequest,
+    SessionItemResponse,
     SessionRequest,
     SessionResponse,
     SessionInstanceResponse,
-    SessionMessageResponse,
 )
 
 
@@ -111,46 +111,59 @@ def get_session(
 
 
 @router.post(
-    "/{session_key}/messages",
-    response_model=SessionMessageResponse,
+    "/{session_key}/items",
+    response_model=SessionItemResponse,
+    response_model_exclude_none=True,
     status_code=status.HTTP_201_CREATED,
 )
-def append_message(
+def append_item(
     session_key: str,
-    payload: AppendSessionMessageRequest,
+    payload: AppendSessionItemRequest,
     container: Annotated[AppContainer, Depends(get_container)],
-) -> SessionMessageResponse:
+) -> SessionItemResponse:
     try:
-        message = container.require(AppKey.SESSION_SERVICE).append_message(
+        item = container.require(AppKey.SESSION_SERVICE).append_item(
             payload.to_input(session_key=session_key),
         )
     except (SessionNotFoundError, SessionInstanceNotFoundError) as exc:
         raise _not_found(exc) from None
-    return SessionMessageResponse.from_dto(SessionMessageDTO.from_entity(message))
+    return SessionItemResponse.from_dto(SessionItemDTO.from_entity(item))
 
 
-@router.get("/{session_key}/messages", response_model=list[SessionMessageResponse])
-def list_messages(
+@router.get(
+    "/{session_key}/items",
+    response_model=list[SessionItemResponse],
+    response_model_exclude_none=True,
+)
+def list_items(
     session_key: str,
     container: Annotated[AppContainer, Depends(get_container)],
     limit: Annotated[int | None, Query(ge=1)] = None,
     active_session_only: Annotated[bool, Query()] = False,
+    model_visible: Annotated[bool | None, Query()] = None,
+    user_visible: Annotated[bool | None, Query()] = None,
+    chat_visible: Annotated[bool | None, Query()] = None,
+    trace_visible: Annotated[bool | None, Query()] = None,
     after_sequence_no: Annotated[int | None, Query(ge=0)] = None,
     before_sequence_no: Annotated[int | None, Query(ge=1)] = None,
-) -> list[SessionMessageResponse]:
+) -> list[SessionItemResponse]:
     try:
-        items = container.require(AppKey.SESSION_SERVICE).list_messages(
-            ListSessionMessagesInput(
+        items = container.require(AppKey.SESSION_SERVICE).list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
                 limit=limit,
                 active_session_only=active_session_only,
+                model_visible=model_visible,
+                user_visible=user_visible,
+                chat_visible=chat_visible,
+                trace_visible=trace_visible,
                 after_sequence_no=after_sequence_no,
                 before_sequence_no=before_sequence_no,
             ),
         )
     except SessionNotFoundError as exc:
         raise _not_found(exc) from None
-    return [SessionMessageResponse.from_dto(SessionMessageDTO.from_entity(item)) for item in items]
+    return [SessionItemResponse.from_dto(SessionItemDTO.from_entity(item)) for item in items]
 
 
 @router.get(

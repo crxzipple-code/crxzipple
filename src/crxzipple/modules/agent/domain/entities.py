@@ -8,6 +8,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
+    AgentLlmPolicy,
     AgentLlmRoutingPolicy,
     AgentMemoryBinding,
     AgentRuntimePreferences,
@@ -26,6 +27,7 @@ class AgentProfile(AggregateRoot[str]):
         default_factory=AgentInstructionPolicy,
     )
     llm_routing_policy: AgentLlmRoutingPolicy
+    llm_policy: AgentLlmPolicy = field(default_factory=AgentLlmPolicy)
     execution_policy: AgentExecutionPolicy = field(default_factory=AgentExecutionPolicy)
     runtime_preferences: AgentRuntimePreferences = field(
         default_factory=AgentRuntimePreferences,
@@ -64,6 +66,7 @@ class AgentProfile(AggregateRoot[str]):
         identity: AgentIdentity | None = None,
         instruction_policy: AgentInstructionPolicy | None = None,
         llm_routing_policy: AgentLlmRoutingPolicy | None = None,
+        llm_policy: AgentLlmPolicy | None = None,
         execution_policy: AgentExecutionPolicy | None = None,
         runtime_preferences: AgentRuntimePreferences | None = None,
         memory: AgentMemoryBinding | None = None,
@@ -84,8 +87,10 @@ class AgentProfile(AggregateRoot[str]):
             if not llm_routing_policy.default_llm_id.strip():
                 raise AgentValidationError(
                     "Agent profile default_llm_id cannot be empty.",
-                )
+            )
             self.llm_routing_policy = llm_routing_policy
+        if llm_policy is not None:
+            self.llm_policy = llm_policy
         if execution_policy is not None:
             if execution_policy.timeout_seconds <= 0:
                 raise AgentValidationError(

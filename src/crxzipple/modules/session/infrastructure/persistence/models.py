@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from crxzipple.core.db import Base
@@ -37,22 +37,22 @@ class SessionModel(Base):
     last_reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class SessionMessageModel(Base):
-    __tablename__ = "session_messages"
+class SessionItemModel(Base):
+    __tablename__ = "session_items"
     __table_args__ = (
         Index(
-            "ix_session_messages_session_sequence",
+            "ix_session_items_session_sequence",
             "session_key",
             "session_id",
             "sequence_no",
         ),
         Index(
-            "ix_session_messages_session_source",
-            "session_key",
-            "session_id",
+            "ix_session_items_source",
+            "source_module",
             "source_kind",
             "source_id",
         ),
+        Index("ix_session_items_call_id", "call_id"),
     )
 
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
@@ -63,16 +63,25 @@ class SessionMessageModel(Base):
     )
     session_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     sequence_no: Mapped[int] = mapped_column(Integer(), nullable=False)
-    role: Mapped[str] = mapped_column(String(50), nullable=False)
-    kind: Mapped[str] = mapped_column(String(50), nullable=False, default="message")
+    kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    phase: Mapped[str] = mapped_column(String(100), nullable=False, default="unknown")
     content_payload: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,
         default=dict,
     )
-    source_kind: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    source_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    visibility: Mapped[str] = mapped_column(String(50), nullable=False, default="default")
+    model_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
+    user_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
+    chat_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
+    trace_visible: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
+    source_module: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_kind: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_item_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_item_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    call_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metadata_payload: Mapped[dict[str, object]] = mapped_column(
         JSON(),
         nullable=False,

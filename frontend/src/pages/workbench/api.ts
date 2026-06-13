@@ -9,6 +9,7 @@ import type {
 } from "@/shared/runtime/promptPreview";
 import type {
   TurnStepView,
+  WorkbenchLinkedEntityDetail,
   WorkbenchHomeReadModel,
   WorkbenchRunView,
 } from "@/shared/runtime/types";
@@ -220,6 +221,9 @@ export interface WorkbenchContextRenderSnapshot {
   estimate: WorkbenchContextEstimate;
   included_node_ids: string[];
   mirrored_node_ids: string[];
+  included_refs: Array<Record<string, unknown>>;
+  collapsed_refs: Array<Record<string, unknown>>;
+  protocol_required_refs: Array<Record<string, unknown>>;
   metadata: Record<string, unknown>;
   created_at: string;
 }
@@ -282,6 +286,15 @@ export function loadWorkbenchHome(options: LoadWorkbenchOptions = {}): Promise<W
   const queryString = query.toString();
   const suffix = queryString ? `?${queryString}` : "";
   return requestJson<WorkbenchHomeReadModel>(`/ui/workbench/home${suffix}`);
+}
+
+export function loadWorkbenchLinkedEntityDetail(
+  entityType: string,
+  entityId: string,
+): Promise<WorkbenchLinkedEntityDetail> {
+  return requestJson<WorkbenchLinkedEntityDetail>(
+    `/ui/workbench/linked-entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}`,
+  );
 }
 
 export function createWorkbenchTurn(payload: CreateTurnPayload): Promise<TurnCommandResponse> {

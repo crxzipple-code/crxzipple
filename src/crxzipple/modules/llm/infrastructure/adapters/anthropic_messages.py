@@ -11,9 +11,13 @@ from crxzipple.modules.llm.application.adapters import (
 )
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
+    LlmMessagePhase,
+    LlmMessageRole,
+    LlmResponseItem,
+    LlmResponseItemKind,
     LlmResult,
     LlmUsage,
-    ToolCallIntent,
+    utcnow,
 )
 from crxzipple.modules.llm.infrastructure.adapters.common import (
     anthropic_messages,
@@ -50,7 +54,11 @@ class AnthropicMessagesAdapter:
             response,
             description=f"Anthropic profile '{profile.id}'",
         )
-        return self._response_from_payload(profile, data)
+        return self._response_from_payload(
+            profile,
+            data,
+            invocation_id=request.invocation_id,
+        )
 
     async def invoke_async(
         self,
@@ -72,7 +80,11 @@ class AnthropicMessagesAdapter:
             response,
             description=f"Anthropic profile '{profile.id}'",
         )
-        return self._response_from_payload(profile, data)
+        return self._response_from_payload(
+            profile,
+            data,
+            invocation_id=request.invocation_id,
+        )
 
     def _invoke_request(
         self,
@@ -135,6 +147,8 @@ class AnthropicMessagesAdapter:
     def _response_from_payload(
         profile: LlmProfile,
         data: dict[str, Any],
+        *,
+        invocation_id: str,
     ) -> LlmAdapterResponse:
         content = data.get("content")
         if not isinstance(content, list):
@@ -164,18 +178,16 @@ class AnthropicMessagesAdapter:
                 output_tokens=usage_raw.get("output_tokens"),
             )
 
+        response_items = _anthropic_response_items(
+            invocation_id=invocation_id,
+            text="".join(text_fragments) or None,
+            tool_calls=tool_calls,
+            provider_response_id=str(data.get("id")) if data.get("id") is not None else None,
+            model_name=str(data.get("model")) if data.get("model") is not None else None,
+        )
         return LlmAdapterResponse(
-            result=LlmResult(
-                text="".join(text_fragments) or None,
-                tool_calls=tuple(
-                    ToolCallIntent(
-                        id=str(item.get("id") or item.get("name") or "tool_call"),
-                        name=str(item.get("name") or ""),
-                        arguments=parse_json_arguments(item.get("input")),
-                    )
-                    for item in tool_calls
-                    if item.get("name")
-                ),
+            result=LlmResult.from_response_items(
+                response_items,
                 usage=usage,
                 finish_reason=(
                     str(data.get("stop_reason"))
@@ -187,6 +199,83 @@ class AnthropicMessagesAdapter:
                     "response_id": data.get("id"),
                     "model": data.get("model"),
                 },
+                text_fallback="".join(text_fragments) or None,
             ),
+            response_items=response_items,
             provider_request_id=str(data.get("id")) if data.get("id") is not None else None,
         )
+
+
+def _anthropic_response_items(
+    *,
+    invocation_id: str,
+    text: str | None,
+    tool_calls: list[dict[str, Any]],
+    provider_response_id: str | None,
+    model_name: str | None,
+) -> tuple[LlmResponseItem, ...]:
+    items: list[LlmResponseItem] = []
+    now = utcnow()
+    if text is not None:
+        sequence_no = len(items) + 1
+        items.append(
+            LlmResponseItem(
+                id=f"{invocation_id}:item:{sequence_no}",
+                invocation_id=invocation_id,
+                sequence_no=sequence_no,
+                kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.FINAL_ANSWER,
+                content_payload={"text": text},
+                provider_payload={
+                    "type": "message.text",
+                    "response_id": provider_response_id,
+                    "model": model_name,
+                },
+                provider_item_id=(
+                    f"{provider_response_id}:text"
+                    if provider_response_id is not None
+                    else f"{invocation_id}:text"
+                ),
+                provider_item_type="message.text",
+                model_visible=True,
+                user_visible=True,
+                created_at=now,
+                completed_at=now,
+            ),
+        )
+    for tool_call in tool_calls:
+        tool_name = tool_call.get("name")
+        if not tool_name:
+            continue
+        sequence_no = len(items) + 1
+        call_id = str(tool_call.get("id") or tool_name or f"tool_call_{sequence_no}")
+        items.append(
+            LlmResponseItem(
+                id=f"{invocation_id}:item:{sequence_no}",
+                invocation_id=invocation_id,
+                sequence_no=sequence_no,
+                kind=LlmResponseItemKind.TOOL_CALL,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.UNKNOWN,
+                content_payload={
+                    "call_id": call_id,
+                    "tool_name": str(tool_name),
+                    "arguments": parse_json_arguments(tool_call.get("input")),
+                },
+                provider_payload={
+                    "type": "tool_use",
+                    "response_id": provider_response_id,
+                    "model": model_name,
+                },
+                provider_item_id=call_id,
+                provider_item_type="tool_use",
+                call_id=call_id,
+                tool_name=str(tool_name),
+                model_visible=True,
+                user_visible=False,
+                created_at=now,
+                completed_at=now,
+            ),
+        )
+    return tuple(items)

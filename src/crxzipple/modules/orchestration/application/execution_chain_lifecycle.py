@@ -8,6 +8,7 @@ from crxzipple.modules.orchestration.application.dispatch_owner_kinds import (
     ORCHESTRATION_STEP_DISPATCH_OWNER_KIND,
 )
 from crxzipple.modules.orchestration.domain import (
+    ContinuationDecision,
     ExecutionChain,
     ExecutionChainRepository,
     ExecutionOwnerReference,
@@ -468,8 +469,9 @@ def complete_llm_execution_step(
     *,
     run: OrchestrationRun,
     llm_invocation_id: str,
-    assistant_progress_message_ids: tuple[str, ...] = (),
+    assistant_progress_item_ids: tuple[str, ...] = (),
     summary_payload: dict[str, object] | None = None,
+    continuation_payload: dict[str, object] | None = None,
 ) -> ExecutionStep | None:
     normalized_invocation_id = llm_invocation_id.strip()
     if not normalized_invocation_id:
@@ -490,12 +492,19 @@ def complete_llm_execution_step(
         llm_invocation_id=normalized_invocation_id,
         summary_payload=summary_payload,
     )
-    next_item_index = _next_item_index(uow, step.id)
-    for message_id in assistant_progress_message_ids:
-        _, created = _ensure_session_message_item(
+    if continuation_payload:
+        _ensure_continuation_decision_item(
             uow,
             step=step,
-            message_id=message_id,
+            llm_invocation_id=normalized_invocation_id,
+            summary_payload=continuation_payload,
+        )
+    next_item_index = _next_item_index(uow, step.id)
+    for item_id in assistant_progress_item_ids:
+        _, created = _ensure_session_item_execution_item(
+            uow,
+            step=step,
+            session_item_id=item_id,
             item_index=next_item_index,
             summary_payload={
                 "message_role": "assistant",
@@ -541,6 +550,61 @@ def fail_active_execution_step(
         uow.execution_chains.add(chain)
         uow.collect(chain)
     return step
+
+
+def record_failed_llm_execution_item(
+    uow: ExecutionChainLifecycleUnitOfWork,
+    *,
+    run: OrchestrationRun,
+    llm_invocation_id: str,
+    message: str,
+    code: str,
+    summary_payload: dict[str, object] | None = None,
+    details: dict[str, object] | None = None,
+) -> ExecutionStepItem | None:
+    chain = uow.execution_chains.get_active_for_turn(run.id)
+    if chain is None or chain.active_step_id is None:
+        return None
+    step = uow.execution_steps.get(chain.active_step_id)
+    if step is None or step.kind is not ExecutionStepKind.LLM:
+        return None
+    normalized_llm_invocation_id = llm_invocation_id.strip()
+    if not normalized_llm_invocation_id:
+        return None
+    owner = ExecutionOwnerReference(
+        owner_kind="llm_invocation",
+        owner_id=normalized_llm_invocation_id,
+    )
+    existing = uow.execution_step_items.find_by_owner_reference(owner)
+    item = next(
+        (candidate for candidate in existing if candidate.step_id == step.id),
+        None,
+    )
+    if item is None:
+        item_index = _next_item_index(uow, step.id)
+        item = ExecutionStepItem.create(
+            item_id=_execution_step_item_id(
+                step_id=step.id,
+                item_index=item_index,
+                kind=ExecutionStepItemKind.LLM_INVOCATION,
+            ),
+            step_id=step.id,
+            chain_id=step.chain_id,
+            turn_id=step.turn_id,
+            item_index=item_index,
+            kind=ExecutionStepItemKind.LLM_INVOCATION,
+            owner=owner,
+            correlation_key=normalized_llm_invocation_id,
+        )
+    item.summary_payload = {
+        **(item.summary_payload or {}),
+        "llm_invocation_id": normalized_llm_invocation_id,
+        **(summary_payload or {}),
+    }
+    item.fail(message=message, code=code, details=details)
+    uow.execution_step_items.add(item)
+    uow.collect(item)
+    return item
 
 
 def cancel_active_execution_step(
@@ -634,23 +698,23 @@ def materialize_final_response_execution_step(
     *,
     run: OrchestrationRun,
     llm_invocation_id: str | None,
-    assistant_message_ids: tuple[str, ...] = (),
+    assistant_session_item_ids: tuple[str, ...] = (),
     summary_payload: dict[str, object] | None = None,
 ) -> ExecutionStep | None:
     chain = uow.execution_chains.get_active_for_turn(run.id)
     if chain is None:
         return None
     normalized_invocation_id = _normalized_optional_text(llm_invocation_id)
-    normalized_message_ids = tuple(
-        message_id.strip()
-        for message_id in assistant_message_ids
-        if message_id is not None and message_id.strip()
+    normalized_item_ids = tuple(
+        item_id.strip()
+        for item_id in assistant_session_item_ids
+        if item_id is not None and item_id.strip()
     )
-    if normalized_invocation_id is None and not normalized_message_ids:
+    if normalized_invocation_id is None and not normalized_item_ids:
         return None
     correlation_key = _final_response_correlation_key(
         turn_id=run.id,
-        owner_id=normalized_invocation_id or ":".join(normalized_message_ids),
+        owner_id=normalized_invocation_id or ":".join(normalized_item_ids),
     )
     step = uow.execution_steps.get_by_correlation_key(correlation_key)
     if step is None:
@@ -672,22 +736,22 @@ def materialize_final_response_execution_step(
                 owner_kind=(
                     "llm_invocation"
                     if normalized_invocation_id is not None
-                    else "session_message"
+                    else "session_item"
                 ),
-                owner_id=normalized_invocation_id or normalized_message_ids[-1],
+                owner_id=normalized_invocation_id or normalized_item_ids[-1],
             ),
         )
         chain.increment_step_count()
         uow.execution_steps.add(step)
     next_item_index = _next_item_index(uow, step.id)
-    for message_id in normalized_message_ids:
-        _, created = _ensure_session_message_item(
+    for item_id in normalized_item_ids:
+        _, created = _ensure_session_item_execution_item(
             uow,
             step=step,
-            message_id=message_id,
+            session_item_id=item_id,
             item_index=next_item_index,
             summary_payload={
-                "message_role": "assistant",
+                "item_role": "assistant",
                 "llm_invocation_id": normalized_invocation_id,
                 **(summary_payload or {}),
             },
@@ -702,60 +766,6 @@ def materialize_final_response_execution_step(
     uow.collect(step)
     uow.collect(chain)
     return step
-
-
-def materialize_tool_result_message_items(
-    uow: ExecutionChainLifecycleUnitOfWork,
-    *,
-    run: OrchestrationRun,
-    tool_result_message_links: tuple[tuple[str, str], ...],
-) -> tuple[ExecutionStepItem, ...]:
-    created_or_existing: list[ExecutionStepItem] = []
-    for tool_run_id, message_id in tool_result_message_links:
-        normalized_tool_run_id = tool_run_id.strip()
-        normalized_message_id = message_id.strip()
-        if not normalized_tool_run_id or not normalized_message_id:
-            continue
-        tool_run_items = uow.execution_step_items.find_by_owner_reference(
-            ExecutionOwnerReference(
-                owner_kind="tool_run",
-                owner_id=normalized_tool_run_id,
-            ),
-        )
-        tool_run_item = next(
-            (
-                item
-                for item in reversed(tool_run_items)
-                if item.turn_id == run.id
-            ),
-            None,
-        )
-        if tool_run_item is None:
-            continue
-        step = uow.execution_steps.get(tool_run_item.step_id)
-        if step is None:
-            continue
-        summary = (
-            dict(tool_run_item.summary_payload)
-            if isinstance(tool_run_item.summary_payload, dict)
-            else {}
-        )
-        link = {
-            **summary,
-            "tool_run_id": normalized_tool_run_id,
-            "result_message_id": normalized_message_id,
-        }
-        if _normalize_tool_run_link(link) is None:
-            continue
-        item, _ = _ensure_tool_result_item(
-            uow,
-            step=step,
-            link=link,
-            item_index=_next_item_index(uow, step.id),
-        )
-        if item is not None:
-            created_or_existing.append(item)
-    return tuple(created_or_existing)
 
 
 def mark_tool_run_step_item_terminal(
@@ -862,6 +872,60 @@ def _ensure_tool_call_item(
     return item, True
 
 
+def materialize_tool_result_session_item_items(
+    uow: ExecutionChainLifecycleUnitOfWork,
+    *,
+    run: OrchestrationRun,
+    tool_result_item_links: tuple[tuple[str, str], ...],
+) -> tuple[ExecutionStepItem, ...]:
+    created_or_existing: list[ExecutionStepItem] = []
+    for tool_run_id, session_item_id in tool_result_item_links:
+        normalized_tool_run_id = tool_run_id.strip()
+        normalized_session_item_id = session_item_id.strip()
+        if not normalized_tool_run_id or not normalized_session_item_id:
+            continue
+        tool_run_items = uow.execution_step_items.find_by_owner_reference(
+            ExecutionOwnerReference(
+                owner_kind="tool_run",
+                owner_id=normalized_tool_run_id,
+            ),
+        )
+        tool_run_item = next(
+            (
+                item
+                for item in reversed(tool_run_items)
+                if item.turn_id == run.id
+            ),
+            None,
+        )
+        if tool_run_item is None:
+            continue
+        step = uow.execution_steps.get(tool_run_item.step_id)
+        if step is None:
+            continue
+        summary = (
+            dict(tool_run_item.summary_payload)
+            if isinstance(tool_run_item.summary_payload, dict)
+            else {}
+        )
+        link = {
+            **summary,
+            "tool_run_id": normalized_tool_run_id,
+            "result_session_item_id": normalized_session_item_id,
+        }
+        if _normalize_tool_run_link(link) is None:
+            continue
+        item, _ = _ensure_tool_result_item(
+            uow,
+            step=step,
+            link=link,
+            item_index=_next_item_index(uow, step.id),
+        )
+        if item is not None:
+            created_or_existing.append(item)
+    return tuple(created_or_existing)
+
+
 def _ensure_tool_run_item(
     uow: ExecutionChainLifecycleUnitOfWork,
     *,
@@ -907,14 +971,14 @@ def _ensure_tool_result_item(
     link: dict[str, object],
     item_index: int,
 ) -> tuple[ExecutionStepItem | None, bool]:
-    result_message_id = _normalized_optional_text(
-        _optional_text(link.get("result_message_id")),
+    result_session_item_id = _normalized_optional_text(
+        _optional_text(link.get("result_session_item_id")),
     )
-    if result_message_id is None:
+    if result_session_item_id is None:
         return None, False
     owner = ExecutionOwnerReference(
-        owner_kind="session_message",
-        owner_id=result_message_id,
+        owner_kind="session_item",
+        owner_id=result_session_item_id,
     )
     existing = uow.execution_step_items.find_by_owner_reference(owner)
     for item in existing:
@@ -935,28 +999,33 @@ def _ensure_tool_result_item(
         correlation_key=str(link["tool_call_id"]),
     )
     item.payload_ref = {
-        "kind": "session_message",
-        "session_message_id": result_message_id,
+        "kind": "session_item",
         "tool_run_id": str(link["tool_run_id"]),
+        "session_item_id": result_session_item_id,
     }
-    item.complete(summary_payload=_tool_result_summary(link, result_message_id))
+    item.complete(
+        summary_payload=_tool_result_summary(
+            link,
+            result_session_item_id=result_session_item_id,
+        ),
+    )
     uow.execution_step_items.add(item)
     uow.collect(item)
     return item, True
 
 
-def _ensure_session_message_item(
+def _ensure_session_item_execution_item(
     uow: ExecutionChainLifecycleUnitOfWork,
     *,
     step: ExecutionStep,
-    message_id: str,
+    session_item_id: str,
     item_index: int,
     summary_payload: dict[str, object] | None = None,
 ) -> tuple[ExecutionStepItem, bool]:
-    normalized_message_id = message_id.strip()
+    normalized_item_id = session_item_id.strip()
     owner = ExecutionOwnerReference(
-        owner_kind="session_message",
-        owner_id=normalized_message_id,
+        owner_kind="session_item",
+        owner_id=normalized_item_id,
     )
     existing = uow.execution_step_items.find_by_owner_reference(owner)
     for item in existing:
@@ -974,15 +1043,15 @@ def _ensure_session_message_item(
         item_index=item_index,
         kind=ExecutionStepItemKind.SESSION_MESSAGE,
         owner=owner,
-        correlation_key=normalized_message_id,
+        correlation_key=normalized_item_id,
     )
     item.payload_ref = {
-        "kind": "session_message",
-        "session_message_id": normalized_message_id,
+        "kind": "session_item",
+        "session_item_id": normalized_item_id,
     }
     item.complete(
         summary_payload={
-            "session_message_id": normalized_message_id,
+            "session_item_id": normalized_item_id,
             **(summary_payload or {}),
         },
     )
@@ -1104,6 +1173,48 @@ def _ensure_llm_invocation_item(
     return item
 
 
+def _ensure_continuation_decision_item(
+    uow: ExecutionChainLifecycleUnitOfWork,
+    *,
+    step: ExecutionStep,
+    llm_invocation_id: str,
+    summary_payload: dict[str, object],
+) -> ExecutionStepItem:
+    owner_id = f"{llm_invocation_id}:continuation"
+    decision = ContinuationDecision.from_payload(
+        llm_invocation_id=llm_invocation_id,
+        continuation_id=owner_id,
+        payload=summary_payload,
+    )
+    owner = ExecutionOwnerReference(
+        owner_kind="llm_continuation",
+        owner_id=owner_id,
+    )
+    existing = uow.execution_step_items.find_by_owner_reference(owner)
+    for item in existing:
+        if item.step_id == step.id:
+            return item
+    item_index = _next_item_index(uow, step.id)
+    item = ExecutionStepItem.create(
+        item_id=_execution_step_item_id(
+            step_id=step.id,
+            item_index=item_index,
+            kind=ExecutionStepItemKind.CONTINUATION_DECISION,
+        ),
+        step_id=step.id,
+        chain_id=step.chain_id,
+        turn_id=step.turn_id,
+        item_index=item_index,
+        kind=ExecutionStepItemKind.CONTINUATION_DECISION,
+        owner=owner,
+        correlation_key=owner_id,
+    )
+    item.complete(summary_payload=decision.to_payload())
+    uow.execution_step_items.add(item)
+    uow.collect(item)
+    return item
+
+
 def _normalize_tool_run_link(
     link: dict[str, object],
 ) -> dict[str, object] | None:
@@ -1143,11 +1254,12 @@ def _tool_run_summary(link: dict[str, object]) -> dict[str, object]:
             "tool_name": link.get("tool_name"),
             "tool_id": link.get("tool_id"),
             "status": link.get("status"),
-            "result_message_id": link.get("result_message_id"),
+            "result_session_item_id": link.get("result_session_item_id"),
             "background": bool(link.get("background")),
             "mode": link.get("mode"),
             "strategy": link.get("strategy"),
             "environment": link.get("environment"),
+            "tool_execution_plan": _tool_execution_plan_summary(link),
             "tool_lifecycle": _tool_lifecycle_summary(link),
         }.items()
         if value is not None
@@ -1156,7 +1268,8 @@ def _tool_run_summary(link: dict[str, object]) -> dict[str, object]:
 
 def _tool_result_summary(
     link: dict[str, object],
-    result_message_id: str,
+    *,
+    result_session_item_id: str | None,
 ) -> dict[str, object]:
     return {
         key: value
@@ -1165,11 +1278,33 @@ def _tool_result_summary(
             "tool_call_id": link.get("tool_call_id"),
             "tool_name": link.get("tool_name"),
             "tool_id": link.get("tool_id"),
-            "result_message_id": result_message_id,
+            "result_session_item_id": result_session_item_id,
+            "tool_execution_plan": _tool_execution_plan_summary(link),
             "tool_lifecycle": _tool_lifecycle_summary(link),
         }.items()
         if value is not None
     }
+
+
+def _tool_execution_plan_summary(link: dict[str, object]) -> dict[str, object] | None:
+    raw = link.get("tool_execution_plan")
+    if not isinstance(raw, dict):
+        return None
+    payload = {
+        key: raw[key]
+        for key in (
+            "tool_call_id",
+            "tool_name",
+            "tool_id",
+            "mode",
+            "strategy",
+            "environment",
+            "resource_policy",
+            "arguments_digest",
+        )
+        if key in raw
+    }
+    return payload or None
 
 
 def _tool_lifecycle_summary(link: dict[str, object]) -> dict[str, object] | None:
@@ -1185,7 +1320,7 @@ def _tool_lifecycle_summary(link: dict[str, object]) -> dict[str, object] | None
             "replacement_tool_call_id",
             "supersedes_tool_call_id",
             "supersedes_tool_run_id",
-            "supersedes_result_message_id",
+            "supersedes_result_session_item_id",
             "lifecycle_status",
             "evidence_lifecycle_status",
             "evidence_lifecycle",
@@ -1409,7 +1544,7 @@ __all__ = [
     "materialize_final_response_execution_step",
     "materialize_resume_execution_step",
     "materialize_tool_batch_execution_step",
-    "materialize_tool_result_message_items",
+    "materialize_tool_result_session_item_items",
     "prepare_dispatch_execution_step",
     "start_llm_execution_step",
 ]

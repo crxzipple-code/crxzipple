@@ -8,46 +8,51 @@ from uuid import uuid4
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.exceptions import (
     SessionInstanceNotFoundError,
-    SessionMessageNotFoundError,
+    SessionItemNotFoundError,
     SessionNotFoundError,
     SessionValidationError,
 )
 from crxzipple.modules.session.domain.repositories import (
     SessionInstanceRepository,
-    SessionMessageRepository,
+    SessionItemRepository,
     SessionRepository,
 )
 from crxzipple.modules.session.domain.value_objects import (
     SessionKind,
+    SessionItem,
+    SessionItemKind,
+    SessionItemPhase,
+    SessionItemVisibility,
     SessionKeyResolution,
-    SessionMessage,
-    SessionMessageKind,
-    SessionMessageVisibility,
     SessionOrigin,
     SessionReply,
     SessionResetDecision,
     SessionResetPolicy,
     utcnow,
 )
-from crxzipple.shared.content_blocks import content_blocks_from_payload
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.domain.events import Event
 from crxzipple.shared.time import format_datetime_utc as _format_datetime_utc
 
 
-def _session_message_fact_payload(message: SessionMessage) -> dict[str, object]:
+def _session_item_fact_payload(item: SessionItem) -> dict[str, object]:
     return {
-        "message_id": message.id,
-        "session_key": message.session_key,
-        "session_id": message.session_id,
-        "role": message.role,
-        "kind": message.kind.value,
-        "source_kind": message.source_kind,
-        "source_id": message.source_id,
-        "message": {
-            **message.to_payload(),
-            "created_at": _format_datetime_utc(message.created_at),
-        },
+        "item_id": item.id,
+        "session_key": item.session_key,
+        "session_id": item.session_id,
+        "sequence_no": item.sequence_no,
+        "kind": item.kind.value,
+        "phase": item.phase.value,
+        "role": item.role,
+        "source_module": item.source_module,
+        "source_kind": item.source_kind,
+        "source_id": item.source_id,
+        "provider_item_id": item.provider_item_id,
+        "provider_item_type": item.provider_item_type,
+        "call_id": item.call_id,
+        "tool_name": item.tool_name,
+        "visibility": item.visibility.to_payload(),
+        "item": item.to_payload(),
     }
 
 
@@ -66,21 +71,40 @@ class EnsureSessionInput:
 
 
 @dataclass(frozen=True, slots=True)
-class AppendSessionMessageInput:
+class AppendSessionItemInput:
     session_key: str
-    role: str
-    kind: SessionMessageKind = SessionMessageKind.MESSAGE
+    kind: SessionItemKind
     content_payload: dict[str, object] = field(default_factory=dict)
+    role: str | None = None
+    phase: SessionItemPhase = SessionItemPhase.UNKNOWN
+    visibility: SessionItemVisibility = field(default_factory=SessionItemVisibility)
+    source_module: str | None = None
     source_kind: str | None = None
     source_id: str | None = None
-    visibility: SessionMessageVisibility = SessionMessageVisibility.DEFAULT
+    provider_item_id: str | None = None
+    provider_item_type: str | None = None
+    call_id: str | None = None
+    tool_name: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class AppendSessionMessagesInput:
-    messages: tuple[AppendSessionMessageInput, ...] = field(default_factory=tuple)
+class AppendSessionItemsInput:
+    items: tuple[AppendSessionItemInput, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class ListSessionItemsInput:
+    session_key: str
+    limit: int | None = None
+    active_session_only: bool = False
+    model_visible: bool | None = None
+    user_visible: bool | None = None
+    chat_visible: bool | None = None
+    trace_visible: bool | None = None
+    after_sequence_no: int | None = None
+    before_sequence_no: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,44 +124,35 @@ class MergeSessionMetadataInput:
 
 
 @dataclass(frozen=True, slots=True)
-class MergeSessionMessageMetadataInput:
-    message_id: str
+class MergeSessionItemMetadataInput:
+    item_id: str
     metadata: dict[str, object] = field(default_factory=dict)
     touch_activity: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class ListSessionMessagesInput:
-    session_key: str
-    limit: int | None = None
-    active_session_only: bool = False
-    include_archived: bool = True
-    after_sequence_no: int | None = None
-    before_sequence_no: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SessionMessagesBundle:
-    session: Session
-    messages: tuple[SessionMessage, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ArchiveSessionMessagesInput:
+class GetSessionItemBySourceInput:
     session_key: str
     session_id: str
-    max_sequence_no: int | None = None
-    reason: str | None = None
+    source_module: str
+    source_kind: str
+    source_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionItemsBundle:
+    session: Session
+    items: tuple[SessionItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class CompactSessionSegmentInput:
     session_key: str
     session_id: str
-    summary_message_id: str
     summary_text: str
     compaction_run_id: str
-    archived_through_sequence_no: int | None = None
+    summary_item_id: str | None = None
+    archived_through_item_sequence_no: int | None = None
     reason: str | None = "compaction"
 
 
@@ -146,8 +161,8 @@ class CompactSessionSegmentResult:
     session: Session
     compacted_session_id: str
     active_session_id: str
-    archived_message_count: int
-    archived_through_sequence_no: int | None = None
+    archived_item_count: int = 0
+    archived_through_item_sequence_no: int | None = None
     compacted_at: str | None = None
 
 
@@ -189,7 +204,7 @@ class SessionResolutionResult:
 
 class SessionUnitOfWork(Protocol):
     sessions: SessionRepository
-    session_messages: SessionMessageRepository
+    session_items: SessionItemRepository
     session_instances: SessionInstanceRepository
 
     def __enter__(self) -> "SessionUnitOfWork":
@@ -548,50 +563,61 @@ class SessionApplicationService:
                 )
             return instance
 
-    def get_message(self, message_id: str) -> SessionMessage:
+    def get_item(self, item_id: str) -> SessionItem:
         with self.uow_factory() as uow:
-            message = uow.session_messages.get(message_id)
-            if message is None:
-                raise SessionMessageNotFoundError(
-                    f"Session message '{message_id}' was not found.",
+            item = uow.session_items.get(item_id)
+            if item is None:
+                raise SessionItemNotFoundError(
+                    f"Session item '{item_id}' was not found.",
                 )
-            return message
+            return item
 
-    def merge_message_metadata(
+    def get_item_by_source(
         self,
-        data: MergeSessionMessageMetadataInput,
-    ) -> SessionMessage:
+        data: GetSessionItemBySourceInput,
+    ) -> SessionItem | None:
         with self.uow_factory() as uow:
-            message = uow.session_messages.get(data.message_id)
-            if message is None:
-                raise SessionMessageNotFoundError(
-                    f"Session message '{data.message_id}' was not found.",
+            return uow.session_items.get_by_source(
+                session_key=data.session_key,
+                session_id=data.session_id,
+                source_module=data.source_module,
+                source_kind=data.source_kind,
+                source_id=data.source_id,
+            )
+
+    def merge_item_metadata(
+        self,
+        data: MergeSessionItemMetadataInput,
+    ) -> SessionItem:
+        with self.uow_factory() as uow:
+            item = uow.session_items.get(data.item_id)
+            if item is None:
+                raise SessionItemNotFoundError(
+                    f"Session item '{data.item_id}' was not found.",
                 )
-            metadata = dict(message.metadata)
+            metadata = dict(item.metadata)
             metadata.update(data.metadata)
-            updated_message = replace(message, metadata=metadata)
-            uow.session_messages.add(updated_message)
-            session = uow.sessions.get(updated_message.session_key)
+            updated_item = replace(item, metadata=metadata)
+            uow.session_items.add(updated_item)
+            session = uow.sessions.get(updated_item.session_key)
             if session is not None and data.touch_activity:
                 session.apply_updates(updated_at=utcnow())
                 uow.sessions.add(session)
                 uow.collect(session)
             uow.commit()
-            return updated_message
+            return updated_item
 
-    def append_message(self, data: AppendSessionMessageInput) -> SessionMessage:
-        return self.append_messages(
-            AppendSessionMessagesInput(messages=(data,)),
-        )[0]
+    def append_item(self, data: AppendSessionItemInput) -> SessionItem:
+        return self.append_items(AppendSessionItemsInput(items=(data,)))[0]
 
-    def append_messages(
+    def append_items(
         self,
-        data: AppendSessionMessagesInput,
-    ) -> tuple[SessionMessage, ...]:
-        if not data.messages:
+        data: AppendSessionItemsInput,
+    ) -> tuple[SessionItem, ...]:
+        if not data.items:
             return ()
         with self.uow_factory() as uow:
-            first = data.messages[0]
+            first = data.items[0]
             session = uow.sessions.get(first.session_key)
             if session is None:
                 raise SessionNotFoundError(
@@ -602,159 +628,100 @@ class SessionApplicationService:
                 raise SessionInstanceNotFoundError(
                     f"Session instance '{target_session_id}' was not found.",
                 )
-            next_sequence_no = self._next_message_sequence(
-                uow,
+            repository = uow.session_items
+            next_sequence_no = repository.max_sequence_no(
                 session_key=session.id,
                 session_id=target_session_id,
-            )
-            messages: list[SessionMessage] = []
-            for offset, item in enumerate(data.messages):
+            ) + 1
+            items: list[SessionItem] = []
+            for offset, item in enumerate(data.items):
                 if item.session_key != session.id:
                     raise SessionValidationError(
-                        "Batched session messages must share a session_key.",
+                        "Batched session items must share a session_key.",
                     )
                 item_session_id = item.session_id or session.active_session_id
                 if item_session_id != target_session_id:
                     raise SessionValidationError(
-                        "Batched session messages must share a session_id.",
+                        "Batched session items must share a session_id.",
                     )
-                message = self._build_message(
+                session_item = self._build_item(
                     item,
                     session_key=session.id,
                     session_id=target_session_id,
                     sequence_no=next_sequence_no + offset,
                 )
-                messages.append(message)
-            uow.session_messages.add_many_new(tuple(messages))
-            if messages:
-                session.updated_at = messages[-1].created_at
+                items.append(session_item)
+            repository.add_many_new(tuple(items))
+            if items:
+                session.updated_at = items[-1].created_at
                 uow.sessions.touch_updated_at(
                     session_key=session.id,
                     updated_at=session.updated_at,
                 )
-            for message in messages:
+            for item in items:
                 session.record_event(
                     Event(
-                        name="session.message.appended",
-                        payload=_session_message_fact_payload(message),
+                        name="session.item.appended",
+                        payload=_session_item_fact_payload(item),
                     ),
                 )
             uow.collect(session)
             uow.commit()
-            return tuple(messages)
+            return tuple(items)
 
-    def _build_message(
+    def _build_item(
         self,
-        data: AppendSessionMessageInput,
+        data: AppendSessionItemInput,
         *,
         session_key: str,
         session_id: str,
         sequence_no: int,
-    ) -> SessionMessage:
-        content_payload = dict(data.content_payload)
-        content_blocks = content_blocks_from_payload(content_payload)
-        is_function_call_message = (
-            data.kind is SessionMessageKind.MESSAGE
-            and content_payload.get("type") == "function_call"
-        )
-        if (
-            not content_blocks
-            and data.kind is SessionMessageKind.MESSAGE
-            and not is_function_call_message
-        ):
-            raise SessionValidationError(
-                "Session message content_payload.blocks is required for message content.",
-            )
-        return SessionMessage(
+    ) -> SessionItem:
+        return SessionItem(
             id=str(uuid4()),
             session_key=session_key,
             session_id=session_id,
             sequence_no=sequence_no,
-            role=data.role,
             kind=data.kind,
-            content_payload=content_payload,
+            role=data.role,
+            phase=data.phase,
+            visibility=data.visibility,
+            content_payload=dict(data.content_payload),
+            source_module=data.source_module,
             source_kind=data.source_kind,
             source_id=data.source_id,
-            visibility=data.visibility,
+            provider_item_id=data.provider_item_id,
+            provider_item_type=data.provider_item_type,
+            call_id=data.call_id,
+            tool_name=data.tool_name,
             metadata=dict(data.metadata),
         )
-
-    def archive_messages(self, data: ArchiveSessionMessagesInput) -> int:
-        with self.uow_factory() as uow:
-            session = uow.sessions.get(data.session_key)
-            if session is None:
-                raise SessionNotFoundError(
-                    f"Session '{data.session_key}' was not found.",
-                )
-            if uow.session_instances.get(data.session_id) is None:
-                raise SessionInstanceNotFoundError(
-                    f"Session instance '{data.session_id}' was not found.",
-                )
-            messages = uow.session_messages.list(
-                session_key=session.id,
-                session_id=data.session_id,
-            )
-            archived_count = 0
-            for message in messages:
-                if (
-                    data.max_sequence_no is not None
-                    and message.sequence_no > data.max_sequence_no
-                ):
-                    continue
-                if message.visibility is SessionMessageVisibility.ARCHIVED:
-                    continue
-                metadata = dict(message.metadata)
-                if data.reason is not None and data.reason.strip():
-                    metadata["archived_reason"] = data.reason.strip()
-                archived = replace(
-                    message,
-                    visibility=SessionMessageVisibility.ARCHIVED,
-                    metadata=metadata,
-                )
-                uow.session_messages.add(archived)
-                archived_count += 1
-            if archived_count > 0:
-                session.apply_updates(updated_at=utcnow())
-                session.record_event(
-                    Event(
-                        name="session.messages.archived",
-                        payload={
-                            "session_key": session.id,
-                            "session_id": data.session_id,
-                            "count": archived_count,
-                        },
-                    ),
-                )
-                uow.sessions.add(session)
-                uow.collect(session)
-            uow.commit()
-            return archived_count
 
     def compact_active_segment(
         self,
         data: CompactSessionSegmentInput,
     ) -> CompactSessionSegmentResult:
         normalized_session_id = data.session_id.strip()
-        normalized_summary_message_id = data.summary_message_id.strip()
+        normalized_summary_item_id = (data.summary_item_id or "").strip()
         normalized_summary_text = data.summary_text.strip()
         normalized_compaction_run_id = data.compaction_run_id.strip()
         normalized_reason = (data.reason or "compaction").strip() or "compaction"
         if not normalized_session_id:
             raise SessionValidationError("Compaction session_id cannot be empty.")
-        if not normalized_summary_message_id:
+        if not normalized_summary_item_id:
             raise SessionValidationError(
-                "Compaction summary_message_id cannot be empty.",
+                "Compaction summary item id cannot be empty.",
             )
         if not normalized_summary_text:
             raise SessionValidationError("Compaction summary_text cannot be empty.")
         if not normalized_compaction_run_id:
             raise SessionValidationError("Compaction run id cannot be empty.")
         if (
-            data.archived_through_sequence_no is not None
-            and data.archived_through_sequence_no < 0
+            data.archived_through_item_sequence_no is not None
+            and data.archived_through_item_sequence_no < 0
         ):
             raise SessionValidationError(
-                "Compaction archived_through_sequence_no cannot be negative.",
+                "Compaction archived_through_item_sequence_no cannot be negative.",
             )
 
         with self.uow_factory() as uow:
@@ -772,46 +739,48 @@ class SessionApplicationService:
                 raise SessionInstanceNotFoundError(
                     f"Session instance '{normalized_session_id}' was not found.",
                 )
-            summary_message = uow.session_messages.get(normalized_summary_message_id)
-            if summary_message is None:
-                raise SessionMessageNotFoundError(
-                    f"Session message '{normalized_summary_message_id}' was not found.",
+            summary_item: SessionItem | None = None
+            summary_item = uow.session_items.get(normalized_summary_item_id)
+            if summary_item is None:
+                raise SessionItemNotFoundError(
+                    f"Session item '{normalized_summary_item_id}' was not found.",
                 )
             if (
-                summary_message.session_key != session.id
-                or summary_message.session_id != normalized_session_id
+                summary_item.session_key != session.id
+                or summary_item.session_id != normalized_session_id
             ):
                 raise SessionValidationError(
-                    "Compaction summary message must belong to the active session segment.",
+                    "Compaction summary item must belong to the active session segment.",
                 )
 
-            archive_through = (
-                data.archived_through_sequence_no
-                if data.archived_through_sequence_no is not None
-                else max(summary_message.sequence_no - 1, 0)
-            )
-            messages = uow.session_messages.list(
-                session_key=session.id,
-                session_id=normalized_session_id,
-            )
-            archived_count = 0
-            for message in messages:
-                if message.id == summary_message.id:
-                    continue
-                if message.sequence_no > archive_through:
-                    continue
-                if message.visibility is SessionMessageVisibility.ARCHIVED:
-                    continue
-                metadata = dict(message.metadata)
-                metadata["archived_reason"] = normalized_reason
-                metadata["archived_by_compaction_run_id"] = normalized_compaction_run_id
-                archived = replace(
-                    message,
-                    visibility=SessionMessageVisibility.ARCHIVED,
-                    metadata=metadata,
+            archive_through_item = data.archived_through_item_sequence_no
+            if archive_through_item is None and summary_item is not None:
+                archive_through_item = max(summary_item.sequence_no - 1, 0)
+            archived_item_count = 0
+            if archive_through_item is not None:
+                items = uow.session_items.list(
+                    session_key=session.id,
+                    session_id=normalized_session_id,
                 )
-                uow.session_messages.add(archived)
-                archived_count += 1
+                for item in items:
+                    if item.id == normalized_summary_item_id:
+                        continue
+                    if item.sequence_no > archive_through_item:
+                        continue
+                    metadata = dict(item.metadata)
+                    metadata["archived_reason"] = normalized_reason
+                    metadata["archived_by_compaction_run_id"] = (
+                        normalized_compaction_run_id
+                    )
+                    metadata["compacted_segment_id"] = normalized_session_id
+                    metadata["archived_through_item_sequence_no"] = (
+                        archive_through_item
+                    )
+                    if normalized_summary_item_id:
+                        metadata["summary_item_id"] = normalized_summary_item_id
+                    archived_item = replace(item, metadata=metadata)
+                    uow.session_items.add(archived_item)
+                    archived_item_count += 1
 
             compacted_at = utcnow()
             current_instance.close(
@@ -819,16 +788,18 @@ class SessionApplicationService:
                 closed_at=compacted_at,
             )
             instance_metadata = dict(current_instance.metadata)
-            instance_metadata["segment"] = {
+            segment_metadata: dict[str, object] = {
                 "kind": "compacted",
-                "summary_message_id": summary_message.id,
                 "summary_text": normalized_summary_text,
                 "compaction_run_id": normalized_compaction_run_id,
-                "archived_message_count": archived_count,
-                "archived_through_sequence_no": archive_through,
+                "archived_item_count": archived_item_count,
+                "archived_through_item_sequence_no": archive_through_item,
                 "compacted_at": _format_datetime_utc(compacted_at),
                 "reason": normalized_reason,
             }
+            if summary_item is not None:
+                segment_metadata["summary_item_id"] = summary_item.id
+            instance_metadata["segment"] = segment_metadata
             current_instance.metadata = instance_metadata
             uow.session_instances.add(current_instance)
 
@@ -851,7 +822,7 @@ class SessionApplicationService:
                         "session_key": session.id,
                         "closed_session_id": normalized_session_id,
                         "active_session_id": session.active_session_id,
-                        "archived_message_count": archived_count,
+                        "archived_item_count": archived_item_count,
                         "compaction_run_id": normalized_compaction_run_id,
                     },
                 ),
@@ -863,46 +834,39 @@ class SessionApplicationService:
                 session=session,
                 compacted_session_id=normalized_session_id,
                 active_session_id=session.active_session_id,
-                archived_message_count=archived_count,
-                archived_through_sequence_no=archive_through,
+                archived_item_count=archived_item_count,
+                archived_through_item_sequence_no=archive_through_item,
                 compacted_at=_format_datetime_utc(compacted_at),
             )
 
-    def get_message_by_source(
+    def list_items(
         self,
-        *,
-        session_key: str,
-        session_id: str,
-        source_kind: str,
-        source_id: str,
-    ) -> SessionMessage | None:
-        with self.uow_factory() as uow:
-            session = uow.sessions.get(session_key)
-            if session is None:
-                raise SessionNotFoundError(
-                    f"Session '{session_key}' was not found.",
-                )
-            if uow.session_instances.get(session_id) is None:
-                raise SessionInstanceNotFoundError(
-                    f"Session instance '{session_id}' was not found.",
-                )
-            return uow.session_messages.get_by_source(
-                session_key=session.id,
-                session_id=session_id,
-                source_kind=source_kind,
-                source_id=source_id,
-            )
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
+        return list(self.get_session_with_items(data).items)
 
-    def list_messages(
+    def list_model_visible_items(
         self,
-        data: ListSessionMessagesInput,
-    ) -> list[SessionMessage]:
-        return list(self.get_session_with_messages(data).messages)
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
+        return self.list_items(replace(data, model_visible=True))
 
-    def get_session_with_messages(
+    def list_chat_visible_items(
         self,
-        data: ListSessionMessagesInput,
-    ) -> SessionMessagesBundle:
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
+        return self.list_items(replace(data, chat_visible=True))
+
+    def list_trace_visible_items(
+        self,
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
+        return self.list_items(replace(data, trace_visible=True))
+
+    def get_session_with_items(
+        self,
+        data: ListSessionItemsInput,
+    ) -> SessionItemsBundle:
         with self.uow_factory() as uow:
             session = uow.sessions.get(data.session_key)
             if session is None:
@@ -910,18 +874,18 @@ class SessionApplicationService:
                     f"Session '{data.session_key}' was not found.",
                 )
             session_id = session.active_session_id if data.active_session_only else None
-            messages = uow.session_messages.list(
+            items = uow.session_items.list(
                 session_key=session.id,
                 session_id=session_id,
                 limit=data.limit,
-                include_archived=data.include_archived,
+                model_visible=data.model_visible,
+                user_visible=data.user_visible,
+                chat_visible=data.chat_visible,
+                trace_visible=data.trace_visible,
                 after_sequence_no=data.after_sequence_no,
                 before_sequence_no=data.before_sequence_no,
             )
-            return SessionMessagesBundle(
-                session=session,
-                messages=tuple(messages),
-            )
+            return SessionItemsBundle(session=session, items=tuple(items))
 
     def reset_session(self, data: ResetSessionInput) -> Session:
         with self.uow_factory() as uow:
@@ -1101,21 +1065,6 @@ class SessionApplicationService:
         session_key: str,
     ) -> int:
         return uow.session_instances.max_sequence_no(session_key=session_key) + 1
-
-    def _next_message_sequence(
-        self,
-        uow: SessionUnitOfWork,
-        *,
-        session_key: str,
-        session_id: str,
-    ) -> int:
-        return (
-            uow.session_messages.max_sequence_no(
-                session_key=session_key,
-                session_id=session_id,
-            )
-            + 1
-        )
 
     @staticmethod
     def _infer_session_kind(

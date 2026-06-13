@@ -92,6 +92,7 @@ class ExecutionStepStatus(StrEnum):
 
 class ExecutionStepItemKind(StrEnum):
     LLM_INVOCATION = "llm_invocation"
+    CONTINUATION_DECISION = "continuation_decision"
     TOOL_CALL = "tool_call"
     TOOL_RUN = "tool_run"
     TOOL_RESULT = "tool_result"
@@ -109,6 +110,19 @@ class ExecutionStepItemStatus(StrEnum):
     CANCELLED = "cancelled"
     LATE_OBSERVED = "late_observed"
     LATE_IGNORED = "late_ignored"
+
+
+class ExecutionOwnerKind(StrEnum):
+    ORCHESTRATION_RUN = "orchestration_run"
+    ORCHESTRATION_INGRESS_REQUEST = "orchestration_ingress_request"
+    DISPATCH_TASK = "dispatch_task"
+    LLM_INVOCATION = "llm_invocation"
+    LLM_CONTINUATION = "llm_continuation"
+    TOOL_CALL = "tool_call"
+    TOOL_RUN = "tool_run"
+    SESSION_ITEM = "session_item"
+    SESSION_MESSAGE = "session_message"
+    APPROVAL_REQUEST = "approval_request"
 
 
 class OrchestrationQueuePolicy(StrEnum):
@@ -157,6 +171,15 @@ class ExecutionOwnerReference(ValueObject):
         }
 
     @classmethod
+    def of(
+        cls,
+        owner_kind: ExecutionOwnerKind | str,
+        owner_id: str,
+    ) -> "ExecutionOwnerReference":
+        raw_kind = owner_kind.value if isinstance(owner_kind, ExecutionOwnerKind) else owner_kind
+        return cls(owner_kind=raw_kind, owner_id=owner_id)
+
+    @classmethod
     def from_payload(
         cls,
         payload: dict[str, Any] | None,
@@ -168,6 +191,90 @@ class ExecutionOwnerReference(ValueObject):
         if owner_kind is None or owner_id is None:
             return None
         return cls(owner_kind=str(owner_kind), owner_id=str(owner_id))
+
+    @classmethod
+    def llm_invocation(cls, invocation_id: str) -> "ExecutionOwnerReference":
+        return cls.of(ExecutionOwnerKind.LLM_INVOCATION, invocation_id)
+
+    @classmethod
+    def llm_continuation(cls, continuation_id: str) -> "ExecutionOwnerReference":
+        return cls.of(ExecutionOwnerKind.LLM_CONTINUATION, continuation_id)
+
+    @classmethod
+    def tool_call(cls, tool_call_id: str) -> "ExecutionOwnerReference":
+        return cls.of(ExecutionOwnerKind.TOOL_CALL, tool_call_id)
+
+    @classmethod
+    def tool_run(cls, tool_run_id: str) -> "ExecutionOwnerReference":
+        return cls.of(ExecutionOwnerKind.TOOL_RUN, tool_run_id)
+
+    @classmethod
+    def session_item(cls, item_id: str) -> "ExecutionOwnerReference":
+        return cls.of(ExecutionOwnerKind.SESSION_ITEM, item_id)
+
+    @classmethod
+    def session_message(cls, message_id: str) -> "ExecutionOwnerReference":
+        return cls.of(ExecutionOwnerKind.SESSION_MESSAGE, message_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationDecision(ValueObject):
+    llm_invocation_id: str
+    continuation_id: str
+    reason: str | None = None
+    end_turn: bool | None = None
+    needs_follow_up: bool | None = None
+
+    def __post_init__(self) -> None:
+        llm_invocation_id = self.llm_invocation_id.strip()
+        continuation_id = self.continuation_id.strip()
+        if not llm_invocation_id:
+            raise OrchestrationValidationError(
+                "Continuation decision llm_invocation_id cannot be empty.",
+            )
+        if not continuation_id:
+            raise OrchestrationValidationError(
+                "Continuation decision continuation_id cannot be empty.",
+            )
+        reason = self.reason.strip() if isinstance(self.reason, str) else self.reason
+        object.__setattr__(self, "llm_invocation_id", llm_invocation_id)
+        object.__setattr__(self, "continuation_id", continuation_id)
+        object.__setattr__(self, "reason", reason or None)
+
+    @classmethod
+    def from_payload(
+        cls,
+        *,
+        llm_invocation_id: str,
+        continuation_id: str,
+        payload: dict[str, object],
+    ) -> "ContinuationDecision":
+        reason_value = payload.get("reason")
+        end_turn_value = payload.get("end_turn")
+        return cls(
+            llm_invocation_id=llm_invocation_id,
+            continuation_id=continuation_id,
+            reason=reason_value if isinstance(reason_value, str) else None,
+            end_turn=end_turn_value if isinstance(end_turn_value, bool) else None,
+            needs_follow_up=(
+                bool(payload["needs_follow_up"])
+                if "needs_follow_up" in payload
+                else None
+            ),
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "llm_invocation_id": self.llm_invocation_id,
+            "continuation_id": self.continuation_id,
+        }
+        if self.reason is not None:
+            payload["reason"] = self.reason
+        if self.end_turn is not None:
+            payload["end_turn"] = self.end_turn
+        if self.needs_follow_up is not None:
+            payload["needs_follow_up"] = self.needs_follow_up
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

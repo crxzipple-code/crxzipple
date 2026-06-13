@@ -54,7 +54,7 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
                 "rendered_prompt_estimated_tokens": 56,
                 "estimated_provider_prompt_tokens": 102,
                 "duplicate_tool_delivery_risk": True,
-                "tree_session_message_count": 2,
+                "tree_session_item_count": 2,
                 "tree_tool_interaction_count": 1,
                 "tree_evidence_item_count": 4,
                 "folded_history_node_count": 3,
@@ -62,11 +62,11 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
                 "session_range_warning_count": 1,
                 "session_range_blocked_count": 0,
                 "session_range_limited_count": 2,
-                "session_message_node_refs": [
-                    {"node_id": "session.message.active.1"},
-                    {"node_id": "session.message.active.2"},
+                "session_item_node_refs": [
+                    {"node_id": "session.item.active.1"},
+                    {"node_id": "session.item.active.2"},
                 ],
-                "current_inbound_node_id": "session.message.active.2",
+                "current_inbound_node_id": "session.item.active.2",
             },
         ),
     )
@@ -87,7 +87,7 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
     assert "content" not in sections["visible_nodes"].rows[0].cells
     assert sections["render_snapshots"].rows[0].cells["run"] == "run:context"
     assert sections["render_snapshots"].rows[0].cells["history"] == "context_tree"
-    assert sections["render_snapshots"].rows[0].cells["tree_messages"] == "2"
+    assert sections["render_snapshots"].rows[0].cells["tree_items"] == "2"
     assert sections["render_snapshots"].rows[0].cells["evidence"] == "4"
     assert sections["render_snapshots"].rows[0].cells["folded"] == "3"
     assert sections["render_snapshots"].rows[0].cells["session_tokens"] == "128"
@@ -96,7 +96,7 @@ def test_context_workspace_operations_page_exposes_tree_without_node_content() -
     assert sections["render_snapshots"].rows[0].cells["session_refs"] == "2"
     assert (
         sections["render_snapshots"].rows[0].cells["current_node"]
-        == "session.message.active.2"
+        == "session.item.active.2"
     )
     assert sections["prompt_budget"].rows[0].cells["provider_tokens"] == "102"
     assert sections["prompt_budget"].rows[0].cells["tree_tokens"] == "56"

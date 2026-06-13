@@ -15,6 +15,10 @@ from crxzipple.modules.tool.application.service_support import (
 from crxzipple.modules.tool.application.context_requirements import (
     check_tool_context_readiness,
 )
+from crxzipple.modules.tool.application.surface import (
+    ToolSurface,
+    ToolSurfaceQueryService,
+)
 from crxzipple.modules.tool.application.submission_service import ToolSubmissionService
 from crxzipple.modules.tool.application.worker_service import ToolWorkerService
 from crxzipple.modules.tool.domain.entities import (
@@ -35,11 +39,13 @@ class ToolApplicationService:
         worker_service: ToolWorkerService,
         submission_service: ToolSubmissionService,
         runtime_pool_service: object,
+        surface_query_service: ToolSurfaceQueryService,
     ) -> None:
         self.catalog_service = catalog_service
         self.worker_service = worker_service
         self.submission_service = submission_service
         self.runtime_pool_service = runtime_pool_service
+        self.surface_query_service = surface_query_service
         self.provider_backend_readiness = ToolProviderBackendReadinessEvaluator()
 
     @property
@@ -95,6 +101,27 @@ class ToolApplicationService:
     ):
         return self.runtime_pool_service.list_enabled_tools(
             runtime_context=runtime_context,
+        )
+
+    def build_tool_surface(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        runtime_context: object | None = None,
+        surface_id: str | None = None,
+        tool_ids: tuple[str, ...] | None = None,
+        persist: bool = False,
+    ) -> ToolSurface:
+        return self.surface_query_service.build_surface(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            runtime_context=runtime_context,
+            surface_id=surface_id,
+            tool_ids=tool_ids,
+            persist=persist,
         )
 
     def get_tool(self, tool_id: str) -> Tool:

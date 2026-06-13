@@ -6,7 +6,7 @@ from datetime import datetime
 from crxzipple.modules.session.application.services import RoutedSessionResult
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.value_objects import (
-    SessionMessage,
+    SessionItem,
     SessionRuntimeBinding,
 )
 
@@ -69,35 +69,47 @@ class SessionDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionMessageDTO:
+class SessionItemDTO:
     id: str
     session_key: str
     session_id: str
     sequence_no: int
-    role: str
+    role: str | None
     kind: str
+    phase: str
     content_payload: dict[str, object]
+    visibility: dict[str, bool]
+    source_module: str | None
     source_kind: str | None
     source_id: str | None
-    visibility: str
+    provider_item_id: str | None
+    provider_item_type: str | None
+    call_id: str | None
+    tool_name: str | None
     metadata: dict[str, object]
     created_at: datetime
 
     @classmethod
-    def from_entity(cls, message: SessionMessage) -> "SessionMessageDTO":
+    def from_entity(cls, item: SessionItem) -> "SessionItemDTO":
         return cls(
-            id=message.id,
-            session_key=message.session_key,
-            session_id=message.session_id,
-            sequence_no=message.sequence_no,
-            role=message.role,
-            kind=message.kind.value,
-            content_payload=dict(message.content_payload),
-            source_kind=message.source_kind,
-            source_id=message.source_id,
-            visibility=message.visibility.value,
-            metadata=dict(message.metadata),
-            created_at=message.created_at,
+            id=item.id,
+            session_key=item.session_key,
+            session_id=item.session_id,
+            sequence_no=item.sequence_no,
+            role=item.role,
+            kind=item.kind.value,
+            phase=item.phase.value,
+            content_payload=dict(item.content_payload),
+            visibility=item.visibility.to_payload(),
+            source_module=item.source_module,
+            source_kind=item.source_kind,
+            source_id=item.source_id,
+            provider_item_id=item.provider_item_id,
+            provider_item_type=item.provider_item_type,
+            call_id=item.call_id,
+            tool_name=item.tool_name,
+            metadata=dict(item.metadata),
+            created_at=item.created_at,
         )
 
 

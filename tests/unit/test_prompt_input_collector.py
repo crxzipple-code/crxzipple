@@ -30,18 +30,23 @@ from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedToolSet,
 )
 from crxzipple.modules.orchestration.domain import (
+    ExecutionOwnerReference,
+    ExecutionStepItem,
+    ExecutionStepItemKind,
+    ExecutionStepItemStatus,
     InboundInstruction,
     OrchestrationRun,
     OrchestrationValidationError,
 )
 from crxzipple.modules.session.application import (
-    ListSessionMessagesInput,
-    SessionMessagesBundle,
+    ListSessionItemsInput,
+    SessionItemsBundle,
 )
 from crxzipple.modules.session.domain import (
     Session,
-    SessionMessage,
-    SessionMessageVisibility,
+    SessionItem,
+    SessionItemKind,
+    SessionItemVisibility,
 )
 from crxzipple.modules.skills.application import SkillCatalogPrompt
 from crxzipple.modules.tool.domain import Tool, ToolExecutionTarget
@@ -66,20 +71,17 @@ def test_build_collects_normal_turn_inputs_for_context_workspace() -> None:
     assert result.mode is PromptMode.NORMAL_TURN
     assert result.surface_policy.surface == "interactive"
     assert result.workspace_dir == "/workspace/session"
-    assert [message.metadata["session_message_id"] for message in result.messages] == [
-        "msg-current",
-        "msg-assistant",
+    assert [message.metadata["session_item_id"] for message in result.messages] == [
+        "item-current",
     ]
-    assert tuple(message.role for message in result.messages) == (
-        LlmMessageRole.USER,
-        LlmMessageRole.ASSISTANT,
-    )
+    assert tuple(message.role for message in result.messages) == (LlmMessageRole.USER,)
     assert tuple(schema.name for schema in result.tool_schemas) == ("weather.lookup",)
     assert result.skills_catalog is not None
     assert result.report is not None
-    assert result.report.transcript_message_count == 2
+    assert result.report.transcript_message_count == 1
     assert result.report.context_budget_source == "context_window_scaled"
     assert result.report.context_budget_estimated_tokens == 300
+    assert len(collector.session_service.item_inputs) == 1
     assert skill_catalog.calls == [
         {
             "workspace_dir": "/workspace/session",
@@ -92,6 +94,156 @@ def test_build_collects_normal_turn_inputs_for_context_workspace() -> None:
             "active_session_id": "active-session",
         }
     ]
+
+
+def test_build_prefers_model_visible_session_items_for_provider_replay() -> None:
+    session_service = _FakeSessionService()
+    session_service.items = (
+        SessionItem(
+            id="item-call-1",
+            session_key="session:assistant",
+            session_id="active-session",
+            sequence_no=1,
+            role="assistant",
+            kind=SessionItemKind.TOOL_CALL,
+            content_payload={"arguments": {"city": "Kunming"}},
+            visibility=SessionItemVisibility(model_visible=True),
+            source_module="llm",
+            source_kind="llm_response_item",
+            source_id="llm-item-1",
+            provider_item_id="provider-call-1",
+            call_id="call-weather-1",
+            tool_name="weather.lookup",
+        ),
+        SessionItem(
+            id="item-result-1",
+            session_key="session:assistant",
+            session_id="active-session",
+            sequence_no=2,
+            role="tool",
+            kind=SessionItemKind.TOOL_RESULT,
+            content_payload={
+                "tool_call_id": "call-weather-1",
+                "tool_name": "weather.lookup",
+                "status": "succeeded",
+                "content": [{"type": "text", "text": "sunny"}],
+            },
+            visibility=SessionItemVisibility(model_visible=True),
+            source_module="tool",
+            source_kind="tool_run",
+            source_id="tool-run-1",
+            call_id="call-weather-1",
+            tool_name="weather.lookup",
+            metadata={"tool_status": "succeeded"},
+        ),
+    )
+    collector = _collector(session_service=session_service)
+
+    result = collector.build(_run(), resolved_tools=_resolved_tools())
+
+    assert len(session_service.item_inputs) == 1
+    assert [message.metadata.get("session_item_id") for message in result.messages] == [
+        "item-call-1",
+        "item-result-1",
+    ]
+    assert result.messages[0].content == {
+        "type": "function_call",
+        "call_id": "call-weather-1",
+        "name": "weather.lookup",
+        "arguments": {"city": "Kunming"},
+    }
+    assert result.messages[1].tool_call_id == "call-weather-1"
+    assert result.report is not None
+    assert result.report.transcript_tool_result_stats["tool_result_item_count"] == 1
+    report_payload = result.report.to_payload()
+    transcript_budget = report_payload["transcript"]["budget"]
+    assert transcript_budget["source"] == "session_items"
+    assert transcript_budget["frontier"] == {
+        "from_sequence_no": 1,
+        "to_sequence_no": 2,
+        "from_item_id": "item-call-1",
+        "to_item_id": "item-result-1",
+        "item_count": 2,
+    }
+    assert transcript_budget["protocol_required_preserved"] is True
+    assert [ref["item_id"] for ref in transcript_budget["protocol_required_refs"]] == [
+        "item-call-1",
+        "item-result-1",
+    ]
+
+
+def test_build_merges_execution_chain_protocol_refs_into_transcript_budget() -> None:
+    execution_query = _FakeExecutionQuery(
+        items=(
+            ExecutionStepItem(
+                id="item-exec-call-1",
+                step_id="step-tools",
+                chain_id="chain-run-1",
+                turn_id="run-1",
+                item_index=0,
+                kind=ExecutionStepItemKind.TOOL_CALL,
+                status=ExecutionStepItemStatus.COMPLETED,
+                owner=ExecutionOwnerReference(
+                    owner_kind="tool_call",
+                    owner_id="call-weather-1",
+                ),
+                summary_payload={
+                    "tool_call_id": "call-weather-1",
+                    "tool_name": "weather.lookup",
+                    "tool_id": "tool.weather",
+                    "mode": "inline",
+                },
+            ),
+            ExecutionStepItem(
+                id="item-exec-result-1",
+                step_id="step-tools",
+                chain_id="chain-run-1",
+                turn_id="run-1",
+                item_index=1,
+                kind=ExecutionStepItemKind.TOOL_RESULT,
+                status=ExecutionStepItemStatus.COMPLETED,
+                owner=ExecutionOwnerReference(
+                    owner_kind="session_item",
+                    owner_id="item-result-1",
+                ),
+                summary_payload={
+                    "tool_call_id": "call-weather-1",
+                    "tool_name": "weather.lookup",
+                    "tool_id": "tool.weather",
+                    "tool_run_id": "tool-run-1",
+                    "result_session_item_id": "item-result-1",
+                    "tool_execution_plan": {
+                        "tool_call_id": "call-weather-1",
+                        "tool_name": "weather.lookup",
+                    },
+                },
+            ),
+        ),
+    )
+    collector = _collector(execution_query=execution_query)
+
+    result = collector.build(_run(), resolved_tools=_resolved_tools())
+
+    assert result.report is not None
+    transcript_budget = result.report.to_payload()["transcript"]["budget"]
+    assert transcript_budget["execution_chain_protocol_required_ref_count"] == 2
+    assert [
+        ref["execution_step_item_id"]
+        for ref in transcript_budget["execution_chain_protocol_required_refs"]
+    ] == ["item-exec-call-1", "item-exec-result-1"]
+    assert {
+        ref["owner_module"]
+        for ref in transcript_budget["execution_chain_protocol_required_refs"]
+    } == {"orchestration"}
+    protocol_ref_ids = {
+        ref.get("execution_step_item_id")
+        for ref in transcript_budget["protocol_required_refs"]
+    }
+    assert {"item-exec-call-1", "item-exec-result-1"} <= protocol_ref_ids
+    result_ref = transcript_budget["execution_chain_protocol_required_refs"][1]
+    assert result_ref["tool_run_id"] == "tool-run-1"
+    assert result_ref["result_session_item_id"] == "item-result-1"
+    assert result_ref["tool_execution_plan"]["tool_name"] == "weather.lookup"
 
 
 def test_build_memory_flush_uses_maintenance_surface_without_skills_catalog() -> None:
@@ -113,6 +265,72 @@ def test_build_memory_flush_uses_maintenance_surface_without_skills_catalog() ->
     assert result.skills_catalog is None
     assert tuple(schema.name for schema in result.tool_schemas) == ("weather.lookup",)
     assert skill_catalog.calls == []
+
+
+def test_build_memory_flush_prefers_model_visible_session_items_without_message_read() -> None:
+    session_service = _FakeSessionService()
+    session_service.items = (
+        SessionItem(
+            id="item-memory-call",
+            session_key="session:assistant",
+            session_id="active-session",
+            sequence_no=1,
+            role="assistant",
+            kind=SessionItemKind.TOOL_CALL,
+            content_payload={"arguments": {"note": "durable preference"}},
+            visibility=SessionItemVisibility(model_visible=True),
+            source_module="llm",
+            source_kind="llm_response_item",
+            source_id="llm-item-memory-call",
+            call_id="call-memory-write",
+            tool_name="memory_write_daily",
+        ),
+        SessionItem(
+            id="item-memory-result",
+            session_key="session:assistant",
+            session_id="active-session",
+            sequence_no=2,
+            role="tool",
+            kind=SessionItemKind.TOOL_RESULT,
+            content_payload={
+                "tool_call_id": "call-memory-write",
+                "tool_name": "memory_write_daily",
+                "status": "succeeded",
+                "content": [{"type": "text", "text": "stored"}],
+            },
+            visibility=SessionItemVisibility(model_visible=True),
+            source_module="tool",
+            source_kind="tool_run",
+            source_id="tool-run-memory-write",
+            call_id="call-memory-write",
+            tool_name="memory_write_daily",
+            metadata={"tool_status": "succeeded"},
+        ),
+    )
+    collector = _collector(session_service=session_service)
+
+    result = collector.build(
+        _run(),
+        resolved_tools=_resolved_tools(),
+        mode=PromptMode.MEMORY_FLUSH,
+    )
+
+    assert result.mode is PromptMode.MEMORY_FLUSH
+    assert len(session_service.item_inputs) == 1
+    assert [message.metadata.get("session_item_id") for message in result.messages] == [
+        "item-memory-call",
+        "item-memory-result",
+    ]
+    assert result.report is not None
+    budget = result.report.to_payload()["transcript"]["budget"]
+    assert budget["source"] == "session_items"
+    assert budget["frontier"] == {
+        "from_sequence_no": 1,
+        "to_sequence_no": 2,
+        "from_item_id": "item-memory-call",
+        "to_item_id": "item-memory-result",
+        "item_count": 2,
+    }
 
 
 @pytest.mark.parametrize(
@@ -154,13 +372,16 @@ def test_build_requires_runtime_binding_fields(
 def _collector(
     *,
     skill_catalog: "_FakeSkillCatalogPort | None" = None,
+    session_service: "_FakeSessionService | None" = None,
+    execution_query: "_FakeExecutionQuery | None" = None,
 ) -> RunPromptInputCollector:
     return RunPromptInputCollector(
         agent_service=_FakeAgentService(),
         llm_port=_FakeLlmPort(),
         skill_catalog_port=skill_catalog or _FakeSkillCatalogPort(),
-        session_service=_FakeSessionService(),
+        session_service=session_service or _FakeSessionService(),
         llm_resolver=_FakeLlmResolver(),
+        execution_query=execution_query,
     )
 
 
@@ -231,8 +452,8 @@ def _llm_profile() -> LlmProfile:
     )
 
 
-def _session_bundle() -> SessionMessagesBundle:
-    session = Session(
+def _session() -> Session:
+    return Session(
         id="session:assistant",
         agent_id="assistant",
         active_session_id="active-session",
@@ -243,62 +464,65 @@ def _session_bundle() -> SessionMessagesBundle:
             },
         },
     )
-    messages = (
-        _message(
-            id="msg-old",
+
+
+def _default_session_items() -> tuple[SessionItem, ...]:
+    return (
+        _session_item(
+            id="item-current",
             sequence_no=1,
-            text="old turn",
-        ),
-        _message(
-            id="msg-current",
-            sequence_no=2,
             text="current request",
+            role="user",
+            source_module="orchestration",
             source_kind="orchestration_run",
             source_id="run-1",
         ),
-        _message(
-            id="msg-archived",
-            sequence_no=3,
-            text="archived",
-            visibility=SessionMessageVisibility.ARCHIVED,
+        _session_item(
+            id="item-assistant",
+            sequence_no=2,
+            text="working on it",
+            role="assistant",
+            source_module="llm",
+            source_kind="llm_response_item",
+            source_id="llm-item-assistant",
         ),
-        _message(
-            id="msg-other-session",
+        _session_item(
+            id="item-other-session",
             session_id="previous-session",
-            sequence_no=4,
+            sequence_no=3,
             text="previous instance",
         ),
-        _message(
-            id="msg-assistant",
-            sequence_no=5,
-            role="assistant",
-            text="working on it",
-        ),
     )
-    return SessionMessagesBundle(session=session, messages=messages)
 
 
-def _message(
+def _session_item(
     *,
     id: str,
     sequence_no: int,
     text: str,
     role: str = "user",
     session_id: str = "active-session",
+    source_module: str | None = None,
     source_kind: str | None = None,
     source_id: str | None = None,
-    visibility: SessionMessageVisibility = SessionMessageVisibility.DEFAULT,
-) -> SessionMessage:
-    return SessionMessage(
+) -> SessionItem:
+    kind = (
+        SessionItemKind.ASSISTANT_MESSAGE
+        if role == "assistant"
+        else SessionItemKind.USER_MESSAGE
+    )
+    return SessionItem(
         id=id,
         session_key="session:assistant",
         session_id=session_id,
         sequence_no=sequence_no,
+        kind=kind,
         role=role,
         content_payload={"blocks": [{"type": "text", "text": text}]},
+        visibility=SessionItemVisibility(model_visible=True),
+        source_module=source_module,
         source_kind=source_kind,
         source_id=source_id,
-        visibility=visibility,
     )
 
 
@@ -319,16 +543,53 @@ class _FakeLlmPort:
 
 class _FakeSessionService:
     def __init__(self) -> None:
-        self.inputs: list[ListSessionMessagesInput] = []
+        self.item_inputs: list[ListSessionItemsInput] = []
+        self.items: tuple[SessionItem, ...] = _default_session_items()
 
-    def get_session_with_messages(
+    def get_session_with_items(
         self,
-        data: ListSessionMessagesInput,
-    ) -> SessionMessagesBundle:
-        self.inputs.append(data)
+        data: ListSessionItemsInput,
+    ) -> SessionItemsBundle:
+        self.item_inputs.append(data)
         assert data.session_key == "session:assistant"
         assert data.active_session_only is True
-        return _session_bundle()
+        assert data.model_visible is True
+        return SessionItemsBundle(session=_session(), items=self.items)
+
+    def list_model_visible_items(
+        self,
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
+        return list(self.get_session_with_items(data).items)
+
+
+class _ExecutionChainRef:
+    id = "chain-run-1"
+
+
+class _ExecutionStepRef:
+    id = "step-tools"
+
+
+class _FakeExecutionQuery:
+    def __init__(
+        self,
+        *,
+        items: tuple[ExecutionStepItem, ...] = (),
+    ) -> None:
+        self.items = items
+
+    def list_execution_chains(self, turn_id: str) -> list[_ExecutionChainRef]:
+        assert turn_id == "run-1"
+        return [_ExecutionChainRef()]
+
+    def list_execution_steps(self, chain_id: str) -> list[_ExecutionStepRef]:
+        assert chain_id == "chain-run-1"
+        return [_ExecutionStepRef()]
+
+    def list_execution_step_items(self, step_id: str) -> list[ExecutionStepItem]:
+        assert step_id == "step-tools"
+        return list(self.items)
 
 
 class _FakeLlmResolver:

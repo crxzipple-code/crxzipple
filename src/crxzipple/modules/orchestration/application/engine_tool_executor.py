@@ -52,8 +52,9 @@ class ToolRunLink:
     mode: str
     strategy: str
     environment: str
-    result_message_id: str | None = None
+    result_session_item_id: str | None = None
     background: bool = False
+    tool_execution_plan: dict[str, object] = field(default_factory=dict)
     tool_lifecycle: dict[str, object] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, object]:
@@ -66,20 +67,71 @@ class ToolRunLink:
             "mode": self.mode,
             "strategy": self.strategy,
             "environment": self.environment,
-            "result_message_id": self.result_message_id,
+            "result_session_item_id": self.result_session_item_id,
             "background": self.background,
         }
+        if self.tool_execution_plan:
+            payload["tool_execution_plan"] = dict(self.tool_execution_plan)
         if self.tool_lifecycle:
             payload["tool_lifecycle"] = dict(self.tool_lifecycle)
         return payload
 
 
 @dataclass(frozen=True, slots=True)
+class ToolExecutionPlan:
+    tool_call_id: str
+    tool_name: str
+    tool_id: str
+    mode: str
+    strategy: str
+    environment: str
+    tool_surface_id: str | None = None
+    resource_policy: dict[str, object] = field(default_factory=dict)
+    arguments_digest: str | None = None
+
+    @classmethod
+    def from_prepared(
+        cls,
+        prepared: "_PreparedToolExecution",
+    ) -> "ToolExecutionPlan":
+        return cls(
+            tool_call_id=prepared.tool_call.id,
+            tool_name=prepared.tool_call.name,
+            tool_id=prepared.tool_id,
+            mode=prepared.target.mode.value,
+            strategy=prepared.target.strategy.value,
+            environment=prepared.target.environment.value,
+            tool_surface_id=prepared.tool_surface_id,
+            resource_policy=prepared.resource_policy.to_payload(),
+            arguments_digest=_arguments_digest(prepared.tool_call.arguments),
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "tool_call_id": self.tool_call_id,
+            "tool_name": self.tool_name,
+            "tool_id": self.tool_id,
+            "mode": self.mode,
+            "strategy": self.strategy,
+            "environment": self.environment,
+        }
+        if self.resource_policy:
+            payload["resource_policy"] = dict(self.resource_policy)
+        if self.tool_surface_id is not None:
+            payload["tool_surface_id"] = self.tool_surface_id
+        if self.arguments_digest is not None:
+            payload["arguments_digest"] = self.arguments_digest
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class ToolExecutionBatchOutcome:
-    tool_call_message_ids: tuple[str, ...] = field(default_factory=tuple)
-    inline_runs: tuple[tuple[str | None, ToolRun], ...] = field(default_factory=tuple)
+    tool_call_session_item_ids: tuple[str, ...] = field(default_factory=tuple)
+    tool_result_session_item_ids: tuple[str, ...] = field(default_factory=tuple)
+    inline_runs: tuple[ToolRun, ...] = field(default_factory=tuple)
     background_runs: tuple[tuple[ToolCallIntent, ToolRun], ...] = field(default_factory=tuple)
     tool_run_links: tuple[ToolRunLink, ...] = field(default_factory=tuple)
+    tool_execution_plans: tuple[ToolExecutionPlan, ...] = field(default_factory=tuple)
     pending_approval_request: PendingApprovalRequest | None = None
     yield_requested: bool = False
     yield_reason: str | None = None
@@ -91,6 +143,8 @@ class _PreparedToolExecution:
     tool_id: str
     target: ToolExecutionTarget
     resource_policy: _ToolResourcePolicy
+    tool_surface_id: str | None = None
+    plan: ToolExecutionPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +176,16 @@ class _ToolExecutionBatchContext:
     execution_context: ToolExecutionContext | None
     context_attrs: dict[str, object]
     resolved_by_name: dict[str, ResolvedTool]
+    tool_surface_refs_by_name: dict[str, "_ToolSurfaceFunctionRef"]
     resource_attrs_by_tool_id: dict[str, dict[str, object]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolSurfaceFunctionRef:
+    tool_id: str
+    name: str
+    source_id: str | None = None
+    group_key: str | None = None
 
 
 @dataclass(slots=True)
@@ -145,7 +208,9 @@ class OrchestrationEngineToolExecutor:
         resolved_tools: ResolvedToolSet,
         tool_calls: tuple[ToolCallIntent, ...],
         append_tool_call_messages: bool,
+        append_tool_call_session_items: bool = False,
         append_tool_result_messages: bool = True,
+        invocation_id: str | None = None,
         extra_context_attrs: dict[str, object] | None = None,
         require_running_run: bool = True,
     ) -> ToolExecutionBatchOutcome:
@@ -160,7 +225,9 @@ class OrchestrationEngineToolExecutor:
                     resolved_tools=resolved_tools,
                     tool_calls=tool_calls,
                     append_tool_call_messages=append_tool_call_messages,
+                    append_tool_call_session_items=append_tool_call_session_items,
                     append_tool_result_messages=append_tool_result_messages,
+                    invocation_id=invocation_id,
                     extra_context_attrs=extra_context_attrs,
                     require_running_run=require_running_run,
                 ),
@@ -179,14 +246,18 @@ class OrchestrationEngineToolExecutor:
         resolved_tools: ResolvedToolSet,
         tool_calls: tuple[ToolCallIntent, ...],
         append_tool_call_messages: bool,
+        append_tool_call_session_items: bool = False,
         append_tool_result_messages: bool = True,
+        invocation_id: str | None = None,
         extra_context_attrs: dict[str, object] | None = None,
         require_running_run: bool = True,
     ) -> ToolExecutionBatchOutcome:
-        tool_call_message_ids: list[str] = []
-        inline_runs: list[tuple[str | None, ToolRun]] = []
+        tool_call_session_item_ids: list[str] = []
+        tool_result_session_item_ids: list[str] = []
+        inline_runs: list[ToolRun] = []
         background_runs: list[tuple[ToolCallIntent, ToolRun]] = []
         tool_run_links: list[ToolRunLink] = []
+        tool_execution_plans: list[ToolExecutionPlan] = []
         prepared_executions: list[_PreparedToolExecution] = []
         pending_tool_call_messages: list[ToolCallIntent] = []
         yield_requested = False
@@ -209,16 +280,16 @@ class OrchestrationEngineToolExecutor:
                 "tool_call_messages",
                 detailed=True,
             ):
-                tool_call_message_ids.extend(
-                    await asyncio.to_thread(
-                        self.session_recorder.append_tool_call_messages,
-                        session_key=session_key,
-                        active_session_id=active_session_id,
-                        invocation_id="",
-                        response_text=None,
-                        tool_calls=tool_call_batch,
-                    ),
+                record = await asyncio.to_thread(
+                    self.session_recorder.append_tool_call_records,
+                    session_key=session_key,
+                    active_session_id=active_session_id,
+                    invocation_id=invocation_id or "",
+                    response_text=None,
+                    tool_calls=tool_call_batch,
+                    append_session_items=append_tool_call_session_items,
                 )
+                tool_call_session_item_ids.extend(record.item_ids)
 
         async def _flush_tool_call_messages() -> None:
             if not pending_tool_call_messages:
@@ -262,10 +333,12 @@ class OrchestrationEngineToolExecutor:
             pending_approval_request: PendingApprovalRequest | None = None,
         ) -> ToolExecutionBatchOutcome:
             return ToolExecutionBatchOutcome(
-                tool_call_message_ids=tuple(tool_call_message_ids),
+                tool_call_session_item_ids=tuple(tool_call_session_item_ids),
+                tool_result_session_item_ids=tuple(tool_result_session_item_ids),
                 inline_runs=tuple(inline_runs),
                 background_runs=tuple(background_runs),
                 tool_run_links=tuple(tool_run_links),
+                tool_execution_plans=tuple(tool_execution_plans),
                 pending_approval_request=pending_approval_request,
                 yield_requested=yield_requested,
                 yield_reason=yield_reason,
@@ -273,7 +346,6 @@ class OrchestrationEngineToolExecutor:
 
         async def _flush_tool_result_messages(
             result_message_items: list[tuple[ToolCallIntent, ToolRun, str, str]],
-            result_message_positions: list[int],
             result_link_positions: list[int],
         ) -> None:
             if not result_message_items:
@@ -282,22 +354,21 @@ class OrchestrationEngineToolExecutor:
                 "tool_result_messages",
                 detailed=True,
             ):
-                message_ids = await asyncio.to_thread(
-                    self.session_recorder.append_tool_result_messages,
+                record = await asyncio.to_thread(
+                    self.session_recorder.append_tool_result_records,
                     session_key=session_key,
                     active_session_id=active_session_id,
                     items=tuple(result_message_items),
                 )
-            for position, message_id in zip(
-                result_message_positions,
-                message_ids,
-            ):
-                _, tool_run = inline_runs[position]
-                inline_runs[position] = (message_id, tool_run)
-            for position, message_id in zip(result_link_positions, message_ids):
+            item_ids = record.item_ids
+            tool_result_session_item_ids.extend(item_ids)
+            for item_position, position in enumerate(result_link_positions):
+                result_session_item_id = None
+                if item_position < len(item_ids):
+                    result_session_item_id = item_ids[item_position]
                 tool_run_links[position] = replace(
                     tool_run_links[position],
-                    result_message_id=message_id,
+                    result_session_item_id=result_session_item_id,
                 )
 
         async def _flush_prepared_executions() -> None:
@@ -357,6 +428,12 @@ class OrchestrationEngineToolExecutor:
                                 ExecuteToolInput(
                                     tool_id=prepared.tool_id,
                                     arguments=dict(prepared.tool_call.arguments),
+                                    call_id=prepared.tool_call.id,
+                                    tool_surface_id=_optional_context_text(
+                                        batch_context.context_attrs.get(
+                                            "tool_surface_id",
+                                        ),
+                                    ),
                                     metadata=self._tool_run_metadata(
                                         run,
                                         session_key=session_key,
@@ -377,7 +454,6 @@ class OrchestrationEngineToolExecutor:
                     amount=len(tool_runs),
                 )
                 result_message_items: list[tuple[ToolCallIntent, ToolRun, str, str]] = []
-                result_message_positions: list[int] = []
                 result_link_positions: list[int] = []
                 for prepared, tool_run in zip(execution_batch, tool_runs):
                     self.metrics.increment_counter(
@@ -399,14 +475,12 @@ class OrchestrationEngineToolExecutor:
                             ),
                         )
                         continue
-                    message_id: str | None = None
                     if append_tool_result_messages:
-                        result_message_positions.append(len(inline_runs))
                         result_link_positions.append(len(tool_run_links))
                         result_message_items.append(
                             (tool_call, tool_run, "tool_run", tool_run.id),
                         )
-                    inline_runs.append((message_id, tool_run))
+                    inline_runs.append(tool_run)
                     tool_run_links.append(
                         self._tool_run_link(
                             prepared,
@@ -423,13 +497,32 @@ class OrchestrationEngineToolExecutor:
                         _stop_remaining_batches()
                 await _flush_tool_result_messages(
                     result_message_items,
-                    result_message_positions,
                     result_link_positions,
                 )
             if yield_requested or stop_remaining_batches:
                 pending_tool_call_messages.clear()
 
         for tool_call in tool_calls:
+            surface_ref = self._tool_surface_ref_for(batch_context, tool_call)
+            if surface_ref is None and batch_context.tool_surface_refs_by_name:
+                raise OrchestrationValidationError(
+                    f"Tool call '{tool_call.name}' is not visible in the request ToolSurface.",
+                    code="tool_surface_not_visible",
+                    details={
+                        "resource_type": "tool_surface",
+                        "tool_surface_id": _optional_context_text(
+                            batch_context.context_attrs.get("tool_surface_id"),
+                        ),
+                        "tool_call_id": tool_call.id,
+                        "tool_name": tool_call.name,
+                        "visible_tool_names": sorted(
+                            {
+                                ref.name
+                                for ref in batch_context.tool_surface_refs_by_name.values()
+                            },
+                        ),
+                    },
+                )
             resolved_tool = batch_context.resolved_by_name.get(tool_call.name)
             if resolved_tool is None:
                 blocked_access = resolved_tools.blocked_access_by_name(tool_call.name)
@@ -447,6 +540,21 @@ class OrchestrationEngineToolExecutor:
                     )
                 raise OrchestrationValidationError(
                     f"Tool call '{tool_call.name}' is not available in this orchestration run.",
+                )
+            if surface_ref is not None and surface_ref.tool_id != resolved_tool.tool.id:
+                raise OrchestrationValidationError(
+                    f"Tool call '{tool_call.name}' does not match the request ToolSurface.",
+                    code="tool_surface_mismatch",
+                    details={
+                        "resource_type": "tool_surface",
+                        "tool_surface_id": _optional_context_text(
+                            batch_context.context_attrs.get("tool_surface_id"),
+                        ),
+                        "tool_call_id": tool_call.id,
+                        "tool_name": tool_call.name,
+                        "surface_tool_id": surface_ref.tool_id,
+                        "resolved_tool_id": resolved_tool.tool.id,
+                    },
                 )
             execution_decision = self.tool_resolver.execution_decision(
                 run,
@@ -467,7 +575,7 @@ class OrchestrationEngineToolExecutor:
                 await _flush_prepared_executions()
                 if yield_requested:
                     return _batch_outcome()
-                if append_tool_call_messages:
+                if append_tool_call_messages or append_tool_call_session_items:
                     pending_tool_call_messages.append(tool_call)
                 await _flush_tool_call_messages()
                 approval = execution_decision.approval
@@ -491,25 +599,30 @@ class OrchestrationEngineToolExecutor:
                         execution_environment=resolved_tool.target.environment.value,
                     ),
                 )
-            if append_tool_call_messages:
+            if append_tool_call_messages or append_tool_call_session_items:
                 pending_tool_call_messages.append(tool_call)
             _record_tool_probe_observation(
                 run,
                 tool_id=resolved_tool.tool.id,
                 tool_call=tool_call,
             )
-            prepared_executions.append(
-                _PreparedToolExecution(
+            prepared = _PreparedToolExecution(
+                tool_call=tool_call,
+                tool_id=resolved_tool.tool.id,
+                target=resolved_tool.target,
+                tool_surface_id=_optional_context_text(
+                    batch_context.context_attrs.get("tool_surface_id"),
+                ),
+                resource_policy=self._resource_policy(
+                    resolved_tool,
                     tool_call=tool_call,
-                    tool_id=resolved_tool.tool.id,
-                    target=resolved_tool.target,
-                    resource_policy=self._resource_policy(
-                        resolved_tool,
-                        tool_call=tool_call,
-                        batch_context=batch_context,
-                    ),
+                    batch_context=batch_context,
                 ),
             )
+            plan = ToolExecutionPlan.from_prepared(prepared)
+            prepared = replace(prepared, plan=plan)
+            tool_execution_plans.append(plan)
+            prepared_executions.append(prepared)
         await _flush_prepared_executions()
         if not yield_requested and not stop_remaining_batches:
             await _flush_tool_call_messages()
@@ -637,8 +750,18 @@ class OrchestrationEngineToolExecutor:
             execution_context=ToolExecutionContext(attrs=attrs) if attrs else None,
             context_attrs=attrs,
             resolved_by_name=resolved_by_name,
+            tool_surface_refs_by_name=_tool_surface_refs_by_name(
+                attrs.get("tool_surface_functions"),
+            ),
             resource_attrs_by_tool_id={},
         )
+
+    @staticmethod
+    def _tool_surface_ref_for(
+        batch_context: _ToolExecutionBatchContext,
+        tool_call: ToolCallIntent,
+    ) -> _ToolSurfaceFunctionRef | None:
+        return batch_context.tool_surface_refs_by_name.get(tool_call.name)
 
     @staticmethod
     def _tool_run_metadata(
@@ -665,12 +788,22 @@ class OrchestrationEngineToolExecutor:
             metadata["lane_key"] = run.lane_key
         if run.lane_lock_key is not None:
             metadata["lane_lock_key"] = run.lane_lock_key
+        for key in (
+            "tool_surface_id",
+            "tool_surface_snapshot_id",
+            "context_render_snapshot_id",
+        ):
+            value = _optional_context_text(batch_context.context_attrs.get(key))
+            if value is not None:
+                metadata[key] = value
         workspace_dir = batch_context.context_attrs.get("workspace_dir")
         if isinstance(workspace_dir, str) and workspace_dir.strip():
             metadata["workspace_dir"] = workspace_dir
         resource_policy_payload = prepared.resource_policy.to_payload()
         if resource_policy_payload:
             metadata["tool_resource_policy"] = resource_policy_payload
+        if prepared.plan is not None:
+            metadata["tool_execution_plan"] = prepared.plan.to_payload()
         return metadata
 
     @staticmethod
@@ -690,6 +823,9 @@ class OrchestrationEngineToolExecutor:
             strategy=prepared.target.strategy.value,
             environment=prepared.target.environment.value,
             background=background,
+            tool_execution_plan=(
+                prepared.plan.to_payload() if prepared.plan is not None else {}
+            ),
             tool_lifecycle=_tool_lifecycle_from_tool_run(tool_run),
         )
 
@@ -830,7 +966,7 @@ def _tool_lifecycle_from_tool_run(tool_run: ToolRun) -> dict[str, object]:
             "replacement_tool_call_id",
             "supersedes_tool_call_id",
             "supersedes_tool_run_id",
-            "supersedes_result_message_id",
+            "supersedes_result_session_item_id",
             "lifecycle_status",
             "evidence_lifecycle_status",
             "evidence_lifecycle",
@@ -838,6 +974,20 @@ def _tool_lifecycle_from_tool_run(tool_run: ToolRun) -> dict[str, object]:
             if key in source:
                 payload[key] = source[key]
     return payload
+
+
+def _arguments_digest(arguments: dict[str, object]) -> str:
+    try:
+        payload = json.dumps(
+            arguments,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except TypeError:
+        payload = repr(sorted(arguments.items()))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _tool_lifecycle_sources(tool_run: ToolRun) -> tuple[dict[str, object], ...]:
@@ -1120,3 +1270,25 @@ def _optional_context_text(value: object) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _tool_surface_refs_by_name(value: object) -> dict[str, _ToolSurfaceFunctionRef]:
+    if not isinstance(value, (list, tuple)):
+        return {}
+    refs: dict[str, _ToolSurfaceFunctionRef] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        tool_id = _optional_context_text(item.get("tool_id"))
+        name = _optional_context_text(item.get("name"))
+        if tool_id is None or name is None:
+            continue
+        ref = _ToolSurfaceFunctionRef(
+            tool_id=tool_id,
+            name=name,
+            source_id=_optional_context_text(item.get("source_id")),
+            group_key=_optional_context_text(item.get("group_key")),
+        )
+        refs[tool_id] = ref
+        refs[name] = ref
+    return refs

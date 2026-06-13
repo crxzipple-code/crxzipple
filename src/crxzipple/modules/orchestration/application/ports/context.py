@@ -19,15 +19,16 @@ if TYPE_CHECKING:
     )
     from crxzipple.modules.orchestration.domain.entities import OrchestrationRun
     from crxzipple.modules.session.domain.entities import Session
-    from crxzipple.modules.session.domain.value_objects import SessionMessage
+    from crxzipple.modules.session.domain.value_objects import SessionItem
     from crxzipple.modules.session.application.services import (
-        AppendSessionMessageInput,
-        AppendSessionMessagesInput,
+        AppendSessionItemInput,
+        AppendSessionItemsInput,
         CompactSessionSegmentInput,
         CompactSessionSegmentResult,
-        ListSessionMessagesInput,
-        MergeSessionMessageMetadataInput,
-        SessionMessagesBundle,
+        GetSessionItemBySourceInput,
+        ListSessionItemsInput,
+        MergeSessionItemMetadataInput,
+        SessionItemsBundle,
     )
     from crxzipple.modules.session.application.resolution import (
         ResolveSessionInput,
@@ -44,10 +45,16 @@ class AgentProfileCatalogPort(Protocol):
 
 
 class SessionTranscriptPort(Protocol):
-    def get_session_with_messages(
+    def get_session_with_items(
         self,
-        data: "ListSessionMessagesInput",
-    ) -> "SessionMessagesBundle":
+        data: "ListSessionItemsInput",
+    ) -> "SessionItemsBundle":
+        ...
+
+    def list_model_visible_items(
+        self,
+        data: "ListSessionItemsInput",
+    ) -> list["SessionItem"]:
         ...
 
 
@@ -66,42 +73,30 @@ class SessionCatalogPort(SessionLookupPort, Protocol):
         ...
 
 
-class SessionMessageAppendPort(Protocol):
-    def append_message(self, data: "AppendSessionMessageInput") -> "SessionMessage":
+class SessionItemAppendPort(Protocol):
+    def append_item(self, data: "AppendSessionItemInput") -> "SessionItem":
         ...
 
 
-class SessionMessageBulkAppendPort(SessionMessageAppendPort, Protocol):
-    def append_messages(
+class SessionItemBulkAppendPort(Protocol):
+    def append_items(
         self,
-        data: "AppendSessionMessagesInput",
-    ) -> tuple["SessionMessage", ...]:
+        data: "AppendSessionItemsInput",
+    ) -> tuple[object, ...]:
         ...
 
 
-class SessionMessageSourceLookupPort(Protocol):
-    def get_message_by_source(
+class SessionItemSourceLookupPort(Protocol):
+    def get_item_by_source(
         self,
-        *,
-        session_key: str,
-        session_id: str,
-        source_kind: str,
-        source_id: str,
-    ) -> "SessionMessage | None":
-        ...
-
-
-class SessionMessageListPort(Protocol):
-    def list_messages(
-        self,
-        data: "ListSessionMessagesInput",
-    ) -> list["SessionMessage"]:
+        data: "GetSessionItemBySourceInput",
+    ) -> "SessionItem | None":
         ...
 
 
 class SessionRecorderPort(
-    SessionMessageBulkAppendPort,
-    SessionMessageSourceLookupPort,
+    SessionItemBulkAppendPort,
+    SessionItemSourceLookupPort,
     Protocol,
 ):
     pass
@@ -118,18 +113,20 @@ class SessionCompactionStatePort(SessionCatalogPort, Protocol):
         ...
 
 
-class SessionMaintenancePort(
-    SessionMessageSourceLookupPort,
-    SessionMessageListPort,
-    Protocol,
-):
-    def get_message(self, message_id: str) -> "SessionMessage":
+class SessionMaintenancePort(Protocol):
+    def get_item(self, item_id: str) -> "SessionItem":
         ...
 
-    def merge_message_metadata(
+    def list_items(
         self,
-        data: "MergeSessionMessageMetadataInput",
-    ) -> "SessionMessage":
+        data: "ListSessionItemsInput",
+    ) -> list["SessionItem"]:
+        ...
+
+    def merge_item_metadata(
+        self,
+        data: "MergeSessionItemMetadataInput",
+    ) -> "SessionItem":
         ...
 
     def compact_active_segment(
@@ -169,6 +166,9 @@ class ContextRenderSnapshotRecord:
     estimate: dict[str, object] | None = None
     included_node_ids: tuple[str, ...] = ()
     mirrored_node_ids: tuple[str, ...] = ()
+    included_refs: tuple[dict[str, object], ...] = ()
+    collapsed_refs: tuple[dict[str, object], ...] = ()
+    protocol_required_refs: tuple[dict[str, object], ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
     provider_attachments: dict[str, object] = field(default_factory=dict)
     tool_schemas: tuple["ToolSchema", ...] | None = None

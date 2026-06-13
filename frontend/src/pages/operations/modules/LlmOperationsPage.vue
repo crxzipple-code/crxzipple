@@ -958,6 +958,11 @@ onUnmounted(() => {
       </section>
 
       <section class="drawer-section">
+        <h4>{{ opsText(selectedDetail.policy_trace.title) }}</h4>
+        <DataTable :columns="selectedDetail.policy_trace.columns" :rows="selectedDetail.policy_trace.rows" section-id="llm-policy-trace" :page-size="8" />
+      </section>
+
+      <section class="drawer-section">
         <h4>{{ t("operations.llm.drawer.requestPayload") }}</h4>
         <pre>{{ detailPayload(selectedDetail.request_payload) }}</pre>
       </section>
@@ -977,6 +982,16 @@ onUnmounted(() => {
             <dd><StatusDot :tone="item.tone ?? 'neutral'" />{{ opsText(item.value) }}</dd>
           </div>
         </dl>
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ opsText(selectedDetail.response_items.title) }}</h4>
+        <DataTable :columns="selectedDetail.response_items.columns" :rows="selectedDetail.response_items.rows" section-id="llm-response-items" :page-size="5" />
+      </section>
+
+      <section class="drawer-section">
+        <h4>{{ opsText(selectedDetail.response_events.title) }}</h4>
+        <DataTable :columns="selectedDetail.response_events.columns" :rows="selectedDetail.response_events.rows" section-id="llm-response-events" :page-size="5" />
       </section>
 
       <section class="drawer-section">

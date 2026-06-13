@@ -37,6 +37,7 @@ from crxzipple.modules.agent.domain.value_objects import (
     AgentExecutionPolicy,
     AgentIdentity,
     AgentInstructionPolicy,
+    AgentLlmPolicy,
     AgentLlmRoutingPolicy,
     AgentMemoryBinding,
     AgentRuntimePreferences,
@@ -68,6 +69,16 @@ class AgentLlmRoutingPolicyRequest(BaseModel):
     document_llm_id: str | None = None
 
 
+class AgentLlmPolicyRequest(BaseModel):
+    reasoning_summary_policy: str = "visible_and_replay_when_provider_supports"
+    raw_reasoning_policy: str = "hidden_by_default"
+    tool_use_policy: str = "auto"
+    parallel_tool_calls_policy: str = "provider_default"
+    final_answer_policy: str = "phase_or_codex_unknown_fallback"
+    commentary_visibility_policy: str = "user_progress"
+    provider_external_item_policy: str = "history_and_trace_no_toolrun"
+
+
 class AgentExecutionPolicyRequest(BaseModel):
     timeout_seconds: int = 120
     max_turns: int = 99
@@ -96,6 +107,7 @@ class RegisterAgentProfileRequest(BaseModel):
         default_factory=AgentInstructionPolicyRequest,
     )
     llm_routing_policy: AgentLlmRoutingPolicyRequest
+    llm_policy: AgentLlmPolicyRequest = Field(default_factory=AgentLlmPolicyRequest)
     execution_policy: AgentExecutionPolicyRequest = Field(
         default_factory=AgentExecutionPolicyRequest,
     )
@@ -113,6 +125,7 @@ class UpdateAgentProfileRequest(BaseModel):
     identity: AgentIdentityRequest | None = None
     instruction_policy: AgentInstructionPolicyRequest | None = None
     llm_routing_policy: AgentLlmRoutingPolicyRequest | None = None
+    llm_policy: AgentLlmPolicyRequest | None = None
     execution_policy: AgentExecutionPolicyRequest | None = None
     runtime_preferences: AgentRuntimePreferencesRequest | None = None
     memory: AgentMemoryBindingRequest | None = None
@@ -168,6 +181,16 @@ class AgentLlmRoutingPolicyResponse(BaseModel):
     document_llm_id: str | None = None
 
 
+class AgentLlmPolicyResponse(BaseModel):
+    reasoning_summary_policy: str
+    raw_reasoning_policy: str
+    tool_use_policy: str
+    parallel_tool_calls_policy: str
+    final_answer_policy: str
+    commentary_visibility_policy: str
+    provider_external_item_policy: str
+
+
 class AgentExecutionPolicyResponse(BaseModel):
     timeout_seconds: int
     max_turns: int
@@ -196,6 +219,7 @@ class AgentProfileResponse(BaseModel):
     identity: AgentIdentityResponse
     instruction_policy: AgentInstructionPolicyResponse
     llm_routing_policy: AgentLlmRoutingPolicyResponse
+    llm_policy: AgentLlmPolicyResponse
     execution_policy: AgentExecutionPolicyResponse
     runtime_preferences: AgentRuntimePreferencesResponse
     memory: AgentMemoryBindingResponse
@@ -589,6 +613,7 @@ def _register_request_to_input(
             image_llm_id=payload.llm_routing_policy.image_llm_id,
             document_llm_id=payload.llm_routing_policy.document_llm_id,
         ),
+        llm_policy=AgentLlmPolicy.from_payload(payload.llm_policy.model_dump()),
         execution_policy=AgentExecutionPolicy(
             timeout_seconds=payload.execution_policy.timeout_seconds,
             max_turns=payload.execution_policy.max_turns,
@@ -640,6 +665,10 @@ def _update_request_to_input(
             image_llm_id=payload.llm_routing_policy.image_llm_id,
             document_llm_id=payload.llm_routing_policy.document_llm_id,
         )
+    if payload.llm_policy is not None:
+        updates["llm_policy"] = AgentLlmPolicy.from_payload(
+            payload.llm_policy.model_dump(),
+        )
     if payload.execution_policy is not None:
         updates["execution_policy"] = AgentExecutionPolicy(
             timeout_seconds=payload.execution_policy.timeout_seconds,
@@ -690,6 +719,7 @@ def _profile_settings_to_input(profile: AgentProfileSettings) -> RegisterAgentPr
         llm_routing_policy=AgentLlmRoutingPolicy.from_payload(
             profile.llm_routing_policy,
         ),
+        llm_policy=AgentLlmPolicy.from_payload(profile.llm_policy),
         execution_policy=AgentExecutionPolicy.from_payload(profile.execution_policy),
         runtime_preferences=AgentRuntimePreferences.from_payload(
             profile.runtime_preferences,
@@ -722,6 +752,15 @@ def _to_response(dto: AgentProfileDTO) -> AgentProfileResponse:
             fallback_llm_ids=list(dto.llm_routing_policy.fallback_llm_ids),
             image_llm_id=dto.llm_routing_policy.image_llm_id,
             document_llm_id=dto.llm_routing_policy.document_llm_id,
+        ),
+        llm_policy=AgentLlmPolicyResponse(
+            reasoning_summary_policy=dto.llm_policy.reasoning_summary_policy,
+            raw_reasoning_policy=dto.llm_policy.raw_reasoning_policy,
+            tool_use_policy=dto.llm_policy.tool_use_policy,
+            parallel_tool_calls_policy=dto.llm_policy.parallel_tool_calls_policy,
+            final_answer_policy=dto.llm_policy.final_answer_policy,
+            commentary_visibility_policy=dto.llm_policy.commentary_visibility_policy,
+            provider_external_item_policy=dto.llm_policy.provider_external_item_policy,
         ),
         execution_policy=AgentExecutionPolicyResponse(
             timeout_seconds=dto.execution_policy.timeout_seconds,

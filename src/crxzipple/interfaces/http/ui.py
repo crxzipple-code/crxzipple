@@ -13,6 +13,7 @@ from crxzipple.interfaces.http.ui_models import (
     TurnStepResponse,
     UiBootstrapResponse,
     WorkbenchHomeResponse,
+    WorkbenchLinkedEntityDetailResponse,
     WorkbenchRunResponse,
 )
 from crxzipple.modules.orchestration.application.read_models import (
@@ -20,6 +21,10 @@ from crxzipple.modules.orchestration.application.read_models import (
 )
 from crxzipple.modules.orchestration.domain import OrchestrationRunNotFoundError
 from crxzipple.modules.events.application import EventTraceReadModelProvider
+from crxzipple.modules.llm.domain import LlmResponseItemNotFoundError
+from crxzipple.modules.session.domain import (
+    SessionItemNotFoundError,
+)
 from crxzipple.shared.runtime_console import ConsoleSection
 
 
@@ -93,6 +98,7 @@ def bootstrap(
             "/ui/workbench/home",
             "/ui/workbench/runs/{run_id}",
             "/ui/workbench/runs/{run_id}/steps",
+            "/ui/workbench/linked-entities/{entity_type}/{entity_id}",
             "/operations/orchestration",
             "/operations/tool",
             "/operations/browser",
@@ -188,6 +194,48 @@ def list_workbench_run_steps(
     return [TurnStepResponse.from_view(view) for view in views]
 
 
+@router.get(
+    "/workbench/linked-entities/{entity_type}/{entity_id}",
+    response_model=WorkbenchLinkedEntityDetailResponse,
+)
+def get_workbench_linked_entity_detail(
+    entity_type: str,
+    entity_id: str,
+    container: Annotated[AppContainer, Depends(get_container)],
+) -> WorkbenchLinkedEntityDetailResponse:
+    if entity_type in {"llm_response_item", "llm_response_item_id"}:
+        llm_service = container.require(AppKey.LLM_SERVICE)
+        try:
+            item = llm_service.get_response_item(entity_id)
+        except LlmResponseItemNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        payload = item.to_payload()
+        return WorkbenchLinkedEntityDetailResponse(
+            type="llm_response_item",
+            id=item.id,
+            owner="llm",
+            label=f"{item.kind.value} #{item.sequence_no}",
+            summary=_entity_detail_summary(payload),
+            payload=payload,
+        )
+    session_service = container.require(AppKey.SESSION_SERVICE)
+    if entity_type == "session_item":
+        try:
+            item = session_service.get_item(entity_id)
+        except SessionItemNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        payload = item.to_payload()
+        return WorkbenchLinkedEntityDetailResponse(
+            type="session_item",
+            id=item.id,
+            owner="session",
+            label=f"{item.kind.value} #{item.sequence_no}",
+            summary=_entity_detail_summary(payload),
+            payload=payload,
+        )
+    raise HTTPException(status_code=404, detail=f"Unsupported entity type '{entity_type}'.")
+
+
 @router.get("/trace/{trace_id}", response_model=TraceSummaryResponse)
 def get_trace_summary(
     trace_id: str,
@@ -220,6 +268,32 @@ def list_trace_events(
         limit=limit,
     )
     return [TraceEventResponse.from_view(view) for view in views]
+
+
+def _entity_detail_summary(payload: dict[str, object]) -> str:
+    content = payload.get("content_payload")
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()[:240]
+        blocks = content.get("blocks")
+        if isinstance(blocks, list):
+            texts = [
+                block.get("text", "").strip()
+                for block in blocks
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ]
+            joined = " ".join(text for text in texts if text)
+            if joined:
+                return joined[:240]
+        tool_name = content.get("tool_name") or content.get("name")
+        if isinstance(tool_name, str) and tool_name.strip():
+            return tool_name.strip()
+    for key in ("tool_name", "provider_item_type", "kind", "role"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(payload.get("kind") or payload.get("role") or "entity")
 
 
 def _trace_aliases(container: AppContainer, trace_id: str) -> set[str]:

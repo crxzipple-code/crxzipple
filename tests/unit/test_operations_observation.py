@@ -67,6 +67,13 @@ from crxzipple.modules.operations.infrastructure import (
     FileBackedOperationsObservationStore,
 )
 from crxzipple.modules.orchestration.domain import (
+    ExecutionChain,
+    ExecutionChainStatus,
+    ExecutionOwnerReference,
+    ExecutionStep,
+    ExecutionStepItem,
+    ExecutionStepItemKind,
+    ExecutionStepKind,
     InboundInstruction,
     OrchestrationExecutorLease,
     OrchestrationRun,
@@ -805,6 +812,81 @@ class OperationsObservationTestCase(unittest.TestCase):
             "www.ceair.com/booking/04ffa1f.js",
         )
         self.assertEqual(repeated_row.cells["count"], "3")
+
+    def test_orchestration_page_projects_continuation_decision_items(self) -> None:
+        timestamp = datetime.now(timezone.utc)
+        run = OrchestrationRun(
+            id="run-continuation-row",
+            inbound_instruction=InboundInstruction(
+                source="http",
+                content="continue",
+            ),
+            status=OrchestrationRunStatus.COMPLETED,
+            stage=OrchestrationRunStage.COMPLETED,
+            lane_key="session:agent:assistant:main",
+            priority=4,
+            metadata={"trace_id": "trace-continuation-row"},
+            created_at=timestamp,
+            updated_at=timestamp,
+            completed_at=timestamp,
+        )
+        chain = ExecutionChain.create(
+            chain_id="chain-continuation-row",
+            turn_id=run.id,
+        )
+        chain.start(active_step_id="step-continuation-row")
+        chain.increment_step_count()
+        chain.complete()
+        step = ExecutionStep.create(
+            step_id="step-continuation-row",
+            chain_id=chain.id,
+            turn_id=run.id,
+            step_index=1,
+            kind=ExecutionStepKind.LLM,
+            correlation_key="run-continuation-row:1:llm",
+        )
+        step.complete()
+        item = ExecutionStepItem.create(
+            item_id="item-continuation-row",
+            step_id=step.id,
+            chain_id=chain.id,
+            turn_id=run.id,
+            item_index=1,
+            kind=ExecutionStepItemKind.CONTINUATION_DECISION,
+            owner=ExecutionOwnerReference(
+                owner_kind="llm_continuation",
+                owner_id="invocation-continuation-row:continuation",
+            ),
+            correlation_key="invocation-continuation-row:continuation",
+        )
+        item.complete(
+            summary_payload={
+                "llm_invocation_id": "invocation-continuation-row",
+                "continuation_id": "invocation-continuation-row:continuation",
+                "reason": "provider_end_turn_false",
+                "end_turn": False,
+                "needs_follow_up": True,
+            },
+        )
+        provider = OrchestrationOperationsReadModelProvider(
+            run_query=_FakeOrchestrationRunQuery(
+                runs=[run],
+                chains_by_run_id={run.id: [chain]},
+                steps_by_chain_id={chain.id: [step]},
+                items_by_step_id={step.id: [item]},
+            ),
+            executor_lease_query=_FakeOrchestrationExecutorControl(leases=[]),
+        )
+
+        page = provider.page()
+
+        self.assertEqual(page.execution_chains.total, 1)
+        row = page.execution_chains.rows[0]
+        self.assertEqual(row.cells["continuation"], "1 decisions / 1 follow-up")
+        self.assertEqual(
+            row.cells["latest_decision"],
+            "provider_end_turn_false; end_turn=false; follow_up=true",
+        )
 
     def test_materializer_stores_paginated_tables_outside_page_projection(
         self,
@@ -1867,12 +1949,37 @@ class _FakeProjectionStore:
 
 
 class _FakeOrchestrationRunQuery:
-    def __init__(self, runs: list[OrchestrationRun]) -> None:
+    def __init__(
+        self,
+        runs: list[OrchestrationRun],
+        *,
+        chains_by_run_id: dict[str, list[ExecutionChain]] | None = None,
+        steps_by_chain_id: dict[str, list[ExecutionStep]] | None = None,
+        items_by_step_id: dict[str, list[ExecutionStepItem]] | None = None,
+    ) -> None:
         self._runs = tuple(runs)
+        self._chains_by_run_id = {
+            key: tuple(value) for key, value in (chains_by_run_id or {}).items()
+        }
+        self._steps_by_chain_id = {
+            key: tuple(value) for key, value in (steps_by_chain_id or {}).items()
+        }
+        self._items_by_step_id = {
+            key: tuple(value) for key, value in (items_by_step_id or {}).items()
+        }
 
     def list_runs(self, *, status: object | None = None) -> list[OrchestrationRun]:
         del status
         return list(self._runs)
+
+    def list_execution_chains(self, run_id: str) -> list[ExecutionChain]:
+        return list(self._chains_by_run_id.get(run_id, ()))
+
+    def list_execution_steps(self, chain_id: str) -> list[ExecutionStep]:
+        return list(self._steps_by_chain_id.get(chain_id, ()))
+
+    def list_execution_step_items(self, step_id: str) -> list[ExecutionStepItem]:
+        return list(self._items_by_step_id.get(step_id, ()))
 
 
 class _FakeOrchestrationExecutorControl:

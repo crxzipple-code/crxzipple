@@ -225,6 +225,146 @@ class ToolCatalogTestCase(ToolTestCaseBase):
         self.assertEqual(missing["checks"][0]["requirement"], "agent_id")
         self.assertTrue(ready["ready"])
 
+    def test_build_tool_surface_groups_ready_functions_by_source_prompt(self) -> None:
+        source_id = "test.local_package.workspace_runtime"
+        self.seed_tool(
+            tool_id="surface_read",
+            name="Surface Read",
+            description="Read workspace content.",
+            source_id=source_id,
+            tags=("surface:interactive",),
+        )
+        self.seed_tool(
+            tool_id="surface_write",
+            name="Surface Write",
+            description="Write workspace content.",
+            source_id=source_id,
+            mutates_state=True,
+            tags=("surface:interactive",),
+        )
+        self.seed_tool(
+            tool_id="surface_hidden",
+            name="Surface Hidden",
+            description="Hidden by runtime pool.",
+            source_id=source_id,
+            enabled=False,
+        )
+        with self.uow_factory() as uow:
+            source = uow.tool_sources.get(source_id)
+            self.assertIsNotNone(source)
+            source.config = {
+                **source.config,
+                "prompt": {
+                    "title": "Workspace Runtime",
+                    "summary": "Workspace tool surface.",
+                    "groups": {
+                        "read": {
+                            "title": "Read",
+                            "summary": "Read-only tools.",
+                            "function_ids": ["surface_read"],
+                            "order": 10,
+                            "default_expanded": True,
+                        },
+                        "write": {
+                            "title": "Write",
+                            "summary": "Mutation tools.",
+                            "function_ids": ["surface_write"],
+                            "order": 20,
+                        },
+                    },
+                },
+            }
+            uow.tool_sources.upsert(source)
+            uow.commit()
+
+        surface = self.tool_service.build_tool_surface(
+            session_id="session-1",
+            run_id="run-1",
+            agent_id="assistant",
+            surface_id="tool_surface:test",
+        )
+
+        self.assertEqual(surface.surface_id, "tool_surface:test")
+        self.assertEqual(surface.session_id, "session-1")
+        surface_source = next(
+            source
+            for source in surface.sources
+            if source.source_id == source_id
+        )
+        self.assertEqual(surface_source.title, "Workspace Runtime")
+        self.assertEqual(
+            [group.group_key for group in surface_source.groups],
+            ["read", "write"],
+        )
+        self.assertEqual(surface_source.groups[0].function_refs, ("surface_read",))
+        self.assertEqual(surface_source.groups[1].function_refs, ("surface_write",))
+        functions = {
+            function.function_id: function
+            for function in surface.functions
+            if function.source_id == source_id
+        }
+        self.assertEqual(functions["surface_read"].group_key, "read")
+        self.assertEqual(functions["surface_write"].group_key, "write")
+        self.assertTrue(functions["surface_read"].readiness["ready"])
+        self.assertTrue(functions["surface_write"].mutates_state)
+        self.assertNotIn("surface_hidden", functions)
+        self.assertIn(
+            "surface_hidden",
+            [
+                item["tool_id"]
+                for item in surface.diagnostics["excluded"]
+            ],
+        )
+
+    def test_build_tool_surface_can_persist_request_time_snapshot(self) -> None:
+        source_id = "test.local_package.persisted_surface"
+        self.seed_tool(
+            tool_id="persisted_surface_read",
+            name="Persisted Surface Read",
+            description="Read from a persisted surface.",
+            source_id=source_id,
+            tags=("surface:interactive",),
+        )
+        self.seed_tool(
+            tool_id="persisted_surface_hidden_from_request",
+            name="Persisted Surface Hidden From Request",
+            description="Available in runtime pool but not visible in this request.",
+            source_id=source_id,
+            tags=("surface:interactive",),
+        )
+
+        surface = self.tool_service.build_tool_surface(
+            session_id="session-persist",
+            run_id="run-persist",
+            agent_id="assistant",
+            surface_id="tool_surface:persisted",
+            tool_ids=("persisted_surface_read",),
+            persist=True,
+        )
+
+        with self.uow_factory() as uow:
+            persisted = uow.tool_surfaces.get("tool_surface:persisted")
+            by_run = uow.tool_surfaces.list_for_run("run-persist")
+
+        self.assertEqual(surface.surface_id, "tool_surface:persisted")
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual(persisted.surface_id, "tool_surface:persisted")
+        self.assertEqual(persisted.session_id, "session-persist")
+        self.assertEqual(persisted.run_id, "run-persist")
+        self.assertEqual(persisted.agent_id, "assistant")
+        self.assertEqual(persisted.estimate["function_count"], surface.estimate["function_count"])
+        self.assertIn(
+            "persisted_surface_read",
+            [function.function_id for function in persisted.functions],
+        )
+        self.assertNotIn(
+            "persisted_surface_hidden_from_request",
+            [function.function_id for function in persisted.functions],
+        )
+        self.assertEqual(persisted.diagnostics["requested_tool_count"], 1)
+        self.assertEqual([item.surface_id for item in by_run], ["tool_surface:persisted"])
+
     def test_get_tool_returns_workspace_read_tool_from_catalog(self) -> None:
         tool = self.tool_service.get_tool("read")
 

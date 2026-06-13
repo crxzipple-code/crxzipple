@@ -7,7 +7,9 @@ from typing import Any, Protocol
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmApiFamily,
+    LlmContinuationSignal,
     LlmMessage,
+    LlmResponseItem,
     LlmResult,
     ToolSchema,
 )
@@ -16,6 +18,7 @@ from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 
 @dataclass(frozen=True, slots=True)
 class LlmAdapterRequest:
+    invocation_id: str
     messages: tuple[LlmMessage, ...]
     tool_schemas: tuple[ToolSchema, ...] = field(default_factory=tuple)
     response_format: dict[str, Any] | None = None
@@ -26,6 +29,8 @@ class LlmAdapterRequest:
 @dataclass(frozen=True, slots=True)
 class LlmAdapterResponse:
     result: LlmResult
+    response_items: tuple[LlmResponseItem, ...] = field(default_factory=tuple)
+    continuation: LlmContinuationSignal | None = None
     provider_request_id: str | None = None
 
 

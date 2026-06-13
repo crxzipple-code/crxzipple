@@ -13,16 +13,23 @@ from crxzipple.modules.llm.application.adapters import (
 )
 from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmResult, LlmUsage
+from crxzipple.modules.llm.domain.value_objects import (
+    LlmContinuationSignal,
+    LlmResponseItem,
+    LlmResult,
+    LlmUsage,
+)
 from crxzipple.modules.llm.infrastructure.adapters.common import (
     async_sleep_before_openai_stream_retry,
+    build_openai_continuation_signal,
+    build_openai_response_items,
     build_openai_tool_name_aliases,
-    build_tool_call_intents,
     default_base_url,
     ensure_image_input_supported,
     httpx_response_text,
     is_retryable_openai_stream_exception,
     join_url,
+    openai_response_stream_event,
     openai_response_input_items,
     openai_tool_schema,
     OPENAI_TRANSIENT_HTTP_STATUS_CODES,
@@ -61,8 +68,11 @@ class OpenAIResponsesAdapter:
                 f"OpenAI Responses profile '{profile.id}' completed with an invalid result payload.",
             )
         provider_request_id = completed_event.data.get("provider_request_id")
+        response_items = _response_items_from_completed_event(completed_event)
         return LlmAdapterResponse(
             result=result,
+            response_items=response_items,
+            continuation=_continuation_from_completed_event(completed_event),
             provider_request_id=(
                 str(provider_request_id) if provider_request_id is not None else None
             ),
@@ -92,8 +102,11 @@ class OpenAIResponsesAdapter:
                 f"OpenAI Responses profile '{profile.id}' completed with an invalid result payload.",
             )
         provider_request_id = completed_event.data.get("provider_request_id")
+        response_items = _response_items_from_completed_event(completed_event)
         return LlmAdapterResponse(
             result=result,
+            response_items=response_items,
+            continuation=_continuation_from_completed_event(completed_event),
             provider_request_id=(
                 str(provider_request_id) if provider_request_id is not None else None
             ),
@@ -123,6 +136,7 @@ class OpenAIResponsesAdapter:
                 for event in self._stream_sse_response(
                     profile,
                     response,
+                    invocation_id=request.invocation_id,
                     description=description,
                     tool_name_aliases=alias_to_original,
                 ):
@@ -177,6 +191,7 @@ class OpenAIResponsesAdapter:
                     async for event in self._stream_sse_response_async(
                         profile,
                         response,
+                        invocation_id=request.invocation_id,
                         description=description,
                         tool_name_aliases=alias_to_original,
                     ):
@@ -256,11 +271,15 @@ class OpenAIResponsesAdapter:
             payload["top_p"] = defaults.top_p
         if defaults.max_output_tokens is not None:
             payload["max_output_tokens"] = defaults.max_output_tokens
-        if defaults.reasoning_effort is not None:
-            payload["reasoning"] = {"effort": defaults.reasoning_effort}
+        reasoning = _merged_reasoning_payload(
+            defaults_reasoning_effort=defaults.reasoning_effort,
+            override_reasoning=request.overrides.get("reasoning"),
+        )
+        if reasoning:
+            payload["reasoning"] = reasoning
 
         for key, value in request.overrides.items():
-            if key not in {"model", "input", "tools"}:
+            if key not in {"model", "input", "tools", "reasoning"}:
                 payload[key] = value
 
         payload["stream"] = True
@@ -277,6 +296,7 @@ class OpenAIResponsesAdapter:
         profile: LlmProfile,
         response: requests.Response,
         *,
+        invocation_id: str,
         description: str,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> Iterator[LlmStreamEvent]:
@@ -291,6 +311,7 @@ class OpenAIResponsesAdapter:
 
         current_event: str | None = None
         data_lines: list[str] = []
+        completed_output_items: dict[int, dict[str, Any]] = {}
         sequence = 1
         for raw_line in response.iter_lines(chunk_size=1, decode_unicode=False):
             if raw_line is None:
@@ -314,7 +335,9 @@ class OpenAIResponsesAdapter:
                 data_lines,
                 sequence=sequence,
                 description=description,
+                invocation_id=invocation_id,
                 tool_name_aliases=tool_name_aliases,
+                completed_output_items=completed_output_items,
             )
             if event is not None:
                 yield event
@@ -331,7 +354,9 @@ class OpenAIResponsesAdapter:
                 data_lines,
                 sequence=sequence,
                 description=description,
+                invocation_id=invocation_id,
                 tool_name_aliases=tool_name_aliases,
+                completed_output_items=completed_output_items,
             )
             if event is not None:
                 yield event
@@ -346,6 +371,7 @@ class OpenAIResponsesAdapter:
         profile: LlmProfile,
         response: httpx.Response,
         *,
+        invocation_id: str,
         description: str,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> AsyncIterator[LlmStreamEvent]:
@@ -361,6 +387,7 @@ class OpenAIResponsesAdapter:
 
         current_event: str | None = None
         data_lines: list[str] = []
+        completed_output_items: dict[int, dict[str, Any]] = {}
         sequence = 1
         async for line in response.aiter_lines():
             line = line.rstrip("\r\n")
@@ -378,7 +405,9 @@ class OpenAIResponsesAdapter:
                 data_lines,
                 sequence=sequence,
                 description=description,
+                invocation_id=invocation_id,
                 tool_name_aliases=tool_name_aliases,
+                completed_output_items=completed_output_items,
             )
             if event is not None:
                 yield event
@@ -395,7 +424,9 @@ class OpenAIResponsesAdapter:
                 data_lines,
                 sequence=sequence,
                 description=description,
+                invocation_id=invocation_id,
                 tool_name_aliases=tool_name_aliases,
+                completed_output_items=completed_output_items,
             )
             if event is not None:
                 yield event
@@ -413,7 +444,9 @@ class OpenAIResponsesAdapter:
         *,
         sequence: int,
         description: str,
+        invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
+        completed_output_items: dict[int, dict[str, Any]] | None = None,
     ) -> tuple[LlmStreamEvent | None, bool]:
         if not data_lines:
             return None, False
@@ -438,9 +471,19 @@ class OpenAIResponsesAdapter:
         response_payload = payload.get("response")
         if resolved_event_name == "response.completed":
             if isinstance(response_payload, dict):
+                normalized_response_payload = dict(response_payload)
+                if (
+                    completed_output_items
+                    and not normalized_response_payload.get("output")
+                ):
+                    normalized_response_payload["output"] = [
+                        dict(item)
+                        for _, item in sorted(completed_output_items.items())
+                    ]
                 response = cls._build_response(
                     profile,
-                    dict(response_payload),
+                    normalized_response_payload,
+                    invocation_id=invocation_id,
                     tool_name_aliases=tool_name_aliases,
                 )
                 return (
@@ -449,12 +492,49 @@ class OpenAIResponsesAdapter:
                         sequence=sequence,
                         data={
                             "result": response.result.to_payload(),
+                            "response_items": [
+                                item.to_payload() for item in response.response_items
+                            ],
+                            "continuation": (
+                                response.continuation.to_payload()
+                                if response.continuation is not None
+                                else None
+                            ),
                             "provider_request_id": response.provider_request_id,
                         },
                     ),
                     True,
                 )
             return None, True
+
+        if resolved_event_name in {
+            "response.output_item.added",
+            "response.output_item.created",
+            "response.output_item.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary.delta",
+            "response.reasoning_text.delta",
+            "response.reasoning.delta",
+            "response.function_call_arguments.delta",
+            "response.tool_call_arguments.delta",
+        }:
+            if resolved_event_name == "response.output_item.done":
+                output_index = payload.get("output_index")
+                item = payload.get("item")
+                if (
+                    completed_output_items is not None
+                    and isinstance(output_index, int)
+                    and isinstance(item, dict)
+                ):
+                    completed_output_items[output_index] = dict(item)
+            return (
+                openai_response_stream_event(
+                    event_name=resolved_event_name,
+                    payload=payload,
+                    sequence=sequence,
+                ),
+                False,
+            )
 
         if payload.get("type") == "error":
             error_payload = payload.get("error")
@@ -490,17 +570,16 @@ class OpenAIResponsesAdapter:
         profile: LlmProfile,
         data: dict[str, Any],
         *,
+        invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> LlmAdapterResponse:
 
         output = data.get("output") if isinstance(data.get("output"), list) else []
         text_fragments: list[str] = []
-        raw_tool_calls: list[dict[str, Any]] = []
         for item in output:
             if not isinstance(item, dict):
                 continue
             if item.get("type") == "function_call":
-                raw_tool_calls.append(item)
                 continue
             if item.get("type") != "message":
                 continue
@@ -522,13 +601,14 @@ class OpenAIResponsesAdapter:
                 total_tokens=usage_raw.get("total_tokens"),
             )
 
+        response_items = build_openai_response_items(
+            invocation_id=invocation_id,
+            response_payload=data,
+            tool_name_aliases=tool_name_aliases,
+        )
         return LlmAdapterResponse(
-            result=LlmResult(
-                text=data.get("output_text") or "".join(text_fragments) or None,
-                tool_calls=build_tool_call_intents(
-                    raw_tool_calls,
-                    tool_name_aliases=tool_name_aliases,
-                ),
+            result=LlmResult.from_response_items(
+                response_items,
                 usage=usage,
                 finish_reason=str(data.get("status")) if data.get("status") is not None else None,
                 metadata={
@@ -537,6 +617,44 @@ class OpenAIResponsesAdapter:
                     "model": data.get("model"),
                     "transport": "sse",
                 },
+                text_fallback=data.get("output_text") or "".join(text_fragments) or None,
             ),
+            response_items=response_items,
+            continuation=build_openai_continuation_signal(data, response_items),
             provider_request_id=str(data.get("id")) if data.get("id") is not None else None,
         )
+
+
+def _response_items_from_completed_event(
+    event: LlmStreamEvent,
+) -> tuple[LlmResponseItem, ...]:
+    raw_items = event.data.get("response_items")
+    if not isinstance(raw_items, list):
+        return ()
+    return tuple(
+        LlmResponseItem.from_payload(item)
+        for item in raw_items
+        if isinstance(item, dict)
+    )
+
+
+def _continuation_from_completed_event(
+    event: LlmStreamEvent,
+) -> LlmContinuationSignal | None:
+    payload = event.data.get("continuation")
+    if not isinstance(payload, dict):
+        return None
+    return LlmContinuationSignal.from_payload(payload)
+
+
+def _merged_reasoning_payload(
+    *,
+    defaults_reasoning_effort: str | None,
+    override_reasoning: object,
+) -> dict[str, Any]:
+    reasoning: dict[str, Any] = {}
+    if defaults_reasoning_effort is not None:
+        reasoning["effort"] = defaults_reasoning_effort
+    if isinstance(override_reasoning, dict):
+        reasoning.update(override_reasoning)
+    return reasoning

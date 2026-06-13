@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from crxzipple.modules.llm.domain import LlmMessage, LlmMessageRole
 from crxzipple.modules.orchestration.application.prompting import estimate_text_tokens
-from crxzipple.modules.session.domain import SessionMessage
+from crxzipple.modules.session.domain import SessionItem, SessionItemKind
 from crxzipple.modules.tool.application.result_envelope import (
     TOOL_RESULT_ENVELOPE_METADATA_KEY,
 )
@@ -24,53 +24,26 @@ class PromptTranscript:
     chars: int
     estimated_tokens: int
     tool_result_stats: dict[str, object]
+    budget: dict[str, object] = field(default_factory=dict)
 
 
-def build_current_run_prompt_window(
-    messages: tuple[SessionMessage, ...],
-    *,
-    completed_tool_call_ids: tuple[str, ...] | None = None,
-    consumed_through_sequence_no: int | None = None,
-    preserve_message_ids: tuple[str, ...] = (),
-) -> PromptTranscript:
-    return _build_session_message_prompt_window(
-        messages,
-        completed_tool_call_ids=completed_tool_call_ids,
-        consumed_through_sequence_no=consumed_through_sequence_no,
-        preserve_message_ids=preserve_message_ids,
-    )
-
-
-def build_memory_flush_prompt_transcript(
-    messages: tuple[SessionMessage, ...],
-    *,
-    max_chars: int,
-) -> PromptTranscript:
-    return _build_session_message_prompt_window(messages, max_chars=max_chars)
-
-
-def _build_session_message_prompt_window(
-    messages: tuple[SessionMessage, ...],
+def build_model_visible_session_item_prompt_window(
+    items: tuple[SessionItem, ...],
     *,
     max_chars: int | None = None,
-    completed_tool_call_ids: tuple[str, ...] | None = None,
-    consumed_through_sequence_no: int | None = None,
-    preserve_message_ids: tuple[str, ...] = (),
+    include_non_protocol_history: bool = True,
 ) -> PromptTranscript:
-    filtered_messages = _prune_processed_history_attachments(
-        _filter_transcript_messages(
-            messages,
-            completed_tool_call_ids=completed_tool_call_ids,
-            consumed_through_sequence_no=consumed_through_sequence_no,
-            preserve_message_ids=preserve_message_ids,
-        ),
+    visible_items = tuple(item for item in items if item.visibility.model_visible)
+    input_items = (
+        visible_items
+        if include_non_protocol_history
+        else _filter_current_protocol_items(visible_items)
     )
-    filtered_messages = _truncate_messages_to_recent_budget(
-        filtered_messages,
+    filtered_items = _truncate_items_to_recent_budget(
+        input_items,
         max_chars=max_chars,
     )
-    tool_result_stats = _tool_result_stats(filtered_messages)
-    llm_messages = tuple(_to_llm_message(message) for message in filtered_messages)
+    llm_messages = tuple(_item_to_llm_message(item) for item in filtered_items)
     return PromptTranscript(
         messages=llm_messages,
         message_count=len(llm_messages),
@@ -79,75 +52,164 @@ def _build_session_message_prompt_window(
             _message_content_tokens(message.content)
             for message in llm_messages
         ),
-        tool_result_stats=tool_result_stats,
+        tool_result_stats=_tool_result_item_stats(filtered_items),
+        budget=_session_item_budget_report(
+            input_items,
+            filtered_items,
+            max_chars=max_chars,
+        ),
     )
 
 
-def _to_llm_message(message: SessionMessage) -> LlmMessage:
-    try:
-        role = LlmMessageRole(message.role)
-    except ValueError:
-        role = LlmMessageRole.USER
-    tool_call_id = message.metadata.get("tool_call_id")
-    if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-        tool_call_id = None
-    tool_name = message.metadata.get("tool_name")
-    if not isinstance(tool_name, str) or not tool_name.strip():
-        payload_tool_name = message.content_payload.get("tool_name")
-        if isinstance(payload_tool_name, str) and payload_tool_name.strip():
-            tool_name = payload_tool_name.strip()
-        else:
-            tool_name = None
-    metadata = {
-        "session_message_id": message.id,
-        "session_id": message.session_id,
-        "sequence_no": message.sequence_no,
-        "kind": message.kind.value,
-        "source_kind": message.source_kind,
-        "source_id": message.source_id,
+def _filter_current_protocol_items(
+    items: tuple[SessionItem, ...],
+) -> tuple[SessionItem, ...]:
+    if not items:
+        return ()
+    current_session_id = items[-1].session_id
+    current_user_items = tuple(
+        item
+        for item in items
+        if item.session_id == current_session_id
+        and item.kind is SessionItemKind.USER_MESSAGE
+        and item.role == "user"
+    )
+    current_user_item = current_user_items[-1:] if current_user_items else ()
+    current_turn_start_sequence = (
+        current_user_item[0].sequence_no if current_user_item else -1
+    )
+    tool_results_by_call_id = {
+        item.call_id: item
+        for item in items
+        if item.session_id == current_session_id
+        and item.sequence_no >= current_turn_start_sequence
+        and item.kind is SessionItemKind.TOOL_RESULT
+        and item.call_id is not None
     }
+    paired_protocol_items: list[SessionItem] = []
+    for item in items:
+        if (
+            item.session_id != current_session_id
+            or item.sequence_no < current_turn_start_sequence
+            or item.kind is not SessionItemKind.TOOL_CALL
+            or item.call_id is None
+        ):
+            continue
+        result = tool_results_by_call_id.get(item.call_id)
+        if result is None:
+            continue
+        paired_protocol_items.extend((item, result))
+    provider_external_items = tuple(
+        item
+        for item in items
+        if item.session_id == current_session_id
+        and item.sequence_no >= current_turn_start_sequence
+        and item.kind is SessionItemKind.PROVIDER_EXTERNAL_ITEM
+    )
+    ordered = (
+        *current_user_item,
+        *paired_protocol_items,
+        *provider_external_items,
+    )
+    seen: set[str] = set()
+    deduped: list[SessionItem] = []
+    for item in ordered:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        deduped.append(item)
+    return tuple(sorted(deduped, key=lambda item: item.sequence_no))
+
+
+def _item_to_llm_message(item: SessionItem) -> LlmMessage:
+    role = _item_role(item)
+    tool_name = item.tool_name
+    metadata: dict[str, object] = {
+        "session_item_id": item.id,
+        "session_id": item.session_id,
+        "sequence_no": item.sequence_no,
+        "kind": item.kind.value,
+        "phase": item.phase.value,
+        "source_module": item.source_module,
+        "source_kind": item.source_kind,
+        "source_id": item.source_id,
+    }
+    if item.provider_item_id is not None:
+        metadata["provider_item_id"] = item.provider_item_id
+    if item.provider_item_type is not None:
+        metadata["provider_item_type"] = item.provider_item_type
+    if item.call_id is not None:
+        metadata["tool_call_id"] = item.call_id
     if tool_name is not None:
         metadata["tool_name"] = tool_name
-    if role is LlmMessageRole.TOOL and "status" in message.content_payload:
-        metadata["tool_status"] = message.content_payload["status"]
-    if role is LlmMessageRole.TOOL and "error" in message.content_payload:
-        metadata["tool_error"] = message.content_payload["error"]
+    tool_status = item.metadata.get("tool_status")
+    if isinstance(tool_status, str) and tool_status.strip():
+        metadata["tool_status"] = tool_status.strip()
+    if item.kind is SessionItemKind.TOOL_RESULT and "error" in item.content_payload:
+        metadata["tool_error"] = item.content_payload["error"]
     return LlmMessage(
         role=role,
-        content=_extract_content(message, role=role),
-        name=tool_name,
-        tool_call_id=tool_call_id,
+        content=_extract_item_content(item, role=role),
+        name=tool_name if role is LlmMessageRole.TOOL else None,
+        tool_call_id=(
+            item.call_id
+            if item.kind in {SessionItemKind.TOOL_CALL, SessionItemKind.TOOL_RESULT}
+            else None
+        ),
         metadata=metadata,
     )
 
 
-def _extract_content(
-    message: SessionMessage,
+def _item_role(item: SessionItem) -> LlmMessageRole:
+    if item.role is not None:
+        try:
+            return LlmMessageRole(item.role)
+        except ValueError:
+            pass
+    if item.kind is SessionItemKind.TOOL_RESULT:
+        return LlmMessageRole.TOOL
+    return LlmMessageRole.ASSISTANT
+
+
+def _extract_item_content(
+    item: SessionItem,
     *,
     role: LlmMessageRole,
 ) -> object:
-    if (
-        role is LlmMessageRole.ASSISTANT
-        and message.content_payload.get("type") == "function_call"
-    ):
-        return dict(message.content_payload)
+    if item.kind is SessionItemKind.TOOL_CALL:
+        return {
+            "type": "function_call",
+            "call_id": item.call_id or item.provider_item_id or item.id,
+            "name": item.tool_name or item.content_payload.get("tool_name") or "",
+            "arguments": (
+                dict(item.content_payload.get("arguments"))
+                if isinstance(item.content_payload.get("arguments"), dict)
+                else {}
+            ),
+        }
     if role is LlmMessageRole.TOOL:
-        compact_result = _compact_tool_result_content(message)
+        compact_result = _compact_tool_result_payload(item.content_payload)
         if compact_result is not None:
             return compact_result
-        blocks = content_blocks_from_payload(message.content_payload)
+        blocks = content_blocks_from_payload(item.content_payload)
         if blocks:
             return blocks
-        if "error" in message.content_payload:
-            return [text_content_block(describe_content_for_text_fallback(message.content_payload["error"]))]
+        content = item.content_payload.get("content")
+        if isinstance(content, list):
+            return content
+        if "error" in item.content_payload:
+            return [text_content_block(describe_content_for_text_fallback(item.content_payload["error"]))]
         return [text_content_block("Tool completed.")]
-    blocks = content_blocks_from_payload(message.content_payload)
+    blocks = content_blocks_from_payload(item.content_payload)
     if blocks:
         return blocks
+    text = item.content_payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return [text_content_block(text)]
     return [
         text_content_block(
             json.dumps(
-                message.content_payload,
+                item.content_payload,
                 ensure_ascii=True,
                 sort_keys=True,
             ),
@@ -155,9 +217,11 @@ def _extract_content(
     ]
 
 
-def _compact_tool_result_content(message: SessionMessage) -> list[dict[str, object]] | None:
-    metadata = message.content_payload.get("metadata")
-    details = message.content_payload.get("details")
+def _compact_tool_result_payload(
+    payload: dict[str, object],
+) -> list[dict[str, object]] | None:
+    metadata = payload.get("metadata")
+    details = payload.get("details")
     if not isinstance(metadata, dict):
         metadata = {}
     if not isinstance(details, dict):
@@ -240,9 +304,9 @@ def _compact_tool_result_envelope_text(
     return "\n".join(lines)
 
 
-def _tool_result_stats(messages: tuple[SessionMessage, ...]) -> dict[str, object]:
+def _tool_result_item_stats(items: tuple[SessionItem, ...]) -> dict[str, object]:
     stats: dict[str, object] = {
-        "tool_result_message_count": 0,
+        "tool_result_item_count": 0,
         "compacted_result_count": 0,
         "omitted_chars": 0,
         "omitted_count": 0,
@@ -250,14 +314,12 @@ def _tool_result_stats(messages: tuple[SessionMessage, ...]) -> dict[str, object
         "read_handle_count": 0,
     }
     artifact_refs: set[str] = set()
-    for message in messages:
-        if message.role != "tool":
+    for item in items:
+        if item.kind is not SessionItemKind.TOOL_RESULT:
             continue
-        stats["tool_result_message_count"] = (
-            int(stats["tool_result_message_count"]) + 1
-        )
-        metadata = message.content_payload.get("metadata")
-        details = message.content_payload.get("details")
+        stats["tool_result_item_count"] = int(stats["tool_result_item_count"]) + 1
+        metadata = item.content_payload.get("metadata")
+        details = item.content_payload.get("details")
         if not isinstance(metadata, dict):
             metadata = {}
         if not isinstance(details, dict):
@@ -365,228 +427,148 @@ def _message_content_tokens(content: object) -> int:
     return estimate_text_tokens(describe_content_for_text_fallback(content))
 
 
-def _filter_transcript_messages(
-    messages: tuple[SessionMessage, ...],
-    *,
-    completed_tool_call_ids: tuple[str, ...] | None = None,
-    consumed_through_sequence_no: int | None = None,
-    preserve_message_ids: tuple[str, ...] = (),
-) -> tuple[SessionMessage, ...]:
-    visible_messages = _messages_after_consumed_frontier(
-        messages,
-        consumed_through_sequence_no=consumed_through_sequence_no,
-        preserve_message_ids=preserve_message_ids,
-    )
-    explicit_completed_tool_call_ids = (
-        _normalized_tool_call_ids(completed_tool_call_ids)
-        if completed_tool_call_ids is not None
-        else None
-    )
-    visible_completed_tool_call_ids = {
-        tool_call_id.strip()
-        for message in visible_messages
-        if message.role == "tool"
-        for tool_call_id in (message.metadata.get("tool_call_id"),)
-        if isinstance(tool_call_id, str) and tool_call_id.strip()
-    }
-    completed_tool_call_id_set = (
-        visible_completed_tool_call_ids
-        if explicit_completed_tool_call_ids is None
-        else explicit_completed_tool_call_ids & visible_completed_tool_call_ids
-    )
-    filtered: list[SessionMessage] = []
-    for message in visible_messages:
-        tool_call_id = message.metadata.get("tool_call_id")
-        normalized_tool_call_id = (
-            tool_call_id.strip()
-            if isinstance(tool_call_id, str) and tool_call_id.strip()
-            else None
-        )
-        if (
-            explicit_completed_tool_call_ids is not None
-            and message.role == "tool"
-            and normalized_tool_call_id not in explicit_completed_tool_call_ids
-        ):
-            continue
-        is_function_call = (
-            message.role == "assistant"
-            and message.content_payload.get("type") == "function_call"
-        )
-        if not is_function_call:
-            filtered.append(message)
-            continue
-        if normalized_tool_call_id in completed_tool_call_id_set:
-            filtered.append(message)
-    return tuple(filtered)
-
-
-def _messages_after_consumed_frontier(
-    messages: tuple[SessionMessage, ...],
-    *,
-    consumed_through_sequence_no: int | None,
-    preserve_message_ids: tuple[str, ...],
-) -> tuple[SessionMessage, ...]:
-    if consumed_through_sequence_no is None:
-        return messages
-    preserved = {
-        value.strip()
-        for value in preserve_message_ids
-        if isinstance(value, str) and value.strip()
-    }
-    return tuple(
-        message
-        for message in messages
-        if message.sequence_no > consumed_through_sequence_no or message.id in preserved
-    )
-
-
-def _normalized_tool_call_ids(values: tuple[str, ...] | None) -> set[str]:
-    return {
-        value.strip()
-        for value in values or ()
-        if isinstance(value, str) and value.strip()
-    }
-
-
-def _prune_processed_history_attachments(
-    messages: tuple[SessionMessage, ...],
-) -> tuple[SessionMessage, ...]:
-    last_assistant_index = max(
-        (
-            index
-            for index, message in enumerate(messages)
-            if message.role == "assistant"
-        ),
-        default=-1,
-    )
-    if last_assistant_index <= 0:
-        return messages
-
-    pruned: list[SessionMessage] = []
-    for index, message in enumerate(messages):
-        if index >= last_assistant_index:
-            pruned.append(message)
-            continue
-        blocks = content_blocks_from_payload(message.content_payload)
-        if not blocks or all(block.get("type") == "text" for block in blocks):
-            pruned.append(message)
-            continue
-        replacement_blocks = []
-        for block in blocks:
-            block_type = str(block.get("type") or "").strip()
-            if block_type == "text":
-                replacement_blocks.append(block)
-                continue
-            placeholder = "[attachment data removed - already processed by model]"
-            if block_type in {"image", "image_ref"}:
-                placeholder = "[image data removed - already processed by model]"
-            elif block_type in {"file", "file_ref"}:
-                placeholder = "[file data removed - already processed by model]"
-            replacement_blocks.append(text_content_block(placeholder))
-        payload = dict(message.content_payload)
-        payload["blocks"] = replacement_blocks
-        replacement_text = extract_text_content({"blocks": replacement_blocks})
-        if replacement_text is not None:
-            payload["text"] = replacement_text
-        else:
-            payload.pop("text", None)
-        pruned.append(replace(message, content_payload=payload))
-    return tuple(pruned)
-
-
-def _truncate_messages_to_recent_budget(
-    messages: tuple[SessionMessage, ...],
+def _truncate_items_to_recent_budget(
+    items: tuple[SessionItem, ...],
     *,
     max_chars: int | None,
-) -> tuple[SessionMessage, ...]:
+) -> tuple[SessionItem, ...]:
     if max_chars is None or max_chars <= 0:
-        return messages
-
-    assistant_function_call_indices: dict[str, int] = {}
-    for index, message in enumerate(messages):
-        if message.role != "assistant":
-            continue
-        if message.content_payload.get("type") != "function_call":
-            continue
-        tool_call_id = message.metadata.get("tool_call_id")
-        if isinstance(tool_call_id, str) and tool_call_id.strip():
-            assistant_function_call_indices[tool_call_id.strip()] = index
-
-    kept: list[tuple[int, SessionMessage]] = []
-    kept_indices: set[int] = set()
-    required_indices: set[int] = set()
+        return items
+    kept: list[tuple[int, SessionItem]] = []
     remaining_chars = max_chars
-    cutoff_reached = False
-
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        forced = index in required_indices
-        if not forced and cutoff_reached:
-            continue
-
-        message_chars = _session_message_content_chars(message)
-        if not forced and kept and message_chars > remaining_chars:
-            cutoff_reached = True
-            continue
+    for index, item in reversed(tuple(enumerate(items))):
+        item_chars = _session_item_content_chars(item)
         if (
-            not forced
+            not _is_protocol_required_item(item)
             and not kept
-            and remaining_chars > 0
-            and message_chars > remaining_chars
+            and item_chars > remaining_chars
         ):
-            message = _truncate_message_to_recent_chars(message, remaining_chars)
-            message_chars = _session_message_content_chars(message)
-            cutoff_reached = True
-
-        kept.append((index, message))
-        kept_indices.add(index)
-        remaining_chars = max(0, remaining_chars - message_chars)
-
-        if message.role != "tool":
+            item = _truncate_item_to_recent_chars(item, remaining_chars)
+            item_chars = _session_item_content_chars(item)
+        if (
+            not _is_protocol_required_item(item)
+            and kept
+            and item_chars > remaining_chars
+        ):
             continue
-        tool_call_id = message.metadata.get("tool_call_id")
-        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-            continue
-        function_call_index = assistant_function_call_indices.get(tool_call_id.strip())
-        if function_call_index is not None and function_call_index not in kept_indices:
-            required_indices.add(function_call_index)
-
-    if len(kept) == len(messages):
-        return messages
-    kept.sort(key=lambda item: item[0])
-    return tuple(message for _, message in kept)
+        kept.append((index, item))
+        remaining_chars = max(0, remaining_chars - item_chars)
+    kept.sort(key=lambda entry: entry[0])
+    return tuple(item for _, item in kept)
 
 
-def _session_message_content_chars(message: SessionMessage) -> int:
-    try:
-        role = LlmMessageRole(message.role)
-    except ValueError:
-        role = LlmMessageRole.USER
-    return _message_content_chars(_extract_content(message, role=role))
+def _session_item_budget_report(
+    all_items: tuple[SessionItem, ...],
+    kept_items: tuple[SessionItem, ...],
+    *,
+    max_chars: int | None,
+) -> dict[str, object]:
+    kept_ids = {item.id for item in kept_items}
+    dropped_items = tuple(item for item in all_items if item.id not in kept_ids)
+    protocol_items = tuple(item for item in all_items if _is_protocol_required_item(item))
+    kept_protocol_ids = {item.id for item in kept_items if _is_protocol_required_item(item)}
+    report: dict[str, object] = {
+        "source": "session_items",
+        "budget_unit": "chars",
+        "max_chars": max_chars,
+        "input_item_count": len(all_items),
+        "included_item_count": len(kept_items),
+        "collapsed_item_count": len(dropped_items),
+        "truncated": bool(dropped_items),
+        "frontier": _session_item_frontier(kept_items),
+        "included_refs": [_session_item_budget_ref(item) for item in kept_items],
+        "collapsed_refs": [_session_item_budget_ref(item) for item in dropped_items],
+        "protocol_required_refs": [
+            _session_item_budget_ref(item) for item in protocol_items
+        ],
+        "protocol_required_preserved": all(
+            item.id in kept_protocol_ids for item in protocol_items
+        ),
+    }
+    return {key: value for key, value in report.items() if value not in (None, [], {})}
 
 
-def _truncate_message_to_recent_chars(
-    message: SessionMessage,
+def _session_item_frontier(
+    items: tuple[SessionItem, ...],
+) -> dict[str, object]:
+    if not items:
+        return {}
+    return {
+        "from_sequence_no": min(item.sequence_no for item in items),
+        "to_sequence_no": max(item.sequence_no for item in items),
+        "from_item_id": items[0].id,
+        "to_item_id": items[-1].id,
+        "item_count": len(items),
+    }
+
+
+def _session_item_budget_ref(item: SessionItem) -> dict[str, object]:
+    ref: dict[str, object] = {
+        "owner_module": "session",
+        "owner_kind": "session_item",
+        "owner_id": item.id,
+        "item_id": item.id,
+        "session_id": item.session_id,
+        "sequence_no": item.sequence_no,
+        "kind": item.kind.value,
+        "role": item.role or "",
+        "render_mode": "full",
+        "visibility": "model_visible",
+    }
+    if item.source_module:
+        ref["source_module"] = item.source_module
+    if item.source_kind:
+        ref["source_kind"] = item.source_kind
+    if item.source_id:
+        ref["source_id"] = item.source_id
+    if item.provider_item_id:
+        ref["provider_item_id"] = item.provider_item_id
+    if item.provider_item_type:
+        ref["provider_item_type"] = item.provider_item_type
+    if item.call_id:
+        ref["tool_call_id"] = item.call_id
+    if item.tool_name:
+        ref["tool_name"] = item.tool_name
+    if _is_protocol_required_item(item):
+        ref["protocol_required"] = True
+        ref["budget_class"] = "protocol_required"
+    return ref
+
+
+def _is_protocol_required_item(item: SessionItem) -> bool:
+    return item.kind in {
+        SessionItemKind.TOOL_CALL,
+        SessionItemKind.TOOL_RESULT,
+        SessionItemKind.PROVIDER_EXTERNAL_ITEM,
+    }
+
+
+def _session_item_content_chars(item: SessionItem) -> int:
+    return _message_content_chars(_extract_item_content(item, role=_item_role(item)))
+
+
+def _truncate_item_to_recent_chars(
+    item: SessionItem,
     max_chars: int,
-) -> SessionMessage:
+) -> SessionItem:
     if max_chars <= 0:
-        return message
-    if message.role == "assistant" and message.content_payload.get("type") == "function_call":
-        return message
-    blocks = content_blocks_from_payload(message.content_payload)
-    text_content = extract_text_content(blocks if blocks else message.content_payload)
+        return item
+    if _is_protocol_required_item(item):
+        return item
+    blocks = content_blocks_from_payload(item.content_payload)
+    text_content = extract_text_content(blocks if blocks else item.content_payload)
     if text_content is None:
-        fallback_text = describe_content_for_text_fallback(message.content_payload)
+        fallback_text = describe_content_for_text_fallback(item.content_payload)
         truncated_text = fallback_text[-max_chars:]
         return replace(
-            message,
+            item,
             content_payload={
                 "blocks": [text_content_block(truncated_text)],
                 "text": truncated_text,
             },
         )
     truncated_text = text_content[-max_chars:]
-    payload = dict(message.content_payload)
+    payload = dict(item.content_payload)
     payload["blocks"] = [text_content_block(truncated_text)]
     payload["text"] = truncated_text
-    return replace(message, content_payload=payload)
+    return replace(item, content_payload=payload)

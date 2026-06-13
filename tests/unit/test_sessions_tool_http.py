@@ -20,15 +20,15 @@ from crxzipple.modules.llm.domain import (
 )
 from crxzipple.modules.orchestration.domain import OrchestrationRunStatus
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
-    ArchiveSessionMessagesInput,
+    AppendSessionItemInput,
     EnsureSessionInput,
-    ListSessionMessagesInput,
+    ListSessionItemsInput,
+    MergeSessionItemMetadataInput,
     ResetSessionInput,
 )
 from crxzipple.modules.session.domain import (
-    SessionMessageKind,
-    SessionMessageVisibility,
+    SessionItemKind,
+    SessionItemVisibility,
 )
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 from tests.unit.tool_test_support import *  # noqa: F403
@@ -124,18 +124,30 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         role: str,
         text: str,
         session_id: str | None = None,
-        kind: SessionMessageKind = SessionMessageKind.MESSAGE,
-        visibility: SessionMessageVisibility = SessionMessageVisibility.DEFAULT,
+        kind: SessionItemKind | None = None,
+        visibility: SessionItemVisibility | None = None,
         source_kind: str | None = None,
         source_id: str | None = None,
     ) -> None:
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        item_kind = kind or (
+            SessionItemKind.TOOL_RESULT if role == "tool" else SessionItemKind.ASSISTANT_MESSAGE
+        )
+        if role == "user":
+            item_kind = kind or SessionItemKind.USER_MESSAGE
+        item_visibility = visibility or SessionItemVisibility(
+            model_visible=True,
+            user_visible=role in {"assistant", "user"},
+            chat_visible=role in {"assistant", "user"},
+            trace_visible=True,
+        )
+        self.session_service.append_item(
+            AppendSessionItemInput(
                 session_key=session_key,
                 session_id=session_id,
                 role=role,
-                kind=kind,
-                visibility=visibility,
+                kind=item_kind,
+                visibility=item_visibility,
+                source_module="test",
                 source_kind=source_kind,
                 source_id=source_id,
                 content_payload={
@@ -148,6 +160,34 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
                 },
             ),
         )
+
+    def _archive_items(
+        self,
+        *,
+        session_key: str,
+        session_id: str,
+        max_sequence_no: int,
+        reason: str = "compacted",
+    ) -> None:
+        items = self.session_service.list_items(
+            ListSessionItemsInput(
+                session_key=session_key,
+                active_session_only=False,
+            ),
+        )
+        for item in items:
+            if item.session_id != session_id or item.sequence_no > max_sequence_no:
+                continue
+            self.session_service.merge_item_metadata(
+                MergeSessionItemMetadataInput(
+                    item_id=item.id,
+                    metadata={
+                        "archived_reason": reason,
+                        "compacted_segment_id": session_id,
+                        "archived_through_item_sequence_no": max_sequence_no,
+                    },
+                ),
+            )
 
     def test_session_status_uses_execution_context_and_reports_counts(self) -> None:
         session = self.session_service.ensure_session(
@@ -174,13 +214,11 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="assistant",
             text="archive me first",
         )
-        self.session_service.archive_messages(
-            ArchiveSessionMessagesInput(
-                session_key=session.id,
-                session_id=session.active_session_id,
-                max_sequence_no=1,
-                reason="compacted",
-            ),
+        self._archive_items(
+            session_key=session.id,
+            session_id=session.active_session_id,
+            max_sequence_no=1,
+            reason="compacted",
         )
         self._append_text(
             session_key=session.id,
@@ -191,8 +229,13 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             session_key=session.id,
             role="tool",
             text="internal tool result",
-            kind=SessionMessageKind.TOOL_RESULT,
-            visibility=SessionMessageVisibility.INTERNAL,
+            kind=SessionItemKind.TOOL_RESULT,
+            visibility=SessionItemVisibility(
+                model_visible=False,
+                user_visible=False,
+                chat_visible=False,
+                trace_visible=True,
+            ),
             source_kind="tool_run",
             source_id="run-1",
         )
@@ -218,9 +261,9 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(metadata["session"]["key"], session.id)
         self.assertEqual(metadata["active_instance"]["id"], session.active_session_id)
         self.assertEqual(metadata["counts"]["instance_count"], 1)
-        self.assertEqual(metadata["counts"]["active_visible_message_count"], 1)
-        self.assertEqual(metadata["counts"]["visible_message_count"], 1)
-        self.assertEqual(metadata["counts"]["total_message_count"], 3)
+        self.assertEqual(metadata["counts"]["active_visible_item_count"], 1)
+        self.assertEqual(metadata["counts"]["visible_item_count"], 1)
+        self.assertEqual(metadata["counts"]["total_item_count"], 3)
         self.assertEqual(
             metadata["compaction"]["summary"],
             "latest compacted summary",
@@ -307,13 +350,11 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="assistant",
             text="archive this active message",
         )
-        self.session_service.archive_messages(
-            ArchiveSessionMessagesInput(
-                session_key=session.id,
-                session_id=active_session_id,
-                max_sequence_no=1,
-                reason="compacted",
-            ),
+        self._archive_items(
+            session_key=session.id,
+            session_id=active_session_id,
+            max_sequence_no=1,
+            reason="compacted",
         )
         self._append_text(
             session_key=session.id,
@@ -326,8 +367,13 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             session_id=active_session_id,
             role="tool",
             text="active internal tool",
-            kind=SessionMessageKind.TOOL_RESULT,
-            visibility=SessionMessageVisibility.INTERNAL,
+            kind=SessionItemKind.TOOL_RESULT,
+            visibility=SessionItemVisibility(
+                model_visible=False,
+                user_visible=False,
+                chat_visible=False,
+                trace_visible=True,
+            ),
             source_kind="tool_run",
             source_id="run-2",
         )
@@ -351,8 +397,8 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(metadata["active_session_id"], active_session_id)
         self.assertEqual(metadata["available_count"], 1)
         self.assertEqual(metadata["returned_count"], 1)
-        self.assertEqual(len(metadata["messages"]), 1)
-        self.assertEqual(metadata["messages"][0]["session_id"], active_session_id)
+        self.assertEqual(len(metadata["items"]), 1)
+        self.assertEqual(metadata["items"][0]["session_id"], active_session_id)
         rendered = tool_run.result.blocks[0]["text"]
         self.assertIn("active visible message", rendered)
         self.assertNotIn("old instance context", rendered)
@@ -379,13 +425,11 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
             role="assistant",
             text="older archived message",
         )
-        self.session_service.archive_messages(
-            ArchiveSessionMessagesInput(
-                session_key=session.id,
-                session_id=old_session_id,
-                max_sequence_no=2,
-                reason="compacted",
-            ),
+        self._archive_items(
+            session_key=session.id,
+            session_id=old_session_id,
+            max_sequence_no=2,
+            reason="compacted",
         )
         self.session_service.reset_session(
             ResetSessionInput(
@@ -426,7 +470,7 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(metadata["available_count"], 2)
         self.assertEqual(metadata["returned_count"], 2)
         self.assertEqual(
-            [item["session_id"] for item in metadata["messages"]],
+            [item["session_id"] for item in metadata["items"]],
             [old_session_id, old_session_id],
         )
         rendered = tool_run.result.blocks[0]["text"]
@@ -502,10 +546,11 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        messages = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=target.id,
-                include_archived=True,
+                active_session_only=False,
+                chat_visible=True,
             ),
         )
         self.assertEqual(len(messages), 2)
@@ -596,10 +641,11 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertIsNotNone(processed)
         assert processed is not None
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        messages = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=child_session.id,
-                include_archived=True,
+                active_session_only=False,
+                chat_visible=True,
             ),
         )
         self.assertEqual(len(messages), 2)
@@ -865,10 +911,11 @@ class SessionsToolHttpTestCase(ToolTestCaseBase):
         self.assertEqual(requester_followup.session_key, requester.id)
         self.assertEqual(requester_followup.metadata["prompt_mode"], "recovery_resume")
 
-        requester_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        requester_messages = self.session_service.list_items(
+            ListSessionItemsInput(
                 session_key=requester.id,
-                include_archived=True,
+                active_session_only=False,
+                chat_visible=True,
             ),
         )
         self.assertEqual([item.role for item in requester_messages], ["user", "assistant"])

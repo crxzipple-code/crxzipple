@@ -91,6 +91,9 @@ class LlmInvocationDetailModel:
     error: str
     resolver: OperationsKeyValueSectionModel
     error_facts: OperationsKeyValueSectionModel
+    policy_trace: OperationsTableSectionModel
+    response_items: OperationsTableSectionModel
+    response_events: OperationsTableSectionModel
     events: OperationsTableSectionModel
 
 
@@ -316,6 +319,10 @@ class LlmOperationsReadModelProvider:
         detail_invocations = _dedupe_invocations(
             (*visible_invocations, *active_invocations, *failed_invocations[:20]),
         )
+        response_events_by_invocation = _response_events_by_invocation(
+            self.llm_service,
+            detail_invocations,
+        )
 
         return LlmOperationsPage(
             module="llm",
@@ -465,6 +472,7 @@ class LlmOperationsReadModelProvider:
                 run_contexts=run_contexts,
                 resolver_events_by_run_id=resolver_events_by_run_id,
                 observed_events=observed_events,
+                response_events_by_invocation=response_events_by_invocation,
             ),
         )
 
@@ -1073,9 +1081,9 @@ def _recent_invocations_section(
                         invocation,
                         "estimated_provider_prompt_tokens",
                     ),
-                    "direct_messages": _metadata_int_label(
+                    "direct_items": _metadata_int_label(
                         invocation,
-                        "direct_transcript_session_message_count",
+                        "direct_session_item_count",
                     ),
                     "direct_tokens": _metadata_int_label(
                         invocation,
@@ -1084,7 +1092,11 @@ def _recent_invocations_section(
                     "tool_protocol": str(_direct_tool_protocol_count(invocation)),
                     "response_text": _response_text_label(invocation),
                     "tool_calls": _result_tool_calls_label(invocation),
-                    "progress": run_context.get("assistant_progress_message_count", "-"),
+                    "response_items": _response_item_count_label(invocation),
+                    "response_events": "-",
+                    "continuation": _continuation_reason_label(invocation),
+                    "end_turn": _end_turn_label(invocation),
+                    "progress": run_context.get("assistant_progress_item_count", "-"),
                     "finish_reason": (
                         invocation.result.finish_reason
                         if invocation.result is not None
@@ -1117,11 +1129,15 @@ def _recent_invocations_section(
             ("streaming", "Streaming"),
             ("tokens", "Tokens"),
             ("provider_prompt_tokens", "Provider Prompt"),
-            ("direct_messages", "Direct Msgs"),
+            ("direct_items", "Direct Items"),
             ("direct_tokens", "Direct Tokens"),
             ("tool_protocol", "Tool Protocol"),
             ("response_text", "Text"),
             ("tool_calls", "Tool Calls"),
+            ("response_items", "Items"),
+            ("response_events", "Events"),
+            ("continuation", "Continuation"),
+            ("end_turn", "End Turn"),
             ("progress", "Progress"),
             ("finish_reason", "Finish Reason"),
             ("error_code", "Error Code"),
@@ -1652,12 +1668,14 @@ def _invocation_details(
     run_contexts: dict[str, dict[str, str]],
     resolver_events_by_run_id: dict[str, OperationsObservedEvent],
     observed_events: tuple[OperationsObservedEvent, ...],
+    response_events_by_invocation: dict[str, tuple[Any, ...]],
 ) -> tuple[LlmInvocationDetailModel, ...]:
     streaming_ids = _streaming_invocation_ids(observed_events)
     details: list[LlmInvocationDetailModel] = []
     for invocation in invocations:
         profile = profiles_by_id.get(invocation.llm_id)
         events = events_by_invocation.get(invocation.id, ())
+        response_events = response_events_by_invocation.get(invocation.id, ())
         run_context = run_contexts.get(invocation.id, {})
         resolver_event = resolver_events_by_run_id.get(run_context.get("run_id", ""))
         error_code = invocation.error.code if invocation.error is not None else "-"
@@ -1685,13 +1703,17 @@ def _invocation_details(
                     OperationsKeyValueItemModel("Tokens", str(_invocation_token_total(invocation))),
                     OperationsKeyValueItemModel("Response Text", _response_text_label(invocation)),
                     OperationsKeyValueItemModel("Tool Calls", _result_tool_calls_label(invocation)),
+                    OperationsKeyValueItemModel("Response Items", _response_item_count_label(invocation)),
+                    OperationsKeyValueItemModel("Response Events", _response_event_count_label(response_events)),
+                    OperationsKeyValueItemModel("Continuation", _continuation_reason_label(invocation)),
+                    OperationsKeyValueItemModel("End Turn", _end_turn_label(invocation)),
                     OperationsKeyValueItemModel(
-                        "Assistant Progress Messages",
-                        run_context.get("assistant_progress_message_count", "-"),
+                        "Assistant Progress Items",
+                        run_context.get("assistant_progress_item_count", "-"),
                     ),
                     OperationsKeyValueItemModel(
                         "Assistant Progress IDs",
-                        run_context.get("assistant_progress_message_ids", "-"),
+                        run_context.get("assistant_progress_item_ids", "-"),
                     ),
                 ),
                 request_context=(
@@ -1715,10 +1737,10 @@ def _invocation_details(
                         ),
                     ),
                     OperationsKeyValueItemModel(
-                        "Direct Transcript Messages",
+                        "Direct Transcript Items",
                         _metadata_int_label(
                             invocation,
-                            "direct_transcript_session_message_count",
+                            "direct_session_item_count",
                         ),
                     ),
                     OperationsKeyValueItemModel(
@@ -1786,10 +1808,135 @@ def _invocation_details(
                         ),
                     ),
                 ),
+                policy_trace=_policy_trace_table_for_invocation(invocation),
+                response_items=_response_items_table_for_invocation(invocation),
+                response_events=_response_events_table_for_invocation(
+                    invocation.id,
+                    response_events,
+                ),
                 events=_events_table_for_invocation(invocation.id, events),
             ),
         )
     return tuple(details)
+
+
+def _response_items_table_for_invocation(
+    invocation: LlmInvocation,
+) -> OperationsTableSectionModel:
+    response_items = tuple(getattr(invocation, "response_items", ()) or ())
+    rows = tuple(
+        OperationsTableRowModel(
+            id=str(getattr(item, "id", f"{invocation.id}:response_item:{index}")),
+            cells={
+                "sequence": str(getattr(item, "sequence_no", index)),
+                "kind": _enum_value(getattr(item, "kind", None)),
+                "phase": _enum_value(getattr(item, "phase", None)),
+                "provider_type": str(getattr(item, "provider_item_type", None) or "-"),
+                "tool": str(getattr(item, "tool_name", None) or "-"),
+                "call_id": str(getattr(item, "call_id", None) or "-"),
+                "model_visible": "Yes" if bool(getattr(item, "model_visible", False)) else "No",
+                "user_visible": "Yes" if bool(getattr(item, "user_visible", False)) else "No",
+                "content": _json_preview(getattr(item, "content_payload", {}) or {}),
+            },
+            status=_enum_value(getattr(item, "kind", None)),
+            tone=_response_item_tone(_enum_value(getattr(item, "kind", None))),
+        )
+        for index, item in enumerate(response_items[:40], start=1)
+    )
+    return OperationsTableSectionModel(
+        id=f"{invocation.id}_response_items",
+        title="Response Items",
+        columns=_columns(
+            ("sequence", "Seq"),
+            ("kind", "Kind"),
+            ("phase", "Phase"),
+            ("provider_type", "Provider Type"),
+            ("tool", "Tool"),
+            ("call_id", "Call ID"),
+            ("model_visible", "Model Visible"),
+            ("user_visible", "User Visible"),
+            ("content", "Content"),
+        ),
+        rows=rows,
+        total=len(response_items),
+        empty_state="No response items recorded.",
+    )
+
+
+def _policy_trace_table_for_invocation(
+    invocation: LlmInvocation,
+) -> OperationsTableSectionModel:
+    policy = _request_metadata(invocation).get("llm_request_policy")
+    trace = policy.get("resolution_trace") if isinstance(policy, dict) else None
+    rows = tuple(
+        OperationsTableRowModel(
+            id=f"{invocation.id}:policy_trace:{index}",
+            cells={
+                "field": _text(item.get("field")) or "-",
+                "source": _text(item.get("source")) or "-",
+                "status": _text(item.get("status")) or "-",
+                "value": _json_preview(item.get("value")),
+                "reason": _text(item.get("reason")) or "-",
+            },
+            status=_text(item.get("status")) or "-",
+            tone=(
+                "warning"
+                if _text(item.get("status")) == "downgraded"
+                else "neutral"
+            ),
+        )
+        for index, item in enumerate(trace or (), start=1)
+        if isinstance(item, dict)
+    )
+    return OperationsTableSectionModel(
+        id=f"{invocation.id}_policy_trace",
+        title="Policy Resolution Trace",
+        columns=_columns(
+            ("field", "Field"),
+            ("source", "Source"),
+            ("status", "Status"),
+            ("value", "Value"),
+            ("reason", "Reason"),
+        ),
+        rows=rows,
+        total=len(rows),
+        empty_state="No policy resolution trace recorded.",
+    )
+
+
+def _response_events_table_for_invocation(
+    invocation_id: str,
+    response_events: tuple[Any, ...],
+) -> OperationsTableSectionModel:
+    rows = tuple(
+        OperationsTableRowModel(
+            id=str(getattr(event, "id", f"{invocation_id}:response_event:{index}")),
+            cells={
+                "sequence": str(getattr(event, "sequence_no", index)),
+                "type": _enum_value(getattr(event, "type", None)),
+                "item_id": str(getattr(event, "item_id", None) or "-"),
+                "provider_event": _provider_event_type(event),
+                "delta": _json_preview(getattr(event, "delta_payload", {}) or {}),
+            },
+            status=_enum_value(getattr(event, "type", None)),
+            tone=_response_event_tone(_enum_value(getattr(event, "type", None))),
+        )
+        for index, event in enumerate(response_events[:80], start=1)
+    )
+    return OperationsTableSectionModel(
+        id=f"{invocation_id}_response_events",
+        title="Response Events",
+        columns=_columns(
+            ("sequence", "Seq"),
+            ("type", "Type"),
+            ("item_id", "Item ID"),
+            ("provider_event", "Provider Event"),
+            ("delta", "Delta"),
+        ),
+        rows=rows,
+        total=len(response_events),
+        empty_state="No response events recorded.",
+    )
 
 
 def _events_table_for_invocation(
@@ -2212,6 +2359,23 @@ def _events_by_invocation(
     }
 
 
+def _response_events_by_invocation(
+    llm_service: OperationsLlmQueryPort,
+    invocations: tuple[LlmInvocation, ...],
+) -> dict[str, tuple[Any, ...]]:
+    list_response_events = getattr(llm_service, "list_response_events", None)
+    if not callable(list_response_events):
+        return {}
+    grouped: dict[str, tuple[Any, ...]] = {}
+    for invocation in invocations:
+        try:
+            events = list_response_events(invocation.id, limit=100)
+        except Exception:
+            events = []
+        grouped[invocation.id] = tuple(events)
+    return grouped
+
+
 def _runtime_snapshot(runtime_metrics: Any | None) -> dict[str, object]:
     if runtime_metrics is None or not hasattr(runtime_metrics, "snapshot"):
         return {"counters": [], "gauges": [], "timings": []}
@@ -2501,11 +2665,11 @@ def _execution_owner_context(
 def _llm_execution_summary_context(summary_payload: Any) -> dict[str, str]:
     if not isinstance(summary_payload, dict):
         return {}
-    progress_ids = _text_list(summary_payload.get("assistant_progress_message_ids"))
+    progress_ids = _text_list(summary_payload.get("assistant_progress_item_ids"))
     result: dict[str, str] = {}
     if progress_ids:
-        result["assistant_progress_message_ids"] = ", ".join(progress_ids)
-        result["assistant_progress_message_count"] = str(len(progress_ids))
+        result["assistant_progress_item_ids"] = ", ".join(progress_ids)
+        result["assistant_progress_item_count"] = str(len(progress_ids))
     progress_text = _text(summary_payload.get("assistant_progress_text"))
     if progress_text is not None:
         result["assistant_progress_text"] = _truncate(progress_text, 160)
@@ -2708,6 +2872,33 @@ def _result_tool_calls_label(invocation: LlmInvocation) -> str:
     return "-"
 
 
+def _response_item_count_label(invocation: LlmInvocation) -> str:
+    response_items = getattr(invocation, "response_items", None)
+    if isinstance(response_items, (list, tuple)) and response_items:
+        return str(len(response_items))
+    return "-"
+
+
+def _response_event_count_label(response_events: tuple[Any, ...]) -> str:
+    return str(len(response_events)) if response_events else "-"
+
+
+def _continuation_reason_label(invocation: LlmInvocation) -> str:
+    continuation = getattr(invocation, "continuation", None)
+    reason = getattr(continuation, "reason", None)
+    return _enum_value(reason) if reason is not None else "-"
+
+
+def _end_turn_label(invocation: LlmInvocation) -> str:
+    continuation = getattr(invocation, "continuation", None)
+    end_turn = getattr(continuation, "end_turn", None)
+    if end_turn is True:
+        return "Yes"
+    if end_turn is False:
+        return "No"
+    return "-"
+
+
 def _direct_transcript_sequence_label(invocation: LlmInvocation) -> str:
     sequence_range = _request_metadata(invocation).get("direct_transcript_sequence_range")
     if not isinstance(sequence_range, dict):
@@ -2722,8 +2913,8 @@ def _direct_transcript_sequence_label(invocation: LlmInvocation) -> str:
         session_id = _text(item.get("session_id")) or "session"
         from_sequence = _text(item.get("from_sequence_no")) or "?"
         to_sequence = _text(item.get("to_sequence_no")) or "?"
-        message_count = _text(item.get("message_count")) or "?"
-        labels.append(f"{session_id}:{from_sequence}-{to_sequence} ({message_count})")
+        item_count = _text(item.get("item_count")) or "?"
+        labels.append(f"{session_id}:{from_sequence}-{to_sequence} ({item_count})")
     if not labels:
         return "-"
     if len(sessions) > 3:
@@ -2881,6 +3072,48 @@ def _event_tone(event: OperationsObservedEvent) -> str:
     if event.status in {"running", "started"}:
         return "info"
     return "neutral"
+
+
+def _response_item_tone(kind: str) -> str:
+    if kind == "tool_call":
+        return "info"
+    if kind == "provider_external_item":
+        return "warning"
+    if kind == "assistant_message":
+        return "success"
+    return "neutral"
+
+
+def _response_event_tone(event_type: str) -> str:
+    if event_type == "failed":
+        return "danger"
+    if event_type in {"tool_argument_delta", "item_started", "item_completed"}:
+        return "info"
+    if event_type == "completed":
+        return "success"
+    return "neutral"
+
+
+def _enum_value(value: Any) -> str:
+    raw_value = getattr(value, "value", value)
+    text = str(raw_value or "").strip()
+    return text or "-"
+
+
+def _provider_event_type(event: Any) -> str:
+    provider_payload = getattr(event, "provider_payload", None)
+    if isinstance(provider_payload, dict):
+        event_type = provider_payload.get("type") or provider_payload.get(
+            "provider_event_type",
+        )
+        if event_type is not None:
+            return str(event_type)
+    delta_payload = getattr(event, "delta_payload", None)
+    if isinstance(delta_payload, dict):
+        event_type = delta_payload.get("provider_event_type")
+        if event_type is not None:
+            return str(event_type)
+    return "-"
 
 
 def _chart_tone(index: int) -> str:

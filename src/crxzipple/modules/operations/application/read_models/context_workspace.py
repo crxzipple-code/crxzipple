@@ -404,9 +404,9 @@ def _snapshot_rows(
     rows: list[dict[str, str]] = []
     for snapshot in filtered[:limit]:
         metadata = _metadata(getattr(snapshot, "metadata", None))
-        session_message_refs = _metadata_list(
+        session_item_refs = _metadata_list(
             metadata,
-            "session_message_node_refs",
+            "session_item_node_refs",
         )
         rows.append(
             {
@@ -418,8 +418,8 @@ def _snapshot_rows(
                 "provider_messages": str(
                     _metadata_int(metadata, "direct_transcript_message_count"),
                 ),
-                "tree_messages": str(
-                    _metadata_int(metadata, "tree_session_message_count"),
+                "tree_items": str(
+                    _metadata_int(metadata, "tree_session_item_count"),
                 ),
                 "tool_interactions": str(
                     _metadata_int(metadata, "tree_tool_interaction_count"),
@@ -454,7 +454,7 @@ def _snapshot_rows(
                 "range_limited": str(
                     _metadata_int(metadata, "session_range_limited_count"),
                 ),
-                "session_refs": str(len(session_message_refs)),
+                "session_refs": str(len(session_item_refs)),
                 "current_node": _short_text(
                     _text(metadata.get("current_inbound_node_id")),
                 ),

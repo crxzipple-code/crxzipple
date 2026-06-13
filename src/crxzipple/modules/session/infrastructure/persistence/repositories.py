@@ -10,17 +10,18 @@ from crxzipple.modules.session.domain.entities import (
     SessionInstance as DomainSessionInstance,
 )
 from crxzipple.modules.session.domain.value_objects import (
+    SessionItem,
+    SessionItemKind,
+    SessionItemPhase,
+    SessionItemVisibility,
     SessionKind,
-    SessionMessage,
-    SessionMessageKind,
-    SessionMessageVisibility,
     SessionOrigin,
     SessionReply,
     SessionRuntimeBinding,
 )
 from crxzipple.modules.session.infrastructure.persistence.models import (
+    SessionItemModel,
     SessionInstanceModel,
-    SessionMessageModel,
     SessionModel,
 )
 from crxzipple.shared.time import (
@@ -128,31 +129,26 @@ class SqlAlchemySessionRepository:
         )
 
 
-class SqlAlchemySessionMessageRepository:
+class SqlAlchemySessionItemRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def add(self, message: SessionMessage) -> None:
-        self.session.merge(
-            self._to_model(message),
-        )
+    def add(self, item: SessionItem) -> None:
+        self.session.merge(self._to_model(item))
 
-    def add_new(self, message: SessionMessage) -> None:
-        self.session.add(self._to_model(message))
-
-    def add_many_new(self, messages: tuple[SessionMessage, ...]) -> None:
-        if not messages:
+    def add_many_new(self, items: tuple[SessionItem, ...]) -> None:
+        if not items:
             return
-        if len(messages) == 1:
-            self.add_new(messages[0])
+        if len(items) == 1:
+            self.session.add(self._to_model(items[0]))
             return
         self.session.bulk_insert_mappings(
-            SessionMessageModel,
-            [self._to_mapping(message) for message in messages],
+            SessionItemModel,
+            [self._to_mapping(item) for item in items],
         )
 
-    def get(self, message_id: str) -> SessionMessage | None:
-        model = self.session.get(SessionMessageModel, message_id)
+    def get(self, item_id: str) -> SessionItem | None:
+        model = self.session.get(SessionItemModel, item_id)
         if model is None:
             return None
         return self._to_entity(model)
@@ -162,23 +158,24 @@ class SqlAlchemySessionMessageRepository:
         *,
         session_key: str,
         session_id: str,
+        source_module: str,
         source_kind: str,
         source_id: str,
-    ) -> SessionMessage | None:
+    ) -> SessionItem | None:
         model = self.session.scalar(
-            select(SessionMessageModel)
+            select(SessionItemModel)
             .where(
-                SessionMessageModel.session_key == session_key,
-                SessionMessageModel.session_id == session_id,
-                SessionMessageModel.source_kind == source_kind,
-                SessionMessageModel.source_id == source_id,
+                SessionItemModel.session_key == session_key,
+                SessionItemModel.session_id == session_id,
+                SessionItemModel.source_module == source_module,
+                SessionItemModel.source_kind == source_kind,
+                SessionItemModel.source_id == source_id,
             )
             .order_by(
-                SessionMessageModel.created_at.desc(),
-                SessionMessageModel.sequence_no.desc(),
-                SessionMessageModel.id.desc(),
+                SessionItemModel.created_at.asc(),
+                SessionItemModel.sequence_no.asc(),
+                SessionItemModel.id.asc(),
             )
-            .limit(1),
         )
         if model is None:
             return None
@@ -186,9 +183,9 @@ class SqlAlchemySessionMessageRepository:
 
     def max_sequence_no(self, *, session_key: str, session_id: str) -> int:
         value = self.session.scalar(
-            select(func.max(SessionMessageModel.sequence_no)).where(
-                SessionMessageModel.session_key == session_key,
-                SessionMessageModel.session_id == session_id,
+            select(func.max(SessionItemModel.sequence_no)).where(
+                SessionItemModel.session_key == session_key,
+                SessionItemModel.session_id == session_id,
             ),
         )
         return int(value or 0)
@@ -199,78 +196,98 @@ class SqlAlchemySessionMessageRepository:
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
-        include_archived: bool = True,
+        model_visible: bool | None = None,
+        user_visible: bool | None = None,
+        chat_visible: bool | None = None,
+        trace_visible: bool | None = None,
         after_sequence_no: int | None = None,
         before_sequence_no: int | None = None,
-    ) -> list[SessionMessage]:
-        statement = select(SessionMessageModel).where(
-            SessionMessageModel.session_key == session_key,
+    ) -> list[SessionItem]:
+        statement = select(SessionItemModel).where(
+            SessionItemModel.session_key == session_key,
         )
         if session_id is not None:
-            statement = statement.where(SessionMessageModel.session_id == session_id)
+            statement = statement.where(SessionItemModel.session_id == session_id)
         if after_sequence_no is not None and after_sequence_no > 0:
-            statement = statement.where(
-                SessionMessageModel.sequence_no > after_sequence_no,
-            )
+            statement = statement.where(SessionItemModel.sequence_no > after_sequence_no)
         if before_sequence_no is not None and before_sequence_no > 0:
-            statement = statement.where(
-                SessionMessageModel.sequence_no < before_sequence_no,
-            )
-        if not include_archived:
-            statement = statement.where(
-                SessionMessageModel.visibility != SessionMessageVisibility.ARCHIVED.value,
-            )
+            statement = statement.where(SessionItemModel.sequence_no < before_sequence_no)
+        if model_visible is not None:
+            statement = statement.where(SessionItemModel.model_visible.is_(model_visible))
+        if user_visible is not None:
+            statement = statement.where(SessionItemModel.user_visible.is_(user_visible))
+        if chat_visible is not None:
+            statement = statement.where(SessionItemModel.chat_visible.is_(chat_visible))
+        if trace_visible is not None:
+            statement = statement.where(SessionItemModel.trace_visible.is_(trace_visible))
         statement = statement.order_by(
-            SessionMessageModel.created_at.desc(),
-            SessionMessageModel.sequence_no.desc(),
-            SessionMessageModel.id.desc(),
+            SessionItemModel.created_at.desc(),
+            SessionItemModel.sequence_no.desc(),
+            SessionItemModel.id.desc(),
         )
         if limit is not None and limit > 0:
             statement = statement.limit(limit)
         models = self.session.scalars(statement).all()
-        messages = [self._to_entity(model) for model in reversed(models)]
-        return messages
+        return [self._to_entity(model) for model in reversed(models)]
 
     @staticmethod
-    def _to_model(message: SessionMessage) -> SessionMessageModel:
-        return SessionMessageModel(
-            **SqlAlchemySessionMessageRepository._to_mapping(message),
-        )
+    def _to_model(item: SessionItem) -> SessionItemModel:
+        return SessionItemModel(**SqlAlchemySessionItemRepository._to_mapping(item))
 
     @staticmethod
-    def _to_mapping(message: SessionMessage) -> dict[str, object]:
+    def _to_mapping(item: SessionItem) -> dict[str, object]:
         return {
-            "id": message.id,
-            "session_key": message.session_key,
-            "session_id": message.session_id,
-            "sequence_no": message.sequence_no,
-            "role": message.role,
-            "kind": message.kind.value,
-            "content_payload": dict(message.content_payload),
-            "source_kind": message.source_kind,
-            "source_id": message.source_id,
-            "visibility": message.visibility.value,
-            "metadata_payload": dict(message.metadata),
-            "created_at": message.created_at,
+            "id": item.id,
+            "session_key": item.session_key,
+            "session_id": item.session_id,
+            "sequence_no": item.sequence_no,
+            "kind": item.kind.value,
+            "role": item.role,
+            "phase": item.phase.value,
+            "content_payload": dict(item.content_payload),
+            "model_visible": item.visibility.model_visible,
+            "user_visible": item.visibility.user_visible,
+            "chat_visible": item.visibility.chat_visible,
+            "trace_visible": item.visibility.trace_visible,
+            "source_module": item.source_module,
+            "source_kind": item.source_kind,
+            "source_id": item.source_id,
+            "provider_item_id": item.provider_item_id,
+            "provider_item_type": item.provider_item_type,
+            "call_id": item.call_id,
+            "tool_name": item.tool_name,
+            "metadata_payload": dict(item.metadata),
+            "created_at": item.created_at,
         }
 
     @staticmethod
-    def _to_entity(model: SessionMessageModel) -> SessionMessage:
-        return SessionMessage(
+    def _to_entity(model: SessionItemModel) -> SessionItem:
+        return SessionItem(
             id=model.id,
             session_key=model.session_key,
             session_id=model.session_id,
             sequence_no=model.sequence_no,
+            kind=SessionItemKind(model.kind),
             role=model.role,
-            kind=SessionMessageKind(model.kind),
+            phase=SessionItemPhase(model.phase),
             content_payload=(
                 dict(model.content_payload)
                 if isinstance(model.content_payload, dict)
                 else {}
             ),
+            visibility=SessionItemVisibility(
+                model_visible=bool(model.model_visible),
+                user_visible=bool(model.user_visible),
+                chat_visible=bool(model.chat_visible),
+                trace_visible=bool(model.trace_visible),
+            ),
+            source_module=model.source_module,
             source_kind=model.source_kind,
             source_id=model.source_id,
-            visibility=SessionMessageVisibility(model.visibility),
+            provider_item_id=model.provider_item_id,
+            provider_item_type=model.provider_item_type,
+            call_id=model.call_id,
+            tool_name=model.tool_name,
             metadata=(
                 dict(model.metadata_payload)
                 if isinstance(model.metadata_payload, dict)

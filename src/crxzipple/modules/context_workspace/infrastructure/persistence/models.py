@@ -132,6 +132,21 @@ class ContextRenderSnapshotModel(Base):
     estimate: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
     included_node_ids: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
     mirrored_node_ids: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    included_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    collapsed_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
+    protocol_required_refs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=list,
+    )
     metadata_: Mapped[dict[str, object]] = mapped_column(
         "metadata",
         JSON(),

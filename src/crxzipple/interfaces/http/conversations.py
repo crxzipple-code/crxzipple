@@ -12,12 +12,12 @@ from crxzipple.interfaces.http.dependencies import get_container
 from crxzipple.modules.orchestration.application.ports import OrchestrationRunQueryPort
 from crxzipple.modules.orchestration.interfaces.dto import OrchestrationRunDTO
 from crxzipple.modules.orchestration.interfaces.http_models import OrchestrationRunResponse
-from crxzipple.modules.session.application import ListSessionMessagesInput
+from crxzipple.modules.session.application import ListSessionItemsInput
 from crxzipple.modules.session.domain import SessionNotFoundError
-from crxzipple.modules.session.interfaces.dto import SessionMessageDTO
-from crxzipple.shared.content_blocks import extract_text_content
+from crxzipple.modules.session.interfaces.dto import SessionItemDTO
+from crxzipple.shared.content_blocks import content_blocks_from_payload, extract_text_content
 from crxzipple.modules.session.interfaces.http_models import (
-    SessionMessageResponse,
+    SessionItemResponse,
     SessionRuntimeBindingPayload,
 )
 from crxzipple.shared.time import format_datetime_utc
@@ -226,39 +226,27 @@ def _display_run_by_session_key(run_query: OrchestrationRunQueryPort) -> dict[st
 
 def _last_message_preview(container: AppContainer, *, session_key: str) -> str | None:
     try:
-        items = container.require(AppKey.SESSION_SERVICE).list_messages(
-            ListSessionMessagesInput(
+        items = container.require(AppKey.SESSION_SERVICE).list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
-                include_archived=False,
+                chat_visible=True,
             ),
         )
     except SessionNotFoundError:
         return None
     for item in reversed(items):
-        preview = _message_preview_text(SessionMessageDTO.from_entity(item))
-        if preview is not None:
-            return preview
-    try:
-        all_items = container.require(AppKey.SESSION_SERVICE).list_messages(
-            ListSessionMessagesInput(
-                session_key=session_key,
-                include_archived=True,
-            ),
-        )
-    except SessionNotFoundError:
-        return None
-    for item in reversed(all_items):
-        preview = _message_preview_text(SessionMessageDTO.from_entity(item))
+        preview = _item_preview_text(SessionItemDTO.from_entity(item))
         if preview is not None:
             return preview
     return None
 
 
-def _message_preview_text(message: SessionMessageDTO) -> str | None:
-    maintenance_kind = message.metadata.get("maintenance_kind")
+def _item_preview_text(item: SessionItemDTO) -> str | None:
+    maintenance_kind = item.metadata.get("maintenance_kind")
     if isinstance(maintenance_kind, str) and maintenance_kind.strip():
         return None
-    text_content = extract_text_content(message.content_payload)
+    blocks = content_blocks_from_payload(item.content_payload)
+    text_content = extract_text_content(blocks if blocks else item.content_payload)
     if text_content is not None and text_content.strip():
         return _normalize_preview_text(text_content)
     return None
@@ -275,10 +263,10 @@ def _conversation_title(container: AppContainer, *, session_key: str) -> str | N
         if normalized_metadata_title is not None:
             return _truncate_title(normalized_metadata_title)
     try:
-        items = container.require(AppKey.SESSION_SERVICE).list_messages(
-            ListSessionMessagesInput(
+        items = container.require(AppKey.SESSION_SERVICE).list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
-                include_archived=True,
+                chat_visible=True,
             ),
         )
     except SessionNotFoundError:
@@ -287,7 +275,7 @@ def _conversation_title(container: AppContainer, *, session_key: str) -> str | N
     for item in items:
         if item.role != "user":
             continue
-        text = _message_preview_text(SessionMessageDTO.from_entity(item))
+        text = _item_preview_text(SessionItemDTO.from_entity(item))
         if text is None:
             continue
         if fallback_title is None:
@@ -420,7 +408,8 @@ def list_conversation_runs(
 
 @router.get(
     "/conversations/{session_key}/messages",
-    response_model=list[SessionMessageResponse],
+    response_model=list[SessionItemResponse],
+    response_model_exclude_none=True,
 )
 def list_conversation_messages(
     session_key: str,
@@ -430,18 +419,26 @@ def list_conversation_messages(
     include_archived: Annotated[bool, Query()] = False,
     after_sequence_no: Annotated[int | None, Query(ge=0)] = None,
     before_sequence_no: Annotated[int | None, Query(ge=1)] = None,
-) -> list[SessionMessageResponse]:
+) -> list[SessionItemResponse]:
     try:
-        items = container.require(AppKey.SESSION_SERVICE).list_messages(
-            ListSessionMessagesInput(
+        items = container.require(AppKey.SESSION_SERVICE).list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
                 limit=limit,
                 active_session_only=active_session_only,
-                include_archived=include_archived,
+                chat_visible=True if not include_archived else None,
                 after_sequence_no=after_sequence_no,
                 before_sequence_no=before_sequence_no,
             ),
         )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
-    return [SessionMessageResponse.from_dto(SessionMessageDTO.from_entity(item)) for item in items]
+    if include_archived:
+        items = tuple(item for item in items if item.visibility.chat_visible)
+    else:
+        items = tuple(item for item in items if not _session_item_is_archived(item))
+    return [SessionItemResponse.from_dto(SessionItemDTO.from_entity(item)) for item in items]
+
+
+def _session_item_is_archived(item) -> bool:  # noqa: ANN001
+    return bool(item.metadata.get("archived_by_compaction_run_id"))

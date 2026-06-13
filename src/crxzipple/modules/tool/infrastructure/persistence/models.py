@@ -151,11 +151,31 @@ class ToolProviderBackendModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ToolSurfaceModel(Base):
+    __tablename__ = "tool_surfaces"
+
+    surface_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    policy_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    surface_payload: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
+    estimate_payload: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
+    diagnostics_payload: Mapped[dict[str, object]] = mapped_column(JSON(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ToolRunModel(Base):
     __tablename__ = "tool_runs"
 
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     tool_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    call_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    tool_surface_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
     function_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     function_revision: Mapped[int | None] = mapped_column(Integer(), nullable=True)
     source_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
@@ -172,6 +192,10 @@ class ToolRunModel(Base):
         nullable=True,
     )
     output_payload: Mapped[object | None] = mapped_column(JSON(), nullable=True)
+    result_envelope_payload: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(),
+        nullable=True,
+    )
     error_message: Mapped[str | None] = mapped_column(Text(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

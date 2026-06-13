@@ -18,6 +18,10 @@ class LlmInvocationNotFoundError(LlmError):
     """Raised when the requested llm invocation does not exist."""
 
 
+class LlmResponseItemNotFoundError(LlmError):
+    """Raised when the requested llm response item does not exist."""
+
+
 class LlmInvocationNotAllowedError(LlmError):
     """Raised when an llm profile cannot be invoked in its current state."""
 

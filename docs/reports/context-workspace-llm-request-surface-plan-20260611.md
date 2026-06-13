@@ -279,33 +279,93 @@ Context Workspace 返回 `ContextSurface`。Orchestration 只记录 snapshot id 
 
 ## Checklist
 
+## 当前施工状态
+
+截至 2026-06-11，`ContextSurface` / `ToolSurface` request-side 结构已落地，Context Workspace render snapshot 已成为 Orchestration preview 和真实 invoke 的 structured surface 来源：
+
+- `RunPromptInputCollector` 优先读取 Session module 的 model-visible `SessionItem` replay view。
+- `tool_call` / `tool_result` SessionItem 会被转换为 provider-facing `LlmMessage`。
+- LLM request metadata 已记录 `direct_session_item_refs`、`direct_session_item_frontier`、`direct_transcript_budget` 和对应 `direct_tool_protocol_call_ids`。
+- Context render snapshot 已用一等字段记录 `included_refs`、`collapsed_refs`、`protocol_required_refs`，并在 metadata/provider attachments 保留观察镜像。
+- current inbound user input 已通过 `current_inbound_session_item_id` 进入 render snapshot，并在 provider request metadata 中优先解析为 `current_inbound_ref.item_id`。
+- Prompt transcript 已输出 SessionItem 级 budget/frontier 事实报告，能说明 included/collapsed/protocol_required item refs。
+- Prompt input collector 已从 execution chain tool protocol items 生成 `execution_chain_protocol_required_refs`，并合并进入 render snapshot / ContextSurface 的 `protocol_required_refs`。
+- SessionItem replay 已启用 item-level 字符预算，`tool_call` / `tool_result` / `provider_external_item` 即使超过普通预算也必须保留。
+- Orchestration `ToolSurface.metadata` 已输出 function count、mirrored schema count 和 source/group refs；Context Workspace 继续只提供 tool schema mirror，不反向拥有 ToolSurface。
+- Workbench/Trace 已展示 Context render snapshot 一等 refs 的计数和 protocol refs 预览。
+- 默认 provider replay 和 `memory_flush` provider replay 已不再读取旧 `session_messages`；当前 session 尚无 model-visible SessionItem 时，normal turn 只从当前 inbound instruction 构造最小输入，其余历史必须通过 SessionItem 进入模型。
+- follow-up normal turn 的 direct transcript 已收窄到当前 user item 与当前 turn protocol pair；上一轮 tool_call/tool_result 不再作为 direct protocol message replay，而是通过 Context Tree session history / `tool_interaction` 节点进入模型。
+- maintenance compaction、正常 Orchestration inbound user input、Conversation `/messages`、Workbench progress、prompt input collector 和 agent-facing `tools/sessions` 已从旧 session message 主路径退场。
+- Context Workspace artifact owner adapter 已从 SessionItem 扫描 artifact refs；session owner adapter 的 current segment、current range children、evidence ledger、browser investigation warning、consumed tool history 和 historical range 入口已优先读取 model-visible SessionItem。
+- Session owner adapter 已从 tool_result SessionItem content blocks 提取 artifact content candidates；已渲染的 `tool_interaction` 节点可以通过 provider attachment mirror 把 image/file artifact refs 送入 request artifact block。
+- Session item/item nodes 的 `owner_ref` 已保留 `session_item_id/source_module/source_kind/source_id`，历史 assistant commentary 折叠后仍可追溯来源。
+- `context_workspace_session.py` 已删除旧 `list_messages` fallback；session owner adapter 只通过 `list_items` 读取 Session transcript facts。
+- session owner adapter 已支持新 `SessionItemKind.TOOL_CALL` + `SessionItemKind.TOOL_RESULT` protocol pair 生成 `tool_interaction` 节点。
+- Context Tree agent-facing session surface 已统一为 `session.items.current`、`session.item.*`、`session_item_range`、`session_item` 和 XML `<item role=...>`；render snapshot metadata 已统一为 `tree_session_item_count`、`session_item_node_refs`、`session_item_range_node_count`，Operations snapshot row 已使用 `tree_items`。
+- Prompt preview HTTP/DTO 已一等返回 `context_surface` / `tool_surface`，不再只能通过 `provider_request_options.request_metadata` 反查 structured surface。
+- Evidence/interaction adapter 已停止输出 `call_message_id/result_message_id` owner metadata，read hint 已指向 `/sessions/{key}/items`，XML renderer refs 已改为 `call_session_item_id/result_session_item_id`。
+
 ### Domain
 
-- [ ] 定义 `ContextSurface`。
-- [ ] 定义 `ContextIncludedRef`。
-- [ ] 定义 render mode / budget class。
-- [ ] 标记 `protocol_required` refs。
+- [x] 定义 `ContextSurface`。
+- [x] 定义 included/collapsed/protocol refs payload。
+- [x] 定义 render mode / budget class。
+- [x] 标记 `protocol_required` refs。
 
 ### Persistence
 
-- [ ] 破坏式调整 render snapshot schema。
-- [ ] 保存 included/collapsed/protocol refs。
-- [ ] 保存 provider attachment mirror。
-- [ ] 保存 tool schema mirror。
-- [ ] 保存 diagnostics。
+- [x] `context_render_snapshots` 增加 `included_refs` / `collapsed_refs` / `protocol_required_refs` 一等字段。
+- [x] SQLAlchemy repository roundtrip 保存 snapshot refs。
+- [x] Orchestration Context Snapshot adapter 写入 direct session item refs 和 protocol required refs。
+
+- [x] 破坏式调整 render snapshot schema。
+- [x] 在 render snapshot metadata/provider attachments 中保存 direct SessionItem refs 和 protocol_required refs。
+- [x] 破坏式 schema 字段保存 included/collapsed/protocol refs。
+- [x] 保存 provider attachment mirror。
+- [x] 保存 tool schema mirror。
+- [x] 保存 diagnostics。
 
 ### Application
 
-- [ ] 从 Session model-visible replay 构建 session nodes。
-- [ ] 从 execution chain refs 构建 protocol required nodes。
-- [ ] 从 ToolSurface 构建 tool surface mirror。
-- [ ] 输出 `ContextSurface`。
-- [ ] Prompt preview 展示 structured surface。
+- [x] prompt input builder 从 Session model-visible replay 构建 provider request transcript。
+- [x] 默认 provider replay 不再读取旧 `session_items`。
+- [x] `memory_flush` provider replay 不再读取旧 `session_items`。
+- [x] Prompt transcript 输出 SessionItem 级 budget/frontier 事实报告。
+- [x] SessionItem replay 使用 item-level budget，并保留 protocol-required items。
+- [x] render snapshot / provider request metadata 能回答当前 inbound user input 对应哪个 SessionItem。
+- [x] current segment 入口优先从 Session model-visible replay 构建 session nodes。
+- [x] current range 展开入口优先从 Session model-visible replay 构建 message/item nodes。
+- [x] evidence ledger 和 browser investigation warning 入口优先从 Session model-visible replay 构建 evidence nodes。
+- [x] consumed tool history 入口优先从 Session model-visible replay 构建 tool interaction nodes。
+- [x] historical range/session node 入口优先从 Session model-visible replay 构建 range/item nodes。
+- [x] session owner adapter 删除旧 `list_messages` fallback。
+- [x] artifact session refs 从 SessionItem content blocks 构建 artifact nodes。
+- [x] 从 execution chain refs 构建 protocol required refs，并进入 render snapshot / ContextSurface。
+- [x] 从 ToolSurface 构建 request-side tool surface mirror metadata。
+- [x] 输出 `ContextSurface`。
+- [x] Prompt preview 展示 structured surface。
+- [x] Evidence/interaction adapter 删除 `call_message/result_message` owner metadata，改为 `call_session_item/result_session_item`。
+- [x] Evidence read hints 不再指向旧 `/sessions/{key}/messages`，改为 item surface 或 Operations/Trace source ref。
 
 ### Verification
 
-- [ ] 当前 turn tool_call/tool_result 不被预算折叠。
-- [ ] 历史 assistant commentary 可折叠但 source ref 保留。
-- [ ] render snapshot 能回答本轮模型看到哪些 SessionItem。
-- [ ] tool schema mirror 与 ToolSurface id 对齐。
-- [ ] 清库重建后 context workspace 单测通过。
+- [x] 当前 turn tool_call/tool_result 通过 SessionItem replay 进入下一轮 request。
+- [x] follow-up normal turn 历史 tool_call/tool_result 不再进入 direct transcript。
+- [x] 新 `SessionItemKind.TOOL_CALL` + `SessionItemKind.TOOL_RESULT` protocol pair 可生成 `tool_interaction` 节点。
+- [x] render snapshot 能回答本轮模型直接看到哪些 SessionItem。
+- [x] render snapshot 能回答当前 inbound user input 对应哪个 SessionItem。
+- [x] 当前 turn tool_call/tool_result 在 item-level budget report 中标记为 protocol_required 并确认 preserved。
+- [x] 超预算时 protocol-required SessionItem 仍进入 provider transcript。
+- [x] 历史 assistant commentary 可折叠但 source ref 保留。
+- [x] render snapshot 能区分 included/collapsed/protocol_required 独立字段。
+- [x] Workbench/Trace 能展示 snapshot 一等 refs 摘要和 protocol refs 预览。
+- [x] Context Workspace HTTP 使用 `/sessions/{key}/items` 写入后，session owner tree 能看到 current segment 并展开到具体 item node。
+- [x] Artifact owner adapter 从 SessionItem content blocks 展开 artifact nodes。
+- [x] Context Workspace HTTP 使用 `/sessions/{key}/items` 写入 tool_call/tool_result 后，evidence ledger 和 browser investigation warning 能从 SessionItem 生成。
+- [x] Context Workspace HTTP reset 后的 closed segment historical range 能从 SessionItem 展开。
+- [x] Context Workspace session adapter 单测通过测试 fake 的 SessionItem mirror，不再依赖 adapter 双读。
+- [x] tool schema mirror 与 ToolSurface id 对齐。
+- [x] Evidence/interaction node 的 owner_ref/content/XML refs 不再出现 `result_message_id` / `call_message_id`。
+- [x] 清库重建后 context workspace 单测通过：Context Workspace HTTP/session/artifact/tree/tool/context snapshot 组合共 91 个测试通过。
+- [x] SessionItem context surface 纠偏后补跑 Context Workspace/Prompt 回归 104 passed。
+- [x] 真实 `openai.gpt-5.4-mini` smoke 验证 snapshot prompt body：包含 `session.items.current` / `session.item.*` / `<item role=...>`，不包含旧 `session.messages.current` / `session.message.*` / `<message role=...>`。

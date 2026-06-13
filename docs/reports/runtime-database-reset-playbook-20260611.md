@@ -19,6 +19,18 @@
 
 ## 推荐流程
 
+执行破坏式清库前，可以先用临时 SQLite 空库做 migration smoke，确认当前 Alembic 链可从 base 升到 head：
+
+```bash
+tmp_db="$(mktemp /tmp/crxzipple-migration-smoke-XXXXXX.db)"
+rm -f "$tmp_db"
+APP_DATABASE_URL="sqlite:///$tmp_db" PYTHONPATH=src python -m crxzipple.main db upgrade head
+APP_DATABASE_URL="sqlite:///$tmp_db" PYTHONPATH=src python -m crxzipple.main db current
+rm -f "$tmp_db"
+```
+
+该 smoke 不替代 Docker Postgres reset，只用于施工中快速确认 schema 链没有断。
+
 ```bash
 make dev-down
 docker compose down -v
@@ -44,10 +56,13 @@ rm -rf .crxzipple/runtime
 reset 后检查：
 
 ```bash
+python -m crxzipple.main db current
 python -m crxzipple.main daemon status
 python -m crxzipple.main tool list
-python -m crxzipple.main llm profiles
+python -m crxzipple.main llm list
 ```
+
+运行真实 agent baseline 前，`db current` 必须等于当前 Alembic head。若常驻 Postgres 落后于工作区 head，不要直接用旧库跑长链任务；先按本 playbook 清库重建或明确执行 upgrade。
 
 如 Settings bootstrap 已经接入，应执行 settings import / validate。
 

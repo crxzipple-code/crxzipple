@@ -15,13 +15,12 @@ from crxzipple.modules.orchestration.application.execution_chain_lifecycle impor
     materialize_approval_execution_step,
     materialize_resume_execution_step,
     materialize_tool_batch_execution_step,
-    materialize_tool_result_message_items,
+    materialize_tool_result_session_item_items,
     prepare_dispatch_execution_step,
     require_current_dispatch_task_id,
 )
 from crxzipple.modules.orchestration.application.ports import (
     OrchestrationDispatchPort,
-    SessionMessageListPort,
 )
 from crxzipple.modules.orchestration.domain import (
     ApprovalDecision,
@@ -40,8 +39,8 @@ from crxzipple.modules.orchestration.domain.exceptions import (
     OrchestrationRunNotFoundError,
     OrchestrationValidationError,
 )
-from crxzipple.modules.session.application import ListSessionMessagesInput
-from crxzipple.modules.session.domain import SessionMessageKind
+from crxzipple.modules.session.application import ListSessionItemsInput
+from crxzipple.modules.session.domain import SessionItemKind
 from crxzipple.modules.tool.domain import ToolError, ToolRun, ToolRunStatus
 from crxzipple.shared.domain.aggregates import AggregateRoot
 from crxzipple.shared.time import format_datetime_utc
@@ -81,12 +80,20 @@ class WaitCoordinatorUnitOfWork(Protocol):
         ...
 
 
+class SessionItemListPort(Protocol):
+    def list_model_visible_items(
+        self,
+        data: ListSessionItemsInput,
+    ) -> list[object]:
+        ...
+
+
 @dataclass(slots=True)
 class RunWaitCoordinator:
     uow_factory: Callable[[], WaitCoordinatorUnitOfWork]
     dispatch_port: OrchestrationDispatchPort
     engine: OrchestrationEngine | None
-    session_service: SessionMessageListPort | None
+    session_service: SessionItemListPort | None
     agent_service: object | None
     get_run: Callable[[str], OrchestrationRun]
     resume_input_factory: Callable[..., "ResumeOrchestrationRunInput"]
@@ -150,6 +157,7 @@ class RunWaitCoordinator:
                 run=run,
                 llm_invocation_id=data.llm_invocation_id,
                 summary_payload=_llm_step_summary(combined_payload),
+                continuation_payload=_continuation_payload(combined_payload),
             )
             materialize_tool_batch_execution_step(
                 uow,
@@ -391,18 +399,18 @@ class RunWaitCoordinator:
             )
         if state != "resolved_allow_pending_replay":
             return run
-        existing_tool_result_message_ids = self._tool_result_message_ids_for_call(
+        existing_tool_result_item_ids = self._tool_result_item_ids_for_call(
             run=run,
             tool_call_id=request.request_id,
         )
-        if existing_tool_result_message_ids:
+        if existing_tool_result_item_ids:
             self._store_recovery_contract(
                 run.id,
                 self._approval_recovery_contract_payload(
                     request=request,
                     state="inline_replayed_pending_resume",
                     decision=decision,
-                    tool_result_message_ids=existing_tool_result_message_ids,
+                    tool_result_item_ids=existing_tool_result_item_ids,
                 ),
             )
             return self._resume_after_approval_resolution(
@@ -466,10 +474,6 @@ class RunWaitCoordinator:
                 run_id=run.id,
                 background_runs=replay_outcome.background_runs,
             )
-        inline_message_ids = tuple(
-            message_id for message_id, _ in replay_outcome.inline_runs
-            if message_id is not None
-        )
         if not replay_outcome.inline_runs and not replay_outcome.background_runs:
             return self._fail_approval_replay_recovery(
                 run_id=run.id,
@@ -482,13 +486,17 @@ class RunWaitCoordinator:
                     "tool_name": request.tool_name or "",
                 },
             )
+        replayed_tool_result_item_ids = self._tool_result_item_ids_for_call(
+            run=self.get_run(run.id),
+            tool_call_id=request.request_id,
+        )
         self._store_recovery_contract(
             run.id,
             self._approval_recovery_contract_payload(
                 request=request,
                 state="inline_replayed_pending_resume",
                 decision=decision,
-                tool_result_message_ids=inline_message_ids,
+                tool_result_item_ids=replayed_tool_result_item_ids,
                 llm_invocation_id=llm_invocation_id,
             ),
         )
@@ -604,14 +612,14 @@ class RunWaitCoordinator:
         )
         if not all(tool_run.is_terminal() for tool_run in pending_tool_runs):
             return run
-        message_ids = self.engine.append_completed_background_tool_results(
+        item_ids = self.engine.append_completed_background_tool_results(
             run,
             tool_runs=pending_tool_runs,
         )
-        self._materialize_tool_result_messages(
+        self._materialize_tool_result_items(
             run=run,
             tool_runs=pending_tool_runs,
-            message_ids=message_ids,
+            item_ids=item_ids,
         )
         resumed = self.resume_after_tool_completion(
             run.id,
@@ -711,24 +719,24 @@ class RunWaitCoordinator:
             uow.commit()
             return run
 
-    def _materialize_tool_result_messages(
+    def _materialize_tool_result_items(
         self,
         *,
         run: OrchestrationRun,
         tool_runs: tuple[ToolRun, ...],
-        message_ids: tuple[str, ...],
+        item_ids: tuple[str, ...],
     ) -> None:
         links = tuple(
-            (tool_run.id, message_id)
-            for tool_run, message_id in zip(tool_runs, message_ids, strict=False)
+            (tool_run.id, item_id)
+            for tool_run, item_id in zip(tool_runs, item_ids, strict=False)
         )
         if not links:
             return
         with self.uow_factory() as uow:
-            materialize_tool_result_message_items(
+            materialize_tool_result_session_item_items(
                 uow,
                 run=run,
-                tool_result_message_links=links,
+                tool_result_item_links=links,
             )
             uow.commit()
 
@@ -766,7 +774,7 @@ class RunWaitCoordinator:
         state: str,
         decision: ApprovalDecision | None = None,
         pending_tool_run_ids: tuple[str, ...] = (),
-        tool_result_message_ids: tuple[str, ...] = (),
+        tool_result_item_ids: tuple[str, ...] = (),
         llm_invocation_id: str | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -780,8 +788,8 @@ class RunWaitCoordinator:
             payload["decision"] = decision.value
         if pending_tool_run_ids:
             payload["pending_tool_run_ids"] = list(pending_tool_run_ids)
-        if tool_result_message_ids:
-            payload["tool_result_message_ids"] = list(tool_result_message_ids)
+        if tool_result_item_ids:
+            payload["tool_result_item_ids"] = list(tool_result_item_ids)
         return payload
 
     @staticmethod
@@ -797,7 +805,7 @@ class RunWaitCoordinator:
             "pending_tool_run_ids": list(pending_tool_run_ids),
         }
 
-    def _tool_result_message_ids_for_call(
+    def _tool_result_item_ids_for_call(
         self,
         *,
         run: OrchestrationRun,
@@ -812,19 +820,23 @@ class RunWaitCoordinator:
             or not run.active_session_id.strip()
         ):
             return ()
-        messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        list_items = getattr(self.session_service, "list_model_visible_items", None)
+        if not callable(list_items):
+            return ()
+        items = list_items(
+            ListSessionItemsInput(
                 session_key=session_key,
-                include_archived=False,
+                active_session_only=True,
+                model_visible=True,
             ),
         )
         return tuple(
-            message.id
-            for message in messages
-            if message.session_id == run.active_session_id
-            and message.kind is SessionMessageKind.TOOL_RESULT
-            and message.source_kind == "tool_run"
-            and str(message.metadata.get("tool_call_id", "")).strip() == tool_call_id
+            item.id
+            for item in items
+            if item.session_id == run.active_session_id
+            and item.kind is SessionItemKind.TOOL_RESULT
+            and item.source_kind == "tool_run"
+            and str(item.call_id or "").strip() == tool_call_id
         )
 
     @staticmethod
@@ -895,22 +907,55 @@ def _enum_value(value: object) -> str:
 def _llm_step_summary(payload: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for key in (
-        "assistant_message_id",
-        "assistant_message_ids",
+        "assistant_progress_item_ids",
         "context_render_snapshot_id",
         "llm_id",
         "llm_invocation_id",
+        "llm_response_item_ids",
+        "llm_loop_diagnostic",
         "llm_transcript_consumption",
         "prompt_mode",
-        "tool_call_message_ids",
+        "session_item_ids",
+        "tool_call_session_item_ids",
         "tool_call_names",
-        "tool_result_message_ids",
-        "user_message_id",
+        "tool_result_session_item_ids",
+        "user_session_item_id",
     ):
         value = payload.get(key)
         if value is not None:
             summary[key] = value
     return summary
+
+
+def _continuation_payload(payload: dict[str, object]) -> dict[str, object] | None:
+    reason = _first_present(
+        payload,
+        "llm_continuation_reason",
+        "continuation_reason",
+    )
+    end_turn = _first_present(
+        payload,
+        "llm_continuation_end_turn",
+        "continuation_end_turn",
+    )
+    follow_up = payload.get("llm_continuation_follow_up")
+    if reason is None and end_turn is None and follow_up is None:
+        return None
+    result: dict[str, object] = {}
+    if reason is not None:
+        result["reason"] = reason
+    if end_turn is not None:
+        result["end_turn"] = end_turn
+    if follow_up is not None:
+        result["needs_follow_up"] = bool(follow_up)
+    return result
+
+
+def _first_present(payload: dict[str, object], *keys: str) -> object | None:
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return None
 
 
 def _tool_run_links(payload: dict[str, object]) -> tuple[dict[str, object], ...]:

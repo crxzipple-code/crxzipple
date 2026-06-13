@@ -36,6 +36,7 @@ from crxzipple.modules.tool.domain.value_objects import (
 from crxzipple.shared.content_blocks import describe_content_for_text_fallback
 
 DEFAULT_TOOL_RUN_ERROR_MESSAGE = "Tool run failed without an error message."
+TOOL_RESULT_ENVELOPE_METADATA_KEY = "tool_result_envelope"
 
 
 def _normalize_access_requirement_sets(
@@ -64,6 +65,13 @@ def _normalize_tool_run_error(error: str | ToolRunError) -> ToolRunError:
         return error
     normalized = str(error).strip()
     return ToolRunError(message=normalized or DEFAULT_TOOL_RUN_ERROR_MESSAGE)
+
+
+def _tool_result_envelope_payload(result: ToolRunResult) -> dict[str, Any] | None:
+    envelope = result.metadata.get(TOOL_RESULT_ENVELOPE_METADATA_KEY)
+    if isinstance(envelope, dict):
+        return dict(envelope)
+    return None
 
 
 def _worker_capability_signature(payload: dict[str, Any]) -> tuple[Any, Any]:
@@ -438,6 +446,8 @@ class Tool(AggregateRoot[str]):
 class ToolRun(AggregateRoot[str]):
     tool_id: str
     target: ToolExecutionTarget
+    call_id: str | None = None
+    tool_surface_id: str | None = None
     function_id: str | None = None
     function_revision: int | None = None
     source_id: str | None = None
@@ -448,6 +458,7 @@ class ToolRun(AggregateRoot[str]):
     metadata: dict[str, Any] = field(default_factory=dict)
     invocation_context_payload: dict[str, Any] | None = None
     result_payload: Any | None = None
+    result_envelope_payload: dict[str, Any] | None = None
     error_payload: str | None = None
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -464,6 +475,8 @@ class ToolRun(AggregateRoot[str]):
     def __post_init__(self) -> None:
         self.input_payload = dict(self.input_payload)
         self.metadata = dict(self.metadata)
+        self.call_id = _normalize_optional_text(self.call_id)
+        self.tool_surface_id = _normalize_optional_text(self.tool_surface_id)
         self.function_id = _normalize_optional_text(self.function_id)
         self.source_id = _normalize_optional_text(self.source_id)
         self.schema_hash = _normalize_optional_text(self.schema_hash)
@@ -474,6 +487,11 @@ class ToolRun(AggregateRoot[str]):
         self.invocation_context_payload = (
             dict(self.invocation_context_payload)
             if self.invocation_context_payload is not None
+            else None
+        )
+        self.result_envelope_payload = (
+            dict(self.result_envelope_payload)
+            if isinstance(self.result_envelope_payload, dict)
             else None
         )
         if self.attempt_count < 0:
@@ -535,6 +553,8 @@ class ToolRun(AggregateRoot[str]):
         metadata: dict[str, Any] | None = None,
         invocation_context_payload: dict[str, Any] | None = None,
         target: ToolExecutionTarget,
+        call_id: str | None = None,
+        tool_surface_id: str | None = None,
         function_id: str | None = None,
         function_revision: int | None = None,
         source_id: str | None = None,
@@ -545,6 +565,8 @@ class ToolRun(AggregateRoot[str]):
         run = cls(
             id=run_id,
             tool_id=tool_id,
+            call_id=call_id,
+            tool_surface_id=tool_surface_id,
             function_id=function_id,
             function_revision=function_revision,
             source_id=source_id,
@@ -562,6 +584,8 @@ class ToolRun(AggregateRoot[str]):
                 payload={
                     "run_id": run.id,
                     "tool_id": run.tool_id,
+                    "call_id": run.call_id,
+                    "tool_surface_id": run.tool_surface_id,
                     "function_id": run.function_id,
                     "function_revision": run.function_revision,
                     "source_id": run.source_id,
@@ -585,6 +609,7 @@ class ToolRun(AggregateRoot[str]):
         self.started_at = None
         self.completed_at = None
         self.result_payload = None
+        self.result_envelope_payload = None
         self.error_payload = None
         self.record_event(
             Event(
@@ -592,6 +617,8 @@ class ToolRun(AggregateRoot[str]):
                 payload={
                     "run_id": self.id,
                     "tool_id": self.tool_id,
+                    "call_id": self.call_id,
+                    "tool_surface_id": self.tool_surface_id,
                     "function_id": self.function_id,
                     "source_id": self.source_id,
                 },
@@ -608,6 +635,7 @@ class ToolRun(AggregateRoot[str]):
         self.started_at = None
         self.completed_at = None
         self.result_payload = None
+        self.result_envelope_payload = None
         self.error_payload = None
         self.record_event(
             Event(
@@ -615,6 +643,8 @@ class ToolRun(AggregateRoot[str]):
                 payload={
                     "run_id": self.id,
                     "tool_id": self.tool_id,
+                    "call_id": self.call_id,
+                    "tool_surface_id": self.tool_surface_id,
                     "function_id": self.function_id,
                     "source_id": self.source_id,
                     "worker_id": worker_id,
@@ -629,12 +659,15 @@ class ToolRun(AggregateRoot[str]):
         self.completed_at = None
         self.error_payload = None
         self.result_payload = None
+        self.result_envelope_payload = None
         self.record_event(
             Event(
                 name="tool.run.started",
                 payload={
                     "run_id": self.id,
                     "tool_id": self.tool_id,
+                    "call_id": self.call_id,
+                    "tool_surface_id": self.tool_surface_id,
                     "function_id": self.function_id,
                     "source_id": self.source_id,
                 },
@@ -669,6 +702,7 @@ class ToolRun(AggregateRoot[str]):
     def succeed(self, output_payload: ToolRunResult) -> None:
         self.status = ToolRunStatus.SUCCEEDED
         self.result_payload = output_payload.to_payload()
+        self.result_envelope_payload = _tool_result_envelope_payload(output_payload)
         self.error_payload = None
         self.completed_at = datetime.now(timezone.utc)
         self.heartbeat_at = self.completed_at
@@ -685,6 +719,7 @@ class ToolRun(AggregateRoot[str]):
         normalized_error = _normalize_tool_run_error(error_message)
         self.error_payload = normalized_error.to_storage()
         self.result_payload = None
+        self.result_envelope_payload = None
         self.completed_at = datetime.now(timezone.utc)
         self.heartbeat_at = self.completed_at
         self.lease_expires_at = None
@@ -703,6 +738,7 @@ class ToolRun(AggregateRoot[str]):
         normalized_error = _normalize_tool_run_error(reason)
         self.error_payload = normalized_error.to_storage()
         self.result_payload = None
+        self.result_envelope_payload = None
         self.started_at = None
         self.completed_at = None
         self.worker_id = None
@@ -733,6 +769,8 @@ class ToolRun(AggregateRoot[str]):
 
     def cancel(self) -> None:
         self.status = ToolRunStatus.CANCELLED
+        self.result_payload = None
+        self.result_envelope_payload = None
         self.completed_at = datetime.now(timezone.utc)
         self.heartbeat_at = self.completed_at
         self.lease_expires_at = None
@@ -745,6 +783,8 @@ class ToolRun(AggregateRoot[str]):
 
     def timeout(self) -> None:
         self.status = ToolRunStatus.TIMED_OUT
+        self.result_payload = None
+        self.result_envelope_payload = None
         self.completed_at = datetime.now(timezone.utc)
         self.heartbeat_at = self.completed_at
         self.lease_expires_at = None
@@ -767,6 +807,8 @@ class ToolRun(AggregateRoot[str]):
         return {
             "run_id": self.id,
             "tool_id": self.tool_id,
+            "call_id": self.call_id,
+            "tool_surface_id": self.tool_surface_id,
             "function_id": self.function_id,
             "function_revision": self.function_revision,
             "source_id": self.source_id,

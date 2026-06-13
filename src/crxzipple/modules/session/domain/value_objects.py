@@ -28,16 +28,118 @@ class DirectSessionScope(StrEnum):
     PER_ACCOUNT_CHANNEL_PEER = "per_account_channel_peer"
 
 
-class SessionMessageKind(StrEnum):
-    MESSAGE = "message"
+class SessionItemKind(StrEnum):
+    USER_MESSAGE = "user_message"
+    ASSISTANT_MESSAGE = "assistant_message"
+    REASONING = "reasoning"
+    TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    EVENT = "event"
+    PROVIDER_EXTERNAL_ITEM = "provider_external_item"
+    COMPACTION = "compaction"
+    SYSTEM_NOTE = "system_note"
+    UNKNOWN = "unknown"
 
 
-class SessionMessageVisibility(StrEnum):
-    DEFAULT = "default"
-    INTERNAL = "internal"
-    ARCHIVED = "archived"
+class SessionItemPhase(StrEnum):
+    COMMENTARY = "commentary"
+    FINAL_ANSWER = "final_answer"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionItemVisibility(ValueObject):
+    model_visible: bool = True
+    user_visible: bool = False
+    chat_visible: bool = False
+    trace_visible: bool = True
+
+    def to_payload(self) -> dict[str, bool]:
+        return {
+            "model_visible": self.model_visible,
+            "user_visible": self.user_visible,
+            "chat_visible": self.chat_visible,
+            "trace_visible": self.trace_visible,
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "SessionItemVisibility":
+        payload = payload or {}
+        return cls(
+            model_visible=bool(payload.get("model_visible", True)),
+            user_visible=bool(payload.get("user_visible", False)),
+            chat_visible=bool(payload.get("chat_visible", False)),
+            trace_visible=bool(payload.get("trace_visible", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionItem(ValueObject):
+    id: str
+    session_key: str
+    session_id: str
+    sequence_no: int
+    kind: SessionItemKind
+    content_payload: dict[str, Any] = field(default_factory=dict)
+    role: str | None = None
+    phase: SessionItemPhase = SessionItemPhase.UNKNOWN
+    visibility: SessionItemVisibility = field(default_factory=SessionItemVisibility)
+    source_module: str | None = None
+    source_kind: str | None = None
+    source_id: str | None = None
+    provider_item_id: str | None = None
+    provider_item_type: str | None = None
+    call_id: str | None = None
+    tool_name: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise SessionValidationError("Session item id cannot be empty.")
+        if not self.session_key.strip():
+            raise SessionValidationError("Session item session_key cannot be empty.")
+        if not self.session_id.strip():
+            raise SessionValidationError("Session item session_id cannot be empty.")
+        if self.sequence_no <= 0:
+            raise SessionValidationError(
+                "Session item sequence_no must be greater than zero.",
+            )
+        object.__setattr__(self, "content_payload", dict(self.content_payload))
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "session_key": self.session_key,
+            "session_id": self.session_id,
+            "sequence_no": self.sequence_no,
+            "kind": self.kind.value,
+            "phase": self.phase.value,
+            "visibility": self.visibility.to_payload(),
+            "content_payload": dict(self.content_payload),
+            "metadata": dict(self.metadata),
+            "created_at": self.created_at.isoformat(),
+        }
+        if self.role is not None:
+            payload["role"] = self.role
+        if self.source_module is not None:
+            payload["source_module"] = self.source_module
+        if self.source_kind is not None:
+            payload["source_kind"] = self.source_kind
+        if self.source_id is not None:
+            payload["source_id"] = self.source_id
+        if self.provider_item_id is not None:
+            payload["provider_item_id"] = self.provider_item_id
+        if self.provider_item_type is not None:
+            payload["provider_item_type"] = self.provider_item_type
+        if self.call_id is not None:
+            payload["call_id"] = self.call_id
+        if self.tool_name is not None:
+            payload["tool_name"] = self.tool_name
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,59 +236,6 @@ class SessionReply(ValueObject):
                 else None
             ),
         )
-
-@dataclass(frozen=True, slots=True)
-class SessionMessage(ValueObject):
-    id: str
-    session_key: str
-    session_id: str
-    sequence_no: int
-    role: str
-    kind: SessionMessageKind = SessionMessageKind.MESSAGE
-    content_payload: dict[str, Any] = field(default_factory=dict)
-    source_kind: str | None = None
-    source_id: str | None = None
-    visibility: SessionMessageVisibility = SessionMessageVisibility.DEFAULT
-    metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=utcnow)
-
-    def __post_init__(self) -> None:
-        if not self.id.strip():
-            raise SessionValidationError("Session message id cannot be empty.")
-        if not self.session_key.strip():
-            raise SessionValidationError("Session message session_key cannot be empty.")
-        if not self.session_id.strip():
-            raise SessionValidationError("Session message session_id cannot be empty.")
-        if self.sequence_no <= 0:
-            raise SessionValidationError(
-                "Session message sequence_no must be greater than zero.",
-            )
-        if not self.role.strip():
-            raise SessionValidationError("Session message role cannot be empty.")
-        has_payload = bool(self.content_payload)
-        if not has_payload:
-            raise SessionValidationError(
-                "Session message content_payload is required.",
-            )
-        object.__setattr__(self, "content_payload", dict(self.content_payload))
-        object.__setattr__(self, "metadata", dict(self.metadata))
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "session_key": self.session_key,
-            "session_id": self.session_id,
-            "sequence_no": self.sequence_no,
-            "role": self.role,
-            "kind": self.kind.value,
-            "content_payload": dict(self.content_payload),
-            "source_kind": self.source_kind,
-            "source_id": self.source_id,
-            "visibility": self.visibility.value,
-            "metadata": dict(self.metadata),
-            "created_at": self.created_at,
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class SessionRouteContext(ValueObject):

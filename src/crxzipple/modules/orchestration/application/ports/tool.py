@@ -31,3 +31,18 @@ class ToolExecutionPort(Protocol):
 
     def cancel_tool_run(self, run_id: str) -> ToolRun:
         ...
+
+
+class ToolSurfacePort(Protocol):
+    def build_tool_surface(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        runtime_context: object | None = None,
+        surface_id: str | None = None,
+        tool_ids: tuple[str, ...] | None = None,
+        persist: bool = False,
+    ) -> object:
+        ...

@@ -62,8 +62,14 @@ export interface UiTraceContext {
   turn_id?: string;
   run_id?: string;
   step_id?: string;
+  execution_item_id?: string;
   tool_run_id?: string;
+  tool_call_id?: string;
   llm_invocation_id?: string;
+  llm_response_item_id?: string;
+  context_render_snapshot_id?: string;
+  session_item_id?: string;
+  continuation_decision_id?: string;
   artifact_id?: string;
   approval_request_id?: string;
 }
@@ -269,6 +275,7 @@ export interface WorkbenchStepView {
     | "user_input"
     | "agent_thinking"
     | "llm"
+    | "continuation_decision"
     | "tool_call"
     | "tool_result"
     | "approval_required"
@@ -568,6 +575,9 @@ export interface OperationsLlmInvocationDetail {
   error: string;
   resolver: UiKeyValueSection;
   error_facts: UiKeyValueSection;
+  policy_trace: UiTableSection;
+  response_items: UiTableSection;
+  response_events: UiTableSection;
   events: UiTableSection;
 }
 

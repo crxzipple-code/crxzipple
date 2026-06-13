@@ -4,8 +4,7 @@ from datetime import datetime
 
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
 from crxzipple.modules.session.domain.value_objects import (
-    SessionMessage,
-    SessionMessageVisibility,
+    SessionItem,
 )
 
 
@@ -36,26 +35,23 @@ class InMemorySessionRepository:
             session.updated_at = updated_at
 
 
-class InMemorySessionMessageRepository:
+class InMemorySessionItemRepository:
     def __init__(self) -> None:
-        self._items: list[SessionMessage] = []
+        self._items: list[SessionItem] = []
 
-    def add(self, message: SessionMessage) -> None:
-        for index, item in enumerate(self._items):
-            if item.id == message.id:
-                self._items[index] = message
+    def add(self, item: SessionItem) -> None:
+        for index, existing in enumerate(self._items):
+            if existing.id == item.id:
+                self._items[index] = item
                 return
-        self._items.append(message)
+        self._items.append(item)
 
-    def add_new(self, message: SessionMessage) -> None:
-        self._items.append(message)
+    def add_many_new(self, items: tuple[SessionItem, ...]) -> None:
+        self._items.extend(items)
 
-    def add_many_new(self, messages: tuple[SessionMessage, ...]) -> None:
-        self._items.extend(messages)
-
-    def get(self, message_id: str) -> SessionMessage | None:
+    def get(self, item_id: str) -> SessionItem | None:
         for item in self._items:
-            if item.id == message_id:
+            if item.id == item_id:
                 return item
         return None
 
@@ -64,23 +60,20 @@ class InMemorySessionMessageRepository:
         *,
         session_key: str,
         session_id: str,
+        source_module: str,
         source_kind: str,
         source_id: str,
-    ) -> SessionMessage | None:
-        matches = [
-            item
-            for item in self._items
-            if item.session_key == session_key
-            and item.session_id == session_id
-            and item.source_kind == source_kind
-            and item.source_id == source_id
-        ]
-        if not matches:
-            return None
-        return sorted(
-            matches,
-            key=lambda item: (item.created_at, item.sequence_no, item.id),
-        )[-1]
+    ) -> SessionItem | None:
+        for item in self._items:
+            if (
+                item.session_key == session_key
+                and item.session_id == session_id
+                and item.source_module == source_module
+                and item.source_kind == source_kind
+                and item.source_id == source_id
+            ):
+                return item
+        return None
 
     def max_sequence_no(self, *, session_key: str, session_id: str) -> int:
         matches = [
@@ -96,26 +89,35 @@ class InMemorySessionMessageRepository:
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
-        include_archived: bool = True,
+        model_visible: bool | None = None,
+        user_visible: bool | None = None,
+        chat_visible: bool | None = None,
+        trace_visible: bool | None = None,
         after_sequence_no: int | None = None,
         before_sequence_no: int | None = None,
-    ) -> list[SessionMessage]:
+    ) -> list[SessionItem]:
         items = [item for item in self._items if item.session_key == session_key]
         if session_id is not None:
             items = [item for item in items if item.session_id == session_id]
         if after_sequence_no is not None and after_sequence_no > 0:
-            items = [
-                item for item in items if item.sequence_no > after_sequence_no
-            ]
+            items = [item for item in items if item.sequence_no > after_sequence_no]
         if before_sequence_no is not None and before_sequence_no > 0:
+            items = [item for item in items if item.sequence_no < before_sequence_no]
+        if model_visible is not None:
             items = [
-                item for item in items if item.sequence_no < before_sequence_no
+                item for item in items if item.visibility.model_visible is model_visible
             ]
-        if not include_archived:
+        if user_visible is not None:
             items = [
-                item
-                for item in items
-                if item.visibility is not SessionMessageVisibility.ARCHIVED
+                item for item in items if item.visibility.user_visible is user_visible
+            ]
+        if chat_visible is not None:
+            items = [
+                item for item in items if item.visibility.chat_visible is chat_visible
+            ]
+        if trace_visible is not None:
+            items = [
+                item for item in items if item.visibility.trace_visible is trace_visible
             ]
         items = sorted(
             items,

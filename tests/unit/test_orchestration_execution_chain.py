@@ -9,6 +9,7 @@ from crxzipple.core.db import Base
 from crxzipple.modules.orchestration.domain import (
     ExecutionChain,
     ExecutionChainStatus,
+    ExecutionOwnerKind,
     ExecutionOwnerReference,
     ExecutionStep,
     ExecutionStepItem,
@@ -58,7 +59,7 @@ from crxzipple.modules.orchestration.application.execution_chain_lifecycle impor
     materialize_approval_execution_step,
     materialize_resume_execution_step,
     materialize_tool_batch_execution_step,
-    materialize_tool_result_message_items,
+    materialize_tool_result_session_item_items,
 )
 from crxzipple.modules.orchestration.application.engine import EngineAdvanceOutcome
 from crxzipple.modules.orchestration.application.execution import RunExecutionService
@@ -84,7 +85,14 @@ from crxzipple.modules.orchestration.infrastructure.persistence import (
     SqlAlchemyExecutionStepItemRepository,
     SqlAlchemyExecutionStepRepository,
 )
-from crxzipple.modules.session.domain import DirectSessionScope, SessionRouteContext
+from crxzipple.modules.session.application import ListSessionItemsInput
+from crxzipple.modules.session.domain import (
+    DirectSessionScope,
+    SessionItem,
+    SessionItemKind,
+    SessionItemVisibility,
+    SessionRouteContext,
+)
 from crxzipple.modules.tool.domain import (
     ToolExecutionTarget,
     ToolMode,
@@ -99,6 +107,7 @@ from crxzipple.shared.infrastructure.sqlalchemy_uow import SqlAlchemyUnitOfWork
 class _FakeSessionRecorderPort:
     def __init__(self) -> None:
         self.messages: list[SimpleNamespace] = []
+        self.items: list[SimpleNamespace] = []
 
     def get_message_by_source(
         self,
@@ -118,6 +127,18 @@ class _FakeSessionRecorderPort:
                 return message
         return None
 
+    def get_item_by_source(self, data: object) -> SimpleNamespace | None:
+        for item in self.items:
+            if (
+                item.session_key == getattr(data, "session_key")
+                and item.session_id == getattr(data, "session_id")
+                and item.source_module == getattr(data, "source_module")
+                and item.source_kind == getattr(data, "source_kind")
+                and item.source_id == getattr(data, "source_id")
+            ):
+                return item
+        return None
+
     def append_message(self, data: object) -> SimpleNamespace:
         message = SimpleNamespace(
             id=f"message-{len(self.messages) + 1}",
@@ -132,6 +153,51 @@ class _FakeSessionRecorderPort:
         )
         self.messages.append(message)
         return message
+
+    def append_messages(self, data: object) -> tuple[SimpleNamespace, ...]:
+        return tuple(
+            self.append_message(message)
+            for message in getattr(data, "messages")
+        )
+
+    def append_items(self, data: object) -> tuple[SimpleNamespace, ...]:
+        items: list[SimpleNamespace] = []
+        for item_input in getattr(data, "items"):
+            item = SimpleNamespace(
+                id=f"item-{len(self.items) + 1}",
+                session_key=getattr(item_input, "session_key"),
+                session_id=getattr(item_input, "session_id"),
+                role=getattr(item_input, "role"),
+                kind=getattr(item_input, "kind"),
+                content_payload=getattr(item_input, "content_payload"),
+                source_module=getattr(item_input, "source_module"),
+                source_kind=getattr(item_input, "source_kind"),
+                source_id=getattr(item_input, "source_id"),
+                call_id=getattr(item_input, "call_id"),
+                tool_name=getattr(item_input, "tool_name"),
+                metadata=dict(getattr(item_input, "metadata", {}) or {}),
+            )
+            self.items.append(item)
+            items.append(item)
+        return tuple(items)
+
+
+class _FakeSessionItemLookupPort:
+    def __init__(self, items: tuple[SessionItem, ...]) -> None:
+        self.items = items
+        self.item_inputs: list[ListSessionItemsInput] = []
+        self.message_reads = 0
+
+    def list_model_visible_items(
+        self,
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
+        self.item_inputs.append(data)
+        return list(self.items)
+
+    def list_messages(self, _data: object) -> list[object]:
+        self.message_reads += 1
+        return []
 
 
 class _FakeEventPublisher:
@@ -358,9 +424,22 @@ def test_execution_step_item_owner_reference_validates_empty_values() -> None:
     try:
         ExecutionOwnerReference(owner_kind="tool_run", owner_id=" ")
     except OrchestrationValidationError:
-        return
+        pass
+    else:
+        raise AssertionError("empty owner_id should fail validation")
 
-    raise AssertionError("empty owner_id should fail validation")
+    assert ExecutionOwnerReference.of(
+        ExecutionOwnerKind.TOOL_RUN,
+        "tool-run-1",
+    ).to_payload() == {
+        "owner_kind": "tool_run",
+        "owner_id": "tool-run-1",
+    }
+    assert ExecutionOwnerReference.llm_invocation("llm-1") == ExecutionOwnerReference(
+        owner_kind="llm_invocation",
+        owner_id="llm-1",
+    )
+    assert ExecutionOwnerReference.session_item("item-1").owner_kind == "session_item"
 
 
 def test_execution_chain_repositories_round_trip_entities() -> None:
@@ -539,6 +618,12 @@ def test_run_query_service_exposes_execution_chain_read_surface() -> None:
     assert [item.id for item in query.list_execution_step_items("step-query")] == [
         "item-query",
     ]
+    snapshots = query.list_execution_chain_snapshots("run-query")
+    assert [snapshot.chain.id for snapshot in snapshots] == ["chain-query"]
+    assert [step_snapshot.step.id for step_snapshot in snapshots[0].steps] == [
+        "step-query",
+    ]
+    assert [item.id for item in snapshots[0].steps[0].items] == ["item-query"]
     assert [
         item.id
         for item in query.find_execution_step_items_by_owner(
@@ -694,10 +779,10 @@ def test_progress_coordinator_records_llm_step_and_invocation_item() -> None:
             worker_id="worker-1",
             result_payload={
                 "llm_id": "llm-primary",
-                "assistant_message_ids": ["message-assistant-1"],
             },
             execution_payload={
                 "llm_invocation_id": "invocation-progress-1",
+                "assistant_progress_item_ids": ["item-assistant-1"],
             },
         ),
     )
@@ -723,51 +808,133 @@ def test_progress_coordinator_records_llm_step_and_invocation_item() -> None:
     assert [item.kind for item in items] == [ExecutionStepItemKind.LLM_INVOCATION]
     assert items[0].summary_payload == {
         "llm_invocation_id": "invocation-progress-1",
-        "assistant_message_ids": ["message-assistant-1"],
+        "assistant_progress_item_ids": ["item-assistant-1"],
         "llm_id": "llm-primary",
     }
-    session_message_items = query.find_execution_step_items_by_owner(
+    session_item_items = query.find_execution_step_items_by_owner(
         ExecutionOwnerReference(
-            owner_kind="session_message",
-            owner_id="message-assistant-1",
+            owner_kind="session_item",
+            owner_id="item-assistant-1",
         ),
     )
-    assert [item.kind for item in session_message_items] == [
+    assert [item.kind for item in session_item_items] == [
         ExecutionStepItemKind.SESSION_MESSAGE,
     ]
-    assert session_message_items[0].summary_payload == {
-        "session_message_id": "message-assistant-1",
+    assert session_item_items[0].summary_payload == {
+        "session_item_id": "item-assistant-1",
         "message_role": "assistant",
         "llm_invocation_id": "invocation-progress-1",
-        "assistant_message_ids": ["message-assistant-1"],
+        "message_kind": "assistant_progress",
+        "assistant_progress_item_ids": ["item-assistant-1"],
         "llm_id": "llm-primary",
     }
 
 
-def test_execution_payload_keeps_tool_call_messages_out_of_assistant_progress() -> None:
+def test_progress_coordinator_records_llm_continuation_decision_item() -> None:
+    engine = _create_sqlite_engine_with_foreign_keys()
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    intake = RunIntakeCoordinator(
+        uow_factory=lambda: uow,
+        scheduler=OrchestrationScheduler(),
+        dispatch_port=OrchestrationDispatchAdapter(),
+        plan_prepared_session_run=lambda _data: None,
+    )
+    progress = RunProgressCoordinator(
+        uow_factory=lambda: uow,
+        dispatch_port=OrchestrationDispatchAdapter(),
+        lease_manager=None,
+        advance_once=lambda _run_id, _worker_id: None,
+        heartbeat_assignment=lambda _run_id, _worker_id: None,
+        get_run=lambda run_id: OrchestrationRunQueryService(lambda: uow).get_run(run_id),
+        apply_compaction_summary=lambda _run: None,
+        maybe_request_auto_compaction=lambda _run: None,
+        clear_pending_compaction_marker=lambda _run: None,
+        clear_pending_memory_flush_marker=lambda _run: None,
+        is_compaction_run=lambda _run: False,
+        is_memory_flush_run=lambda _run: False,
+    )
+    run = intake.accept(
+        AcceptOrchestrationRunInput(
+            run_id="run-exec-chain-continuation",
+            inbound_instruction=InboundInstruction(source="unit", content="hello"),
+        ),
+    )
+    intake.enqueue(EnqueueOrchestrationRunInput(run_id=run.id))
+
+    with uow:
+        claimed = uow.orchestration_runs.get(run.id)
+        assert claimed is not None
+        claimed.claim(worker_id="worker-1", acquire_lane_lock=False)
+        uow.orchestration_runs.add(claimed)
+        uow.collect(claimed)
+        uow.commit()
+
+    progress.advance_assignment(
+        AdvanceAssignmentInput(
+            run_id=run.id,
+            worker_id="worker-1",
+            stage=OrchestrationRunStage.LLM,
+            step_increment=1,
+        ),
+    )
+    progress.complete_assignment(
+        CompleteAssignmentInput(
+            run_id=run.id,
+            worker_id="worker-1",
+            result_payload={
+                "llm_id": "llm-primary",
+                "continuation_reason": "provider_end_turn_false",
+                "continuation_end_turn": False,
+            },
+            execution_payload={
+                "llm_invocation_id": "invocation-continuation-1",
+                "llm_continuation_reason": "provider_end_turn_false",
+                "llm_continuation_end_turn": False,
+                "llm_continuation_follow_up": True,
+            },
+        ),
+    )
+
+    query = OrchestrationRunQueryService(lambda: uow)
+    items = query.find_execution_step_items_by_owner(
+        ExecutionOwnerReference(
+            owner_kind="llm_continuation",
+            owner_id="invocation-continuation-1:continuation",
+        ),
+    )
+    assert [item.kind for item in items] == [
+        ExecutionStepItemKind.CONTINUATION_DECISION,
+    ]
+    assert items[0].summary_payload == {
+        "llm_invocation_id": "invocation-continuation-1",
+        "continuation_id": "invocation-continuation-1:continuation",
+        "reason": "provider_end_turn_false",
+        "end_turn": False,
+        "needs_follow_up": True,
+    }
+
+
+def test_execution_payload_keeps_tool_call_items_out_of_assistant_progress() -> None:
     payload = RunExecutionService._execution_payload_from_outcome(
         EngineAdvanceOutcome(
             llm_id="llm-primary",
             llm_invocation_id="invocation-tool-text",
             response_text="我先检查页面状态。",
-            assistant_message_ids=(
-                "message-progress-1",
-                "message-function-call-1",
-                "message-function-call-2",
-            ),
-            assistant_progress_message_ids=("message-progress-1",),
-            tool_call_message_ids=(
-                "message-function-call-1",
-                "message-function-call-2",
+            assistant_progress_item_ids=("item-progress-1",),
+            tool_call_session_item_ids=(
+                "item-function-call-1",
+                "item-function-call-2",
             ),
             tool_call_names=("browser.snapshot", "browser.click"),
         ),
     )
 
-    assert payload["assistant_progress_message_ids"] == ["message-progress-1"]
-    assert payload["tool_call_message_ids"] == [
-        "message-function-call-1",
-        "message-function-call-2",
+    assert payload["assistant_progress_item_ids"] == ["item-progress-1"]
+    assert payload["tool_call_session_item_ids"] == [
+        "item-function-call-1",
+        "item-function-call-2",
     ]
     assert payload["assistant_progress_text"] == "我先检查页面状态。"
 
@@ -832,7 +999,12 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
             execution_payload={
                 "llm_id": "llm-primary",
                 "llm_invocation_id": "invocation-tool-batch-1",
-                "assistant_progress_message_ids": ["message-progress-1"],
+                "context_render_snapshot_id": "ctxsnap-tool-batch-1",
+                "llm_response_item_ids": [
+                    "invocation-tool-batch-1:item:assistant",
+                    "invocation-tool-batch-1:item:tool-call",
+                ],
+                "assistant_progress_item_ids": ["item-progress-1"],
                 "assistant_progress_text": "我看到 echo 和 image 工具可用，先验证工具调用链。",
                 "tool_call_names": ["echo", "image_generate"],
                 "tool_run_links": [
@@ -845,8 +1017,20 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
                         "mode": "sync",
                         "strategy": "inline",
                         "environment": "local",
-                        "result_message_id": "message-tool-result-1",
+                        "result_session_item_id": "session-item-tool-result-1",
                         "background": False,
+                        "tool_execution_plan": {
+                            "tool_call_id": "call-inline-1",
+                            "tool_name": "echo",
+                            "tool_id": "echo",
+                            "mode": "sync",
+                            "strategy": "inline",
+                            "environment": "local",
+                            "resource_policy": {
+                                "timeout_seconds": 30,
+                            },
+                            "arguments_digest": "digest-inline-1",
+                        },
                         "tool_lifecycle": {
                             "superseded": True,
                             "superseded_by_tool_call_id": "call-inline-2",
@@ -909,22 +1093,40 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
         (
             ExecutionStepItemKind.SESSION_MESSAGE,
             ExecutionOwnerReference(
-                owner_kind="session_message",
-                owner_id="message-progress-1",
+                owner_kind="session_item",
+                owner_id="item-progress-1",
             ),
             ExecutionStepItemStatus.COMPLETED,
-            "message-progress-1",
+            "item-progress-1",
         ),
     ]
+    assert progress_items[0].summary_payload == {
+        "llm_invocation_id": "invocation-tool-batch-1",
+        "assistant_progress_item_ids": ["item-progress-1"],
+        "context_render_snapshot_id": "ctxsnap-tool-batch-1",
+        "llm_id": "llm-primary",
+        "llm_response_item_ids": [
+            "invocation-tool-batch-1:item:assistant",
+            "invocation-tool-batch-1:item:tool-call",
+        ],
+        "tool_call_names": ["echo", "image_generate"],
+        "assistant_progress_text": "我看到 echo 和 image 工具可用，先验证工具调用链。",
+        "assistant_progress_text_chars": 31,
+    }
     assert progress_items[1].summary_payload == {
-        "session_message_id": "message-progress-1",
+        "session_item_id": "item-progress-1",
         "message_role": "assistant",
         "llm_invocation_id": "invocation-tool-batch-1",
         "message_kind": "assistant_progress",
-        "assistant_progress_message_ids": ["message-progress-1"],
+        "assistant_progress_item_ids": ["item-progress-1"],
+        "context_render_snapshot_id": "ctxsnap-tool-batch-1",
         "assistant_progress_text": "我看到 echo 和 image 工具可用，先验证工具调用链。",
         "assistant_progress_text_chars": 31,
         "llm_id": "llm-primary",
+        "llm_response_item_ids": [
+            "invocation-tool-batch-1:item:assistant",
+            "invocation-tool-batch-1:item:tool-call",
+        ],
         "tool_call_names": ["echo", "image_generate"],
     }
 
@@ -951,8 +1153,8 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
         (
             ExecutionStepItemKind.TOOL_RESULT,
             ExecutionOwnerReference(
-                owner_kind="session_message",
-                owner_id="message-tool-result-1",
+                owner_kind="session_item",
+                owner_id="session-item-tool-result-1",
             ),
             ExecutionStepItemStatus.COMPLETED,
             "call-inline-1",
@@ -982,11 +1184,23 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
         "tool_name": "echo",
         "tool_id": "echo",
         "status": "completed",
-        "result_message_id": "message-tool-result-1",
+        "result_session_item_id": "session-item-tool-result-1",
         "background": False,
         "mode": "sync",
         "strategy": "inline",
         "environment": "local",
+        "tool_execution_plan": {
+            "tool_call_id": "call-inline-1",
+            "tool_name": "echo",
+            "tool_id": "echo",
+            "mode": "sync",
+            "strategy": "inline",
+            "environment": "local",
+            "resource_policy": {
+                "timeout_seconds": 30,
+            },
+            "arguments_digest": "digest-inline-1",
+        },
         "tool_lifecycle": {
             "superseded": True,
             "superseded_by_tool_call_id": "call-inline-2",
@@ -998,7 +1212,19 @@ def test_progress_coordinator_materializes_tool_batch_step_items() -> None:
         "tool_call_id": "call-inline-1",
         "tool_name": "echo",
         "tool_id": "echo",
-        "result_message_id": "message-tool-result-1",
+        "result_session_item_id": "session-item-tool-result-1",
+        "tool_execution_plan": {
+            "tool_call_id": "call-inline-1",
+            "tool_name": "echo",
+            "tool_id": "echo",
+            "mode": "sync",
+            "strategy": "inline",
+            "environment": "local",
+            "resource_policy": {
+                "timeout_seconds": 30,
+            },
+            "arguments_digest": "digest-inline-1",
+        },
         "tool_lifecycle": {
             "superseded": True,
             "superseded_by_tool_call_id": "call-inline-2",
@@ -1085,7 +1311,7 @@ def test_progress_coordinator_keeps_repeated_llm_tool_loops_in_distinct_steps() 
                             "tool_run_id": f"tool-run-loop-{loop_index}",
                             "tool_id": f"tool-{loop_index}",
                             "status": "completed",
-                            "result_message_id": f"message-tool-result-{loop_index}",
+                            "result_session_item_id": f"session-item-tool-result-{loop_index}",
                             "background": False,
                         },
                     ],
@@ -1104,7 +1330,8 @@ def test_progress_coordinator_keeps_repeated_llm_tool_loops_in_distinct_steps() 
             worker_id="worker-1",
             result_payload={
                 "llm_id": "llm-primary",
-                "assistant_message_ids": ["message-assistant-final"],
+                "session_item_ids": ["session-item-assistant-final"],
+                "assistant_progress_item_ids": ["session-item-assistant-final"],
             },
             execution_payload={
                 "llm_invocation_id": "invocation-loop-3",
@@ -1299,46 +1526,78 @@ def test_background_tool_result_message_uses_execution_item_reference() -> None:
         execution_item_lookup=query,
     )
 
-    message_ids = recorder.append_completed_background_tool_results(
+    item_ids = recorder.append_completed_background_tool_results(
         run,
         tool_runs=(tool_run,),
     )
 
-    assert message_ids == ("message-1",)
-    [message] = session_service.messages
-    assert message.metadata == {
-        "tool_call_id": "call-background-result",
-        "tool_name": "openai_image_generate",
-    }
-    assert message.content_payload["tool_call_id"] == "call-background-result"
-    assert message.content_payload["tool_name"] == "openai_image_generate"
+    assert item_ids == ("item-1",)
+    [session_item] = session_service.items
+    assert session_item.kind.value == "tool_result"
+    assert session_item.source_module == "tool"
+    assert session_item.source_kind == "tool_run"
+    assert session_item.source_id == "tool-run-background-result"
+    assert session_item.call_id == "call-background-result"
+    assert session_item.tool_name == "openai_image_generate"
+    assert session_item.content_payload["tool_call_id"] == "call-background-result"
 
     with uow:
-        materialized_items = materialize_tool_result_message_items(
+        materialized_items = materialize_tool_result_session_item_items(
             uow,
             run=run,
-            tool_result_message_links=((tool_run.id, message_ids[0]),),
+            tool_result_item_links=((tool_run.id, item_ids[0]),),
         )
         uow.commit()
 
     assert [item.kind for item in materialized_items] == [
         ExecutionStepItemKind.TOOL_RESULT,
     ]
-    result_message_items = query.find_execution_step_items_by_owner(
+    result_session_item_items = query.find_execution_step_items_by_owner(
         ExecutionOwnerReference(
-            owner_kind="session_message",
-            owner_id=message_ids[0],
+            owner_kind="session_item",
+            owner_id=item_ids[0],
         ),
     )
-    assert [item.kind for item in result_message_items] == [
+    assert [item.kind for item in result_session_item_items] == [
         ExecutionStepItemKind.TOOL_RESULT,
     ]
-    assert result_message_items[0].summary_payload == {
+    assert result_session_item_items[0].summary_payload == {
         "tool_run_id": "tool-run-background-result",
         "tool_call_id": "call-background-result",
         "tool_name": "openai_image_generate",
         "tool_id": "openai_image_generate",
-        "result_message_id": "message-1",
+        "result_session_item_id": "item-1",
+    }
+
+
+def test_assistant_response_fallback_records_session_item_without_message() -> None:
+    session_service = _FakeSessionRecorderPort()
+    recorder = OrchestrationSessionRecorder(session_service=session_service)
+
+    item_ids = recorder.append_assistant_response_item(
+        session_key="agent:assistant:main",
+        active_session_id="session-1",
+        invocation_id="llm-invocation-final",
+        response_text="Done.",
+        structured_output={"ok": True},
+        finish_reason="stop",
+        usage_payload={"input_tokens": 10, "output_tokens": 2},
+    )
+
+    assert item_ids == ("item-1",)
+    assert session_service.messages == []
+    [item] = session_service.items
+    assert item.role == "assistant"
+    assert item.kind.value == "assistant_message"
+    assert item.source_module == "llm"
+    assert item.source_kind == "llm_invocation"
+    assert item.source_id == "llm-invocation-final"
+    assert item.content_payload["text"] == "Done."
+    assert item.content_payload["structured_output"] == {"ok": True}
+    assert item.content_payload["finish_reason"] == "stop"
+    assert item.content_payload["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 2,
     }
 
 
@@ -1636,6 +1895,60 @@ def test_replayed_terminal_tool_event_does_not_resume_run_twice() -> None:
         assert uow.orchestration_waits.list_run_ids_for_tool_run(tool_run.id) == []
 
 
+def test_wait_coordinator_finds_existing_tool_results_from_session_items_without_message_read() -> None:
+    session_service = _FakeSessionItemLookupPort(
+        (
+            SessionItem(
+                id="session-item-tool-result",
+                session_key="session:assistant",
+                session_id="active-session",
+                sequence_no=3,
+                kind=SessionItemKind.TOOL_RESULT,
+                role="tool",
+                visibility=SessionItemVisibility(model_visible=True),
+                content_payload={
+                    "content": [{"type": "text", "text": "done"}],
+                },
+                source_module="tool",
+                source_kind="tool_run",
+                source_id="tool-run-1",
+                call_id="call-1",
+                tool_name="tool.echo",
+            ),
+        ),
+    )
+    wait = RunWaitCoordinator(
+        uow_factory=lambda: None,
+        dispatch_port=OrchestrationDispatchAdapter(),
+        engine=None,
+        session_service=session_service,
+        agent_service=None,
+        get_run=lambda _run_id: None,
+        resume_input_factory=lambda **kwargs: ResumeOrchestrationRunInput(**kwargs),
+        grant_run_tool_authorization=lambda **_kwargs: None,
+        grant_session_tool_authorization=lambda **_kwargs: None,
+        grant_agent_effect_authorization=lambda **_kwargs: None,
+        append_approval_resolution_message=lambda **_kwargs: None,
+        reconcile_tool_waits=lambda _tool_run_ids: None,
+    )
+    run = OrchestrationRun.accept(
+        run_id="run-session-item-tool-result",
+        inbound_instruction=InboundInstruction(source="unit", content="go"),
+        metadata={"session_key": "session:assistant"},
+    )
+    run.bind_session(active_session_id="active-session")
+
+    item_ids = wait._tool_result_item_ids_for_call(
+        run=run,
+        tool_call_id="call-1",
+    )
+
+    assert item_ids == ("session-item-tool-result",)
+    assert session_service.message_reads == 0
+    assert len(session_service.item_inputs) == 1
+    assert session_service.item_inputs[0].model_visible is True
+
+
 def test_approval_replay_and_resume_steps_are_materialized() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -1717,7 +2030,7 @@ def test_approval_replay_and_resume_steps_are_materialized() -> None:
                     "mode": "inline",
                     "strategy": "async",
                     "environment": "local",
-                    "result_message_id": "message-tool-result-approval-1",
+                    "result_session_item_id": "session-item-tool-result-approval-1",
                     "background": False,
                 },
             ),

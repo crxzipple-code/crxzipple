@@ -27,7 +27,6 @@ from crxzipple.modules.orchestration.application import (
     OrchestrationToolTerminalReaction,
     RUN_OBSERVATION_EVENT_NAMES,
     RunObservationObserver,
-    SessionMessageObservationObserver,
     TOOL_OBSERVATION_SOURCE_EVENT_NAMES,
     ToolRunObservationObserver,
 )
@@ -168,9 +167,6 @@ def _build_event_relay_runtime_event_service(ctx):
         events_service=events_service,
         run_lookup=run_query,
     )
-    turn_session_message_observer = SessionMessageObservationObserver(
-        events_service=events_service,
-    )
     turn_session_tool_observer = ToolRunObservationObserver(
         events_service=events_service,
         run_lookup=run_query,
@@ -189,15 +185,9 @@ def _build_event_relay_runtime_event_service(ctx):
             replay_existing_on_first_run=True,
         )
     runtime.subscribe_event_name(
-        "session.message.appended",
-        subscription_id="event_relay.workbench.session-message",
-        handler=workbench_observer.observe_session_message_event,
-    )
-    runtime.subscribe_event_name(
-        "session.message.appended",
-        subscription_id="event_relay.turn-session.session-message",
-        handler=turn_session_message_observer.observe_message_appended,
-        replay_existing_on_first_run=True,
+        "session.item.appended",
+        subscription_id="event_relay.workbench.session-item",
+        handler=workbench_observer.observe_session_item_event,
     )
     runtime.subscribe_event_name(
         ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,

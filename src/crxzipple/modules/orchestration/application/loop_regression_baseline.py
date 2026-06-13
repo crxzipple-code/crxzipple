@@ -52,11 +52,14 @@ def build_loop_regression_baseline(
         predicate=_looks_like_candidate_validation,
     )
     final_signal = _final_answer_signal(getattr(run, "result_payload", None))
-    assistant_progress_message_ids = _unique_summary_ids(
+    assistant_progress_item_ids = _unique_summary_ids(
         items,
-        "assistant_progress_message_ids",
+        "assistant_progress_item_ids",
     )
-    tool_call_message_ids = _unique_summary_ids(items, "tool_call_message_ids")
+    tool_call_session_item_ids = _unique_summary_ids(
+        items,
+        "tool_call_session_item_ids",
+    )
     llm_text_tool_call_steps = _llm_text_tool_call_steps(items)
     llm_tool_only_steps = _llm_tool_only_steps(items)
     tool_only_streaks = _llm_tool_only_streaks(steps, items)
@@ -73,12 +76,12 @@ def build_loop_regression_baseline(
         "max_consecutive_llm_tool_only_steps": tool_only_streaks["max"],
         "current_consecutive_llm_tool_only_steps": tool_only_streaks["current"],
         "tool_only_loop_suspected": tool_only_streaks["max"] >= 3,
-        "assistant_progress_message_count": len(assistant_progress_message_ids),
-        "tool_call_message_count": len(tool_call_message_ids),
-        "assistant_progress_message_ids": assistant_progress_message_ids,
-        "tool_call_message_ids": tool_call_message_ids,
-        "progress_without_tool_call_messages": (
-            llm_text_tool_call_steps > 0 and not tool_call_message_ids
+        "assistant_progress_item_count": len(assistant_progress_item_ids),
+        "tool_call_session_item_count": len(tool_call_session_item_ids),
+        "assistant_progress_item_ids": assistant_progress_item_ids,
+        "tool_call_session_item_ids": tool_call_session_item_ids,
+        "progress_without_tool_call_items": (
+            llm_text_tool_call_steps > 0 and not tool_call_session_item_ids
         ),
         "repeated_target_count": _optional_int(
             repeated_probe.get("repeated_count"),
@@ -99,8 +102,8 @@ def build_loop_regression_baseline(
             first_validation_step=first_validation_step,
             final_signal=final_signal,
             llm_text_tool_call_steps=llm_text_tool_call_steps,
-            assistant_progress_message_ids=assistant_progress_message_ids,
-            tool_call_message_ids=tool_call_message_ids,
+            assistant_progress_item_ids=assistant_progress_item_ids,
+            tool_call_session_item_ids=tool_call_session_item_ids,
         ),
     }
     if repeated_probe:
@@ -126,7 +129,7 @@ def _llm_text_tool_call_steps(items: tuple[Any, ...]) -> int:
             continue
         payload = _summary_payload(item)
         has_tool_call = bool(_summary_list(payload, "tool_call_names"))
-        has_progress = bool(_summary_list(payload, "assistant_progress_message_ids")) or bool(
+        has_progress = bool(_summary_list(payload, "assistant_progress_item_ids")) or bool(
             _optional_text(payload.get("assistant_progress_text")),
         )
         if has_tool_call and has_progress:
@@ -141,7 +144,7 @@ def _llm_tool_only_steps(items: tuple[Any, ...]) -> int:
             continue
         payload = _summary_payload(item)
         has_tool_call = bool(_summary_list(payload, "tool_call_names"))
-        has_progress = bool(_summary_list(payload, "assistant_progress_message_ids")) or bool(
+        has_progress = bool(_summary_list(payload, "assistant_progress_item_ids")) or bool(
             _optional_text(payload.get("assistant_progress_text")),
         )
         if has_tool_call and not has_progress:
@@ -171,7 +174,7 @@ def _llm_tool_only_streaks(
     for item in llm_items:
         payload = _summary_payload(item)
         has_tool_call = bool(_summary_list(payload, "tool_call_names"))
-        has_progress = bool(_summary_list(payload, "assistant_progress_message_ids")) or bool(
+        has_progress = bool(_summary_list(payload, "assistant_progress_item_ids")) or bool(
             _optional_text(payload.get("assistant_progress_text")),
         )
         if has_tool_call and not has_progress:
@@ -313,8 +316,8 @@ def _missing_metrics(
     first_validation_step: int | None,
     final_signal: dict[str, object],
     llm_text_tool_call_steps: int,
-    assistant_progress_message_ids: list[str],
-    tool_call_message_ids: list[str],
+    assistant_progress_item_ids: list[str],
+    tool_call_session_item_ids: list[str],
 ) -> list[str]:
     missing: list[str] = []
     if first_candidate_step is None:
@@ -325,10 +328,10 @@ def _missing_metrics(
         missing.append("final_answer_has_verified_facts")
     if final_signal["has_gaps"] is None:
         missing.append("final_answer_has_gaps")
-    if llm_text_tool_call_steps > 0 and not assistant_progress_message_ids:
-        missing.append("assistant_progress_message_ids")
-    if llm_text_tool_call_steps > 0 and not tool_call_message_ids:
-        missing.append("tool_call_message_ids")
+    if llm_text_tool_call_steps > 0 and not assistant_progress_item_ids:
+        missing.append("assistant_progress_item_ids")
+    if llm_text_tool_call_steps > 0 and not tool_call_session_item_ids:
+        missing.append("tool_call_session_item_ids")
     return missing
 
 

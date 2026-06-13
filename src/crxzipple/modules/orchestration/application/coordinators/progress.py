@@ -15,6 +15,7 @@ from crxzipple.modules.orchestration.application.execution_chain_lifecycle impor
     fail_active_execution_step,
     materialize_final_response_execution_step,
     materialize_tool_batch_execution_step,
+    record_failed_llm_execution_item,
     require_current_dispatch_task_id,
     start_llm_execution_step,
 )
@@ -182,10 +183,11 @@ class RunProgressCoordinator:
                         uow,
                         run=run,
                         llm_invocation_id=llm_invocation_id,
-                        assistant_progress_message_ids=_assistant_progress_message_ids(
+                        assistant_progress_item_ids=_assistant_progress_item_ids(
                             combined_payload,
                         ),
                         summary_payload=_llm_step_summary(combined_payload),
+                        continuation_payload=_continuation_payload(combined_payload),
                     )
                     materialize_tool_batch_execution_step(
                         uow,
@@ -214,10 +216,11 @@ class RunProgressCoordinator:
                     uow,
                     run=run,
                     llm_invocation_id=llm_invocation_id,
-                    assistant_progress_message_ids=_assistant_progress_message_ids(
+                    assistant_progress_item_ids=_assistant_progress_item_ids(
                         combined_payload,
                     ),
                     summary_payload=_llm_step_summary(combined_payload),
+                    continuation_payload=_continuation_payload(combined_payload),
                 )
                 materialize_tool_batch_execution_step(
                     uow,
@@ -231,7 +234,7 @@ class RunProgressCoordinator:
                 llm_invocation_id=(
                     llm_invocation_id if isinstance(llm_invocation_id, str) else None
                 ),
-                assistant_message_ids=_assistant_message_ids(combined_payload),
+                assistant_session_item_ids=_assistant_session_item_ids(combined_payload),
                 summary_payload=_final_response_summary(combined_payload),
             )
             dispatch_task_id = require_current_dispatch_task_id(uow, run=run)
@@ -263,6 +266,18 @@ class RunProgressCoordinator:
         with self.uow_factory() as uow:
             run = self._get_run(uow, data.run_id)
             dispatch_task_id = require_current_dispatch_task_id(uow, run=run)
+            failed_llm_payload = _failed_llm_execution_payload(data.details)
+            llm_invocation_id = failed_llm_payload.get("llm_invocation_id")
+            if isinstance(llm_invocation_id, str):
+                record_failed_llm_execution_item(
+                    uow,
+                    run=run,
+                    llm_invocation_id=llm_invocation_id,
+                    message=data.message,
+                    code=data.code,
+                    summary_payload=_llm_step_summary(failed_llm_payload),
+                    details=data.details,
+                )
             fail_active_execution_step(
                 uow,
                 run=run,
@@ -337,17 +352,18 @@ class RunProgressCoordinator:
 def _llm_step_summary(payload: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for key in (
-        "assistant_progress_message_ids",
-        "assistant_message_id",
-        "assistant_message_ids",
+        "assistant_progress_item_ids",
         "context_render_snapshot_id",
         "llm_id",
+        "llm_response_item_ids",
+        "llm_loop_diagnostic",
         "llm_transcript_consumption",
         "prompt_mode",
-        "tool_call_message_ids",
+        "session_item_ids",
+        "tool_call_session_item_ids",
         "tool_call_names",
-        "tool_result_message_ids",
-        "user_message_id",
+        "tool_result_session_item_ids",
+        "user_session_item_id",
     ):
         value = payload.get(key)
         if value is not None:
@@ -357,6 +373,48 @@ def _llm_step_summary(payload: dict[str, object]) -> dict[str, object]:
         summary["assistant_progress_text"] = progress_text
         summary["assistant_progress_text_chars"] = len(progress_text)
     return summary
+
+
+def _failed_llm_execution_payload(
+    details: dict[str, object] | None,
+) -> dict[str, object]:
+    if not isinstance(details, dict):
+        return {}
+    execution_payload = details.get("execution_payload")
+    if not isinstance(execution_payload, dict):
+        return {}
+    return dict(execution_payload)
+
+
+def _continuation_payload(payload: dict[str, object]) -> dict[str, object] | None:
+    reason = _first_present(
+        payload,
+        "llm_continuation_reason",
+        "continuation_reason",
+    )
+    end_turn = _first_present(
+        payload,
+        "llm_continuation_end_turn",
+        "continuation_end_turn",
+    )
+    follow_up = payload.get("llm_continuation_follow_up")
+    if reason is None and end_turn is None and follow_up is None:
+        return None
+    result: dict[str, object] = {}
+    if reason is not None:
+        result["reason"] = reason
+    if end_turn is not None:
+        result["end_turn"] = end_turn
+    if follow_up is not None:
+        result["needs_follow_up"] = bool(follow_up)
+    return result
+
+
+def _first_present(payload: dict[str, object], *keys: str) -> object | None:
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return None
 
 
 def _tool_run_links(payload: dict[str, object]) -> tuple[dict[str, object], ...]:
@@ -370,44 +428,40 @@ def _tool_run_links(payload: dict[str, object]) -> tuple[dict[str, object], ...]
     return tuple(links)
 
 
-def _assistant_message_ids(payload: dict[str, object]) -> tuple[str, ...]:
-    message_ids: list[str] = []
-    raw_ids = payload.get("assistant_message_ids")
-    if isinstance(raw_ids, (list, tuple)):
-        for item in raw_ids:
-            if isinstance(item, str) and item.strip():
-                message_ids.append(item.strip())
-    raw_id = payload.get("assistant_message_id")
-    if isinstance(raw_id, str) and raw_id.strip():
-        normalized = raw_id.strip()
-        if normalized not in message_ids:
-            message_ids.append(normalized)
-    return tuple(message_ids)
-
-
-def _assistant_progress_message_ids(payload: dict[str, object]) -> tuple[str, ...]:
-    message_ids: list[str] = []
-    raw_ids = payload.get("assistant_progress_message_ids")
+def _assistant_progress_item_ids(payload: dict[str, object]) -> tuple[str, ...]:
+    item_ids: list[str] = []
+    raw_ids = payload.get("assistant_progress_item_ids")
     if isinstance(raw_ids, (list, tuple)):
         for item in raw_ids:
             if isinstance(item, str) and item.strip():
                 normalized = item.strip()
-                if normalized not in message_ids:
-                    message_ids.append(normalized)
-    return tuple(message_ids)
+                if normalized not in item_ids:
+                    item_ids.append(normalized)
+    return tuple(item_ids)
+
+
+def _assistant_session_item_ids(payload: dict[str, object]) -> tuple[str, ...]:
+    item_ids: list[str] = []
+    raw_ids = payload.get("session_item_ids")
+    if isinstance(raw_ids, (list, tuple)):
+        for item in raw_ids:
+            if isinstance(item, str) and item.strip():
+                normalized = item.strip()
+                if normalized not in item_ids:
+                    item_ids.append(normalized)
+    return tuple(item_ids)
 
 
 def _final_response_summary(payload: dict[str, object]) -> dict[str, object]:
     summary: dict[str, object] = {}
     for key in (
-        "assistant_message_id",
-        "assistant_message_ids",
         "context_render_snapshot_id",
         "llm_id",
         "llm_invocation_id",
         "prompt_mode",
-        "tool_result_message_ids",
-        "user_message_id",
+        "session_item_ids",
+        "tool_result_session_item_ids",
+        "user_session_item_id",
     ):
         value = payload.get(key)
         if value is not None:

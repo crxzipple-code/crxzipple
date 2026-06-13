@@ -6,6 +6,9 @@ from crxzipple.modules.llm.domain import ToolCallIntent, ToolSchema
 from crxzipple.modules.orchestration.application.engine_tool_executor import (
     OrchestrationEngineToolExecutor,
 )
+from crxzipple.modules.orchestration.application.engine_session_recorder import (
+    SessionProtocolRecord,
+)
 from crxzipple.modules.orchestration.application.tool_resolver import (
     ResolvedTool,
     ResolvedToolSet,
@@ -28,14 +31,37 @@ class _FakeSessionRecorder:
         self.tool_result_batches: list[tuple[tuple[ToolCallIntent, ToolRun, str, str], ...]] = []
 
     def append_tool_call_messages(self, **_kwargs: object) -> tuple[str, ...]:
+        return self.append_tool_call_records(**_kwargs).message_ids
+
+    def append_tool_call_records(self, **_kwargs: object) -> SessionProtocolRecord:
         tool_calls = tuple(_kwargs.get("tool_calls") or ())
         self.tool_call_batches.append(tool_calls)
-        return tuple(f"tool-call-message-{tool_call.id}" for tool_call in tool_calls)
+        append_session_items = bool(_kwargs.get("append_session_items"))
+        return SessionProtocolRecord(
+            message_ids=tuple(
+                f"tool-call-message-{tool_call.id}" for tool_call in tool_calls
+            ),
+            item_ids=(
+                tuple(f"tool-call-item-{tool_call.id}" for tool_call in tool_calls)
+                if append_session_items
+                else ()
+            ),
+        )
 
     def append_tool_result_messages(self, **kwargs: object) -> tuple[str, ...]:
+        return self.append_tool_result_records(**kwargs).message_ids
+
+    def append_tool_result_records(self, **kwargs: object) -> SessionProtocolRecord:
         items = tuple(kwargs.get("items") or ())
         self.tool_result_batches.append(items)
-        return tuple(f"tool-result-message-{index + 1}" for index, _ in enumerate(items))
+        return SessionProtocolRecord(
+            message_ids=tuple(
+                f"tool-result-message-{index + 1}" for index, _ in enumerate(items)
+            ),
+            item_ids=tuple(
+                f"tool-result-item-{index + 1}" for index, _ in enumerate(items)
+            ),
+        )
 
 
 class _AllowingToolResolver:
@@ -399,6 +425,7 @@ def test_terminal_context_tree_plan_stops_remaining_tool_batch() -> None:
                 ),
             ),
             append_tool_call_messages=True,
+            append_tool_call_session_items=True,
             append_tool_result_messages=True,
         ),
     )
@@ -406,7 +433,7 @@ def test_terminal_context_tree_plan_stops_remaining_tool_batch() -> None:
     assert outcome.yield_requested is False
     assert outcome.yield_reason is None
     assert len(outcome.inline_runs) == 1
-    assert len(outcome.tool_call_message_ids) == 1
+    assert len(outcome.tool_call_session_item_ids) == 1
     assert [item.tool_id for item in execution_port.batches[0]] == [
         "context_tree.update_plan",
     ]
@@ -442,7 +469,7 @@ def test_cancelled_run_does_not_dispatch_tool_calls() -> None:
         ),
     )
 
-    assert outcome.tool_call_message_ids == ()
+    assert outcome.tool_call_session_item_ids == ()
     assert outcome.inline_runs == ()
     assert execution_port.batches == []
 
@@ -483,7 +510,7 @@ def test_stale_running_run_rechecks_dispatch_guard_before_tool_creation() -> Non
         ),
     )
 
-    assert outcome.tool_call_message_ids == ()
+    assert outcome.tool_call_session_item_ids == ()
     assert outcome.inline_runs == ()
     assert recorder.tool_call_batches == []
     assert execution_port.batches == []

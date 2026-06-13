@@ -82,7 +82,7 @@ def session_budget_breakdown(nodes: tuple[ContextNode, ...]) -> dict[str, object
     session_nodes = tuple(node for node in nodes if node.owner == "session")
     estimate = aggregate_estimate(session_nodes)
     range_nodes = tuple(
-        node for node in session_nodes if node.kind == "session_message_range"
+        node for node in session_nodes if node.kind == "session_item_range"
     )
     range_notice_nodes = tuple(
         node for node in session_nodes if node.kind == "session_range_notice"
@@ -108,8 +108,8 @@ def session_budget_breakdown(nodes: tuple[ContextNode, ...]) -> dict[str, object
         "segment_node_count": sum(
             1 for node in session_nodes if node.kind == "session_segment"
         ),
-        "message_node_count": sum(
-            1 for node in session_nodes if node.kind == "session_message"
+        "item_node_count": sum(
+            1 for node in session_nodes if node.kind == "session_item"
         ),
         "tool_interaction_count": sum(
             1 for node in session_nodes if node.kind == "tool_interaction"

@@ -7,7 +7,7 @@ from typing import Callable
 
 from crxzipple.modules.orchestration.application.ports import (
     AuthorizationPort,
-    SessionMessageAppendPort,
+    SessionItemAppendPort,
 )
 from crxzipple.modules.orchestration.application.commands import (
     ResolveApprovalRequestInput,
@@ -20,8 +20,8 @@ from crxzipple.modules.orchestration.domain.value_objects import (
     ApprovalDecision,
     PendingApprovalRequest,
 )
-from crxzipple.modules.session.application import AppendSessionMessageInput
-from crxzipple.modules.session.domain import SessionMessageKind
+from crxzipple.modules.session.application import AppendSessionItemInput
+from crxzipple.modules.session.domain import SessionItemKind, SessionItemVisibility
 
 
 @dataclass(slots=True)
@@ -45,7 +45,7 @@ class ApprovalResolutionService:
     """Authorization and transcript side effects for approval decisions."""
 
     authorization_port: AuthorizationPort | None
-    session_service: SessionMessageAppendPort | None
+    session_service: SessionItemAppendPort | None
     get_run: Callable[[str], OrchestrationRun]
 
     def grant_run_tool_authorization(
@@ -151,12 +151,16 @@ class ApprovalResolutionService:
             ),
             ApprovalDecision.DENY: "Denied by the user.",
         }[decision]
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        self.session_service.append_item(
+            AppendSessionItemInput(
                 session_key=session_key,
                 session_id=run.active_session_id,
+                kind=SessionItemKind.TOOL_RESULT,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    trace_visible=True,
+                ),
                 content_payload={
                     "tool_name": tool_name,
                     "tool_call_id": request.request_id,
@@ -167,8 +171,11 @@ class ApprovalResolutionService:
                     "tool_ids": list(request.tool_ids),
                     "output": detail,
                 },
+                source_module="orchestration",
                 source_kind="approval_request",
                 source_id=request.request_id,
+                call_id=request.request_id,
+                tool_name=tool_name,
                 metadata={
                     "tool_call_id": request.request_id,
                     "tool_name": tool_name,

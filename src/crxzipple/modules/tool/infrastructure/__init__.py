@@ -27,6 +27,7 @@ from crxzipple.modules.tool.infrastructure.persistence import (
     SqlAlchemyToolRunRepository,
     SqlAlchemyToolSourceDiscoveryRunRepository,
     SqlAlchemyToolSourceRepository,
+    SqlAlchemyToolSurfaceRepository,
     SqlAlchemyToolWorkerRepository,
 )
 from crxzipple.modules.tool.infrastructure.package_catalog import (
@@ -105,6 +106,7 @@ __all__ = [
     "SqlAlchemyToolRunRepository",
     "SqlAlchemyToolSourceDiscoveryRunRepository",
     "SqlAlchemyToolSourceRepository",
+    "SqlAlchemyToolSurfaceRepository",
     "SqlAlchemyToolWorkerRepository",
     "SubprocessSandboxBackend",
     "ToolRuntimeRegistration",

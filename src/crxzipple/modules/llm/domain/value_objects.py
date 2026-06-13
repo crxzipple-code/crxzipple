@@ -66,6 +66,43 @@ class LlmMessageRole(StrEnum):
     TOOL = "tool"
 
 
+class LlmResponseItemKind(StrEnum):
+    ASSISTANT_MESSAGE = "assistant_message"
+    REASONING = "reasoning"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    STRUCTURED_OUTPUT = "structured_output"
+    PROVIDER_EXTERNAL_ITEM = "provider_external_item"
+    COMPACTION = "compaction"
+    UNKNOWN = "unknown"
+
+
+class LlmMessagePhase(StrEnum):
+    COMMENTARY = "commentary"
+    FINAL_ANSWER = "final_answer"
+    UNKNOWN = "unknown"
+
+
+class LlmResponseEventType(StrEnum):
+    INVOCATION_STARTED = "invocation_started"
+    ITEM_STARTED = "item_started"
+    TEXT_DELTA = "text_delta"
+    REASONING_SUMMARY_DELTA = "reasoning_summary_delta"
+    REASONING_RAW_DELTA = "reasoning_raw_delta"
+    TOOL_ARGUMENT_DELTA = "tool_argument_delta"
+    ITEM_COMPLETED = "item_completed"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class LlmContinuationReason(StrEnum):
+    NONE = "none"
+    TOOL_CALL = "tool_call"
+    PROVIDER_END_TURN_FALSE = "provider_end_turn_false"
+    TOOL_ERROR_RESPONSE = "tool_error_response"
+    PENDING_EXTERNAL = "pending_external"
+
+
 @dataclass(frozen=True, slots=True)
 class LlmDefaults(ValueObject):
     temperature: float | None = None
@@ -327,6 +364,277 @@ class LlmResult(ValueObject):
                 else {}
             ),
         )
+
+    @classmethod
+    def from_response_items(
+        cls,
+        response_items: tuple["LlmResponseItem", ...],
+        *,
+        usage: LlmUsage | None = None,
+        finish_reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        structured_output: Any | None = None,
+        text_fallback: str | None = None,
+    ) -> "LlmResult":
+        text_fragments: list[str] = []
+        tool_calls: list[ToolCallIntent] = []
+        for item in response_items:
+            if item.kind is LlmResponseItemKind.ASSISTANT_MESSAGE:
+                text = _response_item_text(item)
+                if text is not None:
+                    text_fragments.append(text)
+                continue
+            if item.kind is LlmResponseItemKind.TOOL_CALL and item.tool_name:
+                arguments = item.content_payload.get("arguments")
+                tool_calls.append(
+                    ToolCallIntent(
+                        id=item.call_id or item.provider_item_id or item.id,
+                        name=item.tool_name,
+                        arguments=dict(arguments) if isinstance(arguments, dict) else {},
+                    ),
+                )
+        text = "".join(text_fragments) or text_fallback
+        return cls(
+            text=text or None,
+            tool_calls=tuple(tool_calls),
+            structured_output=structured_output,
+            usage=usage,
+            finish_reason=finish_reason,
+            metadata=dict(metadata or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LlmResponseItem(ValueObject):
+    id: str
+    invocation_id: str
+    sequence_no: int
+    kind: LlmResponseItemKind
+    role: LlmMessageRole | None = None
+    phase: LlmMessagePhase = LlmMessagePhase.UNKNOWN
+    content_payload: dict[str, Any] = field(default_factory=dict)
+    provider_payload: dict[str, Any] = field(default_factory=dict)
+    provider_item_id: str | None = None
+    provider_item_type: str | None = None
+    call_id: str | None = None
+    tool_name: str | None = None
+    model_visible: bool = True
+    user_visible: bool = False
+    created_at: datetime = field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise LlmValidationError("LLM response item id cannot be empty.")
+        if not self.invocation_id.strip():
+            raise LlmValidationError("LLM response item invocation_id cannot be empty.")
+        if self.sequence_no < 0:
+            raise LlmValidationError("LLM response item sequence_no cannot be negative.")
+        object.__setattr__(self, "content_payload", dict(self.content_payload))
+        object.__setattr__(self, "provider_payload", dict(self.provider_payload))
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "invocation_id": self.invocation_id,
+            "sequence_no": self.sequence_no,
+            "kind": self.kind.value,
+            "phase": self.phase.value,
+            "content_payload": dict(self.content_payload),
+            "provider_payload": dict(self.provider_payload),
+            "model_visible": self.model_visible,
+            "user_visible": self.user_visible,
+            "created_at": self.created_at.isoformat(),
+        }
+        if self.role is not None:
+            payload["role"] = self.role.value
+        if self.provider_item_id is not None:
+            payload["provider_item_id"] = self.provider_item_id
+        if self.provider_item_type is not None:
+            payload["provider_item_type"] = self.provider_item_type
+        if self.call_id is not None:
+            payload["call_id"] = self.call_id
+        if self.tool_name is not None:
+            payload["tool_name"] = self.tool_name
+        if self.completed_at is not None:
+            payload["completed_at"] = self.completed_at.isoformat()
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "LlmResponseItem":
+        return cls(
+            id=str(payload.get("id", "")),
+            invocation_id=str(payload.get("invocation_id", "")),
+            sequence_no=int(payload.get("sequence_no", 0)),
+            kind=LlmResponseItemKind(str(payload.get("kind", LlmResponseItemKind.UNKNOWN))),
+            role=(
+                LlmMessageRole(str(payload["role"]))
+                if payload.get("role") is not None
+                else None
+            ),
+            phase=LlmMessagePhase(str(payload.get("phase", LlmMessagePhase.UNKNOWN))),
+            content_payload=(
+                dict(payload.get("content_payload"))
+                if isinstance(payload.get("content_payload"), dict)
+                else {}
+            ),
+            provider_payload=(
+                dict(payload.get("provider_payload"))
+                if isinstance(payload.get("provider_payload"), dict)
+                else {}
+            ),
+            provider_item_id=(
+                str(payload["provider_item_id"])
+                if payload.get("provider_item_id") is not None
+                else None
+            ),
+            provider_item_type=(
+                str(payload["provider_item_type"])
+                if payload.get("provider_item_type") is not None
+                else None
+            ),
+            call_id=str(payload["call_id"]) if payload.get("call_id") is not None else None,
+            tool_name=(
+                str(payload["tool_name"]) if payload.get("tool_name") is not None else None
+            ),
+            model_visible=bool(payload.get("model_visible", True)),
+            user_visible=bool(payload.get("user_visible", False)),
+            created_at=_datetime_from_payload(payload.get("created_at")) or utcnow(),
+            completed_at=_datetime_from_payload(payload.get("completed_at")),
+        )
+
+
+def _response_item_text(item: LlmResponseItem) -> str | None:
+    text = item.content_payload.get("text")
+    if text is not None:
+        return str(text)
+    summary = item.content_payload.get("summary")
+    if isinstance(summary, str):
+        return summary
+    if isinstance(summary, list):
+        fragments: list[str] = []
+        for block in summary:
+            if isinstance(block, dict) and block.get("text") is not None:
+                fragments.append(str(block.get("text")))
+            elif isinstance(block, str):
+                fragments.append(block)
+        return "".join(fragments) or None
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class LlmResponseEvent(ValueObject):
+    id: str
+    invocation_id: str
+    sequence_no: int
+    type: LlmResponseEventType
+    item_id: str | None = None
+    delta_payload: dict[str, Any] = field(default_factory=dict)
+    provider_payload: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise LlmValidationError("LLM response event id cannot be empty.")
+        if not self.invocation_id.strip():
+            raise LlmValidationError("LLM response event invocation_id cannot be empty.")
+        if self.sequence_no < 0:
+            raise LlmValidationError("LLM response event sequence_no cannot be negative.")
+        object.__setattr__(self, "delta_payload", dict(self.delta_payload))
+        object.__setattr__(self, "provider_payload", dict(self.provider_payload))
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "invocation_id": self.invocation_id,
+            "sequence_no": self.sequence_no,
+            "type": self.type.value,
+            "delta_payload": dict(self.delta_payload),
+            "provider_payload": dict(self.provider_payload),
+            "created_at": self.created_at.isoformat(),
+        }
+        if self.item_id is not None:
+            payload["item_id"] = self.item_id
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "LlmResponseEvent":
+        return cls(
+            id=str(payload.get("id", "")),
+            invocation_id=str(payload.get("invocation_id", "")),
+            sequence_no=int(payload.get("sequence_no", 0)),
+            type=LlmResponseEventType(str(payload.get("type", LlmResponseEventType.FAILED))),
+            item_id=str(payload["item_id"]) if payload.get("item_id") is not None else None,
+            delta_payload=(
+                dict(payload.get("delta_payload"))
+                if isinstance(payload.get("delta_payload"), dict)
+                else {}
+            ),
+            provider_payload=(
+                dict(payload.get("provider_payload"))
+                if isinstance(payload.get("provider_payload"), dict)
+                else {}
+            ),
+            created_at=_datetime_from_payload(payload.get("created_at")) or utcnow(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LlmContinuationSignal(ValueObject):
+    end_turn: bool | None = None
+    needs_follow_up: bool = False
+    reason: LlmContinuationReason = LlmContinuationReason.NONE
+    provider_payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_payload", dict(self.provider_payload))
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "needs_follow_up": self.needs_follow_up,
+            "reason": self.reason.value,
+            "provider_payload": dict(self.provider_payload),
+        }
+        if self.end_turn is not None:
+            payload["end_turn"] = self.end_turn
+        return payload
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "LlmContinuationSignal | None":
+        if not payload:
+            return None
+        return cls(
+            end_turn=(
+                bool(payload["end_turn"]) if payload.get("end_turn") is not None else None
+            ),
+            needs_follow_up=bool(payload.get("needs_follow_up", False)),
+            reason=LlmContinuationReason(
+                str(payload.get("reason", LlmContinuationReason.NONE)),
+            ),
+            provider_payload=(
+                dict(payload.get("provider_payload"))
+                if isinstance(payload.get("provider_payload"), dict)
+                else {}
+            ),
+        )
+
+
+def _datetime_from_payload(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, str) and value.strip():
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Protocol
 
 from crxzipple.modules.session.domain.entities import Session, SessionInstance
-from crxzipple.modules.session.domain.value_objects import SessionMessage
+from crxzipple.modules.session.domain.value_objects import SessionItem
 
 
 class SessionRepository(Protocol):
@@ -21,17 +21,14 @@ class SessionRepository(Protocol):
         ...
 
 
-class SessionMessageRepository(Protocol):
-    def add(self, message: SessionMessage) -> None:
+class SessionItemRepository(Protocol):
+    def add(self, item: SessionItem) -> None:
         ...
 
-    def add_new(self, message: SessionMessage) -> None:
+    def add_many_new(self, items: tuple[SessionItem, ...]) -> None:
         ...
 
-    def add_many_new(self, messages: tuple[SessionMessage, ...]) -> None:
-        ...
-
-    def get(self, message_id: str) -> SessionMessage | None:
+    def get(self, item_id: str) -> SessionItem | None:
         ...
 
     def get_by_source(
@@ -39,9 +36,10 @@ class SessionMessageRepository(Protocol):
         *,
         session_key: str,
         session_id: str,
+        source_module: str,
         source_kind: str,
         source_id: str,
-    ) -> SessionMessage | None:
+    ) -> SessionItem | None:
         ...
 
     def max_sequence_no(self, *, session_key: str, session_id: str) -> int:
@@ -53,10 +51,13 @@ class SessionMessageRepository(Protocol):
         session_key: str,
         session_id: str | None = None,
         limit: int | None = None,
-        include_archived: bool = True,
+        model_visible: bool | None = None,
+        user_visible: bool | None = None,
+        chat_visible: bool | None = None,
+        trace_visible: bool | None = None,
         after_sequence_no: int | None = None,
         before_sequence_no: int | None = None,
-    ) -> list[SessionMessage]:
+    ) -> list[SessionItem]:
         ...
 
 

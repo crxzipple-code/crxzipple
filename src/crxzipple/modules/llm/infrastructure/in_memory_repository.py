@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from crxzipple.modules.llm.domain.entities import LlmInvocation, LlmProfile
+from crxzipple.modules.llm.domain.value_objects import LlmResponseEvent, LlmResponseItem
 
 
 class InMemoryLlmProfileRepository:
@@ -23,6 +24,7 @@ class InMemoryLlmProfileRepository:
 class InMemoryLlmInvocationRepository:
     def __init__(self) -> None:
         self._items: dict[str, LlmInvocation] = {}
+        self._response_events: dict[str, list[LlmResponseEvent]] = {}
 
     def add(self, invocation: LlmInvocation) -> None:
         self._items[invocation.id] = invocation
@@ -48,3 +50,31 @@ class InMemoryLlmInvocationRepository:
         if limit is None:
             return items[start:]
         return items[start : start + max(int(limit), 0)]
+
+    def add_response_event(self, event: LlmResponseEvent) -> None:
+        events = self._response_events.setdefault(event.invocation_id, [])
+        events = [item for item in events if item.id != event.id]
+        events.append(event)
+        events.sort(key=lambda item: (item.sequence_no, item.id))
+        self._response_events[event.invocation_id] = events
+
+    def list_response_events(
+        self,
+        invocation_id: str,
+        *,
+        limit: int | None = None,
+        after_sequence: int | None = None,
+    ) -> list[LlmResponseEvent]:
+        events = list(self._response_events.get(invocation_id, ()))
+        if after_sequence is not None:
+            events = [event for event in events if event.sequence_no > int(after_sequence)]
+        if limit is None:
+            return events
+        return events[: max(int(limit), 0)]
+
+    def get_response_item(self, item_id: str) -> LlmResponseItem | None:
+        for invocation in self._items.values():
+            for item in invocation.response_items:
+                if item.id == item_id:
+                    return item
+        return None

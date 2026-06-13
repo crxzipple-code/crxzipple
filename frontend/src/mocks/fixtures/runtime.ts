@@ -84,6 +84,7 @@ export const workbenchRun: WorkbenchRunView = {
     eta_ms: 70000,
     queue_wait_ms: 0,
   },
+  timeline: [],
   trace: {
     trace_id: "trc_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",
     session_key: "ses_01H8XK3Q7Y4P8Z2J8S6M1D9F6E",

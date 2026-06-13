@@ -10,7 +10,7 @@ from crxzipple.modules.orchestration.application.event_contracts import (
 )
 from crxzipple.modules.orchestration.application.execution_chain_lifecycle import (
     mark_tool_run_step_item_terminal,
-    materialize_tool_result_message_items,
+    materialize_tool_result_session_item_items,
 )
 from crxzipple.modules.orchestration.application.ports.context import (
     EventPublishPort,
@@ -86,14 +86,14 @@ class OrchestrationToolResumeCoordinator:
             )
             if not all(tool_run.is_terminal() for tool_run in pending_tool_runs):
                 continue
-            message_ids = self.engine.append_completed_background_tool_results(
+            item_ids = self.engine.append_completed_background_tool_results(
                 run,
                 tool_runs=pending_tool_runs,
             )
-            self._materialize_tool_result_messages(
+            self._materialize_tool_result_items(
                 run=run,
                 tool_runs=pending_tool_runs,
-                message_ids=message_ids,
+                item_ids=item_ids,
             )
             resumed_runs.append(
                 self.resume_run(
@@ -176,26 +176,26 @@ class OrchestrationToolResumeCoordinator:
                 extra={"tool_run_id": tool_run_id},
             )
 
-    def _materialize_tool_result_messages(
+    def _materialize_tool_result_items(
         self,
         *,
         run: OrchestrationRun,
         tool_runs: tuple[object, ...],
-        message_ids: tuple[str, ...],
+        item_ids: tuple[str, ...],
     ) -> None:
         links = tuple(
-            (tool_run_id, message_id)
-            for tool_run, message_id in zip(tool_runs, message_ids, strict=False)
+            (tool_run_id, item_id)
+            for tool_run, item_id in zip(tool_runs, item_ids, strict=False)
             for tool_run_id in (getattr(tool_run, "id", None),)
             if isinstance(tool_run_id, str)
         )
         if not links:
             return
         with self.uow_factory() as uow:
-            materialize_tool_result_message_items(
+            materialize_tool_result_session_item_items(
                 uow,
                 run=run,
-                tool_result_message_links=links,
+                tool_result_item_links=links,
             )
             uow.commit()
 

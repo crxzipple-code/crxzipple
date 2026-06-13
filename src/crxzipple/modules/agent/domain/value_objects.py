@@ -146,6 +146,57 @@ class AgentLlmRoutingPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentLlmPolicy:
+    reasoning_summary_policy: str = "visible_and_replay_when_provider_supports"
+    raw_reasoning_policy: str = "hidden_by_default"
+    tool_use_policy: str = "auto"
+    parallel_tool_calls_policy: str = "provider_default"
+    final_answer_policy: str = "phase_or_codex_unknown_fallback"
+    commentary_visibility_policy: str = "user_progress"
+    provider_external_item_policy: str = "history_and_trace_no_toolrun"
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "reasoning_summary_policy": self.reasoning_summary_policy,
+            "raw_reasoning_policy": self.raw_reasoning_policy,
+            "tool_use_policy": self.tool_use_policy,
+            "parallel_tool_calls_policy": self.parallel_tool_calls_policy,
+            "final_answer_policy": self.final_answer_policy,
+            "commentary_visibility_policy": self.commentary_visibility_policy,
+            "provider_external_item_policy": self.provider_external_item_policy,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | None) -> "AgentLlmPolicy":
+        payload = payload or {}
+        return cls(
+            reasoning_summary_policy=str(
+                payload.get(
+                    "reasoning_summary_policy",
+                    "visible_and_replay_when_provider_supports",
+                ),
+            ),
+            raw_reasoning_policy=str(payload.get("raw_reasoning_policy", "hidden_by_default")),
+            tool_use_policy=str(payload.get("tool_use_policy", "auto")),
+            parallel_tool_calls_policy=str(
+                payload.get("parallel_tool_calls_policy", "provider_default"),
+            ),
+            final_answer_policy=str(
+                payload.get("final_answer_policy", "phase_or_codex_unknown_fallback"),
+            ),
+            commentary_visibility_policy=str(
+                payload.get("commentary_visibility_policy", "user_progress"),
+            ),
+            provider_external_item_policy=str(
+                payload.get(
+                    "provider_external_item_policy",
+                    "history_and_trace_no_toolrun",
+                ),
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentExecutionPolicy:
     timeout_seconds: int = 120
     max_turns: int = 99

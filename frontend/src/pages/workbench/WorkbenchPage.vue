@@ -43,6 +43,8 @@ import type {
   UiKeyValueSection,
   UiLinkedEntity,
   UiRuntimeAction,
+  WorkbenchTimelineItem,
+  WorkbenchLinkedEntityDetail,
   WorkbenchHomeReadModel,
   WorkbenchRunView,
   WorkbenchThreadSummary,
@@ -69,6 +71,7 @@ import {
   loadWorkbenchContextTree,
   loadWorkbenchData,
   loadWorkbenchInvocationPromptPreview,
+  loadWorkbenchLinkedEntityDetail,
   loadWorkbenchPromptPreview,
   openEventStream,
   resolveWorkbenchApproval,
@@ -114,6 +117,10 @@ const workbenchModels = ref<WorkbenchLlmProfile[]>([]);
 const activeInspectorTab = ref<InspectorTabId>("overview");
 const expandedStepIds = ref<Set<string>>(new Set());
 const selectedStepId = ref<string | null>(null);
+const selectedEntityDetailKey = ref<string | null>(null);
+const selectedEntityDetail = ref<WorkbenchLinkedEntityDetail | null>(null);
+const entityDetailLoading = ref(false);
+const entityDetailError = ref<string | null>(null);
 const attachedArtifacts = ref<WorkbenchArtifactUpload[]>([]);
 const toolsOpen = ref(false);
 const toolsLoading = ref(false);
@@ -151,6 +158,7 @@ const stepIcons: Record<TurnStepView["type"], Component> = {
   agent_progress: MessageSquarePlus,
   agent_thinking: Sparkles,
   llm: Brain,
+  continuation_decision: Clock3,
   tool_call: Wrench,
   tool_result: Box,
   approval_required: ShieldCheck,
@@ -278,7 +286,8 @@ const activeLiveStream = computed(() => {
   return stream.text.trim() ? stream : null;
 });
 const activeTimelineSteps = computed(() => {
-  const steps = activeSteps.value;
+  const timeline = isNewSessionDraft.value ? [] : timelineStepsForActiveTurn();
+  const steps = timeline.length > 0 ? timeline : activeSteps.value;
   const stream = activeLiveStream.value;
   if (!stream || steps.some((step) => step.type === "final_response")) {
     return steps;
@@ -297,6 +306,9 @@ const selectedStepLlmInvocationId = computed(() => {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 });
 const selectedStepEntities = computed(() => selectedStep.value?.linked_entities ?? []);
+const selectedStepDetailEntities = computed(() => (
+  selectedStepEntities.value.filter((entity) => linkedEntitySupportsDetail(entity))
+));
 const selectedStepActions = computed(() => selectedStep.value?.actions ?? []);
 const enabledAgents = computed(() => workbenchAgents.value.filter((agent) => agent.enabled));
 const enabledModels = computed(() => workbenchModels.value.filter((model) => model.enabled));
@@ -413,6 +425,9 @@ const contextSnapshotRows = computed(() => {
   );
   const includedCount = snapshot?.included_node_ids.length ?? contextPreviewIncludedNodeIds.value.length;
   const mirroredCount = snapshot?.mirrored_node_ids.length ?? contextPreviewMirroredNodeIds.value.length;
+  const includedRefCount = snapshot?.included_refs.length ?? 0;
+  const collapsedRefCount = snapshot?.collapsed_refs.length ?? 0;
+  const protocolRefCount = snapshot?.protocol_required_refs.length ?? 0;
   return [
     { label: t("trace.id.run"), value: compactIdentifier(snapshot?.run_id ?? run.value?.run_id ?? "") },
     { label: t("workbench.context.revision"), value: snapshot ? String(snapshot.tree_revision) : String(contextTree.value?.workspace.active_revision ?? "-") },
@@ -420,6 +435,9 @@ const contextSnapshotRows = computed(() => {
     { label: t("workbench.context.runtimeContractHash"), value: compactIdentifier(textValue(requestMetadata.runtime_contract_hash, "")) },
     { label: t("workbench.context.includedNodes"), value: formatNumber(includedCount) },
     { label: t("workbench.context.mirroredNodes"), value: formatNumber(mirroredCount) },
+    { label: t("workbench.context.includedRefs"), value: formatNumber(includedRefCount) },
+    { label: t("workbench.context.protocolRefs"), value: formatNumber(protocolRefCount) },
+    { label: t("workbench.context.collapsedRefs"), value: formatNumber(collapsedRefCount) },
     { label: t("workbench.context.renderedPromptTokens"), value: formatNumber(renderedTokens) },
     { label: t("workbench.context.providerPromptTokens"), value: formatOptionalNumber(budgetMetadata.estimated_provider_prompt_tokens) },
     { label: t("workbench.context.directTranscriptTokens"), value: formatOptionalNumber(budgetMetadata.direct_transcript_estimated_tokens) },
@@ -432,6 +450,32 @@ const contextSnapshotRows = computed(() => {
 const contextSnapshotIncludedNodeIds = computed(() => (
   new Set(contextRenderSnapshot.value?.included_node_ids ?? contextPreviewIncludedNodeIds.value)
 ));
+const contextSnapshotRefRows = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return [];
+  const refs = snapshot.protocol_required_refs.length
+    ? snapshot.protocol_required_refs
+    : snapshot.included_refs;
+  return refs
+    .filter(isRecord)
+    .map((ref, index) => ({
+      id: textValue(ref.item_id ?? ref.owner_id ?? ref.node_id, `ref-${index}`),
+      kind: titleize(ref.kind ?? ref.owner_kind, "-"),
+      sequence: textValue(ref.sequence_no, "-"),
+      owner: textValue(ref.owner_module ?? ref.source_module, "-"),
+      callId: compactIdentifier(textValue(ref.tool_call_id, "")),
+    }))
+    .filter((row) => row.id)
+    .slice(0, 4);
+});
+const contextSnapshotHiddenRefCount = computed(() => {
+  const snapshot = contextRenderSnapshot.value;
+  if (!snapshot) return 0;
+  const sourceCount = snapshot.protocol_required_refs.length
+    ? snapshot.protocol_required_refs.length
+    : snapshot.included_refs.length;
+  return Math.max(sourceCount - contextSnapshotRefRows.value.length, 0);
+});
 const contextHasRenderInclusion = computed(() => (
   contextRenderSnapshot.value !== null || Object.keys(contextPreviewRenderReport.value).length > 0
 ));
@@ -995,6 +1039,7 @@ watch(
     toolsOpen.value = false;
     expandedStepIds.value = new Set();
     selectedStepId.value = null;
+    resetLinkedEntityDetail();
     void refreshWorkbench();
   },
   { immediate: true },
@@ -1487,6 +1532,7 @@ function createDraftWorkbenchRun(): WorkbenchRunView {
     current_turn_id: null,
     status_strip: null,
     cover_artifact: null,
+    timeline: [],
     actions: home.value?.actions ?? [],
     inspector: null,
     trace: {
@@ -1562,7 +1608,7 @@ function linkedEntityLabelKey(type: string): LinkedWorkbenchAsset["labelKey"] | 
 
 function linkedEntityIcon(type: string): Component {
   if (type === "tool_run") return Wrench;
-  if (type === "llm_invocation") return Brain;
+  if (type === "llm_invocation" || type === "llm_response_item" || type === "llm_response_item_id") return Brain;
   if (type === "artifact") return FileImage;
   if (type.includes("access")) return AlertTriangle;
   return PanelRightOpen;
@@ -1641,6 +1687,51 @@ function selectStepForInspector(step: TurnStepView) {
   activeInspectorTab.value = "step";
 }
 
+function resetLinkedEntityDetail() {
+  selectedEntityDetailKey.value = null;
+  selectedEntityDetail.value = null;
+  entityDetailLoading.value = false;
+  entityDetailError.value = null;
+}
+
+function linkedEntityDetailKey(entity: UiLinkedEntity) {
+  return `${entity.type}:${entity.id}`;
+}
+
+function linkedEntitySupportsDetail(entity: UiLinkedEntity) {
+  return (
+    entity.type === "session_item"
+    || entity.type === "session_message"
+    || entity.type === "llm_response_item"
+    || entity.type === "llm_response_item_id"
+  );
+}
+
+async function showLinkedEntityDetail(entity: UiLinkedEntity) {
+  if (!linkedEntitySupportsDetail(entity)) return;
+  const key = linkedEntityDetailKey(entity);
+  if (selectedEntityDetailKey.value === key && selectedEntityDetail.value) return;
+  selectedEntityDetailKey.value = key;
+  selectedEntityDetail.value = null;
+  entityDetailLoading.value = true;
+  entityDetailError.value = null;
+  try {
+    selectedEntityDetail.value = await loadWorkbenchLinkedEntityDetail(entity.type, entity.id);
+  } catch (error) {
+    entityDetailError.value = commandErrorMessage(error);
+  } finally {
+    entityDetailLoading.value = false;
+  }
+}
+
+function linkedEntityDetailSummary(detail: WorkbenchLinkedEntityDetail | null) {
+  if (!detail) return "";
+  if (detail.summary.trim()) return detail.summary;
+  const text = detail.payload.content_payload;
+  if (isRecord(text) && typeof text.text === "string") return text.text;
+  return detail.label;
+}
+
 function isStepExpanded(stepId: string) {
   return expandedStepIds.value.has(stepId);
 }
@@ -1667,6 +1758,19 @@ function stepDetailRows(step: TurnStepView) {
   if (step.trace.approval_request_id) {
     rows.push({ label: t("workbench.details.approvalRequest"), value: step.trace.approval_request_id });
   }
+  const existingValues = new Set(rows.map((row) => row.value));
+  for (const entity of step.linked_entities ?? []) {
+    if (
+      entity.type !== "llm_response_item_id"
+      && entity.type !== "provider_item_id"
+      && entity.type !== "session_item_id"
+    ) {
+      continue;
+    }
+    if (existingValues.has(entity.id)) continue;
+    rows.push({ label: linkedEntityLabel(entity), value: entity.id });
+    existingValues.add(entity.id);
+  }
   return rows;
 }
 
@@ -1689,6 +1793,7 @@ function exportActiveRun() {
 
 watch(activeTurnId, () => {
   selectedStepId.value = null;
+  resetLinkedEntityDetail();
   void nextTick(scrollActiveTurnTab);
 });
 
@@ -1706,6 +1811,10 @@ watch(selectedStepLlmInvocationId, () => {
   if (activeInspectorTab.value === "context") {
     void refreshContextTree();
   }
+});
+
+watch(selectedStepId, () => {
+  resetLinkedEntityDetail();
 });
 
 watch(threadFilters, (filters) => {
@@ -1826,6 +1935,95 @@ function liveFinalResponseStep(stream: LiveStreamState): TurnStepView {
   };
 }
 
+function timelineStepsForActiveTurn(): TurnStepView[] {
+  const currentRun = run.value;
+  const turnId = activeTurnId.value;
+  if (!currentRun || !turnId) return [];
+  return (currentRun.timeline ?? [])
+    .filter((item) => item.turn_id === turnId)
+    .map(timelineStepFromItem);
+}
+
+function timelineStepFromItem(item: WorkbenchTimelineItem): TurnStepView {
+  const summary = timelineItemSummary(item);
+  const type = timelineItemStepType(item);
+  return {
+    step_id: item.id,
+    turn_id: item.turn_id,
+    run_id: item.run_id,
+    type,
+    status: item.status as TurnStepView["status"],
+    title: item.title,
+    summary,
+    markdown: timelineItemMarkdown(item),
+    started_at: item.started_at,
+    completed_at: item.completed_at,
+    duration_ms: null,
+    artifacts: [],
+    badges: timelineItemBadges(item, type),
+    linked_entities: linkedEntitiesFromTimelineItem(item),
+    details_available: Object.keys(item.source_refs ?? {}).length > 0,
+    trace: item.trace,
+  };
+}
+
+function timelineItemStepType(item: WorkbenchTimelineItem): TurnStepView["type"] {
+  if (item.kind === "user_input") return "user_input";
+  if (item.kind === "assistant_commentary") return "agent_progress";
+  if (item.kind === "assistant_final_answer" || item.kind === "final_answer") return "final_response";
+  if (item.kind === "reasoning_summary") return "agent_thinking";
+  if (item.kind === "tool_call") return "tool_call";
+  if (item.kind === "tool_run") return "tool_call";
+  if (item.kind === "tool_result") return "tool_result";
+  if (item.kind === "continuation") return "continuation_decision";
+  if (item.kind === "approval" || item.kind === "approval_required") return "approval_required";
+  if (item.kind === "error") return "error";
+  return "llm";
+}
+
+function timelineItemSummary(item: WorkbenchTimelineItem): string {
+  const content = item.content ?? {};
+  if (item.kind === "reasoning_summary" && content.reasoning_hidden === true) {
+    return t("workbench.reasoning.hiddenSummary", {
+      count: formatOptionalNumber(content.reasoning_item_count),
+    });
+  }
+  const text = textValue(content.text, "");
+  if (text) return text;
+  const markdown = textValue(content.markdown, "");
+  if (markdown) return markdown;
+  const toolName = textValue(content.tool_name, "");
+  if (toolName) return toolName;
+  return item.title;
+}
+
+function timelineItemMarkdown(item: WorkbenchTimelineItem): string | undefined {
+  const markdown = textValue(item.content?.markdown, "");
+  return markdown || undefined;
+}
+
+function timelineItemBadges(
+  item: WorkbenchTimelineItem,
+  type: TurnStepView["type"],
+): TurnStepView["badges"] {
+  const badges: TurnStepView["badges"] = [];
+  if (type === "tool_call") badges.push({ label: "Tool Call", tone: "info" });
+  if (type === "tool_result") badges.push({ label: "Tool Result", tone: "success" });
+  if (item.kind === "reasoning_summary") badges.push({ label: "Reasoning Summary", tone: "info" });
+  if (item.kind === "provider_external_item") badges.push({ label: "Provider Item", tone: "neutral" });
+  if (item.phase) badges.push({ label: item.phase, tone: "neutral" });
+  return badges;
+}
+
+function linkedEntitiesFromTimelineItem(item: WorkbenchTimelineItem): UiLinkedEntity[] {
+  return Object.entries(item.source_refs ?? {}).map(([type, id]) => ({
+    type,
+    id,
+    owner: type,
+    label: type,
+  }));
+}
+
 function clearLiveFlow() {
   liveStream.value = null;
 }
@@ -1863,7 +2061,7 @@ function stepVisualTone(step: TurnStepView) {
   }
   if (step.type === "user_input") return "user";
   if (step.type === "agent_progress") return "llm";
-  if (step.type === "llm" || step.type === "agent_thinking") return "llm";
+  if (step.type === "llm" || step.type === "agent_thinking" || step.type === "continuation_decision") return "llm";
   if (step.type === "tool_call") return "tool-call";
   if (step.type === "tool_result") return "tool-result";
   if (step.type === "final_response") return "final";
@@ -1931,6 +2129,7 @@ function stepTitle(step: TurnStepView) {
     agent_progress: t("workbench.step.agentProgress.title"),
     agent_thinking: t("workbench.step.llm.title"),
     llm: t("workbench.step.llm.title"),
+    continuation_decision: t("workbench.step.continuationDecision.title"),
     tool_call: t("workbench.badge.toolCall"),
     tool_result: t("workbench.badge.toolResult"),
     approval_required: t("workbench.step.approval.title"),
@@ -1958,6 +2157,8 @@ function badgeLabel(label: string) {
   return {
     "Tool Call": t("workbench.badge.toolCall"),
     "Tool Result": t("workbench.badge.toolResult"),
+    "Reasoning Summary": t("workbench.badge.reasoningSummary"),
+    "Provider Item": t("workbench.badge.providerItem"),
     Authorization: t("workbench.badge.authorization"),
   }[label] ?? label;
 }
@@ -4034,6 +4235,44 @@ function handleTurnsWheel(event: WheelEvent) {
             <strong>{{ linkedEntityLabel(entity) }}</strong>
             <span :title="entity.id">{{ compactIdentifier(entity.id) }}</span>
           </div>
+          <button
+            v-for="entity in selectedStepDetailEntities"
+            :key="`detail:${entity.type}:${entity.id}`"
+            class="asset-link"
+            type="button"
+            :disabled="entityDetailLoading && selectedEntityDetailKey === linkedEntityDetailKey(entity)"
+            @click="showLinkedEntityDetail(entity)"
+          >
+            <component :is="linkedEntityIcon(entity.type)" :size="16" />
+            <strong>{{ t("workbench.entityDetail.open") }}</strong>
+            <span :title="entity.id">{{ linkedEntityLabel(entity) }} · {{ compactIdentifier(entity.id) }}</span>
+            <Loader2
+              v-if="entityDetailLoading && selectedEntityDetailKey === linkedEntityDetailKey(entity)"
+              class="motion-spin"
+              :size="14"
+            />
+            <ChevronRight v-else :size="14" />
+          </button>
+          <div v-if="selectedEntityDetail || entityDetailError" class="entity-detail-card">
+            <template v-if="selectedEntityDetail">
+              <header>
+                <span>{{ selectedEntityDetail.owner }}</span>
+                <strong>{{ selectedEntityDetail.label }}</strong>
+              </header>
+              <p>{{ linkedEntityDetailSummary(selectedEntityDetail) }}</p>
+              <dl>
+                <div>
+                  <dt>{{ t("table.kind") }}</dt>
+                  <dd>{{ selectedEntityDetail.type }}</dd>
+                </div>
+                <div>
+                  <dt>ID</dt>
+                  <dd :title="selectedEntityDetail.id">{{ selectedEntityDetail.id }}</dd>
+                </div>
+              </dl>
+            </template>
+            <p v-else>{{ entityDetailError }}</p>
+          </div>
           <p v-if="!selectedStepEntities.length" class="asset-empty">{{ t("workbench.asset.empty") }}</p>
         </UiCard>
 
@@ -4204,6 +4443,22 @@ function handleTurnsWheel(event: WheelEvent) {
             >
               <span>{{ row.label }}</span>
               <strong>{{ row.value }}</strong>
+            </div>
+          </div>
+          <div v-if="contextSnapshotRefRows.length" class="context-snapshot-ref-rows">
+            <div class="context-snapshot-ref-rows__head">
+              <span>{{ t("workbench.context.protocolRefs") }}</span>
+              <small v-if="contextSnapshotHiddenRefCount > 0">
+                {{ t("workbench.context.moreRefs", { count: formatNumber(contextSnapshotHiddenRefCount) }) }}
+              </small>
+            </div>
+            <div
+              v-for="row in contextSnapshotRefRows"
+              :key="row.id"
+              class="context-snapshot-ref-row"
+            >
+              <span>{{ row.kind }} · #{{ row.sequence }}</span>
+              <code :title="`${row.id} · ${row.owner} · ${row.callId}`">{{ compactIdentifier(row.id) }}</code>
             </div>
           </div>
           <div v-if="contextRouteDiagnosticRows.length" class="context-route-diagnostics" :aria-label="t('workbench.context.routeDiagnostics')">
@@ -6649,6 +6904,52 @@ dd {
   color: var(--color-danger);
 }
 
+.context-snapshot-ref-rows {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-2);
+  background: var(--surface-panel-soft);
+}
+
+.context-snapshot-ref-rows__head,
+.context-snapshot-ref-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.context-snapshot-ref-rows__head {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.context-snapshot-ref-rows__head small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-snapshot-ref-row {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.context-snapshot-ref-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .context-route-diagnostics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -7459,6 +7760,72 @@ dd {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.entity-detail-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.entity-detail-card header {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.entity-detail-card header span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.entity-detail-card header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entity-detail-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.entity-detail-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.entity-detail-card dl div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.entity-detail-card dt,
+.entity-detail-card dd {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.entity-detail-card dt {
+  color: var(--text-muted);
+}
+
+.entity-detail-card dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
 }
 
 .quick-actions a,

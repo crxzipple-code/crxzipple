@@ -29,6 +29,12 @@ def build_snapshot_provider_attachments(
     prompt: RunPromptInput,
 ) -> dict[str, object]:
     payload = dict(rendered_attachments)
+    session_item_refs = _direct_session_item_refs(prompt)
+    transcript_budget = _prompt_transcript_budget(prompt)
+    protocol_required_refs = _merged_protocol_required_refs(
+        session_item_refs,
+        transcript_budget,
+    )
     payload["prompt_input"] = {
         "llm_id": prompt.llm_id,
         "llm_capabilities": [
@@ -37,7 +43,22 @@ def build_snapshot_provider_attachments(
         "message_count": len(prompt.messages),
         "tool_schema_count": len(prompt.tool_schemas),
         "context_block_count": len(prompt.context_blocks),
+        "session_item_count": len(session_item_refs),
+        "protocol_required_ref_count": len(protocol_required_refs),
+        "transcript_budget_source": transcript_budget.get("source"),
+        "transcript_budget_truncated": transcript_budget.get("truncated"),
+        "transcript_frontier": transcript_budget.get("frontier"),
     }
+    if session_item_refs:
+        payload["session_item_refs"] = session_item_refs
+    execution_refs = _metadata_dict_list(
+        transcript_budget.get("execution_chain_protocol_required_refs"),
+    )
+    if execution_refs:
+        payload["execution_chain_protocol_required_refs"] = execution_refs
+    collapsed_refs = _metadata_dict_list(transcript_budget.get("collapsed_refs"))
+    if collapsed_refs:
+        payload["collapsed_session_item_refs"] = collapsed_refs
     return payload
 
 
@@ -75,6 +96,15 @@ def build_context_snapshot_metadata(
     rendered_prompt_tokens = estimate_text_tokens(rendered_prompt_body or "")
     direct_transcript_chars = _direct_transcript_chars(prompt)
     direct_transcript_tokens = estimate_text_tokens_from_chars(direct_transcript_chars)
+    direct_session_item_refs = _direct_session_item_refs(prompt)
+    direct_transcript_budget = _prompt_transcript_budget(prompt)
+    protocol_required_refs = _merged_protocol_required_refs(
+        direct_session_item_refs,
+        direct_transcript_budget,
+    )
+    execution_chain_protocol_required_refs = _metadata_dict_list(
+        direct_transcript_budget.get("execution_chain_protocol_required_refs"),
+    )
     tree_tool_interaction_count = sum(
         1
         for node_id in included_node_ids
@@ -228,6 +258,20 @@ def build_context_snapshot_metadata(
         "direct_transcript_roles": [message.role.value for message in prompt.messages],
         "direct_transcript_chars": direct_transcript_chars,
         "direct_transcript_estimated_tokens": direct_transcript_tokens,
+        "direct_session_item_refs": direct_session_item_refs,
+        "direct_session_item_count": len(direct_session_item_refs),
+        "direct_session_item_frontier": _session_item_frontier(
+            direct_session_item_refs,
+        ),
+        "direct_transcript_budget": direct_transcript_budget,
+        "protocol_required_refs": protocol_required_refs,
+        "protocol_required_ref_count": len(protocol_required_refs),
+        "execution_chain_protocol_required_refs": (
+            execution_chain_protocol_required_refs
+        ),
+        "execution_chain_protocol_required_ref_count": len(
+            execution_chain_protocol_required_refs,
+        ),
         "rendered_prompt_chars": rendered_prompt_chars,
         "rendered_prompt_estimated_tokens": rendered_prompt_tokens,
         "estimated_provider_prompt_tokens": (
@@ -259,10 +303,10 @@ def build_context_snapshot_metadata(
             "omitted_count",
         ),
         "duplicate_tool_delivery_risk": duplicate_delivery_risk,
-        "tree_session_message_count": sum(
-            1 for node_id in included_node_ids if node_id.startswith("session.message.")
+        "tree_session_item_count": sum(
+            1 for node_id in included_node_ids if node_id.startswith("session.item.")
         ),
-        "session_message_node_refs": _session_message_node_refs(included_node_ids),
+        "session_item_node_refs": _session_item_node_refs(included_node_ids),
         "current_inbound_node_id": _current_inbound_node_id(
             run=run,
             prompt=prompt,
@@ -284,7 +328,7 @@ def build_context_snapshot_metadata(
             session_budget,
             "segment_node_count",
         ),
-        "session_message_range_node_count": metadata_int(
+        "session_item_range_node_count": metadata_int(
             session_budget,
             "range_node_count",
         ),
@@ -351,7 +395,7 @@ def build_context_snapshot_metadata(
             or node_id.startswith("session.segment.messages.")
         ),
         "artifact_content_block_count": len(artifact_content_blocks),
-        "current_inbound_message_id": _current_inbound_message_id(
+        "current_inbound_session_item_id": _current_inbound_session_item_id(
             run=run,
             prompt=prompt,
         ),
@@ -549,11 +593,11 @@ def mirrored_tool_schemas(
     return tuple(schemas)
 
 
-def _session_message_node_refs(
+def _session_item_node_refs(
     included_node_ids: tuple[str, ...],
 ) -> list[dict[str, object]]:
     refs: list[dict[str, object]] = []
-    prefix = "session.message."
+    prefix = "session.item."
     for node_id in included_node_ids:
         if not node_id.startswith(prefix):
             continue
@@ -619,13 +663,13 @@ def _current_inbound_node_id(
             sequence_text = sequence_no.strip()
         else:
             continue
-        node_id = f"session.message.{session_id.strip()}.{sequence_text}"
+        node_id = f"session.item.{session_id.strip()}.{sequence_text}"
         if node_id in included:
             return node_id
     return None
 
 
-def _current_inbound_message_id(
+def _current_inbound_session_item_id(
     *,
     run: OrchestrationRun,
     prompt: RunPromptInput,
@@ -636,14 +680,161 @@ def _current_inbound_message_id(
             continue
         if metadata.get("source_id") != run.id:
             continue
-        session_message_id = metadata.get("session_message_id")
-        if isinstance(session_message_id, str) and session_message_id.strip():
-            return session_message_id.strip()
+        session_item_id = metadata.get("session_item_id")
+        if isinstance(session_item_id, str) and session_item_id.strip():
+            return session_item_id.strip()
     return None
 
 
 def _direct_transcript_chars(prompt: RunPromptInput) -> int:
     return sum(_llm_message_content_chars(message.content) for message in prompt.messages)
+
+
+def _direct_session_item_refs(prompt: RunPromptInput) -> list[dict[str, object]]:
+    refs: list[dict[str, object]] = []
+    for message in prompt.messages:
+        metadata = message.metadata
+        item_id = metadata_text(metadata.get("session_item_id"))
+        session_id = metadata_text(metadata.get("session_id"))
+        sequence_no = _metadata_int_value(metadata.get("sequence_no"))
+        if item_id is None or session_id is None or sequence_no is None:
+            continue
+        ref: dict[str, object] = {
+            "owner_module": "session",
+            "owner_kind": "session_item",
+            "owner_id": item_id,
+            "item_id": item_id,
+            "session_id": session_id,
+            "sequence_no": sequence_no,
+            "role": message.role.value,
+            "render_mode": "full",
+            "visibility": "model_visible",
+        }
+        for key in (
+            "kind",
+            "phase",
+            "source_module",
+            "source_kind",
+            "source_id",
+            "provider_item_id",
+            "provider_item_type",
+            "tool_call_id",
+            "tool_name",
+            "tool_status",
+        ):
+            value = metadata_text(metadata.get(key))
+            if value is not None:
+                ref[key] = value
+        refs.append(ref)
+    return refs
+
+
+def _protocol_required_refs(
+    refs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    required: list[dict[str, object]] = []
+    for ref in refs:
+        kind = metadata_text(ref.get("kind"))
+        if kind not in {"tool_call", "tool_result", "provider_external_item"}:
+            continue
+        payload = dict(ref)
+        payload["protocol_required"] = True
+        payload["budget_class"] = "protocol_required"
+        required.append(payload)
+    return required
+
+
+def _merged_protocol_required_refs(
+    direct_refs: list[dict[str, object]],
+    transcript_budget: dict[str, object],
+) -> list[dict[str, object]]:
+    refs = [
+        *_protocol_required_refs(direct_refs),
+        *_metadata_dict_list(transcript_budget.get("protocol_required_refs")),
+    ]
+    deduped: list[dict[str, object]] = []
+    seen: set[tuple[object, object, object, object, object]] = set()
+    for ref in refs:
+        identity = (
+            ref.get("owner_module"),
+            ref.get("owner_kind"),
+            ref.get("owner_id"),
+            ref.get("item_id"),
+            ref.get("tool_call_id"),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        payload = dict(ref)
+        payload["protocol_required"] = True
+        payload["budget_class"] = "protocol_required"
+        deduped.append(payload)
+    return deduped
+
+
+def _prompt_transcript_budget(prompt: RunPromptInput) -> dict[str, object]:
+    if prompt.report is None:
+        return _direct_session_item_budget(prompt)
+    report_payload = prompt.report.to_payload()
+    transcript = report_payload.get("transcript")
+    if not isinstance(transcript, dict):
+        return _direct_session_item_budget(prompt)
+    budget = transcript.get("budget")
+    if not isinstance(budget, dict):
+        return _direct_session_item_budget(prompt)
+    normalized = dict(budget)
+    if normalized:
+        return normalized
+    return _direct_session_item_budget(prompt)
+
+
+def _direct_session_item_budget(prompt: RunPromptInput) -> dict[str, object]:
+    direct_refs = _direct_session_item_refs(prompt)
+    if not direct_refs:
+        return {}
+    return {
+        "source": "session_items",
+        "budget_unit": "chars",
+        "input_item_count": len(direct_refs),
+        "included_item_count": len(direct_refs),
+        "collapsed_item_count": 0,
+        "truncated": False,
+        "frontier": _session_item_frontier(direct_refs),
+        "included_refs": direct_refs,
+        "protocol_required_refs": _protocol_required_refs(direct_refs),
+        "protocol_required_preserved": True,
+    }
+
+
+def _session_item_frontier(
+    refs: list[dict[str, object]],
+) -> dict[str, object]:
+    sequence_numbers = [
+        ref.get("sequence_no") for ref in refs if isinstance(ref.get("sequence_no"), int)
+    ]
+    if not sequence_numbers:
+        return {}
+    payload: dict[str, object] = {
+        "from_sequence_no": min(sequence_numbers),
+        "to_sequence_no": max(sequence_numbers),
+        "item_count": len(sequence_numbers),
+    }
+    first_id = refs[0].get("item_id")
+    last_id = refs[-1].get("item_id")
+    if isinstance(first_id, str):
+        payload["from_item_id"] = first_id
+    if isinstance(last_id, str):
+        payload["to_item_id"] = last_id
+    return payload
+
+
+def _metadata_int_value(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _metadata_dict_list(value: object) -> list[dict[str, object]]:

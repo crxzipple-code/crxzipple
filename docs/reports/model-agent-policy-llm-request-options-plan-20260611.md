@@ -155,11 +155,46 @@ Operations/Trace 应展示：
 
 ## Checklist
 
-- [ ] 定义 ModelProfile capability fields。
-- [ ] 定义 Agent LLM policy fields。
-- [ ] 定义 EffectiveLlmRequestPolicy。
-- [ ] Settings runtime defaults 增加 request option 默认值。
-- [ ] Orchestration request builder 使用 effective policy。
-- [ ] Adapter 拒绝或降级 provider 不支持的 option。
-- [ ] Operations 展示 policy resolution trace。
-- [ ] 清库重建后 model/agent/settings/llm 测试通过。
+- [x] 定义 ModelProfile capability/default fields。
+- [x] 定义 Agent LLM policy fields。
+- [x] 定义 EffectiveLlmRequestPolicy。
+- [x] Settings runtime defaults 增加 request option 默认值。
+- [x] Orchestration request builder 使用 effective policy。
+- [x] Adapter 前置 policy resolver 降级 provider 不支持的 reasoning option。
+- [x] Operations 展示 policy resolution trace。
+- [x] model/agent/settings/llm 目标回归通过。
+- [x] 清库重建后 model/agent/settings/llm smoke 通过。
+
+## 施工状态 2026-06-12
+
+- `src/crxzipple/modules/orchestration/application/llm_request_policy.py`
+  已新增 `EffectiveLlmRequestPolicy` 和 resolver。
+- `RunPromptInput` 已携带 `llm_defaults`，由 `RunPromptInputCollector`
+  从 `LlmProfile.default_params.to_payload()` 填充。
+- Agent Profile 已新增 `llm_policy`，agent home config、settings import、
+  HTTP request/response、CLI settings sync 和 DTO 均可读写该策略。
+- `RunPromptInput` 已携带 `llm_policy`，由 `RunPromptInputCollector`
+  从 `AgentProfile.llm_policy.to_payload()` 填充。
+- Engine preview/真实 invoke 已使用 effective policy 合成
+  `provider_options`、`reasoning_config`、`output_contract`。
+- Agent LLM policy 已进入 effective policy resolver：reasoning summary policy
+  会在 provider 支持 reasoning 时默认请求 `summary=auto`，不支持时写入
+  downgrade trace；final answer/tool use policy 会进入 `output_contract`，
+  parallel tool calls policy 会在明确 enabled/disabled 时进入
+  `provider_options`。
+- Settings 已新增 `llm_request_defaults`，由 `APP_LLM_REQUEST_DEFAULTS`
+  JSON object 加载；assembly 会将其注入 `RunPromptInputCollector`，
+  `RunPromptInput.runtime_llm_defaults` 再交给 effective policy resolver。
+- runtime defaults 已支持 `max_output_tokens`、`reasoning_effort`、
+  `service_tier`、`prompt_cache_enabled`、`parallel_tool_calls`、
+  `trace_raw_provider_payload`、`reasoning_summary_default_visibility` 和
+  `extra_body`，解析顺序为 runtime defaults -> model defaults ->
+  agent policy -> run override。
+- request metadata 已写入 `llm_request_policy` payload，包含 resolution trace。
+- LLM Operations invocation detail 已新增 `policy_trace` 表格，展示
+  `field`、`source`、`status`、`value`、`reason`，前端 LLM Operations 抽屉
+  已展示该表格。
+- reasoning option 会在模型缺少 `LlmCapability.REASONING` 时降级并记录
+  `llm_capability_not_supported`。
+- 2026-06-12 已补跑 `test_llm_settings_integration.py`、`test_agent_http.py`、`test_app_assembly_module_local.py`，共 40 个测试通过。
+- Docker reset 后已补跑 model/agent/LLM 组合回归：`test_llm_settings_integration.py`、`test_agent_http.py`、`test_app_assembly_module_local.py`、`test_llm.py`、`test_llm_adapters.py` 共 99 个测试通过；`llm list` 可读取 6 个 imported profiles。

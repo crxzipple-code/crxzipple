@@ -165,6 +165,27 @@ class ToolOrchestrationPortAdapter:
             ),
         )
 
+    def build_tool_surface(
+        self,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        runtime_context: object | None = None,
+        surface_id: str | None = None,
+        tool_ids: tuple[str, ...] | None = None,
+        persist: bool = False,
+    ):
+        return self.service.build_tool_surface(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            runtime_context=runtime_context,
+            surface_id=surface_id,
+            tool_ids=tool_ids,
+            persist=persist,
+        )
+
     async def execute(self, data):
         return await self.service.execute(data)
 

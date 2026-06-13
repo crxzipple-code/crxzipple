@@ -21,7 +21,7 @@ from crxzipple.modules.context_workspace.infrastructure import (
     InMemoryContextRenderSnapshotRepository,
     InMemoryContextWorkspaceRepository,
 )
-from crxzipple.modules.session.domain import SessionMessage
+from crxzipple.modules.session.domain import SessionItem, SessionItemKind
 from crxzipple.shared.content_blocks import (
     file_ref_content_block,
     image_ref_content_block,
@@ -30,11 +30,12 @@ from crxzipple.shared.content_blocks import (
 
 def test_artifact_adapter_expands_session_artifact_handles() -> None:
     session_service = _FakeSessionService(
-        SessionMessage(
-            id="message-1",
+        SessionItem(
+            id="item-1",
             session_key="session:artifacts",
             session_id="instance-1",
             sequence_no=1,
+            kind=SessionItemKind.ASSISTANT_MESSAGE,
             role="assistant",
             content_payload={
                 "blocks": [
@@ -105,11 +106,12 @@ def test_artifact_adapter_expands_session_artifact_handles() -> None:
 
 def test_artifact_provider_mirror_includes_pinned_artifacts() -> None:
     session_service = _FakeSessionService(
-        SessionMessage(
-            id="message-1",
+        SessionItem(
+            id="item-1",
             session_key="session:artifacts",
             session_id="instance-1",
             sequence_no=1,
+            kind=SessionItemKind.ASSISTANT_MESSAGE,
             role="assistant",
             content_payload={
                 "blocks": [
@@ -212,11 +214,11 @@ def _context_services(
 
 
 class _FakeSessionService:
-    def __init__(self, *messages: SessionMessage) -> None:
-        self._messages = tuple(messages)
+    def __init__(self, *items: SessionItem) -> None:
+        self._items = tuple(items)
 
-    def list_messages(self, _data):
-        return list(self._messages)
+    def list_items(self, _data):
+        return list(self._items)
 
 
 class _FakeArtifactService:

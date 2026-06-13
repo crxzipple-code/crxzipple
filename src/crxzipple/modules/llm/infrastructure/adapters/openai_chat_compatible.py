@@ -17,9 +17,13 @@ from crxzipple.modules.llm.application.streaming import LlmStreamEvent
 from crxzipple.modules.llm.domain.entities import LlmProfile
 from crxzipple.modules.llm.domain.value_objects import (
     LlmMessage,
+    LlmMessagePhase,
     LlmMessageRole,
+    LlmResponseItem,
+    LlmResponseItemKind,
     LlmResult,
     LlmUsage,
+    utcnow,
 )
 from crxzipple.modules.llm.infrastructure.adapters.common import (
     build_openai_tool_name_aliases,
@@ -217,13 +221,20 @@ class OpenAIChatCompatibleAdapter:
                 total_tokens=usage_raw.get("total_tokens"),
             )
 
+        response_items = _chat_response_items(
+            invocation_id=request.invocation_id,
+            content_text=content_text,
+            raw_tool_calls=raw_tool_calls,
+            provider_response_id=(
+                str(data.get("id")) if data.get("id") is not None else None
+            ),
+            model_name=str(data.get("model")) if data.get("model") is not None else None,
+            transport="json",
+            tool_name_aliases=alias_to_original,
+        )
         return LlmAdapterResponse(
-            result=LlmResult(
-                text=content_text,
-                tool_calls=build_tool_call_intents(
-                    raw_tool_calls,
-                    tool_name_aliases=alias_to_original,
-                ),
+            result=LlmResult.from_response_items(
+                response_items,
                 usage=usage,
                 finish_reason=(
                     str(choice.get("finish_reason"))
@@ -235,7 +246,9 @@ class OpenAIChatCompatibleAdapter:
                     "response_id": data.get("id"),
                     "model": data.get("model"),
                 },
+                text_fallback=content_text,
             ),
+            response_items=response_items,
             provider_request_id=str(data.get("id")) if data.get("id") is not None else None,
         )
 
@@ -263,8 +276,10 @@ class OpenAIChatCompatibleAdapter:
                 f"OpenAI-compatible profile '{profile.id}' completed with an invalid result payload.",
             )
         provider_request_id = completed_event.data.get("provider_request_id")
+        response_items = _response_items_from_completed_event(completed_event)
         return LlmAdapterResponse(
             result=result,
+            response_items=response_items,
             provider_request_id=(
                 str(provider_request_id) if provider_request_id is not None else None
             ),
@@ -293,6 +308,7 @@ class OpenAIChatCompatibleAdapter:
                 profile,
                 response,
                 description=f"OpenAI-compatible profile '{profile.id}'",
+                invocation_id=request.invocation_id,
                 tool_name_aliases=alias_to_original,
             )
         finally:
@@ -324,6 +340,7 @@ class OpenAIChatCompatibleAdapter:
                 profile,
                 response,
                 description=f"OpenAI-compatible profile '{profile.id}'",
+                invocation_id=request.invocation_id,
                 tool_name_aliases=alias_to_original,
             ):
                 yield event
@@ -404,6 +421,7 @@ class OpenAIChatCompatibleAdapter:
         response: requests.Response,
         *,
         description: str,
+        invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> Iterator[LlmStreamEvent]:
         if response.status_code >= 400:
@@ -432,6 +450,7 @@ class OpenAIChatCompatibleAdapter:
                 profile,
                 payload,
                 sequence=1,
+                invocation_id=invocation_id,
                 tool_name_aliases=tool_name_aliases,
             )
             return
@@ -461,6 +480,7 @@ class OpenAIChatCompatibleAdapter:
                 yield cls._build_stream_completed_event(
                     profile,
                     sequence=sequence,
+                    invocation_id=invocation_id,
                     response_id=response_id,
                     model_name=model_name,
                     text_fragments=text_fragments,
@@ -514,6 +534,7 @@ class OpenAIChatCompatibleAdapter:
                 yield cls._build_stream_completed_event(
                     profile,
                     sequence=sequence,
+                    invocation_id=invocation_id,
                     response_id=response_id,
                     model_name=model_name,
                     text_fragments=text_fragments,
@@ -528,6 +549,7 @@ class OpenAIChatCompatibleAdapter:
             yield cls._build_stream_completed_event(
                 profile,
                 sequence=sequence,
+                invocation_id=invocation_id,
                 response_id=response_id,
                 model_name=model_name,
                 text_fragments=text_fragments,
@@ -547,6 +569,7 @@ class OpenAIChatCompatibleAdapter:
         response: httpx.Response,
         *,
         description: str,
+        invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> AsyncIterator[LlmStreamEvent]:
         if response.status_code >= 400:
@@ -576,6 +599,7 @@ class OpenAIChatCompatibleAdapter:
                 profile,
                 payload,
                 sequence=1,
+                invocation_id=invocation_id,
                 tool_name_aliases=tool_name_aliases,
             )
             return
@@ -599,6 +623,7 @@ class OpenAIChatCompatibleAdapter:
                 yield cls._build_stream_completed_event(
                     profile,
                     sequence=sequence,
+                    invocation_id=invocation_id,
                     response_id=response_id,
                     model_name=model_name,
                     text_fragments=text_fragments,
@@ -652,6 +677,7 @@ class OpenAIChatCompatibleAdapter:
                 yield cls._build_stream_completed_event(
                     profile,
                     sequence=sequence,
+                    invocation_id=invocation_id,
                     response_id=response_id,
                     model_name=model_name,
                     text_fragments=text_fragments,
@@ -666,6 +692,7 @@ class OpenAIChatCompatibleAdapter:
             yield cls._build_stream_completed_event(
                 profile,
                 sequence=sequence,
+                invocation_id=invocation_id,
                 response_id=response_id,
                 model_name=model_name,
                 text_fragments=text_fragments,
@@ -685,6 +712,7 @@ class OpenAIChatCompatibleAdapter:
         payload: dict[str, Any],
         *,
         sequence: int,
+        invocation_id: str,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> LlmStreamEvent:
         choices = payload.get("choices")
@@ -742,12 +770,20 @@ class OpenAIChatCompatibleAdapter:
                 output_tokens=usage_raw.get("completion_tokens"),
                 total_tokens=usage_raw.get("total_tokens"),
             )
-        result = LlmResult(
-            text=content_text,
-            tool_calls=build_tool_call_intents(
-                raw_tool_calls,
-                tool_name_aliases=tool_name_aliases,
-            ),
+        provider_request_id = (
+            str(payload.get("id")) if payload.get("id") is not None else None
+        )
+        response_items = _chat_response_items(
+            invocation_id=invocation_id,
+            content_text=content_text,
+            raw_tool_calls=raw_tool_calls,
+            provider_response_id=provider_request_id,
+            model_name=str(payload.get("model")) if payload.get("model") is not None else None,
+            transport="json_fallback",
+            tool_name_aliases=tool_name_aliases,
+        )
+        result = LlmResult.from_response_items(
+            response_items,
             usage=usage,
             finish_reason=(
                 str(choice.get("finish_reason"))
@@ -760,15 +796,14 @@ class OpenAIChatCompatibleAdapter:
                 "model": payload.get("model"),
                 "transport": "json_fallback",
             },
-        )
-        provider_request_id = (
-            str(payload.get("id")) if payload.get("id") is not None else None
+            text_fallback=content_text,
         )
         return LlmStreamEvent(
             type="completed",
             sequence=sequence,
             data={
                 "result": result.to_payload(),
+                "response_items": [item.to_payload() for item in response_items],
                 "provider_request_id": provider_request_id,
             },
         )
@@ -811,6 +846,7 @@ class OpenAIChatCompatibleAdapter:
         profile: LlmProfile,
         *,
         sequence: int,
+        invocation_id: str,
         response_id: str | None,
         model_name: str | None,
         text_fragments: list[str],
@@ -841,12 +877,17 @@ class OpenAIChatCompatibleAdapter:
                 output_tokens=usage_raw.get("completion_tokens"),
                 total_tokens=usage_raw.get("total_tokens"),
             )
-        result = LlmResult(
-            text=content_text,
-            tool_calls=build_tool_call_intents(
-                raw_tool_calls,
-                tool_name_aliases=tool_name_aliases,
-            ),
+        response_items = _chat_response_items(
+            invocation_id=invocation_id,
+            content_text=content_text,
+            raw_tool_calls=raw_tool_calls,
+            provider_response_id=response_id,
+            model_name=model_name or profile.model_name,
+            transport="sse",
+            tool_name_aliases=tool_name_aliases,
+        )
+        result = LlmResult.from_response_items(
+            response_items,
             usage=usage,
             finish_reason=finish_reason,
             metadata={
@@ -855,12 +896,14 @@ class OpenAIChatCompatibleAdapter:
                 "model": model_name or profile.model_name,
                 "transport": "sse",
             },
+            text_fallback=content_text,
         )
         return LlmStreamEvent(
             type="completed",
             sequence=sequence,
             data={
                 "result": result.to_payload(),
+                "response_items": [item.to_payload() for item in response_items],
                 "provider_request_id": response_id,
             },
         )
@@ -896,3 +939,95 @@ class OpenAIChatCompatibleAdapter:
     def _strip_xmlish_tool_calls(cls, content: str) -> str | None:
         stripped = cls.TOOL_CALL_BLOCK_PATTERN.sub("", content).strip()
         return stripped or None
+
+
+def _response_items_from_completed_event(
+    event: LlmStreamEvent,
+) -> tuple[LlmResponseItem, ...]:
+    raw_items = event.data.get("response_items")
+    if not isinstance(raw_items, list):
+        return ()
+    return tuple(
+        LlmResponseItem.from_payload(item)
+        for item in raw_items
+        if isinstance(item, dict)
+    )
+
+
+def _chat_response_items(
+    *,
+    invocation_id: str,
+    content_text: str | None,
+    raw_tool_calls: list[dict[str, Any]],
+    provider_response_id: str | None,
+    model_name: str | None,
+    transport: str,
+    tool_name_aliases: dict[str, str] | None,
+) -> tuple[LlmResponseItem, ...]:
+    items: list[LlmResponseItem] = []
+    now = utcnow()
+    if content_text is not None:
+        sequence_no = len(items) + 1
+        provider_item_id = (
+            f"{provider_response_id}:message"
+            if provider_response_id is not None
+            else f"{invocation_id}:message:{sequence_no}"
+        )
+        items.append(
+            LlmResponseItem(
+                id=f"{invocation_id}:item:{sequence_no}",
+                invocation_id=invocation_id,
+                sequence_no=sequence_no,
+                kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.FINAL_ANSWER,
+                content_payload={"text": content_text},
+                provider_payload={
+                    "type": "chat.completion.message",
+                    "response_id": provider_response_id,
+                    "model": model_name,
+                    "transport": transport,
+                },
+                provider_item_id=provider_item_id,
+                provider_item_type="chat.completion.message",
+                model_visible=True,
+                user_visible=True,
+                created_at=now,
+                completed_at=now,
+            ),
+        )
+    for tool_call in build_tool_call_intents(
+        raw_tool_calls,
+        tool_name_aliases=tool_name_aliases,
+    ):
+        sequence_no = len(items) + 1
+        items.append(
+            LlmResponseItem(
+                id=f"{invocation_id}:item:{sequence_no}",
+                invocation_id=invocation_id,
+                sequence_no=sequence_no,
+                kind=LlmResponseItemKind.TOOL_CALL,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.UNKNOWN,
+                content_payload={
+                    "call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "arguments": dict(tool_call.arguments),
+                },
+                provider_payload={
+                    "type": "chat.completion.tool_call",
+                    "response_id": provider_response_id,
+                    "model": model_name,
+                    "transport": transport,
+                },
+                provider_item_id=tool_call.id,
+                provider_item_type="chat.completion.tool_call",
+                call_id=tool_call.id,
+                tool_name=tool_call.name,
+                model_visible=True,
+                user_visible=False,
+                created_at=now,
+                completed_at=now,
+            ),
+        )
+    return tuple(items)

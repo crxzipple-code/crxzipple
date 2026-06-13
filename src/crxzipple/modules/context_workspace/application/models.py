@@ -103,6 +103,9 @@ class RecordContextRenderSnapshotInput:
     estimate: ContextEstimate = field(default_factory=ContextEstimate)
     included_node_ids: tuple[str, ...] = ()
     mirrored_node_ids: tuple[str, ...] = ()
+    included_refs: tuple[JsonObject, ...] = ()
+    collapsed_refs: tuple[JsonObject, ...] = ()
+    protocol_required_refs: tuple[JsonObject, ...] = ()
     metadata: JsonObject = field(default_factory=dict)
     snapshot_id: str = field(default_factory=lambda: f"ctxsnap_{uuid4().hex}")
 

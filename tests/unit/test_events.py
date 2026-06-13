@@ -38,7 +38,6 @@ from crxzipple.modules.orchestration.application import (
     RUN_OBSERVATION_EVENT_NAMES,
     RunObservationObserver,
     RuntimeObservationObserver,
-    SessionMessageObservationObserver,
     ToolRunObservationObserver,
     orchestration_event_definitions,
     orchestration_event_observers,
@@ -57,11 +56,9 @@ from crxzipple.shared import (
     EventObserver,
     ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT,
     EventSurface,
-    ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT,
     ORCHESTRATION_RUN_TOOL_UPDATED_EVENT,
     ORCHESTRATION_RUNTIME_OBSERVATION_SOURCE_EVENT_NAMES,
     ORCHESTRATION_RUNTIME_STATUS_EVENT,
-    SESSION_MESSAGE_APPENDED_SOURCE_EVENT,
     TOOL_RUN_OBSERVATION_SOURCE_EVENT_NAMES,
 )
 from crxzipple.shared.domain.events import Event, named_event_topic
@@ -1199,7 +1196,6 @@ class EventsModuleTestCase(unittest.TestCase):
             events_service=service,
             run_lookup=_FakeOrchestrationService(),
         )
-        message_observer = SessionMessageObservationObserver(events_service=service)
         tool_observer = ToolRunObservationObserver(
             events_service=service,
             run_lookup=_FakeOrchestrationService(),
@@ -1240,34 +1236,6 @@ class EventsModuleTestCase(unittest.TestCase):
             Event(
                 name="orchestration.run.completed",
                 payload={"run_id": "run-1"},
-            ),
-        )
-        message_observer.observe_message_appended(
-            Event(
-                name=SESSION_MESSAGE_APPENDED_SOURCE_EVENT,
-                payload={
-                    "message_id": "msg-1",
-                    "session_key": "agent:demo:main",
-                    "session_id": "sess-1",
-                    "role": "user",
-                    "kind": "message",
-                    "source_kind": "orchestration_run",
-                    "source_id": "run-1",
-                    "message": {
-                        "id": "msg-1",
-                        "session_key": "agent:demo:main",
-                        "session_id": "sess-1",
-                        "sequence_no": 1,
-                        "role": "user",
-                        "kind": "message",
-                        "content_payload": {"blocks": [{"type": "text", "text": "hello"}]},
-                        "source_kind": "orchestration_run",
-                        "source_id": "run-1",
-                        "visibility": "default",
-                        "metadata": {},
-                        "created_at": "2026-04-13T00:00:00+00:00",
-                    },
-                },
             ),
         )
         tool_observer.observe_tool_event(
@@ -1317,10 +1285,6 @@ class EventsModuleTestCase(unittest.TestCase):
             ("orchestration.run.completed",),
         )
         self.assertEqual(
-            definitions[ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT].publication_mode,
-            "translated",
-        )
-        self.assertEqual(
             definitions[ORCHESTRATION_RUN_LLM_TEXT_DELTA_EVENT].publication_mode,
             "direct",
         )
@@ -1340,10 +1304,7 @@ class EventsModuleTestCase(unittest.TestCase):
             observers["orchestration.run.observation"].output_definition_ids,
             RUN_OBSERVATION_EVENT_NAMES,
         )
-        self.assertEqual(
-            observers["orchestration.session.message_observation"].source_event_names,
-            (SESSION_MESSAGE_APPENDED_SOURCE_EVENT,),
-        )
+        self.assertNotIn("orchestration.session.message_observation", observers)
         self.assertEqual(
             observers["orchestration.tool.observation"].source_event_names,
             TOOL_RUN_OBSERVATION_SOURCE_EVENT_NAMES,
@@ -1359,20 +1320,6 @@ class EventsModuleTestCase(unittest.TestCase):
                 "dispatch.task.requeued",
                 "dispatch.task.recovered",
             ),
-        )
-        message_envelope = next(
-            item
-            for item in published_envelopes
-            if item.topic == turn_session_topic("agent:demo:main")
-            and item.payload.get("event_name") == ORCHESTRATION_RUN_MESSAGE_APPENDED_EVENT
-        )
-        self.assertEqual(message_envelope.payload["message"]["id"], "msg-1")
-        self.assertEqual(
-            message_envelope.payload["message"]["content_payload"]["blocks"][0]["text"],
-            "hello",
-        )
-        self.assertTrue(
-            str(message_envelope.payload["message"]["created_at"]).endswith("+00:00")
         )
         tool_envelope = next(
             item

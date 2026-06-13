@@ -3,16 +3,254 @@ from __future__ import annotations
 import asyncio
 import threading
 
+from crxzipple.modules.llm.domain import (
+    LlmContinuationReason,
+    LlmContinuationSignal,
+    LlmMessageRole,
+    LlmMessagePhase,
+    LlmResponseItem,
+    LlmResponseItemKind,
+    ToolSchema,
+)
 from crxzipple.modules.orchestration.infrastructure.adapters import (
     AuthorizationServiceAdapter,
 )
+from crxzipple.modules.orchestration.application.tool_resolver import (
+    ResolvedTool,
+    ResolvedToolSet,
+)
 from crxzipple.modules.orchestration.domain import ExecutionOwnerReference
+from crxzipple.modules.tool.application.result_envelope import (
+    TOOL_RESULT_ENVELOPE_METADATA_KEY,
+)
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
+from crxzipple.modules.tool.domain import ToolExecutionTarget
 from crxzipple.shared.domain.events import Event
 
 from tests.unit.orchestration_test_support import *  # noqa: F403
 from tests.unit.tool_runtime_test_support import process_next_background_tool_run
 from tools.skills.local import SkillsToolDeps, skill_read
+
+
+def _tool_call_response_item(
+    request: LlmAdapterRequest,
+    *,
+    sequence_no: int,
+    call_id: str,
+    name: str,
+    arguments: dict[str, object],
+) -> LlmResponseItem:
+    return LlmResponseItem(
+        id=f"{request.invocation_id}:item:{sequence_no}",
+        invocation_id=request.invocation_id,
+        sequence_no=sequence_no,
+        kind=LlmResponseItemKind.TOOL_CALL,
+        phase=LlmMessagePhase.COMMENTARY,
+        content_payload={
+            "call_id": call_id,
+            "tool_name": name,
+            "arguments": dict(arguments),
+        },
+        provider_item_id=f"provider-{call_id}",
+        call_id=call_id,
+        tool_name=name,
+        model_visible=True,
+        user_visible=False,
+    )
+
+
+class _ResponseItemsInlineToolLoopAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        request_index = len(self.requests) - 1
+        if request_index == 0:
+            return LlmAdapterResponse(
+                result=LlmResult(text=""),
+                response_items=(
+                    _tool_call_response_item(
+                        request,
+                        sequence_no=1,
+                        call_id="item-call-expand-echo",
+                        name="context_tree.expand",
+                        arguments={
+                            "node_id": "tools.bundle.test.local_package.echo",
+                        },
+                    ),
+                ),
+                continuation=LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                ),
+            )
+        if request_index == 1:
+            return LlmAdapterResponse(
+                result=LlmResult(text=""),
+                response_items=(
+                    _tool_call_response_item(
+                        request,
+                        sequence_no=1,
+                        call_id="item-call-enable-echo",
+                        name="context_tree.enable_tool_schema",
+                        arguments={"node_id": "tools.tool.echo"},
+                    ),
+                ),
+                continuation=LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                ),
+            )
+        if request_index == 2:
+            return LlmAdapterResponse(
+                result=LlmResult(text=""),
+                response_items=(
+                    _tool_call_response_item(
+                        request,
+                        sequence_no=1,
+                        call_id="item-call-echo-1",
+                        name="echo",
+                        arguments={"message": "hello from response item"},
+                    ),
+                ),
+                continuation=LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                ),
+            )
+        return LlmAdapterResponse(
+            result=LlmResult(text="response item tool loop complete"),
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
+
+
+class _ContinuationFollowupAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            return LlmAdapterResponse(
+                result=LlmResult(text="still thinking"),
+                continuation=LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.PROVIDER_END_TURN_FALSE,
+                    provider_payload={"end_turn": False},
+                ),
+            )
+        return LlmAdapterResponse(
+            result=LlmResult(text="final answer after provider continuation"),
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
+
+
+class _ProviderExternalOnlyAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        return LlmAdapterResponse(
+            result=LlmResult(text="provider search completed"),
+            response_items=(
+                LlmResponseItem(
+                    id=f"{request.invocation_id}:item:provider-search",
+                    invocation_id=request.invocation_id,
+                    sequence_no=1,
+                    kind=LlmResponseItemKind.PROVIDER_EXTERNAL_ITEM,
+                    phase=LlmMessagePhase.COMMENTARY,
+                    content_payload={
+                        "provider_tool_name": "web_search",
+                        "status": "completed",
+                    },
+                    provider_item_id="provider-search-item-1",
+                    tool_name="web_search",
+                    model_visible=True,
+                    user_visible=True,
+                ),
+            ),
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
+
+
+class _FinalAnswerResponseItemAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        return LlmAdapterResponse(
+            result=LlmResult(text="final item answer"),
+            response_items=(
+                LlmResponseItem(
+                    id=f"{request.invocation_id}:item:final",
+                    invocation_id=request.invocation_id,
+                    sequence_no=1,
+                    kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                    role=LlmMessageRole.ASSISTANT,
+                    phase=LlmMessagePhase.FINAL_ANSWER,
+                    content_payload={"text": "final item answer"},
+                    provider_item_id="provider-final-item-1",
+                    model_visible=True,
+                    user_visible=True,
+                ),
+            ),
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
+
+
+class _CommentaryOnlyResponseItemAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        self.requests.append(request)
+        return LlmAdapterResponse(
+            result=LlmResult(text="I will inspect the current state first."),
+            response_items=(
+                LlmResponseItem(
+                    id=f"{request.invocation_id}:item:commentary",
+                    invocation_id=request.invocation_id,
+                    sequence_no=1,
+                    kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                    role=LlmMessageRole.ASSISTANT,
+                    phase=LlmMessagePhase.COMMENTARY,
+                    content_payload={
+                        "text": "I will inspect the current state first.",
+                    },
+                    provider_item_id="provider-commentary-item-1",
+                    model_visible=True,
+                    user_visible=True,
+                ),
+            ),
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
 
 
 class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
@@ -47,6 +285,15 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 tool_calls=(
                     ToolCallIntent(
                         id="call-yield-1",
+                        name="context_tree.enable_tool_schema",
+                        arguments={"node_id": "tools.tool.sessions_yield"},
+                    ),
+                ),
+            ),
+            LlmResult(
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-yield-2",
                         name="sessions_yield",
                         arguments={"reason": "wait for delegated work"},
                     ),
@@ -86,8 +333,12 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(processed)
         assert processed is not None
-        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(len(adapter.requests), 3)
+        self.assertEqual(
+            processed.status,
+            OrchestrationRunStatus.COMPLETED,
+            processed.error.to_payload() if processed.error is not None else None,
+        )
+        self.assertEqual(len(adapter.requests), 4)
         self.assertEqual(processed.result_payload["yield_requested"], True)
         self.assertEqual(
             processed.result_payload["yield_reason"],
@@ -150,18 +401,8 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.status, OrchestrationRunStatus.FAILED)
         self.assertIsNotNone(processed.error)
         assert processed.error is not None
-        self.assertEqual(processed.error.code, "access_not_ready")
-        self.assertEqual(processed.error.details["resource_type"], "tool")
-        self.assertEqual(processed.error.details["resource_id"], "missing_access_tool")
-        access = processed.error.details["access"]
-        self.assertIsInstance(access, dict)
-        assert isinstance(access, dict)
-        requirement_sets = access["requirement_sets"]
-        self.assertIsInstance(requirement_sets, list)
-        assert isinstance(requirement_sets, list)
-        check = requirement_sets[0]["checks"][0]
-        self.assertEqual(check["requirement"], "env:MISSING_STALE_TOOL_TOKEN")
-        self.assertEqual(check["setup_flow"]["kind"], "env")
+        self.assertEqual(processed.error.code, "tool_surface_not_visible")
+        self.assertIn("missing_access_tool", processed.error.message)
 
     def test_wait_on_tool_reconciles_when_tool_finished_before_wait_mapping(self) -> None:
         self._register_agent_and_llm()
@@ -461,7 +702,11 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
 
         self.assertIsNotNone(processed)
         assert processed is not None
-        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(
+            processed.status,
+            OrchestrationRunStatus.COMPLETED,
+            processed.error.to_payload() if processed.error is not None else None,
+        )
         system_messages = [
             message
             for message in adapter.requests[0].messages
@@ -548,41 +793,42 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
             assert completed.result_payload is not None
             self.assertEqual(completed.result_payload["output_text"], "used repo-review skill")
-            self.assertEqual(len(adapter.requests), 3)
+            self.assertEqual(len(adapter.requests), 4)
             skill_tool_messages = [
                 message
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.TOOL
                 and message.name == "skill_read"
             ]
             self.assertEqual(len(skill_tool_messages), 1)
             context_tree_message = next(
                 message
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.SYSTEM
                 and message.metadata.get("prompt_block_kind") == "context_workspace"
             )
             self.assertIn("skills.skill.repo-review", str(context_tree_message.content))
-            self.assertIn("SKILL.md", str(context_tree_message.content))
             self.assertIn("Suggested tools: memory_search", str(context_tree_message.content))
             self.assertIn(
                 "skill_read",
                 str(context_tree_message.content),
             )
-            session_messages = self.session_service.list_messages(
-                ListSessionMessagesInput(
+            self.assertIn("SKILL.md", str(skill_tool_messages[0].content))
+            self.assertIn("Repo Review", str(skill_tool_messages[0].content))
+            session_items = self.session_service.list_model_visible_items(
+                ListSessionItemsInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
                 ),
             )
             skill_results = [
-                message
-                for message in session_messages
-                if message.source_kind == "tool_run"
-                and message.metadata.get("tool_name") == "skill_read"
+                item
+                for item in session_items
+                if item.source_kind == "tool_run"
+                and item.tool_name == "skill_read"
             ]
             self.assertEqual(len(skill_results), 1)
-            self.assertEqual(skill_results[0].metadata["tool_name"], "skill_read")
+            self.assertEqual(skill_results[0].tool_name, "skill_read")
             self.assertIn(
                 "# Repo Review",
                 str(skill_results[0].content_payload.get("content")),
@@ -969,10 +1215,10 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 completed.result_payload["output_text"],
                 "used skill guidance without mode switch",
             )
-            self.assertEqual(len(adapter.requests), 3)
+            self.assertEqual(len(adapter.requests), 4)
             second_request_tool_names = [
                 message.name
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.TOOL
             ]
             self.assertIn("skill_read", second_request_tool_names)
@@ -1038,7 +1284,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             )
             second_request_tool_names = [
                 message.name
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.TOOL
             ]
             self.assertEqual(second_request_tool_names.count("skill_read"), 2)
@@ -1130,32 +1376,37 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             limit=1,
         )[0]
         self.assertEqual(
-            latest_invocation.request_metadata["direct_transcript_session_message_count"],
-            3,
+            latest_invocation.request_metadata["direct_session_item_count"],
+            7,
+        )
+        self.assertEqual(
+            latest_invocation.request_metadata["direct_session_item_refs"][0]["kind"],
+            "user_message",
         )
         self.assertIn(
             "call-echo-1",
             latest_invocation.request_metadata["direct_tool_protocol_call_ids"],
         )
-        self.assertNotIn(
+        self.assertIn(
             "call-expand-echo",
             latest_invocation.request_metadata["direct_tool_protocol_call_ids"],
         )
-        self.assertNotIn(
+        self.assertIn(
             "call-enable-echo",
             latest_invocation.request_metadata["direct_tool_protocol_call_ids"],
         )
         self.assertEqual(
-            latest_invocation.request_metadata["direct_transcript_sequence_range"],
+            latest_invocation.request_metadata["direct_session_item_frontier"],
             {
-                "sessions": [
-                    {
-                        "session_id": processed.active_session_id,
-                        "from_sequence_no": 1,
-                        "to_sequence_no": 7,
-                        "message_count": 3,
-                    },
-                ],
+                "from_sequence_no": 1,
+                "to_sequence_no": 7,
+                "item_count": 7,
+                "from_item_id": latest_invocation.request_metadata[
+                    "direct_session_item_refs"
+                ][0]["item_id"],
+                "to_item_id": latest_invocation.request_metadata[
+                    "direct_session_item_refs"
+                ][-1]["item_id"],
             },
         )
         llm_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
@@ -1166,47 +1417,47 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(len(llm_items), 1)
         consumption = llm_items[0].summary_payload["llm_transcript_consumption"]
-        self.assertEqual(consumption["direct_transcript_session_message_count"], 3)
+        self.assertEqual(consumption["direct_session_item_count"], 7)
         self.assertIn("call-echo-1", consumption["direct_tool_protocol_call_ids"])
-        self.assertNotIn(
+        self.assertIn(
             "call-expand-echo",
             consumption["direct_tool_protocol_call_ids"],
         )
-        self.assertNotIn(
+        self.assertIn(
             "call-enable-echo",
             consumption["direct_tool_protocol_call_ids"],
         )
         self.assertEqual(
-            consumption["direct_transcript_sequence_range"],
-            latest_invocation.request_metadata["direct_transcript_sequence_range"],
+            consumption["direct_session_item_refs"],
+            latest_invocation.request_metadata["direct_session_item_refs"],
         )
 
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
             ),
         )
         self.assertEqual(
-            [message.role for message in session_messages],
+            [(item.role, item.kind.value) for item in session_items],
             [
-                "user",
-                "assistant",
-                "tool",
-                "assistant",
-                "tool",
-                "assistant",
-                "tool",
-                "assistant",
+                ("user", "user_message"),
+                ("assistant", "tool_call"),
+                ("tool", "tool_result"),
+                ("assistant", "tool_call"),
+                ("tool", "tool_result"),
+                ("assistant", "tool_call"),
+                ("tool", "tool_result"),
+                ("assistant", "assistant_message"),
             ],
         )
-        self.assertEqual(session_messages[1].metadata["tool_call_id"], "call-expand-echo")
-        self.assertEqual(session_messages[2].metadata["tool_call_id"], "call-expand-echo")
-        self.assertEqual(session_messages[3].metadata["tool_call_id"], "call-enable-echo")
-        self.assertEqual(session_messages[4].metadata["tool_call_id"], "call-enable-echo")
-        self.assertEqual(session_messages[5].metadata["tool_call_id"], "call-echo-1")
-        self.assertEqual(session_messages[6].metadata["tool_call_id"], "call-echo-1")
-        echo_result_payload = session_messages[6].content_payload
+        self.assertEqual(session_items[1].call_id, "call-expand-echo")
+        self.assertEqual(session_items[2].call_id, "call-expand-echo")
+        self.assertEqual(session_items[3].call_id, "call-enable-echo")
+        self.assertEqual(session_items[4].call_id, "call-enable-echo")
+        self.assertEqual(session_items[5].call_id, "call-echo-1")
+        self.assertEqual(session_items[6].call_id, "call-echo-1")
+        echo_result_payload = session_items[6].content_payload
         self.assertEqual(
             echo_result_payload["metadata"],
             {
@@ -1214,6 +1465,466 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "browser_target_id": "tab-echo",
             },
         )
+
+    def test_response_items_tool_calls_drive_inline_tool_loop(self) -> None:
+        adapter = _ResponseItemsInlineToolLoopAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="echo",
+            name="Echo",
+            description="Returns the input payload for response item tool call tests.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="echo",
+        )
+
+        async def echo(arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(
+                str(arguments.get("message") or ""),
+                details={"echo": arguments.get("message")},
+            )
+
+        self.local_runtime_registry.register(tool, echo)
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-response-items-inline-tool",
+                inbound_instruction=InboundInstruction(source="cli", content="search"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
+        assert processed.result_payload is not None
+        self.assertEqual(
+            processed.result_payload["output_text"],
+            "response item tool loop complete",
+        )
+        self.assertEqual(len(adapter.requests), 4)
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        tool_call_ids = [
+            item.call_id
+            for item in session_items
+            if item.call_id
+        ]
+        self.assertIn("item-call-expand-echo", tool_call_ids)
+        self.assertIn("item-call-enable-echo", tool_call_ids)
+        self.assertIn("item-call-echo-1", tool_call_ids)
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        session_user_items = [
+            item
+            for item in session_items
+            if item.kind.value == "user_message"
+        ]
+        self.assertEqual(len(session_user_items), 1)
+        self.assertEqual(session_user_items[0].source_module, "orchestration")
+        self.assertEqual(session_user_items[0].source_kind, "orchestration_run")
+        session_tool_call_items = [
+            item
+            for item in session_items
+            if item.kind.value == "tool_call"
+        ]
+        session_item_call_ids = [item.call_id for item in session_tool_call_items]
+        self.assertIn("item-call-expand-echo", session_item_call_ids)
+        self.assertIn("item-call-enable-echo", session_item_call_ids)
+        self.assertIn("item-call-echo-1", session_item_call_ids)
+        self.assertEqual(session_tool_call_items[0].source_module, "llm")
+        self.assertEqual(session_tool_call_items[0].source_kind, "llm_response_item")
+        self.assertEqual(session_tool_call_items[0].provider_item_id, "provider-item-call-expand-echo")
+        self.assertEqual(session_tool_call_items[0].tool_name, "context_tree.expand")
+        session_tool_result_items = [
+            item
+            for item in session_items
+            if item.kind.value == "tool_result"
+        ]
+        session_result_call_ids = [item.call_id for item in session_tool_result_items]
+        self.assertIn("item-call-expand-echo", session_result_call_ids)
+        self.assertIn("item-call-enable-echo", session_result_call_ids)
+        self.assertIn("item-call-echo-1", session_result_call_ids)
+        self.assertEqual(session_tool_result_items[0].source_module, "tool")
+        self.assertEqual(session_tool_result_items[0].source_kind, "tool_run")
+        invocations = self.llm_service.list_invocations(
+            llm_id="openai.gpt-5.4-mini",
+            limit=10,
+        )
+        second_invocation = next(
+            invocation
+            for invocation in invocations
+            if invocation.response_items
+            and invocation.response_items[0].call_id == "item-call-enable-echo"
+        )
+        second_request_metadata = second_invocation.request_metadata
+        self.assertEqual(second_request_metadata["direct_session_item_count"], 3)
+        self.assertEqual(
+            second_request_metadata["direct_session_item_frontier"],
+            {
+                "from_sequence_no": session_user_items[0].sequence_no,
+                "to_sequence_no": session_tool_result_items[0].sequence_no,
+                "item_count": 3,
+                "from_item_id": session_user_items[0].id,
+                "to_item_id": session_tool_result_items[0].id,
+            },
+        )
+        self.assertEqual(
+            second_request_metadata["direct_transcript_budget"]["source"],
+            "session_items",
+        )
+        self.assertTrue(
+            second_request_metadata["direct_transcript_budget"][
+                "protocol_required_preserved"
+            ],
+        )
+        self.assertEqual(
+            second_request_metadata["direct_tool_protocol_call_ids"],
+            ["item-call-expand-echo"],
+        )
+        self.assertEqual(
+            [
+                ref["item_id"]
+                for ref in second_request_metadata["direct_session_item_refs"]
+            ],
+            [
+                session_user_items[0].id,
+                session_tool_call_items[0].id,
+                session_tool_result_items[0].id,
+            ],
+        )
+        first_invocation = next(
+            invocation
+            for invocation in invocations
+            if invocation.response_items
+            and invocation.response_items[0].call_id == "item-call-expand-echo"
+        )
+        echo_invocation = next(
+            invocation
+            for invocation in invocations
+            if invocation.response_items
+            and invocation.response_items[0].call_id == "item-call-echo-1"
+        )
+        echo_tool_runs = self.tool_service.list_tool_runs(tool_id="echo")
+        self.assertEqual(len(echo_tool_runs), 1)
+        echo_tool_run = echo_tool_runs[0]
+        self.assertEqual(echo_tool_run.call_id, "item-call-echo-1")
+        self.assertEqual(
+            echo_tool_run.tool_surface_id,
+            echo_invocation.request_metadata["tool_surface_id"],
+        )
+        self.assertEqual(
+            echo_tool_run.metadata["tool_surface_snapshot_id"],
+            echo_invocation.request_metadata["tool_surface_snapshot_id"],
+        )
+        self.assertEqual(
+            echo_tool_run.metadata["context_render_snapshot_id"],
+            echo_invocation.request_metadata["context_render_snapshot_id"],
+        )
+        self.assertEqual(
+            first_invocation.response_items[0].kind,
+            LlmResponseItemKind.TOOL_CALL,
+        )
+        assert first_invocation.result is not None
+        self.assertEqual(len(first_invocation.result.tool_calls), 1)
+        self.assertEqual(
+            first_invocation.result.tool_calls[0].name,
+            "context_tree.expand",
+        )
+
+    def test_provider_external_response_item_does_not_create_tool_run(self) -> None:
+        adapter = _ProviderExternalOnlyAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-provider-external-item",
+                inbound_instruction=InboundInstruction(
+                    source="cli",
+                    content="search the web",
+                ),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertEqual(len(adapter.requests), 1)
+        self.assertEqual(self.tool_service.list_tool_runs(), [])
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        provider_items = [
+            item
+            for item in session_items
+            if item.kind.value == "provider_external_item"
+        ]
+        self.assertEqual(len(provider_items), 1)
+        self.assertEqual(provider_items[0].source_module, "llm")
+        self.assertEqual(provider_items[0].source_kind, "llm_response_item")
+        self.assertEqual(provider_items[0].provider_item_id, "provider-search-item-1")
+        self.assertEqual(provider_items[0].tool_name, "web_search")
+
+    def test_final_answer_response_item_with_no_pending_work_completes_run(self) -> None:
+        adapter = _FinalAnswerResponseItemAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-final-answer-response-item",
+                inbound_instruction=InboundInstruction(source="cli", content="answer"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(
+            processed.status,
+            OrchestrationRunStatus.COMPLETED,
+            processed.error.to_payload() if processed.error is not None else None,
+        )
+        self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
+        self.assertEqual(len(adapter.requests), 1)
+        assert processed.result_payload is not None
+        self.assertEqual(processed.result_payload["output_text"], "final item answer")
+        self.assertEqual(self.tool_service.list_tool_runs(), [])
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        final_items = [
+            item
+            for item in session_items
+            if item.kind.value == "assistant_message"
+            and item.phase is not None
+            and item.phase.value == "final_answer"
+        ]
+        self.assertEqual(len(final_items), 1)
+        self.assertEqual(final_items[0].source_module, "llm")
+        self.assertEqual(final_items[0].source_kind, "llm_response_item")
+        self.assertEqual(final_items[0].provider_item_id, "provider-final-item-1")
+
+    def test_commentary_only_response_item_fails_with_loop_diagnostic(self) -> None:
+        adapter = _CommentaryOnlyResponseItemAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-commentary-only-response-item",
+                inbound_instruction=InboundInstruction(source="cli", content="continue"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.FAILED)
+        self.assertIsNotNone(processed.error)
+        assert processed.error is not None
+        self.assertEqual(
+            processed.error.code,
+            "llm_incomplete_terminal_response",
+        )
+        self.assertEqual(len(adapter.requests), 1)
+        details = processed.error.details
+        self.assertEqual(
+            details["diagnostic"]["reason"],
+            "commentary_or_reasoning_without_final_answer_or_follow_up",
+        )
+        self.assertEqual(
+            details["execution_payload"]["llm_loop_diagnostic"]["code"],
+            "llm_incomplete_terminal_response",
+        )
+        llm_invocation_id = adapter.requests[0].invocation_id
+        llm_invocation_items = (
+            self.orchestration_run_query_service.find_execution_step_items_by_owner(
+                ExecutionOwnerReference(
+                    owner_kind="llm_invocation",
+                    owner_id=llm_invocation_id,
+                ),
+            )
+        )
+        self.assertEqual(len(llm_invocation_items), 1)
+        self.assertEqual(llm_invocation_items[0].status.value, "failed")
+        assert llm_invocation_items[0].summary_payload is not None
+        self.assertEqual(
+            llm_invocation_items[0].summary_payload["llm_loop_diagnostic"]["code"],
+            "llm_incomplete_terminal_response",
+        )
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        commentary_items = [
+            item
+            for item in session_items
+            if item.kind.value == "assistant_message"
+            and item.phase.value == "commentary"
+        ]
+        self.assertEqual(len(commentary_items), 1)
+        self.assertEqual(commentary_items[0].source_module, "llm")
+        self.assertEqual(commentary_items[0].source_kind, "llm_response_item")
+
+    def test_provider_continuation_without_tool_calls_keeps_loop_open(self) -> None:
+        adapter = _ContinuationFollowupAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-provider-continuation-followup",
+                inbound_instruction=InboundInstruction(source="cli", content="continue"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        assert processed.result_payload is not None
+        self.assertEqual(len(adapter.requests), 2)
+        self.assertEqual(
+            processed.result_payload["output_text"],
+            "final answer after provider continuation",
+        )
+        invocations = self.llm_service.list_invocations(
+            llm_id="openai.gpt-5.4-mini",
+            limit=10,
+        )
+        continuation_invocation = next(
+            invocation
+            for invocation in invocations
+            if invocation.result is not None
+            and invocation.result.text == "still thinking"
+        )
+        self.assertIsNotNone(continuation_invocation.continuation)
+        assert continuation_invocation.continuation is not None
+        self.assertEqual(
+            continuation_invocation.continuation.reason,
+            LlmContinuationReason.PROVIDER_END_TURN_FALSE,
+        )
+        self.assertTrue(continuation_invocation.continuation.needs_follow_up)
 
     def test_text_with_tool_calls_records_assistant_progress_for_next_prompt(self) -> None:
         adapter = _SequentialResultAdapter(
@@ -1293,77 +2004,58 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
         self.assertEqual(len(adapter.requests), 4)
 
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
             ),
         )
-        progress_messages = [
-            message
-            for message in session_messages
-            if message.role == "assistant"
-            and message.source_kind == "llm_invocation"
-            and message.content_payload.get("text") == "我先检查页面状态。"
+        progress_items = [
+            item
+            for item in session_items
+            if item.role == "assistant"
+            and item.source_kind == "llm_invocation"
+            and item.content_payload.get("text") == "我先检查页面状态。"
         ]
-        self.assertEqual(len(progress_messages), 1)
-        self.assertEqual(
-            progress_messages[0].content_payload["finish_reason"],
-            "tool_calls",
-        )
-        function_call_messages = [
-            message
-            for message in session_messages
-            if message.role == "assistant"
-            and message.content_payload.get("type") == "function_call"
-            and message.content_payload.get("call_id") == "call-echo-progress"
-        ]
-        self.assertEqual(len(function_call_messages), 1)
-        progress_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
-            ExecutionOwnerReference(
-                owner_kind="session_message",
-                owner_id=progress_messages[0].id,
-            ),
-        )
         self.assertEqual(len(progress_items), 1)
         self.assertEqual(
-            progress_items[0].summary_payload["message_kind"],
-            "assistant_progress",
+            progress_items[0].content_payload["finish_reason"],
+            "tool_calls",
         )
-        function_call_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+        function_call_items = [
+            item
+            for item in session_items
+            if item.role == "assistant"
+            and item.kind.value == "tool_call"
+            and item.call_id == "call-echo-progress"
+        ]
+        self.assertEqual(len(function_call_items), 1)
+        progress_execution_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
             ExecutionOwnerReference(
-                owner_kind="session_message",
-                owner_id=function_call_messages[0].id,
+                owner_kind="session_item",
+                owner_id=progress_items[0].id,
             ),
         )
-        self.assertEqual(function_call_items, [])
-        llm_invocation_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
+        self.assertEqual(len(progress_execution_items), 1)
+        self.assertEqual(
+            progress_execution_items[0].summary_payload["assistant_progress_item_ids"],
+            [progress_items[0].id],
+        )
+        function_call_execution_items = self.orchestration_run_query_service.find_execution_step_items_by_owner(
             ExecutionOwnerReference(
-                owner_kind="llm_invocation",
-                owner_id=progress_items[0].summary_payload["llm_invocation_id"],
+                owner_kind="session_item",
+                owner_id=function_call_items[0].id,
             ),
         )
-        self.assertEqual(len(llm_invocation_items), 1)
-        self.assertEqual(
-            llm_invocation_items[0].summary_payload["assistant_progress_message_ids"],
-            [progress_messages[0].id],
-        )
-        self.assertEqual(
-            llm_invocation_items[0].summary_payload["tool_call_message_ids"],
-            [function_call_messages[0].id],
-        )
+        self.assertEqual(function_call_execution_items, [])
         diagnostic_events = [
             event
             for event in self.published_event_bus_events()
             if event.name == "orchestration.execution.llm_step_completed"
-            and event.payload.get("assistant_progress_message_ids")
-            == [progress_messages[0].id]
+            and progress_items[0].id in event.payload.get("session_item_ids", [])
         ]
         self.assertEqual(len(diagnostic_events), 1)
-        self.assertEqual(
-            diagnostic_events[0].payload["tool_call_message_ids"],
-            [function_call_messages[0].id],
-        )
+        self.assertIn(function_call_items[0].id, diagnostic_events[0].payload["session_item_ids"])
 
         final_request_content = [
             message.content for message in adapter.requests[3].messages
@@ -1516,8 +2208,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             ),
         )
         bound_run = self.orchestration_run_query_service.get_run(run.id)
-        resolved_tools = self.orchestration_inspection_service.resolve_tools(
-            bound_run,
+        resolved_tools = ResolvedToolSet(
+            tools=(
+                ResolvedTool(
+                    tool=tool,
+                    schema=ToolSchema(
+                        name="context_echo",
+                        description="Returns whether execution context was attached.",
+                    ),
+                    target=ToolExecutionTarget(mode=ToolMode.INLINE),
+                ),
+            ),
         )
         call_count = 0
 
@@ -1554,16 +2255,269 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 ),
                 append_tool_call_messages=False,
                 append_tool_result_messages=False,
+                require_running_run=False,
+                extra_context_attrs={
+                    "tool_surface_id": "tool_surface:batch-context",
+                    "tool_surface_functions": [
+                        {
+                            "tool_id": "context_echo",
+                            "name": "context_echo",
+                        },
+                    ],
+                },
             ),
         )
 
         self.assertEqual(len(outcome.inline_runs), 2)
+        self.assertEqual(len(outcome.tool_execution_plans), 2)
+        self.assertEqual(
+            [plan.tool_call_id for plan in outcome.tool_execution_plans],
+            ["call-context-1", "call-context-2"],
+        )
+        self.assertEqual(
+            outcome.tool_execution_plans[0].tool_id,
+            "context_echo",
+        )
+        self.assertEqual(
+            outcome.tool_execution_plans[0].mode,
+            "inline",
+        )
+        self.assertEqual(
+            outcome.tool_execution_plans[0].tool_surface_id,
+            "tool_surface:batch-context",
+        )
+        self.assertIn(
+            "arguments_digest",
+            outcome.tool_execution_plans[0].to_payload(),
+        )
+        self.assertEqual(
+            outcome.tool_run_links[0].tool_execution_plan["tool_call_id"],
+            "call-context-1",
+        )
+        self.assertEqual(
+            outcome.tool_run_links[0].tool_execution_plan["tool_surface_id"],
+            "tool_surface:batch-context",
+        )
+        self.assertEqual(
+            outcome.inline_runs[0].metadata["tool_execution_plan"]["tool_call_id"],
+            "call-context-1",
+        )
+        self.assertEqual(outcome.inline_runs[0].call_id, "call-context-1")
+        self.assertEqual(outcome.inline_runs[1].call_id, "call-context-2")
         self.assertEqual(call_count, 1)
         self.assertTrue(
             all(
                 tool_run.output_payload["has_context"]
-                for _, tool_run in outcome.inline_runs
+                for tool_run in outcome.inline_runs
             ),
+        )
+
+    def test_tool_execution_rejects_call_outside_request_tool_surface(self) -> None:
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="surface_visible_tool",
+            name="Surface Visible Tool",
+            description="A tool that is available in resolved tools.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="surface_visible_tool",
+        )
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-tool-surface-gate",
+                inbound_instruction=InboundInstruction(source="cli", content="search"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        bound_run = self.orchestration_run_query_service.get_run(run.id)
+        resolved_tools = ResolvedToolSet(
+            tools=(
+                ResolvedTool(
+                    tool=tool,
+                    schema=ToolSchema(name="surface.visible"),
+                    target=ToolExecutionTarget(mode=ToolMode.INLINE),
+                ),
+            ),
+        )
+
+        with self.assertRaises(OrchestrationValidationError) as raised:
+            asyncio.run(
+                self.orchestration_inspection_service.engine.tool_executor.execute_tool_calls_async(
+                    bound_run,
+                    session_key="agent:assistant:main",
+                    active_session_id=bound_run.active_session_id or "",
+                    resolved_tools=resolved_tools,
+                    tool_calls=(
+                        ToolCallIntent(
+                            id="call-hidden-surface-tool",
+                            name="surface.visible",
+                            arguments={},
+                        ),
+                    ),
+                    append_tool_call_messages=False,
+                    append_tool_result_messages=False,
+                    require_running_run=False,
+                    extra_context_attrs={
+                        "tool_surface_id": "tool_surface:request-1",
+                        "tool_surface_functions": [
+                            {
+                                "tool_id": "other_tool",
+                                "name": "surface.other",
+                            },
+                        ],
+                    },
+                ),
+            )
+
+        self.assertEqual(raised.exception.code, "tool_surface_not_visible")
+        self.assertEqual(
+            raised.exception.details["tool_surface_id"],
+            "tool_surface:request-1",
+        )
+        self.assertEqual(
+            raised.exception.details["visible_tool_names"],
+            ["surface.other"],
+        )
+
+    def test_tool_result_session_item_uses_result_envelope_payload(self) -> None:
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="enveloped_result_tool",
+            name="Enveloped Result Tool",
+            description="Returns a tool result envelope.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="enveloped_result_tool",
+        )
+
+        async def enveloped_result(_arguments: dict[str, object]) -> ToolRunResult:
+            return ToolRunResult.text(
+                "raw result should not be the provider replay body",
+                metadata={
+                    TOOL_RESULT_ENVELOPE_METADATA_KEY: {
+                        "status": "completed",
+                        "summary": "Envelope summary for model replay.",
+                        "tool_run_id": "will-be-overwritten-by-tool-run",
+                        "call_id": "call-envelope-1",
+                        "tool_name": "enveloped.result",
+                        "artifact_refs": [
+                            {"artifact_id": "artifact-envelope-1"},
+                        ],
+                        "model_visible_payload": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "model-visible envelope body",
+                                },
+                            ],
+                            "details": {"compact": True},
+                        },
+                        "user_visible_payload": {
+                            "summary": "User-visible envelope summary.",
+                        },
+                        "trace_payload": {
+                            "duration_ms": 12,
+                        },
+                    },
+                },
+            )
+
+        self.local_runtime_registry.register(tool, enveloped_result)
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-tool-result-envelope-session-item",
+                inbound_instruction=InboundInstruction(source="cli", content="search"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        bound_run = self.orchestration_run_query_service.get_run(run.id)
+        resolved_tools = ResolvedToolSet(
+            tools=(
+                ResolvedTool(
+                    tool=tool,
+                    schema=ToolSchema(name="enveloped.result"),
+                    target=ToolExecutionTarget(mode=ToolMode.INLINE),
+                ),
+            ),
+        )
+
+        outcome = asyncio.run(
+            self.orchestration_inspection_service.engine.tool_executor.execute_tool_calls_async(
+                bound_run,
+                session_key="agent:assistant:main",
+                active_session_id=bound_run.active_session_id or "",
+                resolved_tools=resolved_tools,
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-envelope-1",
+                        name="enveloped.result",
+                        arguments={},
+                    ),
+                ),
+                append_tool_call_messages=False,
+                append_tool_result_messages=True,
+                require_running_run=False,
+                extra_context_attrs={
+                    "tool_surface_id": "tool_surface:envelope",
+                    "tool_surface_functions": [
+                        {
+                            "tool_id": "enveloped_result_tool",
+                            "name": "enveloped.result",
+                        },
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(outcome.inline_runs), 1)
+        tool_run = outcome.inline_runs[0]
+        self.assertIsNotNone(tool_run.result_envelope_payload)
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        tool_result_items = [
+            item
+            for item in session_items
+            if item.kind.value == "tool_result"
+        ]
+        self.assertEqual(len(tool_result_items), 1)
+        payload = tool_result_items[0].content_payload
+        self.assertEqual(
+            payload["content"],
+            [{"type": "text", "text": "model-visible envelope body"}],
+        )
+        self.assertEqual(payload["details"], {"compact": True})
+        self.assertEqual(payload["trace"], {"duration_ms": 12})
+        self.assertEqual(
+            payload["user_visible"],
+            {"summary": "User-visible envelope summary."},
+        )
+        self.assertEqual(
+            payload["metadata"]["artifact_ids"],
+            ["artifact-envelope-1"],
+        )
+        self.assertEqual(
+            payload["metadata"][TOOL_RESULT_ENVELOPE_METADATA_KEY]["summary"],
+            "Envelope summary for model replay.",
         )
 
     def test_process_next_orchestration_assignment_waits_when_tool_is_background(self) -> None:
@@ -1664,7 +2618,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             assert processed is not None
             self.assertEqual(processed.status, OrchestrationRunStatus.WAITING)
             self.assertEqual(processed.stage, OrchestrationRunStage.WAITING_ON_TOOL)
-            self.assertEqual(processed.current_step, 2)
+            self.assertEqual(processed.current_step, 3)
             self.assertEqual(processed.waiting_reason, "tool_background_wait")
             self.assertEqual(len(processed.pending_tool_run_ids), 1)
 
@@ -1673,19 +2627,28 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             )
             self.assertEqual(tool_run.status, ToolRunStatus.QUEUED)
 
-            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
-                ListSessionMessagesInput(
+            session_items = container.require(AppKey.SESSION_SERVICE).list_model_visible_items(
+                ListSessionItemsInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
                 ),
             )
             self.assertEqual(
-                [message.role for message in session_messages],
-                ["user", "assistant", "tool", "assistant"],
+                [(item.role, item.kind.value) for item in session_items],
+                [
+                    ("user", "user_message"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                    ("assistant", "tool_call"),
+                ],
             )
-            self.assertEqual(session_messages[1].metadata["tool_call_id"], "call-expand-background")
-            self.assertEqual(session_messages[2].metadata["tool_call_id"], "call-expand-background")
-            self.assertEqual(session_messages[3].metadata["tool_call_id"], "call-bg-1")
+            self.assertEqual(session_items[1].call_id, "call-expand-background")
+            self.assertEqual(session_items[2].call_id, "call-expand-background")
+            self.assertEqual(session_items[3].call_id, "call-enable-background")
+            self.assertEqual(session_items[4].call_id, "call-enable-background")
+            self.assertEqual(session_items[5].call_id, "call-bg-1")
         finally:
             custom_harness.close()
 
@@ -2006,18 +2969,26 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 OrchestrationQueuePolicy.RESUME_FIRST,
             )
 
-            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
-                ListSessionMessagesInput(
+            session_items = container.require(AppKey.SESSION_SERVICE).list_model_visible_items(
+                ListSessionItemsInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
                 ),
             )
             self.assertEqual(
-                [message.role for message in session_messages],
-                ["user", "assistant", "tool", "assistant", "tool"],
+                [(item.role, item.kind.value) for item in session_items],
+                [
+                    ("user", "user_message"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                ],
             )
-            self.assertEqual(session_messages[4].source_id, background_tool_run_id)
-            self.assertEqual(session_messages[4].metadata["tool_call_id"], "call-bg-1")
+            self.assertEqual(session_items[6].source_id, background_tool_run_id)
+            self.assertEqual(session_items[6].call_id, "call-bg-1")
 
             completed = process_next_orchestration_assignment(container,
                 worker_id="worker-1",
@@ -2026,18 +2997,18 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             assert completed is not None
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
             self.assertEqual(completed.stage, OrchestrationRunStage.COMPLETED)
-            self.assertEqual(completed.current_step, 3)
+            self.assertEqual(completed.current_step, 4)
             assert completed.result_payload is not None
             self.assertEqual(
                 completed.result_payload["output_text"],
                 "background loop complete",
             )
-            self.assertEqual(len(adapter.requests), 3)
-            self.assertEqual(adapter.requests[2].messages[0].role, LlmMessageRole.SYSTEM)
-            self.assertIn("<context_tree", str(adapter.requests[2].messages[0].content))
+            self.assertEqual(len(adapter.requests), 4)
+            self.assertEqual(adapter.requests[3].messages[0].role, LlmMessageRole.SYSTEM)
+            self.assertIn("<context_tree", str(adapter.requests[3].messages[0].content))
             background_messages = [
                 message
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.tool_call_id == "call-bg-1"
             ]
             self.assertEqual(
@@ -2047,7 +3018,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(completed.metadata["prompt_mode"], "recovery_resume")
             recovery_system_messages = [
                 message
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.SYSTEM
             ]
             context_tree_message = next(
@@ -2224,21 +3195,29 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "tool_failed_results_ready",
             )
 
-            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
-                ListSessionMessagesInput(
+            session_items = container.require(AppKey.SESSION_SERVICE).list_model_visible_items(
+                ListSessionItemsInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
                 ),
             )
             self.assertEqual(
-                [message.role for message in session_messages],
-                ["user", "assistant", "tool", "assistant", "tool"],
+                [(item.role, item.kind.value) for item in session_items],
+                [
+                    ("user", "user_message"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                    ("assistant", "tool_call"),
+                    ("tool", "tool_result"),
+                ],
             )
-            self.assertEqual(session_messages[4].source_id, background_tool_run_id)
-            self.assertEqual(session_messages[4].content_payload["status"], "failed")
+            self.assertEqual(session_items[6].source_id, background_tool_run_id)
+            self.assertEqual(session_items[6].content_payload["status"], "failed")
             self.assertIn(
                 "intentional background failure",
-                str(session_messages[4].content_payload),
+                str(session_items[6].content_payload),
             )
 
             completed = process_next_orchestration_assignment(
@@ -2256,7 +3235,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             )
             failed_tool_messages = [
                 message
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.TOOL
                 and message.name == "background_echo"
             ]
@@ -2391,17 +3370,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
                 "tool_terminal_results_ready",
             )
 
-            session_messages = container.require(AppKey.SESSION_SERVICE).list_messages(
-                ListSessionMessagesInput(
+            session_items = container.require(AppKey.SESSION_SERVICE).list_model_visible_items(
+                ListSessionItemsInput(
                     session_key="agent:assistant:main",
                     active_session_only=True,
                 ),
             )
             cancelled_messages = [
-                message
-                for message in session_messages
-                if message.kind is SessionMessageKind.TOOL_RESULT
-                and message.source_id == background_tool_run_id
+                item
+                for item in session_items
+                if item.kind.value == "tool_result"
+                and item.source_id == background_tool_run_id
             ]
             self.assertEqual(len(cancelled_messages), 1)
             self.assertEqual(
@@ -2422,7 +3401,7 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             self.assertEqual(completed.status, OrchestrationRunStatus.COMPLETED)
             cancelled_tool_messages = [
                 message
-                for message in adapter.requests[2].messages
+                for message in adapter.requests[3].messages
                 if message.role is LlmMessageRole.TOOL
                 and message.name == "background_echo"
             ]
@@ -2603,16 +3582,21 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.stage, OrchestrationRunStage.FAILED)
         self.assertEqual(processed.current_step, 1)
         assert processed.error is not None
-        self.assertEqual(processed.error.code, "engine_failed")
+        self.assertEqual(processed.error.code, "tool_surface_not_visible")
         self.assertIn("search_docs", processed.error.message)
 
-        session_messages = self.session_service.list_messages(
-            ListSessionMessagesInput(
+        session_items = self.session_service.list_model_visible_items(
+            ListSessionItemsInput(
                 session_key="agent:assistant:main",
                 active_session_only=True,
             ),
         )
         self.assertEqual(
-            [message.role for message in session_messages],
-            ["user", "assistant"],
+            [(item.role, item.kind.value) for item in session_items],
+            [
+                ("user", "user_message"),
+                ("assistant", "assistant_message"),
+                ("assistant", "tool_call"),
+                ("assistant", "assistant_message"),
+            ],
         )

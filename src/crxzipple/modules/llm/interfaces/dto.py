@@ -191,6 +191,7 @@ class LlmInvocationDTO:
     request_metadata: dict[str, object]
     status: str
     result: LlmResultDTO | None
+    response_items: tuple[dict[str, object], ...]
     error: LlmErrorDTO | None
     provider_request_id: str | None
     created_at: str
@@ -220,6 +221,9 @@ class LlmInvocationDTO:
                 LlmResultDTO.from_value(invocation.result)
                 if invocation.result is not None
                 else None
+            ),
+            response_items=tuple(
+                item.to_payload() for item in invocation.response_items
             ),
             error=(
                 LlmErrorDTO.from_value(invocation.error)

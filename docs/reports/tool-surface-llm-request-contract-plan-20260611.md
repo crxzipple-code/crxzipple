@@ -19,6 +19,13 @@
 
 如果旧 Tool catalog/schema 表达阻碍 agent 最佳效果，应直接迁到新结构。migration 只服务新库初始化，不设计历史升级路径。
 
+## 施工进展 2026-06-12
+
+- `ToolSurface` / `ToolRun` request-time refs 主路径已落地到 Orchestration request envelope、ToolRun metadata、Operations Tool read model 和 LLM request metadata。
+- 测试 seed helper 已按 `access_requirement_sets` 正确生成 requirement set，不再把旧 `access_requirements` 包成错误嵌套结构。
+- Operations Tool `auth_missing` 表已按近 24h 受影响次数、access failure 次数、tool id 排序，优先展示当前任务相关风险，避免静态 browser runtime 风险占满前 50 行。
+- UI HTTP 回归已按新边界收敛：Operations 页面消费 projection/read model，不依赖页面 GET 触发 runtime refresh，也不从测试里直连裸 event bus 拼 lifecycle。
+
 ## 定位
 
 Tool module 拥有：
@@ -316,38 +323,91 @@ Tool module：
 
 ### Domain / Application
 
-- [ ] 定义 `ToolSurface`。
-- [ ] 定义 `ToolSurfaceSource`。
-- [ ] 定义 `ToolSurfaceGroup`。
-- [ ] 定义 `ToolSurfaceFunction`。
-- [ ] 定义 `ToolResultEnvelope`。
-- [ ] 提供 ToolSurface query/service。
+- [x] 定义 `ToolSurface`。
+- [x] 定义 `ToolSurfaceSource`。
+- [x] 定义 `ToolSurfaceGroup`。
+- [x] 定义 `ToolSurfaceFunction`。
+- [x] 定义 `ToolResultEnvelope`。
+- [x] 提供 ToolSurface query/service。
+
+当前落地状态：
+
+- `src/crxzipple/modules/tool/application/surface.py` 已提供 provider-neutral
+  `ToolSurface` / source / group / function application contract。
+- `ToolSurfaceQueryService.build_surface()` 复用现有 Tool catalog 和 runtime pool，
+  按 source-first / group-first 生成 request-time view。
+- `ToolApplicationService.build_tool_surface()` 已作为 Tool module application 出口。
+- `ToolResultEnvelope` 已扩展为包含 `tool_run_id`、`call_id`、`tool_name`、
+  `output_payload`、`error_payload`、`artifact_refs`、`model_visible_payload`、
+  `user_visible_payload`、`trace_payload` 的分层结构；大结果外置路径已开始填充
+  artifact/model/user/trace payload。
+- `ToolRun` 已新增一等 `call_id`、`tool_surface_id`、`result_envelope_payload`
+  字段；Orchestration 发起 `ExecuteToolInput` 时已显式传入 tool call id。
+- `tool_runs` schema 已新增 `call_id`、`tool_surface_id`、
+  `result_envelope_payload`，并为 call/surface 建索引。
+- Tool HTTP/DTO 和 Operations Tool read model 已展示 `call_id` /
+  `tool_surface_id`。
+- `tool_surfaces` schema/repository/UOW 已落地，`build_tool_surface(persist=True)`
+  可保存 request-time ToolSurface snapshot，并支持按本轮 provider-visible
+  `tool_ids` 收敛为模型实际可见子集。
+- Orchestration 真实 request envelope 构造路径已注入 ToolSurface snapshot
+  builder，使用 `tool_surface:{context_render_snapshot_id}:{unique}` 保存同一轮 request-time
+  snapshot，并在 metadata 保留 base id；同时把 `tool_surface_snapshot_id` 写入 request metadata；preview 只构造
+  envelope，不持久化 owner truth。
+- Orchestration 的 Tool adapter 已暴露 `build_tool_surface()`，真实 tool execution 会把
+  request metadata 中的 `tool_surface_id` 显式写入 `ExecuteToolInput.tool_surface_id`
+  和 ToolRun metadata，ToolRun 可追溯到本轮 request-time snapshot。
+- LLM request metadata 已一等输出 `tool_surface_id`、
+  `tool_surface_mirrored_schema_names`、`tool_surface_function_refs`、
+  `tool_surface_source_refs`、`tool_surface_group_refs`、
+  `tool_surface_always_visible_count` 和
+  `tool_surface_context_selected_count`，用于把 Context Workspace tool schema
+  mirror 和本轮 ToolSurface 关联起来。
+- Tool execution 已使用 request envelope 中的 ToolSurface function refs 校验
+  `tool_call` 可见性和 tool id 一致性；越界调用会失败为
+  `tool_surface_not_visible`，surface/ref 不一致会失败为 `tool_surface_mismatch`。
+- Session recorder 已优先使用 `ToolRun.result_envelope_payload` 投影
+  `SessionItem(kind=tool_result)`；provider replay 内容来自
+  `model_visible_payload`，同时保留 `user_visible_payload`、`trace_payload`、
+  artifact/read handle refs 和完整 `tool_result_envelope` metadata。
 
 ### Persistence
 
-- [ ] 保存 request-time ToolSurface snapshot。
-- [ ] ToolRun 记录 `tool_surface_id`。
-- [ ] ToolRun 记录 `call_id`。
-- [ ] ToolRun 保存 result envelope。
+- [x] 保存 request-time ToolSurface snapshot。
+- [x] ToolRun 记录 `tool_surface_id`。
+- [x] ToolRun 记录 `call_id`。
+- [x] ToolRun 保存 result envelope。
 
 ### Orchestration Integration
 
-- [ ] request builder 获取 ToolSurface。
-- [ ] tool_call response item 用 ToolSurface 验证。
-- [ ] ToolRun result envelope 投影为 Session tool_result。
-- [ ] provider external item 不进入 Tool module。
+- [x] request builder 获取并保存 ToolSurface request-time snapshot。
+- [x] tool_call response item 用 ToolSurface 验证。
+- [x] ToolRun result envelope 投影为 Session tool_result。
+- [x] provider external item 不进入 Tool module。
 
 ### Context Workspace Integration
 
-- [ ] tool surface source/group/function 生成 Context Tree mirror。
-- [ ] schema_enabled 状态只控制镜像展示，不改 readiness。
-- [ ] tool schema mirror 引用 ToolSurface id。
+- [x] tool surface source/group/function 生成 Context Tree mirror。
+- [x] schema_enabled 状态只控制镜像展示，不改 readiness。
+- [x] tool schema mirror 引用 ToolSurface id。
 
 ### Verification
 
-- [ ] 常驻工具通过 ToolSurface always-visible 暴露。
-- [ ] context-selected tool 可进入 ToolSurface。
-- [ ] 未授权/未 ready tool 不进入 enabled function。
-- [ ] tool_call call_id 贯穿 response item、ToolRun、Session tool_result。
-- [ ] provider external item 不创建 ToolRun。
-- [ ] 清库重建后 tool/orchestration 相关测试通过。
+- [x] 常驻工具通过 ToolSurface always-visible 暴露。
+- [x] context-selected tool 可进入 ToolSurface。
+- [x] 未授权/未 ready tool 不进入 enabled function。
+- [x] tool_call call_id 贯穿 response item、ToolRun、Session tool_result。
+- [x] provider external item 不创建 ToolRun。
+- [x] 清库重建后 tool/orchestration 相关测试通过：Tool catalog/execution/Operations Tool + Orchestration tools/resource policy 组合共 85 个测试通过。
+
+已验证：
+
+- `PYTHONPATH=src pytest -q tests/unit/test_orchestration_context_workspace_snapshot.py::test_engine_carries_context_contract_metadata_for_llm_invocation tests/unit/test_turns_http.py::TurnsHttpTestCase::test_turns_endpoint_submits_async_turn_without_exposing_orchestration`
+  - 2 passed
+- `PYTHONPATH=src pytest -q tests/unit/test_tool_catalog.py`
+  - 23 passed
+- `PYTHONPATH=src pytest -q tests/unit/test_tool_execution.py tests/unit/test_tool_catalog.py tests/unit/test_prompt_transcript.py tests/unit/test_context_workspace_session_adapter.py`
+  - 92 passed
+- `PYTHONPATH=src pytest -q tests/unit/test_tool_execution.py tests/unit/test_tool_catalog.py tests/unit/test_tool_http.py tests/unit/test_operations_tool_read_model.py tests/unit/test_orchestration_tools.py::OrchestrationToolsTestCase::test_tool_execution_reuses_run_context_for_batch_decisions`
+  - 72 passed
+- `python -m compileall -q src/crxzipple/modules/tool/application/surface.py src/crxzipple/modules/tool/application/services.py src/crxzipple/modules/tool/application/service_graph.py src/crxzipple/modules/tool/application/__init__.py`

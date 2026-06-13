@@ -33,8 +33,14 @@ export interface TraceContext {
   turn_id?: string;
   run_id?: string;
   step_id?: string;
+  execution_item_id?: string;
   tool_run_id?: string;
+  tool_call_id?: string;
   llm_invocation_id?: string;
+  llm_response_item_id?: string;
+  context_render_snapshot_id?: string;
+  session_item_id?: string;
+  continuation_decision_id?: string;
   artifact_id?: string;
   approval_request_id?: string;
 }
@@ -92,6 +98,7 @@ export interface TurnStepView {
     | "agent_progress"
     | "agent_thinking"
     | "llm"
+    | "continuation_decision"
     | "tool_call"
     | "tool_result"
     | "approval_required"
@@ -164,9 +171,34 @@ export interface WorkbenchRunView {
     queue_wait_ms: number;
   } | null;
   cover_artifact?: ArtifactPreview | null;
+  timeline: WorkbenchTimelineItem[];
   actions?: UiRuntimeAction[];
   inspector?: WorkbenchInspectorView | null;
   trace: TraceContext;
+}
+
+export interface WorkbenchTimelineItem {
+  id: string;
+  turn_id: string;
+  run_id: string;
+  kind: string;
+  status: RuntimeStatus | string;
+  title: string;
+  content: Record<string, unknown>;
+  phase?: string | null;
+  source_refs: Record<string, string>;
+  started_at: string | null;
+  completed_at: string | null;
+  trace: TraceContext;
+}
+
+export interface WorkbenchLinkedEntityDetail {
+  type: string;
+  id: string;
+  owner: string;
+  label: string;
+  summary: string;
+  payload: Record<string, unknown>;
 }
 
 export interface TraceLinkedEntity {

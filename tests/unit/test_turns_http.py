@@ -4,7 +4,10 @@ import asyncio
 from crxzipple.modules.context_workspace.application import CONTEXT_TREE_SCHEMA_VERSION
 from crxzipple.modules.llm.domain import LlmApiFamily, LlmProviderKind
 from crxzipple.modules.orchestration.domain import OrchestrationRunStatus
-from crxzipple.modules.session.application import EnsureSessionInput
+from crxzipple.modules.session.application import (
+    EnsureSessionInput,
+    ListSessionItemsInput,
+)
 from crxzipple.modules.tool.application import ExecuteToolInput
 from crxzipple.modules.tool.domain import ToolRunResult
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunStatus
@@ -96,10 +99,9 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                     )
 
                     session_key = get_response.json()["run"]["session_key"]
-                    history = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_messages(
-                        ListSessionMessagesInput(
+                    history = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_chat_visible_items(
+                        ListSessionItemsInput(
                             session_key=session_key,
-                            include_archived=False,
                         ),
                     )
                     self.assertEqual(
@@ -287,6 +289,24 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                         preview_payload["provider_attachments"],
                     )
                     self.assertEqual(
+                        preview_payload["context_surface"]["snapshot_id"],
+                        preview_payload["context_render_snapshot_id"],
+                    )
+                    self.assertIn(
+                        "rendered_context",
+                        preview_payload["context_surface"],
+                    )
+                    self.assertEqual(
+                        preview_payload["tool_surface"]["metadata"][
+                            "context_render_snapshot_id"
+                        ],
+                        preview_payload["context_render_snapshot_id"],
+                    )
+                    self.assertEqual(
+                        preview_payload["tool_surface"]["id"],
+                        f"tool_surface:{preview_payload['context_render_snapshot_id']}",
+                    )
+                    self.assertEqual(
                         preview_payload["provider_request_options"]["response_format"],
                         None,
                     )
@@ -303,6 +323,24 @@ class TurnsHttpTestCase(HttpModuleTestCase):
                             "context_render_snapshot_id"
                         ],
                         preview_payload["context_render_snapshot_id"],
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["request_metadata"][
+                            "tool_surface_id"
+                        ],
+                        preview_payload["tool_surface"]["id"],
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["request_metadata"][
+                            "tool_surface_mirrored_schema_names"
+                        ],
+                        preview_payload["tool_surface"]["mirrored_schema_names"],
+                    )
+                    self.assertEqual(
+                        preview_payload["provider_request_options"]["request_metadata"][
+                            "tool_surface_mirrored_schema_count"
+                        ],
+                        len(preview_payload["tool_surface"]["mirrored_schema_names"]),
                     )
                     self.assertEqual(
                         preview_payload["provider_request_options"]["request_metadata"][
@@ -558,20 +596,25 @@ class TurnsHttpTestCase(HttpModuleTestCase):
             full_history_payload = full_history_response.json()
             self.assertGreater(len(full_history_payload), len(live_history_payload))
             self.assertTrue(
-                any(item["visibility"] == "archived" for item in full_history_payload),
+                any(
+                    item["visibility_state"] == "archived"
+                    for item in full_history_payload
+                ),
             )
 
             session_key = str(compact_run.metadata["session_key"])
-            session_messages = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_messages(
-                ListSessionMessagesInput(
+            session_items = self.client.app.state.container.require(AppKey.SESSION_SERVICE).list_items(
+                ListSessionItemsInput(
                     session_key=session_key,
-                    active_session_only=False,
+                    chat_visible=True,
                 ),
             )
-            archived_messages = [
-                message for message in session_messages if message.visibility.value == "archived"
+            archived_items = [
+                item
+                for item in session_items
+                if item.metadata.get("archived_by_compaction_run_id")
             ]
-            self.assertGreaterEqual(len(archived_messages), 2)
+            self.assertGreaterEqual(len(archived_items), 2)
 
     def test_turn_heartbeat_endpoint_creates_heartbeat_run(self) -> None:
             adapter = _SequentialTextAdapter("initial answer", "HEARTBEAT_OK")

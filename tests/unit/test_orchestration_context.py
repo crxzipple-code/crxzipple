@@ -56,58 +56,80 @@ class _ToolThenFollowupAdapter:
         request: LlmAdapterRequest,
     ) -> LlmAdapterResponse:
         self.requests.append(request)
-        request_number = len(self.requests)
-        if request_number == 1:
-            return LlmAdapterResponse(
-                result=LlmResult(
-                    tool_calls=(
-                        _expand_tool_bundle_call(
-                            call_id="call-expand-echo",
-                            source_id="test.local_package.echo",
+        current_user_text = "\n".join(
+            block.get("text", "")
+            for message in request.messages
+            if message.role is LlmMessageRole.USER
+            for block in (
+                message.content if isinstance(message.content, list) else ()
+            )
+            if isinstance(block, dict)
+        )
+        if "use echo" in current_user_text:
+            activation = _tool_schema_activation_response(
+                request,
+                source_id="test.local_package.echo",
+                tool_id="echo",
+                expand_call_id="call-expand-echo-history",
+                enable_call_id="call-enable-echo-history",
+            )
+            if activation is not None:
+                return activation
+            if not _has_tool_message(request, "echo"):
+                return _adapter_response_from_result(
+                    request,
+                    LlmResult(
+                        tool_calls=(
+                            ToolCallIntent(
+                                id="call-echo-history-1",
+                                name="echo",
+                                arguments={"message": "first tool hello"},
+                            ),
                         ),
                     ),
-                ),
-            )
-        if request_number == 2:
-            return LlmAdapterResponse(
-                result=LlmResult(
-                    tool_calls=(
-                        ToolCallIntent(
-                            id="call-expand-echo-group",
-                            name="context_tree.expand",
-                            arguments={
-                                "node_id": "tools.bundle.test.local_package.echo.group.source",
-                            },
-                        ),
-                    ),
-                ),
-            )
-        if request_number == 3:
-            return LlmAdapterResponse(
-                result=LlmResult(
-                    tool_calls=(
-                        _enable_tool_schema_call(
-                            call_id="call-enable-echo-history",
-                            tool_id="echo",
-                        ),
-                    ),
-                ),
-            )
-        if request_number == 4:
-            return LlmAdapterResponse(
-                result=LlmResult(
-                    tool_calls=(
-                        ToolCallIntent(
-                            id="call-echo-history-1",
-                            name="echo",
-                            arguments={"message": "first tool hello"},
-                        ),
-                    ),
-                ),
-            )
-        if request_number == 5:
+                )
             return LlmAdapterResponse(result=LlmResult(text="first tool answer"))
         return LlmAdapterResponse(result=LlmResult(text="second answer"))
+
+
+def _context_artifacts_message(messages: tuple[LlmMessage, ...]) -> LlmMessage:
+    return next(
+        message
+        for message in messages
+        if message.metadata.get("prompt_block_kind") == "context_artifacts"
+    )
+
+
+def _tool_messages(messages: tuple[LlmMessage, ...]) -> list[LlmMessage]:
+    return [message for message in messages if message.role is LlmMessageRole.TOOL]
+
+
+def _append_tool_call_fixture(
+    session_service: object,
+    *,
+    session_key: str,
+    session_id: str,
+    tool_call_id: str,
+    tool_name: str,
+) -> None:
+    session_service.append_item_fixture(
+        AppendSessionItemFixtureInput(
+            session_key=session_key,
+            session_id=session_id,
+            role="assistant",
+            kind=SessionItemFixtureKind.MESSAGE,
+            content_payload={
+                "type": "function_call",
+                "call_id": tool_call_id,
+                "name": tool_name,
+                "arguments": {},
+            },
+            metadata={
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+            },
+        ),
+    )
 
 
 class _BlockingStreamingAdapter:
@@ -206,12 +228,19 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         session_key = str(run.metadata["session_key"])
         active_session_id = run.active_session_id
         assert active_session_id is not None
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        _append_tool_call_fixture(
+            self.session_service,
+            session_key=session_key,
+            session_id=active_session_id,
+            tool_call_id="call-browser-ref-1",
+            tool_name="browser.screenshot",
+        )
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.screenshot",
                     "tool_call_id": "call-browser-1",
@@ -327,12 +356,19 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         session_key = str(run.metadata["session_key"])
         active_session_id = run.active_session_id
         assert active_session_id is not None
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        _append_tool_call_fixture(
+            self.session_service,
+            session_key=session_key,
+            session_id=active_session_id,
+            tool_call_id="call-browser-ref-1",
+            tool_name="browser.screenshot",
+        )
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.screenshot",
                     "tool_call_id": "call-browser-ref-1",
@@ -365,16 +401,11 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         preview = self.orchestration_inspection_service.preview_prompt(run.id)
 
         self.assertEqual(preview.llm_id, "image-special")
-        tool_message = next(
-            message for message in preview.messages if message.role.value == "tool"
-        )
-        self.assertEqual(
-            tool_message.content[0],
-            {"type": "text", "text": "Browser screenshot captured."},
-        )
-        self.assertEqual(tool_message.content[1]["type"], "image")
-        self.assertEqual(tool_message.content[1]["mime_type"], "image/png")
-        self.assertEqual(tool_message.content[1]["data"], "ZmFrZS1wbmc=")
+        tool_messages = _tool_messages(preview.messages)
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0].content[1]["type"], "image")
+        self.assertEqual(tool_messages[0].content[1]["mime_type"], "image/png")
+        self.assertEqual(tool_messages[0].content[1]["data"], "ZmFrZS1wbmc=")
 
     def test_prompt_preview_downgrades_image_ref_for_explicit_non_vision_model(self) -> None:
         self.llm_service.register_profile(
@@ -436,12 +467,19 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         session_key = str(run.metadata["session_key"])
         active_session_id = run.active_session_id
         assert active_session_id is not None
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        _append_tool_call_fixture(
+            self.session_service,
+            session_key=session_key,
+            session_id=active_session_id,
+            tool_call_id="call-browser-ref-2",
+            tool_name="browser.screenshot",
+        )
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.screenshot",
                     "tool_call_id": "call-browser-ref-2",
@@ -474,15 +512,10 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         preview = self.orchestration_inspection_service.preview_prompt(run.id)
 
         self.assertEqual(preview.llm_id, "text-default")
-        tool_message = next(
-            message for message in preview.messages if message.role.value == "tool"
-        )
+        tool_messages = _tool_messages(preview.messages)
+        self.assertEqual(len(tool_messages), 1)
         self.assertEqual(
-            tool_message.content[0],
-            {"type": "text", "text": "Browser screenshot captured."},
-        )
-        self.assertEqual(
-            tool_message.content[1],
+            tool_messages[0].content[1],
             {
                 "type": "text",
                 "text": "[image attachment omitted for non-vision model:browser-screenshot.png]",
@@ -516,12 +549,19 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         session_key = str(run.metadata["session_key"])
         active_session_id = run.active_session_id
         assert active_session_id is not None
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        _append_tool_call_fixture(
+            self.session_service,
+            session_key=session_key,
+            session_id=active_session_id,
+            tool_call_id="call-browser-file-1",
+            tool_name="browser.screenshot",
+        )
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.screenshot",
                     "tool_call_id": "call-browser-file-1",
@@ -547,11 +587,10 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         preview = self.orchestration_inspection_service.preview_prompt(run.id)
 
-        tool_message = next(
-            message for message in preview.messages if message.role.value == "tool"
-        )
+        tool_messages = _tool_messages(preview.messages)
+        self.assertEqual(len(tool_messages), 1)
         self.assertEqual(
-            tool_message.content,
+            tool_messages[0].content,
             [
                 {
                     "type": "text",
@@ -587,12 +626,19 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         session_key = str(run.metadata["session_key"])
         active_session_id = run.active_session_id
         assert active_session_id is not None
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        _append_tool_call_fixture(
+            self.session_service,
+            session_key=session_key,
+            session_id=active_session_id,
+            tool_call_id="call-reader-1",
+            tool_name="reader",
+        )
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "reader",
                     "tool_call_id": "call-reader-1",
@@ -618,11 +664,10 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
 
         preview = self.orchestration_inspection_service.preview_prompt(run.id)
 
-        tool_message = next(
-            message for message in preview.messages if message.role.value == "tool"
-        )
+        tool_messages = _tool_messages(preview.messages)
+        self.assertEqual(len(tool_messages), 1)
         self.assertEqual(
-            tool_message.content,
+            tool_messages[0].content,
             [
                 {
                     "type": "text",
@@ -654,12 +699,12 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         active_session_id = run.active_session_id
         assert active_session_id is not None
 
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="assistant",
-                kind=SessionMessageKind.MESSAGE,
+                kind=SessionItemFixtureKind.MESSAGE,
                 content_payload={
                     "type": "function_call",
                     "call_id": "orphan-call-1",
@@ -674,12 +719,12 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 },
             ),
         )
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="assistant",
-                kind=SessionMessageKind.MESSAGE,
+                kind=SessionItemFixtureKind.MESSAGE,
                 content_payload={
                     "type": "function_call",
                     "call_id": "paired-call-1",
@@ -694,12 +739,12 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
                 },
             ),
         )
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "echo",
                     "tool_call_id": "paired-call-1",
@@ -943,8 +988,8 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertIsNotNone(second_processed)
         assert second_processed is not None
         self.assertEqual(second_processed.status, OrchestrationRunStatus.COMPLETED)
-        self.assertEqual(len(adapter.requests), 6)
-        followup_request = adapter.requests[5]
+        self.assertEqual(len(adapter.requests), 5)
+        followup_request = adapter.requests[4]
         direct_messages = [
             message
             for message in followup_request.messages
@@ -967,7 +1012,10 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         context_body = str(context_tree_message.content)
         self.assertIn('<tool_interaction tool_name="echo"', context_body)
         self.assertIn("call-echo-history-1", context_body)
-        self.assertIn("first tool hello", context_body)
+        self.assertIn("args_sha256=", context_body)
+        self.assertIn("result_sha256=", context_body)
+        self.assertIn("expand for refs", context_body)
+        self.assertNotIn("first tool hello", context_body)
 
     def test_process_next_orchestration_assignment_downgrades_image_history_for_explicit_non_vision_model(
         self,
@@ -1036,12 +1084,19 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         session_key = str(run.metadata["session_key"])
         active_session_id = run.active_session_id
         assert active_session_id is not None
-        self.session_service.append_message(
-            AppendSessionMessageInput(
+        _append_tool_call_fixture(
+            self.session_service,
+            session_key=session_key,
+            session_id=active_session_id,
+            tool_call_id="call-browser-ref-process-1",
+            tool_name="browser.screenshot",
+        )
+        self.session_service.append_item_fixture(
+            AppendSessionItemFixtureInput(
                 session_key=session_key,
                 session_id=active_session_id,
                 role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemFixtureKind.TOOL_RESULT,
                 content_payload={
                     "tool_name": "browser.screenshot",
                     "tool_call_id": "call-browser-ref-process-1",
@@ -1084,14 +1139,9 @@ class OrchestrationContextTestCase(OrchestrationTestCaseBase):
         self.assertEqual(processed.stage, OrchestrationRunStage.COMPLETED)
         self.assertEqual(processed.result_payload["output_text"], "handled without vision")
         self.assertEqual(processed.result_payload["llm_id"], "text-default")
-        tool_messages = [
-            message
-            for message in adapter.requests[-1].messages
-            if message.role is LlmMessageRole.TOOL
-        ]
-        self.assertEqual(len(tool_messages), 1)
+        context_artifacts = _context_artifacts_message(adapter.requests[-1].messages)
         self.assertEqual(
-            tool_messages[0].content[1],
+            context_artifacts.content[1],
             {
                 "type": "text",
                 "text": "[image attachment omitted for non-vision model:browser-screenshot.png]",

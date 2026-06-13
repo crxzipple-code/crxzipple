@@ -11,7 +11,15 @@ from crxzipple.modules.llm.application.adapters import (
     LlmAdapterResponse,
 )
 from crxzipple.modules.llm.domain.entities import LlmProfile
-from crxzipple.modules.llm.domain.value_objects import LlmResult, LlmUsage, ToolCallIntent
+from crxzipple.modules.llm.domain.value_objects import (
+    LlmMessagePhase,
+    LlmMessageRole,
+    LlmResponseItem,
+    LlmResponseItemKind,
+    LlmResult,
+    LlmUsage,
+    utcnow,
+)
 from crxzipple.modules.llm.infrastructure.adapters.common import (
     default_base_url,
     ensure_async_json_response,
@@ -44,7 +52,11 @@ class GeminiGenerateContentAdapter:
             response,
             description=f"Gemini profile '{profile.id}'",
         )
-        return self._response_from_payload(profile, data)
+        return self._response_from_payload(
+            profile,
+            data,
+            invocation_id=request.invocation_id,
+        )
 
     async def invoke_async(
         self,
@@ -66,7 +78,11 @@ class GeminiGenerateContentAdapter:
             response,
             description=f"Gemini profile '{profile.id}'",
         )
-        return self._response_from_payload(profile, data)
+        return self._response_from_payload(
+            profile,
+            data,
+            invocation_id=request.invocation_id,
+        )
 
     def _invoke_request(
         self,
@@ -132,6 +148,8 @@ class GeminiGenerateContentAdapter:
     def _response_from_payload(
         profile: LlmProfile,
         data: dict[str, Any],
+        *,
+        invocation_id: str,
     ) -> LlmAdapterResponse:
         candidates = data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
@@ -147,7 +165,7 @@ class GeminiGenerateContentAdapter:
             parts = []
 
         text_fragments: list[str] = []
-        tool_calls: list[ToolCallIntent] = []
+        tool_calls: list[dict[str, Any]] = []
         for part in parts:
             if not isinstance(part, dict):
                 continue
@@ -155,17 +173,7 @@ class GeminiGenerateContentAdapter:
                 text_fragments.append(str(part.get("text")))
             function_call = part.get("functionCall")
             if isinstance(function_call, dict) and function_call.get("name"):
-                tool_calls.append(
-                    ToolCallIntent(
-                        id=str(function_call.get("id") or uuid4().hex),
-                        name=str(function_call.get("name")),
-                        arguments=(
-                            dict(function_call.get("args"))
-                            if isinstance(function_call.get("args"), dict)
-                            else {}
-                        ),
-                    ),
-                )
+                tool_calls.append(dict(function_call))
 
         usage_raw = data.get("usageMetadata")
         usage = None
@@ -176,10 +184,20 @@ class GeminiGenerateContentAdapter:
                 total_tokens=usage_raw.get("totalTokenCount"),
             )
 
+        response_items = _gemini_response_items(
+            invocation_id=invocation_id,
+            text="".join(text_fragments) or None,
+            tool_calls=tool_calls,
+            provider_response_id=(
+                str(data.get("responseId")) if data.get("responseId") is not None else None
+            ),
+            model_name=(
+                str(data.get("modelVersion")) if data.get("modelVersion") is not None else None
+            ),
+        )
         return LlmAdapterResponse(
-            result=LlmResult(
-                text="".join(text_fragments) or None,
-                tool_calls=tuple(tool_calls),
+            result=LlmResult.from_response_items(
+                response_items,
                 usage=usage,
                 finish_reason=(
                     str(candidate.get("finishReason"))
@@ -191,8 +209,86 @@ class GeminiGenerateContentAdapter:
                     "response_id": data.get("responseId"),
                     "model": data.get("modelVersion"),
                 },
+                text_fallback="".join(text_fragments) or None,
             ),
+            response_items=response_items,
             provider_request_id=(
                 str(data.get("responseId")) if data.get("responseId") is not None else None
             ),
         )
+
+
+def _gemini_response_items(
+    *,
+    invocation_id: str,
+    text: str | None,
+    tool_calls: list[dict[str, Any]],
+    provider_response_id: str | None,
+    model_name: str | None,
+) -> tuple[LlmResponseItem, ...]:
+    items: list[LlmResponseItem] = []
+    now = utcnow()
+    if text is not None:
+        sequence_no = len(items) + 1
+        items.append(
+            LlmResponseItem(
+                id=f"{invocation_id}:item:{sequence_no}",
+                invocation_id=invocation_id,
+                sequence_no=sequence_no,
+                kind=LlmResponseItemKind.ASSISTANT_MESSAGE,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.FINAL_ANSWER,
+                content_payload={"text": text},
+                provider_payload={
+                    "type": "candidate.text",
+                    "response_id": provider_response_id,
+                    "model": model_name,
+                },
+                provider_item_id=(
+                    f"{provider_response_id}:text"
+                    if provider_response_id is not None
+                    else f"{invocation_id}:text"
+                ),
+                provider_item_type="candidate.text",
+                model_visible=True,
+                user_visible=True,
+                created_at=now,
+                completed_at=now,
+            ),
+        )
+    for tool_call in tool_calls:
+        tool_name = tool_call.get("name")
+        if not tool_name:
+            continue
+        sequence_no = len(items) + 1
+        call_id = str(tool_call.get("id") or uuid4().hex)
+        arguments = tool_call.get("args")
+        items.append(
+            LlmResponseItem(
+                id=f"{invocation_id}:item:{sequence_no}",
+                invocation_id=invocation_id,
+                sequence_no=sequence_no,
+                kind=LlmResponseItemKind.TOOL_CALL,
+                role=LlmMessageRole.ASSISTANT,
+                phase=LlmMessagePhase.UNKNOWN,
+                content_payload={
+                    "call_id": call_id,
+                    "tool_name": str(tool_name),
+                    "arguments": dict(arguments) if isinstance(arguments, dict) else {},
+                },
+                provider_payload={
+                    "type": "functionCall",
+                    "response_id": provider_response_id,
+                    "model": model_name,
+                },
+                provider_item_id=call_id,
+                provider_item_type="functionCall",
+                call_id=call_id,
+                tool_name=str(tool_name),
+                model_visible=True,
+                user_visible=False,
+                created_at=now,
+                completed_at=now,
+            ),
+        )
+    return tuple(items)

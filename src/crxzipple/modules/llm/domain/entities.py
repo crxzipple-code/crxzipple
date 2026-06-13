@@ -11,8 +11,10 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmErrorPayload,
     LlmInvocationStatus,
     LlmMessage,
+    LlmContinuationSignal,
     LlmModelFamily,
     LlmProviderKind,
+    LlmResponseItem,
     LlmResult,
     LlmSourceKind,
     ToolSchema,
@@ -89,6 +91,8 @@ class LlmInvocation(AggregateRoot[str]):
     request_metadata: dict[str, object] = field(default_factory=dict)
     status: LlmInvocationStatus = LlmInvocationStatus.CREATED
     result: LlmResult | None = None
+    response_items: tuple[LlmResponseItem, ...] = field(default_factory=tuple)
+    continuation: LlmContinuationSignal | None = None
     error: LlmErrorPayload | None = None
     provider_request_id: str | None = None
     created_at: datetime = field(default_factory=utcnow)
@@ -102,6 +106,7 @@ class LlmInvocation(AggregateRoot[str]):
             raise LlmValidationError("LLM invocation requires at least one message.")
         self.messages = tuple(self.messages)
         self.tool_schemas = tuple(self.tool_schemas)
+        self.response_items = tuple(self.response_items)
         self.request_overrides = dict(self.request_overrides)
         self.request_metadata = dict(self.request_metadata)
         if self.response_format is not None:
@@ -117,10 +122,14 @@ class LlmInvocation(AggregateRoot[str]):
         self,
         result: LlmResult,
         *,
+        response_items: tuple[LlmResponseItem, ...] = (),
+        continuation: LlmContinuationSignal | None = None,
         provider_request_id: str | None = None,
     ) -> None:
         self.status = LlmInvocationStatus.SUCCEEDED
         self.result = result
+        self.response_items = tuple(response_items)
+        self.continuation = continuation
         self.error = None
         self.provider_request_id = provider_request_id
         self.completed_at = utcnow()

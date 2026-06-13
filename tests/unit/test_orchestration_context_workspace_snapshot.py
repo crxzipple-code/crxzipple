@@ -41,6 +41,9 @@ from crxzipple.modules.llm.domain import (
     ToolSchema,
 )
 from crxzipple.modules.orchestration.application.engine import OrchestrationEngine
+from crxzipple.modules.orchestration.application.engine_session_recorder import (
+    InboundSessionRecord,
+)
 from crxzipple.modules.orchestration.application.ports import (
     ContextRenderSnapshotRecord,
 )
@@ -128,7 +131,7 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
     assert continuation_node.metadata["status"] == "accepted"
     assert continuation_node.metadata["stage"] == "accepted"
     assert "No pending public continuation state." in continuation_node.content
-    assert snapshot.provider_attachments["prompt_input"]["message_count"] == 1
+    assert snapshot.provider_attachments["prompt_input"]["session_item_count"] == 1
     assert workspace.metadata["available_tool_names"] == ["fetch_weather"]
     assert workspace.metadata["run_flow_node"]["mode"] == "normal_turn"
     assert snapshot.metadata["parallel_recording"] is True
@@ -176,8 +179,8 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
         + snapshot.metadata["direct_transcript_estimated_tokens"]
     )
     assert snapshot.metadata["duplicate_tool_delivery_risk"] is False
-    assert snapshot.metadata["tree_session_message_count"] == 0
-    assert snapshot.metadata["session_message_node_refs"] == []
+    assert snapshot.metadata["tree_session_item_count"] == 0
+    assert snapshot.metadata["session_item_node_refs"] == []
     assert snapshot.metadata["current_inbound_node_id"] is None
     assert snapshot.metadata["tree_tool_interaction_count"] == 0
     assert snapshot.metadata["tool_interaction_node_refs"] == []
@@ -192,7 +195,7 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
     assert snapshot.metadata["browser_verified_evidence_path_count"] == 0
     assert snapshot.metadata["browser_verified_evidence_paths"] == []
     assert snapshot.metadata["session_estimated_text_tokens"] >= 0
-    assert snapshot.metadata["session_message_range_node_count"] >= 0
+    assert snapshot.metadata["session_item_range_node_count"] >= 0
     assert snapshot.metadata["session_range_warning_count"] == 0
     assert snapshot.metadata["session_range_blocked_count"] == 0
     assert snapshot.metadata["session_range_limited_count"] == 0
@@ -201,7 +204,218 @@ def test_context_workspace_adapter_records_tree_snapshot_for_run_prompt() -> Non
     assert snapshot.metadata["artifact_content_estimated_tokens"] == 0
     assert snapshot.metadata["artifact_content_candidate_count"] == 0
     assert snapshot.metadata["artifact_content_budget"]["status"] == "ok"
-    assert snapshot.metadata["current_inbound_message_id"] == "message-user-1"
+    assert "current_inbound_message_id" not in snapshot.metadata
+    assert snapshot.metadata["current_inbound_session_item_id"] == "item-user-1"
+
+
+def test_context_workspace_snapshot_records_direct_session_item_refs() -> None:
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    snapshots = InMemoryContextRenderSnapshotRepository()
+    adapter = ContextWorkspacePromptSnapshotAdapter(
+        workspace_service=ContextWorkspaceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+        ),
+        render_service=ContextRenderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+    )
+
+    snapshot_record = adapter.record_run_prompt_snapshot(
+        run=_run(),
+        prompt=_prompt(
+            extra_messages=(
+                LlmMessage(
+                    role=LlmMessageRole.ASSISTANT,
+                    content={
+                        "type": "function_call",
+                        "call_id": "call-weather-1",
+                        "name": "weather.lookup",
+                        "arguments": {"city": "Kunming"},
+                    },
+                    metadata={
+                        "session_item_id": "item-call-1",
+                        "session_id": "session-instance-1",
+                        "sequence_no": 2,
+                        "kind": "tool_call",
+                        "phase": "commentary",
+                        "source_module": "llm",
+                        "source_kind": "llm_response_item",
+                        "source_id": "llm-item-1",
+                        "provider_item_id": "provider-call-1",
+                        "tool_call_id": "call-weather-1",
+                        "tool_name": "weather.lookup",
+                    },
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.TOOL,
+                    content=[{"type": "text", "text": "sunny"}],
+                    tool_call_id="call-weather-1",
+                    name="weather.lookup",
+                    metadata={
+                        "session_item_id": "item-result-1",
+                        "session_id": "session-instance-1",
+                        "sequence_no": 3,
+                        "kind": "tool_result",
+                        "phase": "unknown",
+                        "source_module": "tool",
+                        "source_kind": "tool_run",
+                        "source_id": "tool-run-1",
+                        "tool_call_id": "call-weather-1",
+                        "tool_name": "weather.lookup",
+                        "tool_status": "succeeded",
+                    },
+                ),
+            ),
+        ),
+    )
+    snapshot = snapshots.get_by_run("run-context")
+
+    assert snapshot is not None
+    assert snapshot_record is not None
+    assert snapshot.metadata["direct_session_item_count"] == 3
+    assert snapshot.metadata["direct_session_item_frontier"] == {
+        "from_sequence_no": 1,
+        "to_sequence_no": 3,
+        "item_count": 3,
+        "from_item_id": "item-user-1",
+        "to_item_id": "item-result-1",
+    }
+    assert snapshot.metadata["direct_transcript_budget"]["source"] == "session_items"
+    assert (
+        snapshot.metadata["direct_transcript_budget"][
+            "protocol_required_preserved"
+        ]
+        is True
+    )
+    assert [
+        ref["item_id"] for ref in snapshot.metadata["direct_session_item_refs"]
+    ] == ["item-user-1", "item-call-1", "item-result-1"]
+    assert [ref["item_id"] for ref in snapshot.included_refs] == [
+        "item-user-1",
+        "item-call-1",
+        "item-result-1",
+    ]
+    assert snapshot.metadata["protocol_required_ref_count"] == 2
+    assert [
+        ref["item_id"] for ref in snapshot.metadata["protocol_required_refs"]
+    ] == ["item-call-1", "item-result-1"]
+    assert [ref["item_id"] for ref in snapshot.protocol_required_refs] == [
+        "item-call-1",
+        "item-result-1",
+    ]
+    assert snapshot.metadata["protocol_required_refs"][0]["budget_class"] == (
+        "protocol_required"
+    )
+    assert snapshot_record.metadata["direct_session_item_count"] == 3
+    assert [ref["item_id"] for ref in snapshot_record.included_refs] == [
+        "item-user-1",
+        "item-call-1",
+        "item-result-1",
+    ]
+    assert [ref["item_id"] for ref in snapshot_record.protocol_required_refs] == [
+        "item-call-1",
+        "item-result-1",
+    ]
+    assert snapshot.provider_attachments["prompt_input"]["session_item_count"] == 3
+    assert (
+        snapshot.provider_attachments["prompt_input"]["transcript_budget_source"]
+        == "session_items"
+    )
+    assert (
+        snapshot.provider_attachments["prompt_input"]["transcript_budget_truncated"]
+        is False
+    )
+    assert snapshot.provider_attachments["prompt_input"]["transcript_frontier"] == {
+        "from_sequence_no": 1,
+        "to_sequence_no": 3,
+        "from_item_id": "item-user-1",
+        "to_item_id": "item-result-1",
+        "item_count": 3,
+    }
+    assert (
+        snapshot.provider_attachments["prompt_input"]["protocol_required_ref_count"]
+        == 2
+    )
+    assert [
+        ref["item_id"] for ref in snapshot.provider_attachments["session_item_refs"]
+    ] == ["item-user-1", "item-call-1", "item-result-1"]
+
+
+def test_context_workspace_snapshot_merges_execution_chain_protocol_refs() -> None:
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    snapshots = InMemoryContextRenderSnapshotRepository()
+    adapter = ContextWorkspacePromptSnapshotAdapter(
+        workspace_service=ContextWorkspaceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+        ),
+        render_service=ContextRenderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+    )
+
+    execution_ref = {
+        "owner_module": "orchestration",
+        "owner_kind": "execution_step_item",
+        "owner_id": "item-exec-result-1",
+        "execution_step_item_id": "item-exec-result-1",
+        "execution_step_id": "step-tools",
+        "execution_chain_id": "chain-run-context",
+        "turn_id": "run-context",
+        "kind": "tool_result",
+        "tool_call_id": "call-weather-1",
+        "tool_name": "weather.lookup",
+        "tool_run_id": "tool-run-1",
+        "result_session_item_id": "item-result-1",
+        "protocol_required": True,
+        "budget_class": "protocol_required",
+        "render_mode": "ref",
+        "visibility": "model_visible",
+    }
+    snapshot_record = adapter.record_run_prompt_snapshot(
+        run=_run(),
+        prompt=_prompt(
+            transcript_budget={
+                "source": "session_items",
+                "protocol_required_refs": [execution_ref],
+                "execution_chain_protocol_required_refs": [execution_ref],
+                "execution_chain_protocol_required_ref_count": 1,
+                "protocol_required_preserved": True,
+            },
+        ),
+    )
+    snapshot = snapshots.get_by_run("run-context")
+
+    assert snapshot is not None
+    assert snapshot_record is not None
+    assert snapshot.metadata["execution_chain_protocol_required_ref_count"] == 1
+    assert snapshot.metadata["execution_chain_protocol_required_refs"][0][
+        "execution_step_item_id"
+    ] == "item-exec-result-1"
+    assert any(
+        ref.get("execution_step_item_id") == "item-exec-result-1"
+        for ref in snapshot.metadata["protocol_required_refs"]
+    )
+    assert any(
+        ref.get("execution_step_item_id") == "item-exec-result-1"
+        for ref in snapshot.protocol_required_refs
+    )
+    assert (
+        snapshot.provider_attachments["prompt_input"][
+            "protocol_required_ref_count"
+        ]
+        == 1
+    )
+    assert snapshot.provider_attachments["execution_chain_protocol_required_refs"][0][
+        "tool_run_id"
+    ] == "tool-run-1"
 
 
 def test_context_workspace_adapter_forwards_prompt_flow_default_tool_schemas() -> None:
@@ -569,7 +783,7 @@ def test_context_workspace_adapter_bootstraps_browser_starter_schemas_from_sourc
     assert snapshot.metadata["tool_schema_mirror_default_mirrored"]
 
 
-def test_context_workspace_snapshot_metadata_locates_session_message_nodes() -> None:
+def test_context_workspace_snapshot_metadata_locates_session_item_nodes() -> None:
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()
     snapshots = InMemoryContextRenderSnapshotRepository()
@@ -603,19 +817,19 @@ def test_context_workspace_snapshot_metadata_locates_session_message_nodes() -> 
             action=ContextAction.EXPAND,
             nodes=(
                 ContextNodeSeed(
-                    node_id="session.messages.current",
+                    node_id="session.items.current",
                     parent_id="session.current",
                     owner="session",
-                    kind="session_message_range",
-                    title="Current Messages",
+                    kind="session_item_range",
+                    title="Current Items",
                     summary="Current active messages.",
                     state=ContextNodeState(collapsed=False, loaded=True),
                 ),
                 ContextNodeSeed(
-                    node_id="session.message.session-instance-1.1",
-                    parent_id="session.messages.current",
+                    node_id="session.item.session-instance-1.1",
+                    parent_id="session.items.current",
                     owner="session",
-                    kind="session_message",
+                    kind="session_item",
                     title="1. user",
                     summary="Delivered as provider user message for this turn.",
                     state=ContextNodeState(collapsed=False, loaded=True),
@@ -657,17 +871,17 @@ def test_context_workspace_snapshot_metadata_locates_session_message_nodes() -> 
     snapshot = snapshots.get_by_run("run-context")
 
     assert snapshot is not None
-    assert snapshot.metadata["tree_session_message_count"] == 1
-    assert snapshot.metadata["session_message_node_refs"] == [
+    assert snapshot.metadata["tree_session_item_count"] == 1
+    assert snapshot.metadata["session_item_node_refs"] == [
         {
-            "node_id": "session.message.session-instance-1.1",
+            "node_id": "session.item.session-instance-1.1",
             "session_id": "session-instance-1",
             "sequence_no": 1,
         },
     ]
     assert (
         snapshot.metadata["current_inbound_node_id"]
-        == "session.message.session-instance-1.1"
+        == "session.item.session-instance-1.1"
     )
     assert snapshot.metadata["tree_evidence_item_count"] == 1
     assert snapshot.metadata["evidence_node_refs"] == [
@@ -742,7 +956,7 @@ def test_context_workspace_adapter_returns_recorded_run_snapshot_when_available(
     assert loaded.snapshot_id == recorded.snapshot_id
     assert loaded.prompt_body == recorded.prompt_body
     assert loaded.metadata["runtime_contract_hash"] == recorded.metadata["runtime_contract_hash"]
-    assert loaded.provider_attachments["prompt_input"]["message_count"] == 1
+    assert loaded.provider_attachments["prompt_input"]["session_item_count"] == 1
 
 
 def test_context_workspace_adapter_records_agent_and_runtime_blocks_as_tree_content() -> None:
@@ -1006,7 +1220,7 @@ def test_engine_preview_uses_context_tree_without_recording_snapshot() -> None:
         metadata={"runtime_contract_hash": "preview-hash"},
         provider_attachments={
             "tool_schemas": [{"name": "fetch_weather", "input_schema": {}}],
-            "prompt_input": {"message_count": 1},
+            "prompt_input": {"session_item_count": 1},
         },
     )
     engine = OrchestrationEngine(
@@ -1037,8 +1251,15 @@ def test_engine_preview_uses_context_tree_without_recording_snapshot() -> None:
     assert preview.prompt_report.context_render.snapshot_id == "preview-run-context"
     assert preview.context_render_snapshot_id == "preview-run-context"
     assert preview.context_render_metadata["runtime_contract_hash"] == "preview-hash"
-    assert preview.provider_attachments["prompt_input"]["message_count"] == 1
+    assert preview.provider_attachments["prompt_input"]["session_item_count"] == 1
     assert preview.provider_attachments["tool_schemas"][0]["name"] == "fetch_weather"
+    assert preview.context_surface["snapshot_id"] == "preview-run-context"
+    assert "session.current" in str(preview.context_surface["rendered_context"])
+    assert preview.context_surface["provider_attachment_mirror"]["prompt_input"][
+        "session_item_count"
+    ] == 1
+    assert preview.tool_surface["id"] == "tool_surface:preview-run-context"
+    assert preview.tool_surface["mirrored_schema_names"] == ["fetch_weather"]
     assert snapshot_port.preview_calls == [("run-context", "session:context")]
     assert snapshot_port.calls == []
 
@@ -1057,7 +1278,7 @@ def test_engine_preview_replays_recorded_context_tree_when_snapshot_exists() -> 
             "history_delivery": "context_tree",
             "runtime_contract_hash": "live-hash",
         },
-        provider_attachments={"prompt_input": {"message_count": 1}},
+        provider_attachments={"prompt_input": {"session_item_count": 1}},
     )
     snapshot_port.recorded_snapshot = snapshot_port._snapshot_record(  # noqa: SLF001
         snapshot_id="snapshot-run-context",
@@ -1065,7 +1286,7 @@ def test_engine_preview_replays_recorded_context_tree_when_snapshot_exists() -> 
             "history_delivery": "context_tree",
             "runtime_contract_hash": "recorded-hash",
         },
-        provider_attachments={"prompt_input": {"message_count": 1}},
+        provider_attachments={"prompt_input": {"session_item_count": 1}},
     )
     engine = OrchestrationEngine(
         prompt_inputs=_FakeRunPromptInputCollector(),
@@ -1080,10 +1301,12 @@ def test_engine_preview_replays_recorded_context_tree_when_snapshot_exists() -> 
 
     assert preview.context_render_snapshot_id == "snapshot-run-context"
     assert preview.context_render_metadata["runtime_contract_hash"] == "recorded-hash"
-    assert preview.provider_attachments["prompt_input"]["message_count"] == 1
+    assert preview.provider_attachments["prompt_input"]["session_item_count"] == 1
     assert preview.provider_request_options["request_metadata"][
         "context_render_snapshot_id"
     ] == "snapshot-run-context"
+    assert preview.context_surface["snapshot_id"] == "snapshot-run-context"
+    assert preview.tool_surface["id"] == "tool_surface:snapshot-run-context"
     assert snapshot_port.preview_calls == []
 
 
@@ -1226,7 +1449,7 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
             "duplicate_tool_delivery_risk": False,
             "session_budget_status": "ok",
             "mirrored_node_count": 2,
-            "current_inbound_message_id": "message-user-1",
+            "current_inbound_session_item_id": "item-user-1",
         },
     )
     engine = OrchestrationEngine(
@@ -1243,7 +1466,7 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
                     },
                     tool_call_id="call-weather-1",
                     metadata={
-                        "session_message_id": "message-assistant-tool-1",
+                        "session_item_id": "item-assistant-tool-1",
                         "session_id": "session-instance-1",
                         "sequence_no": 2,
                         "kind": "message",
@@ -1259,7 +1482,7 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
                     name="fetch_weather",
                     tool_call_id="call-weather-1",
                     metadata={
-                        "session_message_id": "message-tool-result-1",
+                        "session_item_id": "item-tool-result-1",
                         "session_id": "session-instance-1",
                         "sequence_no": 3,
                         "kind": "tool_result",
@@ -1333,6 +1556,30 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
     assert request_metadata["tool_schema_mirror_default_mirrored"][0]["name"] == (
         "browser.network.inspect"
     )
+    assert request_metadata["tool_surface_id"] == "tool_surface:snapshot-run-context"
+    assert request_metadata["tool_surface_mirrored_schema_names"] == ["fetch_weather"]
+    assert request_metadata["tool_surface_mirrored_schema_count"] == 1
+    assert request_metadata["tool_surface_always_visible_count"] == 1
+    assert request_metadata["tool_surface_context_selected_count"] == 0
+    assert request_metadata["tool_surface_function_refs"] == [
+        {
+            "tool_id": "fetch_weather",
+            "name": "fetch_weather",
+            "enabled": True,
+            "always_visible": True,
+            "source_id": "bundled.local_package.browser",
+            "group_key": "network",
+        },
+    ]
+    assert request_metadata["tool_surface_source_refs"] == [
+        {"source_id": "bundled.local_package.browser"},
+    ]
+    assert request_metadata["tool_surface_group_refs"] == [
+        {
+            "source_id": "bundled.local_package.browser",
+            "group_key": "network",
+        },
+    ]
     assert "tool_schema_mirror_skipped" not in request_metadata
     assert "tool_schema_mirror_skipped_by_reason" not in request_metadata
     assert request_metadata["tool_schema_mirror_max_count"] == 32
@@ -1349,19 +1596,10 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
     assert request_metadata["duplicate_tool_delivery_risk"] is False
     assert request_metadata["session_budget_status"] == "ok"
     assert request_metadata["runtime_contract"]["node_id"] == "runtime.contract"
-    assert request_metadata["direct_transcript_session_message_count"] == 3
-    assert request_metadata["direct_transcript_sequence_range"] == {
-        "sessions": [
-            {
-                "session_id": "session-instance-1",
-                "from_sequence_no": 1,
-                "to_sequence_no": 3,
-                "message_count": 3,
-            },
-        ],
-    }
+    assert "direct_transcript_session_item_count" not in request_metadata
+    assert "direct_transcript_sequence_range" not in request_metadata
     assert request_metadata["current_inbound_ref"] == {
-        "message_id": "message-user-1",
+        "item_id": "item-user-1",
         "session_id": "session-instance-1",
         "sequence_no": 1,
         "role": "user",
@@ -1371,7 +1609,7 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
     assert request_metadata["direct_tool_protocol_call_ids"] == ["call-weather-1"]
     assert request_metadata["direct_tool_protocol_refs"] == [
         {
-            "message_id": "message-assistant-tool-1",
+            "item_id": "item-assistant-tool-1",
             "session_id": "session-instance-1",
             "sequence_no": 2,
             "role": "assistant",
@@ -1382,7 +1620,7 @@ def test_engine_carries_context_contract_metadata_for_llm_invocation() -> None:
             "tool_name": "fetch_weather",
         },
         {
-            "message_id": "message-tool-result-1",
+            "item_id": "item-tool-result-1",
             "session_id": "session-instance-1",
             "sequence_no": 3,
             "role": "tool",
@@ -1653,6 +1891,7 @@ def _prompt(
     llm_capabilities: tuple[LlmCapability, ...] = (),
     extra_messages: tuple[LlmMessage, ...] = (),
     flow_hint: dict[str, object] | None = None,
+    transcript_budget: dict[str, object] | None = None,
 ) -> RunPromptInput:
     return RunPromptInput(
         llm_id="test-llm",
@@ -1663,7 +1902,7 @@ def _prompt(
                 role=LlmMessageRole.USER,
                 content="hello tree",
                 metadata={
-                    "session_message_id": "message-user-1",
+                    "session_item_id": "item-user-1",
                     "session_id": "session-instance-1",
                     "sequence_no": 1,
                     "source_kind": "orchestration_run",
@@ -1691,6 +1930,7 @@ def _prompt(
             transcript_message_count=1,
             transcript_chars=10,
             transcript_estimated_tokens=3,
+            transcript_budget=dict(transcript_budget or {}),
         ),
     )
 
@@ -1723,7 +1963,9 @@ class _FakeSessionRecorder:
     def ensure_inbound_message(self, run, *, session_key):  # noqa: ANN001, ANN201
         assert run.id == "run-context"
         assert session_key == "session:context"
-        return "message-user-1"
+        return InboundSessionRecord(
+            user_session_item_id="item-user-1",
+        )
 
 
 class _FakeToolResolver:

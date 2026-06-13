@@ -5,24 +5,25 @@ import typer
 from crxzipple.interfaces.cli.context import AppKey, ensure_container
 from crxzipple.interfaces.cli.formatters import echo_data
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
+    AppendSessionItemInput,
+    ListSessionItemsInput,
     ListSessionInstancesInput,
-    ListSessionMessagesInput,
     ResetSessionInput,
     SessionResolutionService,
 )
 from crxzipple.modules.session.domain import (
     DirectSessionScope,
+    SessionItemKind,
+    SessionItemPhase,
+    SessionItemVisibility,
     SessionInstanceNotFoundError,
-    SessionMessageKind,
-    SessionMessageVisibility,
     SessionNotFoundError,
 )
 from crxzipple.modules.session.interfaces.dto import (
     ResolveSessionDTO,
     SessionDTO,
+    SessionItemDTO,
     SessionInstanceDTO,
-    SessionMessageDTO,
 )
 from crxzipple.modules.session.interfaces.shared import (
     build_ensure_session_input,
@@ -222,18 +223,27 @@ def build_cli() -> typer.Typer:
         )
         echo_data(ResolveSessionDTO.from_result(bundle.resolution))
 
-    @app.command("append-message")
-    def append_message(
+    @app.command("append-item")
+    def append_item(
         ctx: typer.Context,
         session_key: str = typer.Argument(..., help="Stable session key."),
-        role: str = typer.Argument(..., help="Message role."),
-        kind: SessionMessageKind = typer.Option(
-            SessionMessageKind.MESSAGE,
-            help="Structured transcript message kind.",
+        kind: SessionItemKind = typer.Argument(..., help="Session item kind."),
+        role: str | None = typer.Option(None, help="Optional provider role."),
+        phase: SessionItemPhase = typer.Option(
+            SessionItemPhase.UNKNOWN,
+            help="Session item phase.",
         ),
         content_payload: str | None = typer.Option(
             None,
             help="Optional structured content JSON object.",
+        ),
+        visibility: str | None = typer.Option(
+            None,
+            help="Optional visibility JSON object.",
+        ),
+        source_module: str | None = typer.Option(
+            None,
+            help="Optional provenance source module.",
         ),
         source_kind: str | None = typer.Option(
             None,
@@ -243,13 +253,19 @@ def build_cli() -> typer.Typer:
             None,
             help="Optional provenance source id.",
         ),
-        visibility: SessionMessageVisibility = typer.Option(
-            SessionMessageVisibility.DEFAULT,
-            help="Message visibility within transcript maintenance.",
+        provider_item_id: str | None = typer.Option(
+            None,
+            help="Optional provider-native item id.",
         ),
+        provider_item_type: str | None = typer.Option(
+            None,
+            help="Optional provider-native item type.",
+        ),
+        call_id: str | None = typer.Option(None, help="Optional tool call id."),
+        tool_name: str | None = typer.Option(None, help="Optional tool name."),
         metadata: str | None = typer.Option(
             None,
-            help="Optional message metadata JSON object.",
+            help="Optional item metadata JSON object.",
         ),
         session_id: str | None = typer.Option(
             None,
@@ -258,55 +274,87 @@ def build_cli() -> typer.Typer:
     ) -> None:
         container = ensure_container(ctx)
         try:
-            message = container.require(AppKey.SESSION_SERVICE).append_message(
-                AppendSessionMessageInput(
+            item = container.require(AppKey.SESSION_SERVICE).append_item(
+                AppendSessionItemInput(
                     session_key=session_key,
-                    role=role,
                     kind=kind,
+                    role=role,
+                    phase=phase,
                     content_payload=_parse_json_option(
                         content_payload,
                         option_name="--content-payload",
                     ),
+                    visibility=SessionItemVisibility.from_payload(
+                        _parse_json_option(visibility, option_name="--visibility"),
+                    ),
+                    source_module=source_module,
                     source_kind=source_kind,
                     source_id=source_id,
-                    visibility=visibility,
+                    provider_item_id=provider_item_id,
+                    provider_item_type=provider_item_type,
+                    call_id=call_id,
+                    tool_name=tool_name,
                     metadata=_parse_json_option(metadata, option_name="--metadata"),
                     session_id=session_id,
                 ),
             )
         except (SessionNotFoundError, SessionInstanceNotFoundError) as exc:
             _exit_not_found(exc)
-        echo_data(SessionMessageDTO.from_entity(message))
+        echo_data(SessionItemDTO.from_entity(item))
 
-    @app.command("history")
-    def history(
+    @app.command("items")
+    def items(
         ctx: typer.Context,
         session_key: str = typer.Argument(..., help="Stable session key."),
-        limit: int | None = typer.Option(None, min=1, help="Optional message limit."),
+        limit: int | None = typer.Option(None, min=1, help="Optional item limit."),
         active_only: bool = typer.Option(
             False,
             "--active-only/--all",
-            help="Only show messages for the active session instance.",
+            help="Only show items for the active session instance.",
+        ),
+        model_visible: bool | None = typer.Option(
+            None,
+            "--model-visible/--not-model-visible",
+            help="Filter by model visibility.",
+        ),
+        user_visible: bool | None = typer.Option(
+            None,
+            "--user-visible/--not-user-visible",
+            help="Filter by user visibility.",
+        ),
+        chat_visible: bool | None = typer.Option(
+            None,
+            "--chat-visible/--not-chat-visible",
+            help="Filter by chat visibility.",
+        ),
+        trace_visible: bool | None = typer.Option(
+            None,
+            "--trace-visible/--not-trace-visible",
+            help="Filter by trace visibility.",
         ),
         before_sequence_no: int | None = typer.Option(
             None,
             min=1,
-            help="Optional upper sequence bound for loading older history.",
+            help="Optional upper sequence bound for loading older items.",
         ),
     ) -> None:
         container = ensure_container(ctx)
         try:
-            items = container.require(AppKey.SESSION_SERVICE).list_messages(
-                ListSessionMessagesInput(
+            item_list = container.require(AppKey.SESSION_SERVICE).list_items(
+                ListSessionItemsInput(
                     session_key=session_key,
                     limit=limit,
                     active_session_only=active_only,
+                    model_visible=model_visible,
+                    user_visible=user_visible,
+                    chat_visible=chat_visible,
+                    trace_visible=trace_visible,
                     before_sequence_no=before_sequence_no,
                 ),
             )
         except SessionNotFoundError as exc:
             _exit_not_found(exc)
-        echo_data([SessionMessageDTO.from_entity(item) for item in items])
+        echo_data([SessionItemDTO.from_entity(item) for item in item_list])
 
     @app.command("instances")
     def list_instances(

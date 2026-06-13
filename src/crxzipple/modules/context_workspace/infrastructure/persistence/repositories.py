@@ -431,6 +431,11 @@ def _snapshot_model(snapshot: ContextRenderSnapshot) -> ContextRenderSnapshotMod
         estimate=snapshot.estimate.to_payload(),
         included_node_ids=list(snapshot.included_node_ids),
         mirrored_node_ids=list(snapshot.mirrored_node_ids),
+        included_refs=[dict(ref) for ref in snapshot.included_refs],
+        collapsed_refs=[dict(ref) for ref in snapshot.collapsed_refs],
+        protocol_required_refs=[
+            dict(ref) for ref in snapshot.protocol_required_refs
+        ],
         metadata_=dict(snapshot.metadata),
         created_at=snapshot.created_at,
     )
@@ -450,6 +455,11 @@ def _apply_snapshot(
     model.estimate = snapshot.estimate.to_payload()
     model.included_node_ids = list(snapshot.included_node_ids)
     model.mirrored_node_ids = list(snapshot.mirrored_node_ids)
+    model.included_refs = [dict(ref) for ref in snapshot.included_refs]
+    model.collapsed_refs = [dict(ref) for ref in snapshot.collapsed_refs]
+    model.protocol_required_refs = [
+        dict(ref) for ref in snapshot.protocol_required_refs
+    ]
     model.metadata_ = dict(snapshot.metadata)
     model.created_at = snapshot.created_at
 
@@ -466,9 +476,18 @@ def _snapshot_from_model(model: ContextRenderSnapshotModel) -> ContextRenderSnap
         estimate=ContextEstimate.from_payload(dict(model.estimate or {})),
         included_node_ids=tuple(model.included_node_ids or ()),
         mirrored_node_ids=tuple(model.mirrored_node_ids or ()),
+        included_refs=_ref_tuple(model.included_refs or ()),
+        collapsed_refs=_ref_tuple(model.collapsed_refs or ()),
+        protocol_required_refs=_ref_tuple(model.protocol_required_refs or ()),
         metadata=dict(model.metadata_ or {}),
         created_at=coerce_utc_datetime(model.created_at),
     )
+
+
+def _ref_tuple(refs: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(refs, list | tuple):
+        return ()
+    return tuple(dict(ref) for ref in refs if isinstance(ref, dict))
 
 
 __all__ = [

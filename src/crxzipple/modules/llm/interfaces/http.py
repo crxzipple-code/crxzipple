@@ -153,6 +153,7 @@ class LlmInvocationResponse(BaseModel):
     request_metadata: dict[str, Any] = Field(default_factory=dict)
     status: str
     result: LlmResultResponse | None = None
+    response_items: list[dict[str, Any]] = Field(default_factory=list)
     error: LlmErrorResponse | None = None
     provider_request_id: str | None = None
     created_at: str
@@ -595,6 +596,7 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
             if invocation.result is not None
             else None
         ),
+        response_items=[item.to_payload() for item in invocation.response_items],
         error=(
             LlmErrorResponse(
                 message=invocation.error.message,

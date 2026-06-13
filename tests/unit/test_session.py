@@ -4,28 +4,29 @@ from datetime import timedelta
 import unittest
 
 from crxzipple.modules.session.application import (
-    ArchiveSessionMessagesInput,
-    AppendSessionMessageInput,
-    AppendSessionMessagesInput,
+    AppendSessionItemInput,
+    AppendSessionItemsInput,
     EnsureSessionInput,
+    GetSessionItemBySourceInput,
     ListSessionInstancesInput,
-    ListSessionMessagesInput,
-    MergeSessionMessageMetadataInput,
+    ListSessionItemsInput,
+    MergeSessionItemMetadataInput,
     ResolveSessionInput,
     SessionApplicationService,
     SessionResolutionService,
 )
 from crxzipple.modules.session.domain import (
     DirectSessionScope,
-    SessionMessageKind,
-    SessionMessageVisibility,
+    SessionItemKind,
+    SessionItemPhase,
+    SessionItemVisibility,
     SessionReply,
     SessionResetPolicy,
     SessionRouteContext,
 )
 from crxzipple.modules.session.infrastructure import (
+    InMemorySessionItemRepository,
     InMemorySessionInstanceRepository,
-    InMemorySessionMessageRepository,
     InMemorySessionRepository,
 )
 from crxzipple.modules.session.domain.value_objects import utcnow
@@ -34,7 +35,7 @@ from crxzipple.modules.session.domain.value_objects import utcnow
 class _FakeSessionUnitOfWork:
     def __init__(self) -> None:
         self.sessions = InMemorySessionRepository()
-        self.session_messages = InMemorySessionMessageRepository()
+        self.session_items = InMemorySessionItemRepository()
         self.session_instances = InMemorySessionInstanceRepository()
 
     def __enter__(self) -> "_FakeSessionUnitOfWork":
@@ -95,6 +96,131 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(listed[0].sequence_no, 1)
         self.assertEqual(listed[0].kind.value, "main")
 
+    def test_session_items_support_model_chat_and_trace_visible_views(self) -> None:
+        self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+                workspace="workspace",
+            ),
+        )
+
+        commentary = self.service.append_item(
+            AppendSessionItemInput(
+                session_key="agent:assistant:main",
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                phase=SessionItemPhase.COMMENTARY,
+                content_payload={"text": "I will inspect the page."},
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=False,
+                    trace_visible=True,
+                ),
+                source_module="llm",
+                source_kind="llm_response_item",
+                source_id="llm-1:item:0",
+            ),
+        )
+        final_answer = self.service.append_item(
+            AppendSessionItemInput(
+                session_key="agent:assistant:main",
+                kind=SessionItemKind.ASSISTANT_MESSAGE,
+                role="assistant",
+                phase=SessionItemPhase.FINAL_ANSWER,
+                content_payload={"text": "Done."},
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=True,
+                    trace_visible=True,
+                ),
+            ),
+        )
+        tool_call = self.service.append_item(
+            AppendSessionItemInput(
+                session_key="agent:assistant:main",
+                kind=SessionItemKind.TOOL_CALL,
+                content_payload={"arguments": {"format": "text"}},
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=False,
+                    chat_visible=False,
+                    trace_visible=True,
+                ),
+                source_module="llm",
+                source_kind="llm_response_item",
+                source_id="llm-1:item:1",
+                provider_item_id="provider-call-1",
+                call_id="call-browser-snapshot",
+                tool_name="browser.snapshot",
+            ),
+        )
+
+        model_items = self.service.list_model_visible_items(
+            ListSessionItemsInput(session_key="agent:assistant:main"),
+        )
+        chat_items = self.service.list_chat_visible_items(
+            ListSessionItemsInput(session_key="agent:assistant:main"),
+        )
+        trace_items = self.service.list_trace_visible_items(
+            ListSessionItemsInput(session_key="agent:assistant:main"),
+        )
+
+        self.assertEqual(
+            [item.id for item in model_items],
+            [commentary.id, final_answer.id, tool_call.id],
+        )
+        self.assertEqual([item.id for item in chat_items], [final_answer.id])
+        self.assertEqual(
+            [item.id for item in trace_items],
+            [commentary.id, final_answer.id, tool_call.id],
+        )
+        self.assertEqual(tool_call.call_id, "call-browser-snapshot")
+        self.assertEqual(tool_call.provider_item_id, "provider-call-1")
+        self.assertEqual(tool_call.source_id, "llm-1:item:1")
+
+    def test_session_item_source_lookup_returns_existing_item(self) -> None:
+        self.service.ensure_session(
+            EnsureSessionInput(
+                key="agent:assistant:main",
+                agent_id="assistant",
+                workspace="workspace",
+            ),
+        )
+        item = self.service.append_item(
+            AppendSessionItemInput(
+                session_key="agent:assistant:main",
+                kind=SessionItemKind.USER_MESSAGE,
+                role="user",
+                content_payload={"text": "search"},
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=True,
+                    trace_visible=True,
+                ),
+                source_module="orchestration",
+                source_kind="orchestration_run",
+                source_id="run-user-input",
+            ),
+        )
+
+        found = self.service.get_item_by_source(
+            GetSessionItemBySourceInput(
+                session_key="agent:assistant:main",
+                session_id=item.session_id,
+                source_module="orchestration",
+                source_kind="orchestration_run",
+                source_id="run-user-input",
+            ),
+        )
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(found.id, item.id)
+
     def test_resolve_session_applies_idle_reset_policy_with_new_instance(self) -> None:
         started_at = utcnow()
         initial = self.resolver.resolve(
@@ -108,11 +234,18 @@ class SessionServiceTestCase(unittest.TestCase):
                 now=started_at,
             ),
         )
-        self.service.append_message(
-            AppendSessionMessageInput(
+        self.service.append_item(
+            AppendSessionItemInput(
                 session_key=initial.resolution.resolution.key,
+                kind=SessionItemKind.USER_MESSAGE,
                 role="user",
-                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
+                content_payload={"text": "hello"},
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=True,
+                    trace_visible=True,
+                ),
             ),
         )
 
@@ -196,7 +329,7 @@ class SessionServiceTestCase(unittest.TestCase):
         self.assertEqual(session.reply.channel, "webhook")
         self.assertEqual(session.reply.to_id, "conv-reply-1")
 
-    def test_append_message_creates_structured_transcript_payload_and_sequence(self) -> None:
+    def test_append_item_creates_structured_payload_and_sequence(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
@@ -204,45 +337,55 @@ class SessionServiceTestCase(unittest.TestCase):
             ),
         )
 
-        first = self.service.append_message(
-            AppendSessionMessageInput(
+        first = self.service.append_item(
+            AppendSessionItemInput(
                 session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
                 role="user",
-                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
+                content_payload={"text": "hello"},
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=True,
+                    chat_visible=True,
+                    trace_visible=True,
+                ),
             ),
         )
-        second = self.service.append_message(
-            AppendSessionMessageInput(
+        second = self.service.append_item(
+            AppendSessionItemInput(
                 session_key=session.id,
-                role="tool",
-                kind=SessionMessageKind.TOOL_RESULT,
+                kind=SessionItemKind.TOOL_RESULT,
                 content_payload={"tool": "search", "result": "ok"},
+                source_module="tool",
                 source_kind="tool_run",
                 source_id="run-1",
-                visibility=SessionMessageVisibility.INTERNAL,
+                visibility=SessionItemVisibility(
+                    model_visible=True,
+                    user_visible=False,
+                    chat_visible=False,
+                    trace_visible=True,
+                ),
             ),
         )
 
-        history = self.service.list_messages(
-            ListSessionMessagesInput(
+        history = self.service.list_items(
+            ListSessionItemsInput(
                 session_key=session.id,
             ),
         )
 
         self.assertEqual(first.sequence_no, 1)
-        self.assertEqual(
-            first.content_payload,
-            {"blocks": [{"type": "text", "text": "hello"}]},
-        )
+        self.assertEqual(first.content_payload, {"text": "hello"})
         self.assertEqual(second.sequence_no, 2)
         self.assertEqual(second.kind.value, "tool_result")
         self.assertEqual(second.content_payload["tool"], "search")
+        self.assertEqual(second.source_module, "tool")
         self.assertEqual(second.source_kind, "tool_run")
         self.assertEqual(second.source_id, "run-1")
-        self.assertEqual(second.visibility.value, "internal")
+        self.assertFalse(second.visibility.user_visible)
         self.assertEqual([item.sequence_no for item in history], [1, 2])
 
-    def test_append_messages_batches_sequence_assignment(self) -> None:
+    def test_append_items_batches_sequence_assignment(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
@@ -250,24 +393,26 @@ class SessionServiceTestCase(unittest.TestCase):
             ),
         )
 
-        messages = self.service.append_messages(
-            AppendSessionMessagesInput(
-                messages=(
-                    AppendSessionMessageInput(
+        items = self.service.append_items(
+            AppendSessionItemsInput(
+                items=(
+                    AppendSessionItemInput(
                         session_key=session.id,
+                        kind=SessionItemKind.TOOL_CALL,
                         role="assistant",
                         content_payload={
-                            "type": "function_call",
                             "call_id": "call-1",
                             "name": "search",
                             "arguments": {"query": "hello"},
                         },
+                        call_id="call-1",
+                        tool_name="search",
                     ),
-                    AppendSessionMessageInput(
+                    AppendSessionItemInput(
                         session_key=session.id,
-                        role="tool",
-                        kind=SessionMessageKind.TOOL_RESULT,
+                        kind=SessionItemKind.TOOL_RESULT,
                         content_payload={"tool": "search", "result": "ok"},
+                        source_module="tool",
                         source_kind="tool_run",
                         source_id="tool-run-1",
                     ),
@@ -275,113 +420,70 @@ class SessionServiceTestCase(unittest.TestCase):
             ),
         )
 
-        history = self.service.list_messages(
-            ListSessionMessagesInput(session_key=session.id),
+        history = self.service.list_items(
+            ListSessionItemsInput(session_key=session.id),
         )
 
-        self.assertEqual([message.sequence_no for message in messages], [1, 2])
-        self.assertEqual([message.id for message in history], [message.id for message in messages])
-        self.assertEqual(history[0].content_payload["type"], "function_call")
+        self.assertEqual([item.sequence_no for item in items], [1, 2])
+        self.assertEqual([item.id for item in history], [item.id for item in items])
+        self.assertEqual(history[0].call_id, "call-1")
         self.assertEqual(history[1].kind.value, "tool_result")
 
-    def test_get_session_with_messages_returns_bundle_from_one_read(self) -> None:
+    def test_get_session_with_items_returns_bundle_from_one_read(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
             ),
         )
-        message = self.service.append_message(
-            AppendSessionMessageInput(
+        item = self.service.append_item(
+            AppendSessionItemInput(
                 session_key=session.id,
+                kind=SessionItemKind.USER_MESSAGE,
                 role="user",
-                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
+                content_payload={"text": "hello"},
             ),
         )
 
-        bundle = self.service.get_session_with_messages(
-            ListSessionMessagesInput(
+        bundle = self.service.get_session_with_items(
+            ListSessionItemsInput(
                 session_key=session.id,
                 active_session_only=True,
             ),
         )
 
         self.assertEqual(bundle.session.id, session.id)
-        self.assertEqual([item.id for item in bundle.messages], [message.id])
+        self.assertEqual([session_item.id for session_item in bundle.items], [item.id])
 
-    def test_archive_messages_marks_existing_messages_without_duplication(self) -> None:
+    def test_merge_item_metadata_keeps_item_inside_session_service(self) -> None:
         session = self.service.ensure_session(
             EnsureSessionInput(
                 key="agent:assistant:main",
                 agent_id="assistant",
             ),
         )
-        first = self.service.append_message(
-            AppendSessionMessageInput(
+        item = self.service.append_item(
+            AppendSessionItemInput(
                 session_key=session.id,
-                role="user",
-                content_payload={"blocks": [{"type": "text", "text": "hello"}]},
-            ),
-        )
-        second = self.service.append_message(
-            AppendSessionMessageInput(
-                session_key=session.id,
+                kind=SessionItemKind.COMPACTION,
                 role="assistant",
-                content_payload={"blocks": [{"type": "text", "text": "hi"}]},
-            ),
-        )
-
-        archived_count = self.service.archive_messages(
-            ArchiveSessionMessagesInput(
-                session_key=session.id,
-                session_id=session.active_session_id,
-                max_sequence_no=1,
-                reason="compaction",
-            ),
-        )
-        history = self.service.list_messages(
-            ListSessionMessagesInput(
-                session_key=session.id,
-                active_session_only=True,
-            ),
-        )
-
-        self.assertEqual(archived_count, 1)
-        self.assertEqual(len(history), 2)
-        self.assertEqual(history[0].id, first.id)
-        self.assertEqual(history[0].visibility.value, "archived")
-        self.assertEqual(history[0].metadata["archived_reason"], "compaction")
-        self.assertEqual(history[1].id, second.id)
-        self.assertEqual(history[1].visibility.value, "default")
-
-    def test_merge_message_metadata_keeps_message_inside_session_service(self) -> None:
-        session = self.service.ensure_session(
-            EnsureSessionInput(
-                key="agent:assistant:main",
-                agent_id="assistant",
-            ),
-        )
-        message = self.service.append_message(
-            AppendSessionMessageInput(
-                session_key=session.id,
-                role="assistant",
-                content_payload={"blocks": [{"type": "text", "text": "summary"}]},
+                content_payload={"text": "summary"},
                 metadata={"kind": "summary"},
             ),
         )
 
-        updated = self.service.merge_message_metadata(
-            MergeSessionMessageMetadataInput(
-                message_id=message.id,
+        updated = self.service.merge_item_metadata(
+            MergeSessionItemMetadataInput(
+                item_id=item.id,
                 metadata={"maintenance_kind": "compaction_summary"},
             ),
         )
 
-        self.assertEqual(updated.id, message.id)
+        self.assertEqual(updated.id, item.id)
         self.assertEqual(updated.metadata["kind"], "summary")
         self.assertEqual(updated.metadata["maintenance_kind"], "compaction_summary")
         self.assertEqual(
-            self.service.get_message(message.id).metadata["maintenance_kind"],
+            self.service.get_item(item.id).metadata["maintenance_kind"],
             "compaction_summary",
         )
 

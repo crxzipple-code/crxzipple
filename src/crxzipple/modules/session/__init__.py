@@ -1,8 +1,8 @@
 from crxzipple.modules.session.application import (
-    AppendSessionMessageInput,
+    AppendSessionItemInput,
     EnsureSessionInput,
     ListSessionInstancesInput,
-    ListSessionMessagesInput,
+    ListSessionItemsInput,
     ResolveSessionInput,
     ResetSessionInput,
     SessionApplicationService,
@@ -11,23 +11,23 @@ from crxzipple.modules.session.application import (
 from crxzipple.modules.session.domain import (
     Session,
     SessionInstance,
-    SessionMessage,
-    SessionMessageKind,
-    SessionMessageVisibility,
+    SessionItem,
+    SessionItemKind,
+    SessionItemVisibility,
 )
 
 __all__ = [
-    "AppendSessionMessageInput",
+    "AppendSessionItemInput",
     "EnsureSessionInput",
     "ListSessionInstancesInput",
-    "ListSessionMessagesInput",
+    "ListSessionItemsInput",
     "ResolveSessionInput",
     "ResetSessionInput",
     "Session",
     "SessionApplicationService",
     "SessionInstance",
-    "SessionMessage",
-    "SessionMessageKind",
-    "SessionMessageVisibility",
+    "SessionItem",
+    "SessionItemKind",
+    "SessionItemVisibility",
     "SessionResolutionService",
 ]

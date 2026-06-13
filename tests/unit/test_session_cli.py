@@ -29,7 +29,7 @@ class SessionCliTestCase(CliModuleTestCase):
         )
         self.assertEqual(agent_result.exit_code, 0)
 
-    def test_session_commands_manage_history_and_reset_instances(self) -> None:
+    def test_session_commands_manage_items_and_reset_instances(self) -> None:
         self._register_llm_and_agent()
 
         start_result = self.invoke_cli(
@@ -58,8 +58,10 @@ class SessionCliTestCase(CliModuleTestCase):
         append_user_result = self.invoke_cli(
             [
                 "session",
-                "append-message",
+                "append-item",
                 "agent:assistant:main",
+                "user_message",
+                "--role",
                 "user",
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"hello"}]}',
@@ -68,8 +70,10 @@ class SessionCliTestCase(CliModuleTestCase):
         append_assistant_result = self.invoke_cli(
             [
                 "session",
-                "append-message",
+                "append-item",
                 "agent:assistant:main",
+                "assistant_message",
+                "--role",
                 "assistant",
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"hi there"}]}',
@@ -82,21 +86,21 @@ class SessionCliTestCase(CliModuleTestCase):
         append_assistant_payload = json.loads(append_assistant_result.stdout)
         self.assertEqual(append_user_payload["session_id"], first_active_session_id)
         self.assertEqual(append_user_payload["sequence_no"], 1)
-        self.assertEqual(append_user_payload["kind"], "message")
+        self.assertEqual(append_user_payload["kind"], "user_message")
         self.assertEqual(
             append_user_payload["content_payload"],
             {"blocks": [{"type": "text", "text": "hello"}]},
         )
         self.assertEqual(append_assistant_payload["sequence_no"], 2)
 
-        history_result = self.invoke_cli(
-            ["session", "history", "agent:assistant:main"],
+        items_result = self.invoke_cli(
+            ["session", "items", "agent:assistant:main"],
         )
 
-        self.assertEqual(history_result.exit_code, 0)
-        history_payload = json.loads(history_result.stdout)
+        self.assertEqual(items_result.exit_code, 0)
+        items_payload = json.loads(items_result.stdout)
         self.assertEqual(
-            [item["content_payload"] for item in history_payload],
+            [item["content_payload"] for item in items_payload],
             [
                 {"blocks": [{"type": "text", "text": "hello"}]},
                 {"blocks": [{"type": "text", "text": "hi there"}]},
@@ -129,17 +133,19 @@ class SessionCliTestCase(CliModuleTestCase):
         self.assertEqual(instances_payload[1]["id"], reset_payload["active_session_id"])
         self.assertEqual(instances_payload[1]["status"], "active")
 
-        active_history_result = self.invoke_cli(
-            ["session", "history", "agent:assistant:main", "--active-only"],
+        active_items_result = self.invoke_cli(
+            ["session", "items", "agent:assistant:main", "--active-only"],
         )
-        self.assertEqual(active_history_result.exit_code, 0)
-        self.assertEqual(json.loads(active_history_result.stdout), [])
+        self.assertEqual(active_items_result.exit_code, 0)
+        self.assertEqual(json.loads(active_items_result.stdout), [])
 
         append_fresh_result = self.invoke_cli(
             [
                 "session",
-                "append-message",
+                "append-item",
                 "agent:assistant:main",
+                "user_message",
+                "--role",
                 "user",
                 "--content-payload",
                 '{"blocks":[{"type":"text","text":"fresh start"}]}',
@@ -160,7 +166,7 @@ class SessionCliTestCase(CliModuleTestCase):
             reset_payload["active_session_id"],
         )
 
-    def test_session_append_message_command_supports_structured_payloads(self) -> None:
+    def test_session_append_item_command_supports_structured_payloads(self) -> None:
         self._register_llm_and_agent()
 
         start_result = self.invoke_cli(
@@ -177,19 +183,21 @@ class SessionCliTestCase(CliModuleTestCase):
         append_result = self.invoke_cli(
             [
                 "session",
-                "append-message",
+                "append-item",
                 "agent:assistant:main",
-                "tool",
-                "--kind",
                 "tool_result",
+                "--role",
+                "tool",
                 "--content-payload",
                 '{"tool":"search","result":"ok"}',
+                "--source-module",
+                "tool",
                 "--source-kind",
                 "tool_run",
                 "--source-id",
                 "run-1",
                 "--visibility",
-                "internal",
+                '{"model_visible":true,"trace_visible":true}',
             ],
         )
 
@@ -198,9 +206,106 @@ class SessionCliTestCase(CliModuleTestCase):
         self.assertEqual(append_payload["sequence_no"], 1)
         self.assertEqual(append_payload["kind"], "tool_result")
         self.assertEqual(append_payload["content_payload"]["tool"], "search")
+        self.assertEqual(append_payload["source_module"], "tool")
         self.assertEqual(append_payload["source_kind"], "tool_run")
         self.assertEqual(append_payload["source_id"], "run-1")
-        self.assertEqual(append_payload["visibility"], "internal")
+        self.assertTrue(append_payload["visibility"]["model_visible"])
+
+    def test_session_item_commands_append_and_filter_items(self) -> None:
+        self._register_llm_and_agent()
+
+        start_result = self.invoke_cli(
+            [
+                "session",
+                "start",
+                "agent:assistant:main",
+                "--agent-id",
+                "assistant",
+            ],
+        )
+        self.assertEqual(start_result.exit_code, 0)
+
+        append_user_result = self.invoke_cli(
+            [
+                "session",
+                "append-item",
+                "agent:assistant:main",
+                "user_message",
+                "--role",
+                "user",
+                "--phase",
+                "commentary",
+                "--content-payload",
+                '{"blocks":[{"type":"text","text":"hello item"}]}',
+                "--visibility",
+                '{"model_visible":true,"user_visible":true,"chat_visible":true,"trace_visible":true}',
+                "--source-module",
+                "orchestration",
+                "--source-kind",
+                "orchestration_run",
+                "--source-id",
+                "run-cli-item",
+            ],
+        )
+        append_tool_result = self.invoke_cli(
+            [
+                "session",
+                "append-item",
+                "agent:assistant:main",
+                "tool_result",
+                "--role",
+                "tool",
+                "--content-payload",
+                '{"status":"succeeded"}',
+                "--visibility",
+                '{"model_visible":true,"user_visible":false,"chat_visible":false,"trace_visible":true}',
+                "--source-module",
+                "tool",
+                "--source-kind",
+                "tool_run",
+                "--source-id",
+                "tool-run-cli-item",
+                "--call-id",
+                "call-cli-item",
+                "--tool-name",
+                "browser.snapshot",
+            ],
+        )
+
+        self.assertEqual(append_user_result.exit_code, 0)
+        self.assertEqual(append_tool_result.exit_code, 0)
+        user_payload = json.loads(append_user_result.stdout)
+        tool_payload = json.loads(append_tool_result.stdout)
+        self.assertEqual(user_payload["kind"], "user_message")
+        self.assertEqual(user_payload["sequence_no"], 1)
+        self.assertEqual(user_payload["visibility"]["chat_visible"], True)
+        self.assertEqual(tool_payload["kind"], "tool_result")
+        self.assertEqual(tool_payload["sequence_no"], 2)
+        self.assertEqual(tool_payload["tool_name"], "browser.snapshot")
+
+        all_items_result = self.invoke_cli(
+            ["session", "items", "agent:assistant:main", "--active-only"],
+        )
+        chat_items_result = self.invoke_cli(
+            [
+                "session",
+                "items",
+                "agent:assistant:main",
+                "--active-only",
+                "--chat-visible",
+            ],
+        )
+
+        self.assertEqual(all_items_result.exit_code, 0)
+        self.assertEqual(chat_items_result.exit_code, 0)
+        self.assertEqual(
+            [item["kind"] for item in json.loads(all_items_result.stdout)],
+            ["user_message", "tool_result"],
+        )
+        self.assertEqual(
+            [item["id"] for item in json.loads(chat_items_result.stdout)],
+            [user_payload["id"]],
+        )
 
     def test_session_start_command_accepts_reply_payload(self) -> None:
         self._register_llm_and_agent()

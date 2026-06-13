@@ -16,9 +16,9 @@ from crxzipple.modules.context_workspace.domain import (
     ContextNodeState,
 )
 from crxzipple.modules.session.application import (
-    ListSessionMessagesInput,
+    ListSessionItemsInput,
 )
-from crxzipple.modules.session.domain import SessionMessage, SessionNotFoundError
+from crxzipple.modules.session.domain import SessionItem, SessionNotFoundError
 from crxzipple.shared.content_blocks import (
     FILE_REF_BLOCK_TYPE,
     IMAGE_REF_BLOCK_TYPE,
@@ -31,11 +31,11 @@ class ArtifactContextService(Protocol):
         ...
 
 
-class ArtifactSessionMessageService(Protocol):
-    def list_messages(
+class ArtifactSessionItemService(Protocol):
+    def list_items(
         self,
-        data: ListSessionMessagesInput,
-    ) -> list[SessionMessage]:
+        data: ListSessionItemsInput,
+    ) -> list[SessionItem]:
         ...
 
 
@@ -45,13 +45,13 @@ class ArtifactContextNodeProvider:
     def __init__(
         self,
         *,
-        session_service: ArtifactSessionMessageService,
+        session_service: ArtifactSessionItemService,
         artifact_service: ArtifactContextService,
-        message_limit: int = 200,
+        item_limit: int = 200,
     ) -> None:
         self._session_service = session_service
         self._artifact_service = artifact_service
-        self._message_limit = max(int(message_limit), 1)
+        self._item_limit = max(int(item_limit), 1)
 
     def children(
         self,
@@ -60,17 +60,17 @@ class ArtifactContextNodeProvider:
         if request.node.id != "artifacts.session":
             return ()
         try:
-            messages = self._session_service.list_messages(
-                ListSessionMessagesInput(
+            items = self._session_service.list_items(
+                ListSessionItemsInput(
                     session_key=request.workspace.session_key,
                     active_session_only=False,
-                    include_archived=True,
-                    limit=self._message_limit,
+                    trace_visible=True,
+                    limit=self._item_limit,
                 ),
             )
         except SessionNotFoundError:
             return ()
-        refs = _artifact_refs_from_messages(tuple(messages))
+        refs = _artifact_refs_from_items(tuple(items))
         seeds: list[ContextNodeSeed] = []
         for index, ref in enumerate(refs, start=1):
             try:
@@ -92,10 +92,10 @@ class ArtifactContextNodeProvider:
 class _ArtifactRef:
     artifact_id: str
     block_type: str
-    message_id: str
+    session_item_id: str
     session_id: str
     sequence_no: int
-    role: str
+    role: str | None
     name: str | None = None
     mime_type: str | None = None
     preview_url: str | None = None
@@ -110,13 +110,13 @@ _ARTIFACT_ACTIONS = (
 )
 
 
-def _artifact_refs_from_messages(
-    messages: tuple[SessionMessage, ...],
+def _artifact_refs_from_items(
+    items: tuple[SessionItem, ...],
 ) -> tuple[_ArtifactRef, ...]:
     refs: list[_ArtifactRef] = []
     seen: set[str] = set()
-    for message in messages:
-        for block in content_blocks_from_payload(message.content_payload):
+    for item in items:
+        for block in content_blocks_from_payload(item.content_payload):
             block_type = block.get("type")
             if block_type not in {IMAGE_REF_BLOCK_TYPE, FILE_REF_BLOCK_TYPE}:
                 continue
@@ -128,10 +128,10 @@ def _artifact_refs_from_messages(
                 _ArtifactRef(
                     artifact_id=artifact_id,
                     block_type=str(block_type),
-                    message_id=message.id,
-                    session_id=message.session_id,
-                    sequence_no=message.sequence_no,
-                    role=message.role,
+                    session_item_id=item.id,
+                    session_id=item.session_id,
+                    sequence_no=item.sequence_no,
+                    role=item.role,
                     name=_optional_text(block.get("name")),
                     mime_type=_optional_text(block.get("mime_type")),
                     preview_url=_optional_text(block.get("preview_url")),
@@ -168,7 +168,7 @@ def _artifact_node_seed(
         actions=_ARTIFACT_ACTIONS,
         owner_ref={
             "artifact_id": artifact.id,
-            "message_id": ref.message_id,
+            "session_item_id": ref.session_item_id,
             "session_id": ref.session_id,
             "sequence_no": ref.sequence_no,
             "preferred_variant": preferred_variant,
@@ -189,7 +189,7 @@ def _artifact_node_seed(
             "download_url": ref.download_url or f"/artifacts/{artifact.id}/download",
             "preferred_variant": preferred_variant,
             "referenced_by": {
-                "message_id": ref.message_id,
+                "session_item_id": ref.session_item_id,
                 "session_id": ref.session_id,
                 "sequence_no": ref.sequence_no,
                 "role": ref.role,
@@ -207,7 +207,7 @@ def _artifact_summary(artifact: Artifact, *, ref: _ArtifactRef) -> str:
         parts.append(_format_bytes(artifact.size_bytes))
     return (
         f"{artifact.name or ref.name or artifact.id} "
-        f"({', '.join(parts)}) referenced by message #{ref.sequence_no}."
+        f"({', '.join(parts)}) referenced by session item #{ref.sequence_no}."
     )
 
 

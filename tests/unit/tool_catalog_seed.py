@@ -83,7 +83,7 @@ def seed_catalog_tool(
                 access_requirement_sets=(
                     access_requirement_sets
                     if access_requirement_sets is not None
-                    else ((tuple(access_requirements),) if access_requirements else ())
+                    else (tuple(access_requirements),) if access_requirements else ()
                 ),
                 runtime_requirements=tuple(
                     {"requirements": tuple(requirement_set)}

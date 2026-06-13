@@ -32,11 +32,16 @@ from crxzipple.modules.orchestration.domain import (
 )
 from crxzipple.modules.session.application import (
     CompactSessionSegmentInput,
-    ListSessionMessagesInput,
-    MergeSessionMessageMetadataInput,
+    GetSessionItemBySourceInput,
+    ListSessionItemsInput,
+    MergeSessionItemMetadataInput,
 )
 from crxzipple.shared.time import format_datetime_utc
-from crxzipple.modules.session.domain import SessionMessageNotFoundError
+from crxzipple.modules.session.domain import (
+    SessionItem,
+    SessionItemKind,
+    SessionItemNotFoundError,
+)
 from crxzipple.shared.content_blocks import extract_text_content
 
 logger = get_logger(__name__)
@@ -234,29 +239,27 @@ class OrchestrationMaintenanceService:
         if self.session_service is None:
             return
         result_payload = run.result_payload or {}
-        summary_message_id = result_payload.get("assistant_message_id")
+        summary_item = self._summary_item_from_result_payload(
+            result_payload,
+            session_key=session_key,
+            session_id=run.active_session_id,
+        )
         summary_text = result_payload.get("output_text")
-        if not isinstance(summary_message_id, str) or not summary_message_id.strip():
-            return
         if not isinstance(summary_text, str) or not summary_text.strip():
             return
-        try:
-            summary_message = self.session_service.get_message(
-                summary_message_id.strip(),
-            )
-        except SessionMessageNotFoundError:
+        if summary_item is None:
             return
-        self.session_service.merge_message_metadata(
-            MergeSessionMessageMetadataInput(
-                message_id=summary_message.id,
+        self.session_service.merge_item_metadata(
+            MergeSessionItemMetadataInput(
+                item_id=summary_item.id,
                 metadata={
                     "maintenance_kind": "compaction_summary",
                     "maintenance_run_id": run.id,
                 },
             ),
         )
-        cutoff_sequence_no = summary_message.sequence_no - 1
-        if cutoff_sequence_no <= 0:
+        cutoff_item_sequence_no = summary_item.sequence_no - 1
+        if cutoff_item_sequence_no <= 0:
             return
         compacted_at = (
             format_datetime_utc(run.completed_at)
@@ -267,32 +270,61 @@ class OrchestrationMaintenanceService:
             CompactSessionSegmentInput(
                 session_key=session_key,
                 session_id=run.active_session_id,
-                summary_message_id=summary_message.id,
                 summary_text=summary_text.strip(),
                 compaction_run_id=run.id,
-                archived_through_sequence_no=cutoff_sequence_no,
+                summary_item_id=summary_item.id,
+                archived_through_item_sequence_no=cutoff_item_sequence_no,
                 reason="compaction",
             ),
-        )
-        archived_count = int(segment_result.archived_message_count)
-        archived_through_sequence_no = (
-            segment_result.archived_through_sequence_no
-            if segment_result.archived_through_sequence_no is not None
-            else cutoff_sequence_no
         )
         result_compacted_at = segment_result.compacted_at or compacted_at
         with self.uow_factory() as uow:
             persisted_run = self._get_run(uow, run.id)
             updated_result_payload = dict(persisted_run.result_payload or {})
-            updated_result_payload["archived_message_count"] = archived_count
-            updated_result_payload["archived_through_sequence_no"] = (
-                archived_through_sequence_no
+            updated_result_payload["archived_item_count"] = int(
+                segment_result.archived_item_count,
             )
+            if segment_result.archived_through_item_sequence_no is not None:
+                updated_result_payload["archived_through_item_sequence_no"] = (
+                    segment_result.archived_through_item_sequence_no
+                )
+            if summary_item is not None:
+                updated_result_payload["summary_item_id"] = summary_item.id
             updated_result_payload["compacted_at"] = result_compacted_at
             persisted_run.result_payload = updated_result_payload
             uow.orchestration_runs.add(persisted_run)
             uow.collect(persisted_run)
             uow.commit()
+
+    def _summary_item_from_result_payload(
+        self,
+        result_payload: dict[str, object],
+        *,
+        session_key: str,
+        session_id: str,
+    ) -> SessionItem | None:
+        raw_ids = result_payload.get("session_item_ids")
+        if not isinstance(raw_ids, (list, tuple)):
+            return None
+        candidate_ids = [
+            item_id.strip()
+            for item_id in raw_ids
+            if isinstance(item_id, str) and item_id.strip()
+        ]
+        for item_id in reversed(candidate_ids):
+            try:
+                item = self.session_service.get_item(item_id)
+            except SessionItemNotFoundError:
+                continue
+            if item.session_key != session_key or item.session_id != session_id:
+                continue
+            if item.kind not in {
+                SessionItemKind.ASSISTANT_MESSAGE,
+                SessionItemKind.COMPACTION,
+            }:
+                continue
+            return item
+        return None
 
     def maybe_request_auto_compaction(
         self,
@@ -582,13 +614,16 @@ class OrchestrationMaintenanceService:
             or not run.active_session_id.strip()
         ):
             return 0, 0
-        existing_message = self.session_service.get_message_by_source(
-            session_key=session_key,
-            session_id=run.active_session_id,
-            source_kind="orchestration_run",
-            source_id=run.id,
+        existing_item = self.session_service.get_item_by_source(
+            GetSessionItemBySourceInput(
+                session_key=session_key,
+                session_id=run.active_session_id,
+                source_module="orchestration",
+                source_kind="orchestration_run",
+                source_id=run.id,
+            ),
         )
-        if existing_message is not None and existing_message.role == "user":
+        if existing_item is not None and existing_item.role == "user":
             return 0, 0
         content = extract_text_content(run.inbound_instruction.content)
         if content is None or not content.strip():
@@ -630,12 +665,12 @@ class OrchestrationMaintenanceService:
         if not session_key:
             return False
         try:
-            messages = self.session_service.list_messages(
-                ListSessionMessagesInput(
+            items = self.session_service.list_items(
+                ListSessionItemsInput(
                     session_key=session_key,
                     limit=2,
                     active_session_only=True,
-                    include_archived=False,
+                    model_visible=True,
                 ),
             )
         except Exception:
@@ -645,7 +680,7 @@ class OrchestrationMaintenanceService:
                 extra={"run_id": run.id, "session_key": session_key},
             )
             return True
-        return bool(messages)
+        return bool(items)
 
     def _record_preflight_maintenance_attempt(
         self,

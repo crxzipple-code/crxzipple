@@ -11,14 +11,23 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmErrorPayload,
     LlmInvocationStatus,
     LlmMessage,
+    LlmContinuationSignal,
     LlmModelFamily,
     LlmProviderKind,
+    LlmResponseEvent,
+    LlmResponseEventType,
+    LlmResponseItem,
+    LlmResponseItemKind,
+    LlmMessagePhase,
+    LlmMessageRole,
     LlmResult,
     LlmSourceKind,
     ToolSchema,
 )
 from crxzipple.modules.llm.infrastructure.persistence.models import (
     LlmInvocationModel,
+    LlmInvocationResponseEventModel,
+    LlmInvocationResponseItemModel,
     LlmProfileModel,
 )
 from crxzipple.shared.time import (
@@ -118,6 +127,11 @@ class SqlAlchemyLlmInvocationRepository:
                     if invocation.result is not None
                     else None
                 ),
+                continuation_payload=(
+                    invocation.continuation.to_payload()
+                    if invocation.continuation is not None
+                    else None
+                ),
                 error_payload=(
                     invocation.error.to_payload()
                     if invocation.error is not None
@@ -127,6 +141,9 @@ class SqlAlchemyLlmInvocationRepository:
                 created_at=invocation.created_at,
                 started_at=invocation.started_at,
                 completed_at=invocation.completed_at,
+                response_items=[
+                    _response_item_to_model(item) for item in invocation.response_items
+                ],
             ),
         )
 
@@ -185,9 +202,125 @@ class SqlAlchemyLlmInvocationRepository:
             ),
             status=LlmInvocationStatus(model.status),
             result=LlmResult.from_payload(model.result_payload),
+            response_items=tuple(
+                _response_item_from_model(item)
+                for item in sorted(
+                    model.response_items or [],
+                    key=lambda item: item.sequence_no,
+                )
+            ),
+            continuation=LlmContinuationSignal.from_payload(model.continuation_payload),
             error=LlmErrorPayload.from_payload(model.error_payload),
             provider_request_id=model.provider_request_id,
             created_at=coerce_utc_datetime(model.created_at),
             started_at=coerce_optional_utc_datetime(model.started_at),
             completed_at=coerce_optional_utc_datetime(model.completed_at),
         )
+
+    def add_response_event(self, event: LlmResponseEvent) -> None:
+        self.session.merge(_response_event_to_model(event))
+
+    def list_response_events(
+        self,
+        invocation_id: str,
+        *,
+        limit: int | None = None,
+        after_sequence: int | None = None,
+    ) -> list[LlmResponseEvent]:
+        statement = select(LlmInvocationResponseEventModel).where(
+            LlmInvocationResponseEventModel.invocation_id == invocation_id,
+        )
+        if after_sequence is not None:
+            statement = statement.where(
+                LlmInvocationResponseEventModel.sequence_no > int(after_sequence),
+            )
+        statement = statement.order_by(
+            LlmInvocationResponseEventModel.sequence_no,
+            LlmInvocationResponseEventModel.id,
+        )
+        if limit is not None:
+            statement = statement.limit(max(int(limit), 0))
+        models = self.session.scalars(statement).all()
+        return [_response_event_from_model(model) for model in models]
+
+    def get_response_item(self, item_id: str) -> LlmResponseItem | None:
+        model = self.session.get(LlmInvocationResponseItemModel, item_id)
+        if model is None:
+            return None
+        return _response_item_from_model(model)
+
+
+def _response_item_to_model(item: LlmResponseItem) -> LlmInvocationResponseItemModel:
+    return LlmInvocationResponseItemModel(
+        id=item.id,
+        invocation_id=item.invocation_id,
+        sequence_no=item.sequence_no,
+        kind=item.kind.value,
+        role=item.role.value if item.role is not None else None,
+        phase=item.phase.value,
+        content_payload=dict(item.content_payload),
+        provider_payload=dict(item.provider_payload),
+        provider_item_id=item.provider_item_id,
+        provider_item_type=item.provider_item_type,
+        call_id=item.call_id,
+        tool_name=item.tool_name,
+        model_visible=item.model_visible,
+        user_visible=item.user_visible,
+        created_at=item.created_at,
+        completed_at=item.completed_at,
+    )
+
+
+def _response_item_from_model(model: LlmInvocationResponseItemModel) -> LlmResponseItem:
+    return LlmResponseItem(
+        id=model.id,
+        invocation_id=model.invocation_id,
+        sequence_no=model.sequence_no,
+        kind=LlmResponseItemKind(model.kind),
+        role=LlmMessageRole(model.role) if model.role is not None else None,
+        phase=LlmMessagePhase(model.phase),
+        content_payload=(
+            dict(model.content_payload) if isinstance(model.content_payload, dict) else {}
+        ),
+        provider_payload=(
+            dict(model.provider_payload) if isinstance(model.provider_payload, dict) else {}
+        ),
+        provider_item_id=model.provider_item_id,
+        provider_item_type=model.provider_item_type,
+        call_id=model.call_id,
+        tool_name=model.tool_name,
+        model_visible=model.model_visible,
+        user_visible=model.user_visible,
+        created_at=coerce_utc_datetime(model.created_at),
+        completed_at=coerce_optional_utc_datetime(model.completed_at),
+    )
+
+
+def _response_event_to_model(event: LlmResponseEvent) -> LlmInvocationResponseEventModel:
+    return LlmInvocationResponseEventModel(
+        id=event.id,
+        invocation_id=event.invocation_id,
+        sequence_no=event.sequence_no,
+        type=event.type.value,
+        item_id=event.item_id,
+        delta_payload=dict(event.delta_payload),
+        provider_payload=dict(event.provider_payload),
+        created_at=event.created_at,
+    )
+
+
+def _response_event_from_model(model: LlmInvocationResponseEventModel) -> LlmResponseEvent:
+    return LlmResponseEvent(
+        id=model.id,
+        invocation_id=model.invocation_id,
+        sequence_no=model.sequence_no,
+        type=LlmResponseEventType(model.type),
+        item_id=model.item_id,
+        delta_payload=(
+            dict(model.delta_payload) if isinstance(model.delta_payload, dict) else {}
+        ),
+        provider_payload=(
+            dict(model.provider_payload) if isinstance(model.provider_payload, dict) else {}
+        ),
+        created_at=coerce_utc_datetime(model.created_at),
+    )

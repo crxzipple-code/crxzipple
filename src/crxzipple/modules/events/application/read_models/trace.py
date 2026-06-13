@@ -20,9 +20,15 @@ _TRACE_FIELD_NAMES = {
     "run_id",
     "turn_id",
     "step_id",
+    "execution_item_id",
     "invocation_id",
     "tool_run_id",
+    "tool_call_id",
     "llm_invocation_id",
+    "llm_response_item_id",
+    "session_item_id",
+    "session_item_ids",
+    "continuation_decision_id",
     "artifact_id",
     "approval_request_id",
     "message_id",
@@ -38,9 +44,15 @@ _LINKED_ENTITY_FIELDS = {
     "run_id",
     "turn_id",
     "step_id",
+    "execution_item_id",
     "invocation_id",
     "tool_run_id",
+    "tool_call_id",
     "llm_invocation_id",
+    "llm_response_item_id",
+    "session_item_id",
+    "session_item_ids",
+    "continuation_decision_id",
     "artifact_id",
     "approval_request_id",
     "message_id",
@@ -221,10 +233,22 @@ class EventTraceReadModelProvider:
                 turn_id=_optional_str(trace_payload.get("turn_id")),
                 run_id=_optional_str(trace_payload.get("run_id")),
                 step_id=_optional_str(trace_payload.get("step_id")),
+                execution_item_id=_optional_str(trace_payload.get("execution_item_id")),
                 tool_run_id=_optional_str(trace_payload.get("tool_run_id")),
+                tool_call_id=_optional_str(trace_payload.get("tool_call_id")),
                 llm_invocation_id=(
                     _optional_str(trace_payload.get("llm_invocation_id"))
                     or _optional_str(trace_payload.get("invocation_id"))
+                ),
+                llm_response_item_id=_optional_str(
+                    trace_payload.get("llm_response_item_id"),
+                ),
+                session_item_id=(
+                    _optional_str(trace_payload.get("session_item_id"))
+                    or _first_optional_str(trace_payload.get("session_item_ids"))
+                ),
+                continuation_decision_id=_optional_str(
+                    trace_payload.get("continuation_decision_id"),
                 ),
                 artifact_id=_optional_str(trace_payload.get("artifact_id")),
                 approval_request_id=_optional_str(trace_payload.get("approval_request_id")),
@@ -427,6 +451,16 @@ def _optional_str(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _first_optional_str(value: object) -> str | None:
+    if not isinstance(value, list | tuple):
+        return None
+    for item in value:
+        normalized = _optional_str(item)
+        if normalized is not None:
+            return normalized
+    return None
 
 
 def _optional_int(value: object) -> int | None:
