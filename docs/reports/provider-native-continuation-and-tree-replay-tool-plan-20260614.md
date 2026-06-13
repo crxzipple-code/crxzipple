@@ -522,7 +522,7 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
 - [x] Orchestration 每轮生成 evidence delta。
 - [x] Context Tree 展示 evidence frontier。
 - [x] 后续 continuation 可注入 evidence delta。
-- [ ] Workbench 展示 verified facts 和 remaining gaps。
+- [x] Workbench 展示 verified facts 和 remaining gaps。
 
 ### Construction Notes 2026-06-14
 
@@ -543,6 +543,9 @@ Reasoning raw 默认不展示；reasoning summary 按 policy 展示；provider e
   evidence builder，把 terminal tool result 合并进 resumed run metadata。
 - 显式 `run.metadata.evidence_frontier` 与 direct tool message 仍作为
   Context Workspace 的归一化入口。
+- Workbench timeline 会追加 `evidence_frontier` item，content 暴露
+  `verified_facts`、`remaining_gaps`、`failed_evidence_paths` 和原始 items，
+  不重排既有时间线。
 
 ## 迁移策略
 

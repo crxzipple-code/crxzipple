@@ -1267,6 +1267,24 @@ class UiHttpTestCase(HttpModuleTestCase):
             metadata={
                 "session_key": "agent:assistant:main",
                 "trace_id": "trace-ui-chain-only",
+                "evidence_frontier": [
+                    {
+                        "id": "fact:briefInfo",
+                        "kind": "tool_result",
+                        "status": "success",
+                        "summary": "Captured briefInfo flight search result.",
+                        "source_kind": "tool_run",
+                        "source_id": "tool-run-briefInfo",
+                    },
+                    {
+                        "id": "gap:fare",
+                        "kind": "request_payload",
+                        "status": "gap",
+                        "summary": "Fare class mapping still needs validation.",
+                        "source_kind": "tool_run",
+                        "source_id": "tool-run-fare",
+                    },
+                ],
             },
             created_at=timestamp,
             updated_at=timestamp + timedelta(seconds=2),
@@ -1404,7 +1422,20 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "provider_external_item",
                 "final_answer",
                 "continuation",
+                "evidence_frontier",
             ],
+        )
+        evidence_items = [
+            item for item in payload["timeline"] if item["kind"] == "evidence_frontier"
+        ]
+        self.assertEqual(len(evidence_items), 1)
+        self.assertEqual(
+            evidence_items[0]["content"]["verified_facts"],
+            ["Captured briefInfo flight search result."],
+        )
+        self.assertEqual(
+            evidence_items[0]["content"]["remaining_gaps"],
+            ["Fare class mapping still needs validation."],
         )
         response_item_timeline_items = [
             item
@@ -1522,7 +1553,7 @@ class UiHttpTestCase(HttpModuleTestCase):
                 for item in timeline_diagnostics["items"]
             },
             {
-                "Timeline items": "10",
+                "Timeline items": "11",
                 "LLM response items": "7",
                 "Tool lifecycle items": "1",
                 "Hidden reasoning items": "1",

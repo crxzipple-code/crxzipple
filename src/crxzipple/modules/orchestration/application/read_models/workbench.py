@@ -429,6 +429,12 @@ class WorkbenchReadModelProvider:
             run_query=self.run_query,
             runs=session_runs,
         )
+        timeline = _timeline_items_with_evidence_frontier(
+            timeline,
+            runs=session_runs,
+            turn_id=turn_id,
+            trace=trace,
+        )
         metrics = _metrics_for_runs(
             session_runs,
             related_tool_runs=tuple(
@@ -1143,6 +1149,99 @@ def _timeline_items_with_tool_lifecycle(
         ),
     )
     return _suppress_loop_control_timeline_items(merged)
+
+
+def _timeline_items_with_evidence_frontier(
+    timeline: tuple[WorkbenchTimelineItem, ...],
+    *,
+    runs: tuple[OrchestrationRun, ...],
+    turn_id: str,
+    trace: TraceContext,
+) -> tuple[WorkbenchTimelineItem, ...]:
+    evidence_items = _run_evidence_frontier_items(runs)
+    if not evidence_items:
+        return timeline
+    verified_facts = [
+        str(item["summary"])
+        for item in evidence_items
+        if item.get("status") in {"verified", "success"}
+    ]
+    remaining_gaps = [
+        str(item["summary"])
+        for item in evidence_items
+        if item.get("status") in {"open", "gap", "unknown"}
+    ]
+    failed_paths = [
+        str(item["summary"])
+        for item in evidence_items
+        if item.get("status") in {"failed", "blocked"}
+    ]
+    latest_run = max(runs, key=lambda run: run.updated_at)
+    item = WorkbenchTimelineItem(
+        id=f"timeline:{latest_run.id}:evidence_frontier",
+        turn_id=turn_id,
+        run_id=latest_run.id,
+        kind="evidence_frontier",
+        status="success" if verified_facts else "running",
+        title="Evidence Frontier",
+        content={
+            "text": _evidence_frontier_summary(
+                verified_count=len(verified_facts),
+                gap_count=len(remaining_gaps),
+                failed_count=len(failed_paths),
+            ),
+            "verified_facts": verified_facts,
+            "remaining_gaps": remaining_gaps,
+            "failed_evidence_paths": failed_paths,
+            "items": evidence_items,
+        },
+        phase="evidence",
+        source_refs={"run_id": latest_run.id},
+        started_at=format_optional_datetime_utc(latest_run.updated_at),
+        completed_at=format_optional_datetime_utc(latest_run.updated_at),
+        trace=trace,
+    )
+    return _deduplicate_timeline_items((*timeline, item))
+
+
+def _run_evidence_frontier_items(
+    runs: tuple[OrchestrationRun, ...],
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for run in runs:
+        raw_items = run.metadata.get("evidence_frontier")
+        if not isinstance(raw_items, list | tuple):
+            continue
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                continue
+            summary = _optional_text(raw_item.get("summary"))
+            if summary is None:
+                continue
+            item = dict(raw_item)
+            item["summary"] = summary
+            item_id = _optional_text(item.get("id")) or f"{run.id}:{len(items) + 1}"
+            if item_id in seen_ids:
+                continue
+            item["id"] = item_id
+            items.append(item)
+            seen_ids.add(item_id)
+    return items
+
+
+def _evidence_frontier_summary(
+    *,
+    verified_count: int,
+    gap_count: int,
+    failed_count: int,
+) -> str:
+    parts = [f"verified facts: {verified_count}"]
+    if gap_count:
+        parts.append(f"remaining gaps: {gap_count}")
+    if failed_count:
+        parts.append(f"failed evidence paths: {failed_count}")
+    return "; ".join(parts)
 
 
 def _timeline_ref(item: WorkbenchTimelineItem, key: str) -> str | None:
