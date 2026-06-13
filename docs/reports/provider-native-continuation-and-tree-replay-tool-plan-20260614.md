@@ -317,7 +317,7 @@ Loop 结束判断继续使用：
 `context_tree.diff_since`：
 
 - 输入：`snapshot_id` 或 `revision`。
-- 输出：新增/变更/删除节点、schema_enabled 变化、pin/collapse 状态变化。
+- 输出：新增/变更/删除节点、provider tool schema mirror 变化、revision 变化。
 - 用途：provider-native continuation 下向模型注入 delta。
 
 `context_tree.read_snapshot`：
@@ -340,11 +340,11 @@ Loop 结束判断继续使用：
 - [x] 新增 `context_tree.render_current`。
 - [x] 新增 `context_tree.diff_since`。
 - [x] 新增 `context_tree.read_snapshot`。
-- [ ] Render service 支持 delta render。
-- [ ] Provider mirror 支持 tool schema delta summary。
-- [ ] Context snapshot 记录 revision 和 parent snapshot。
+- [x] Render service 支持 delta render。
+- [x] Provider mirror 支持 tool schema delta summary。
+- [x] Context snapshot 记录 revision 和 parent snapshot。
 - [x] 单测覆盖显式 tree replay。
-- [ ] 单测覆盖 schema_enabled delta。
+- [x] 单测覆盖 schema_enabled delta。
 
 ## 4. Tool Module
 

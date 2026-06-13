@@ -95,6 +95,37 @@ class RenderContextPromptResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RenderContextDeltaInput:
+    session_key: str
+    baseline_snapshot_id: str
+    run_id: str | None = None
+    provider_attachments: JsonObject = field(default_factory=dict)
+    metadata: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderContextDeltaResult:
+    workspace: ContextWorkspace
+    baseline_snapshot_id: str
+    baseline_revision: int
+    current_revision: int
+    changed_revision: bool
+    added_node_ids: tuple[str, ...] = ()
+    removed_node_ids: tuple[str, ...] = ()
+    current_included_node_ids: tuple[str, ...] = ()
+    baseline_included_node_ids: tuple[str, ...] = ()
+    added_tool_schema_names: tuple[str, ...] = ()
+    removed_tool_schema_names: tuple[str, ...] = ()
+    current_tool_schema_names: tuple[str, ...] = ()
+    baseline_tool_schema_names: tuple[str, ...] = ()
+    prompt_body: str = ""
+    provider_attachments: JsonObject = field(default_factory=dict)
+    provider_attachment_report: JsonObject = field(default_factory=dict)
+    estimate: ContextEstimate = field(default_factory=ContextEstimate)
+    metadata: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class RecordContextRenderSnapshotInput:
     session_key: str
     run_id: str
@@ -107,6 +138,8 @@ class RecordContextRenderSnapshotInput:
     collapsed_refs: tuple[JsonObject, ...] = ()
     protocol_required_refs: tuple[JsonObject, ...] = ()
     metadata: JsonObject = field(default_factory=dict)
+    parent_snapshot_id: str | None = None
+    parent_tree_revision: int | None = None
     snapshot_id: str = field(default_factory=lambda: f"ctxsnap_{uuid4().hex}")
 
 
@@ -126,6 +159,8 @@ __all__ = [
     "ContextWorkspaceServices",
     "EnsureContextWorkspaceInput",
     "RecordContextRenderSnapshotInput",
+    "RenderContextDeltaInput",
+    "RenderContextDeltaResult",
     "RenderContextPromptInput",
     "RenderContextPromptResult",
 ]

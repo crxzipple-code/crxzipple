@@ -185,6 +185,8 @@ class ContextRenderSnapshot(AggregateRoot[str]):
     collapsed_refs: tuple[JsonObject, ...] = ()
     protocol_required_refs: tuple[JsonObject, ...] = ()
     metadata: JsonObject = field(default_factory=dict)
+    parent_snapshot_id: str | None = None
+    parent_tree_revision: int | None = None
     created_at: datetime = field(default_factory=utcnow)
 
     def __post_init__(self) -> None:
@@ -204,6 +206,17 @@ class ContextRenderSnapshot(AggregateRoot[str]):
             self.protocol_required_refs,
         )
         self.metadata = dict(self.metadata)
+        if self.parent_snapshot_id is not None:
+            self.parent_snapshot_id = _require_text(
+                self.parent_snapshot_id,
+                "parent_snapshot_id",
+            )
+        if self.parent_tree_revision is not None:
+            if int(self.parent_tree_revision) <= 0:
+                raise ContextWorkspaceValidationError(
+                    "parent_tree_revision must be positive.",
+                )
+            self.parent_tree_revision = int(self.parent_tree_revision)
         self.created_at = normalize_timestamp(self.created_at)
 
 

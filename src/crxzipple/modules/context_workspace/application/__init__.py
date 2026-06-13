@@ -7,6 +7,8 @@ from crxzipple.modules.context_workspace.application.models import (
     ContextWorkspaceServices,
     EnsureContextWorkspaceInput,
     RecordContextRenderSnapshotInput,
+    RenderContextDeltaInput,
+    RenderContextDeltaResult,
     RenderContextPromptInput,
     RenderContextPromptResult,
 )
@@ -45,6 +47,8 @@ __all__ = [
     "EXECUTION_CURRENT_NODE_ID",
     "EnsureContextWorkspaceInput",
     "RecordContextRenderSnapshotInput",
+    "RenderContextDeltaInput",
+    "RenderContextDeltaResult",
     "RenderContextPromptInput",
     "RenderContextPromptResult",
     "SESSION_CURRENT_NODE_ID",

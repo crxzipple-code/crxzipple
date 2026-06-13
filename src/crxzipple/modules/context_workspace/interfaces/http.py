@@ -302,6 +302,8 @@ def _snapshot_payload(snapshot: ContextRenderSnapshot) -> dict[str, object]:
         "protocol_required_refs": [
             dict(ref) for ref in snapshot.protocol_required_refs
         ],
+        "parent_snapshot_id": snapshot.parent_snapshot_id,
+        "parent_tree_revision": snapshot.parent_tree_revision,
         "metadata": dict(snapshot.metadata),
         "created_at": snapshot.created_at.isoformat(),
     }

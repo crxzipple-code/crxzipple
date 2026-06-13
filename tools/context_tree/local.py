@@ -9,6 +9,7 @@ from crxzipple.modules.context_workspace.application import (
     ContextNodeUpsertInput,
     ContextRenderService,
     ContextTreeService,
+    RenderContextDeltaInput,
     RenderContextPromptInput,
 )
 from crxzipple.modules.context_workspace.domain import (
@@ -235,67 +236,120 @@ def context_tree_diff_since(deps: ContextTreeToolDeps | Any):
         session_key = _resolve_session_key(arguments, execution_context)
         snapshot_id = _optional_text(arguments.get("snapshot_id"))
         since_revision = _optional_int(arguments.get("revision"))
-        current = resolved.context_render_service.render_prompt_body(
-            RenderContextPromptInput(session_key=session_key),
-        )
         baseline_revision = since_revision
-        baseline_node_ids: tuple[str, ...] = ()
         baseline_snapshot_payload: dict[str, object] | None = None
+        delta = None
         if snapshot_id is not None:
             snapshot = resolved.context_render_service.get_snapshot(snapshot_id)
-            baseline_revision = snapshot.tree_revision
-            baseline_node_ids = tuple(snapshot.included_node_ids)
             baseline_snapshot_payload = _snapshot_payload(
                 snapshot,
                 prompt_body="",
                 truncated=False,
                 max_chars=0,
             )
-        current_node_ids = tuple(current.included_node_ids)
-        added = tuple(item for item in current_node_ids if item not in baseline_node_ids)
-        removed = tuple(item for item in baseline_node_ids if item not in current_node_ids)
-        changed_revision = (
-            baseline_revision is None
-            or current.workspace.active_revision != baseline_revision
-        )
-        text = _render_diff_text(
-            session_key=current.workspace.session_key,
-            current_revision=current.workspace.active_revision,
-            baseline_revision=baseline_revision,
-            snapshot_id=snapshot_id,
-            added=added,
-            removed=removed,
-            changed_revision=changed_revision,
-        )
-        return ToolRunResult.text(
-            text,
-            details={
+            delta = resolved.context_render_service.render_delta(
+                RenderContextDeltaInput(
+                    session_key=session_key,
+                    baseline_snapshot_id=snapshot_id,
+                ),
+            )
+            baseline_revision = delta.baseline_revision
+        else:
+            current = resolved.context_render_service.render_prompt_body(
+                RenderContextPromptInput(session_key=session_key),
+            )
+            current_node_ids = tuple(current.included_node_ids)
+            baseline_node_ids: tuple[str, ...] = ()
+            added = current_node_ids
+            removed: tuple[str, ...] = ()
+            changed_revision = (
+                baseline_revision is None
+                or current.workspace.active_revision != baseline_revision
+            )
+            delta_details = {
                 "session_key": current.workspace.session_key,
                 "workspace_id": current.workspace.id,
                 "current_revision": current.workspace.active_revision,
                 "baseline_revision": baseline_revision,
-                "baseline_snapshot_id": snapshot_id,
                 "changed_revision": changed_revision,
                 "current_estimate": current.estimate.to_payload(),
                 "current_included_node_ids": list(current_node_ids),
                 "baseline_included_node_ids": list(baseline_node_ids),
                 "added_node_ids": list(added),
                 "removed_node_ids": list(removed),
+                "added_tool_schema_names": [],
+                "removed_tool_schema_names": [],
+                "current_tool_schema_names": [],
+                "baseline_tool_schema_names": [],
+            }
+            current_revision = current.workspace.active_revision
+            added_schema_names: tuple[str, ...] = ()
+            removed_schema_names: tuple[str, ...] = ()
+        if delta is not None:
+            current_node_ids = delta.current_included_node_ids
+            baseline_node_ids = delta.baseline_included_node_ids
+            added = delta.added_node_ids
+            removed = delta.removed_node_ids
+            changed_revision = delta.changed_revision
+            workspace_id = delta.workspace.id
+            current_revision = delta.current_revision
+            current_estimate = delta.estimate.to_payload()
+            current_schema_names = delta.current_tool_schema_names
+            baseline_schema_names = delta.baseline_tool_schema_names
+            added_schema_names = delta.added_tool_schema_names
+            removed_schema_names = delta.removed_tool_schema_names
+            delta_details = {
+                "session_key": delta.workspace.session_key,
+                "workspace_id": workspace_id,
+                "current_revision": current_revision,
+                "baseline_revision": baseline_revision,
+                "changed_revision": changed_revision,
+                "current_estimate": current_estimate,
+                "current_included_node_ids": list(current_node_ids),
+                "baseline_included_node_ids": list(baseline_node_ids),
+                "added_node_ids": list(added),
+                "removed_node_ids": list(removed),
+                "added_tool_schema_names": list(added_schema_names),
+                "removed_tool_schema_names": list(removed_schema_names),
+                "current_tool_schema_names": list(current_schema_names),
+                "baseline_tool_schema_names": list(baseline_schema_names),
+                "delta_prompt_body": delta.prompt_body,
+            }
+        text = _render_diff_text(
+            session_key=session_key,
+            current_revision=current_revision,
+            baseline_revision=baseline_revision,
+            snapshot_id=snapshot_id,
+            added=added,
+            removed=removed,
+            added_tool_schema_names=added_schema_names,
+            removed_tool_schema_names=removed_schema_names,
+            changed_revision=changed_revision,
+        )
+        return ToolRunResult.text(
+            text,
+            details={
+                **delta_details,
+                "baseline_snapshot_id": snapshot_id,
+                "baseline_revision": baseline_revision,
                 "baseline_snapshot": baseline_snapshot_payload,
                 "note": (
-                    "Diff compares rendered node membership and tree revision. "
+                    "Diff compares rendered node membership, tool schema mirror "
+                    "membership, and tree revision. "
                     "Use context_tree.render_current when full current prompt text is needed."
                 ),
             },
             metadata={
                 "tool": CONTEXT_TREE_DIFF_SINCE_TOOL_ID,
-                "session_key": current.workspace.session_key,
-                "current_revision": current.workspace.active_revision,
+                "session_key": session_key,
+                "current_revision": current_revision,
                 "baseline_revision": baseline_revision,
                 "baseline_snapshot_id": snapshot_id,
                 "changed_revision": changed_revision,
                 "added_node_count": len(added),
                 "removed_node_count": len(removed),
+                "added_tool_schema_count": len(added_schema_names),
+                "removed_tool_schema_count": len(removed_schema_names),
             },
         )
 
@@ -1063,6 +1117,8 @@ def _snapshot_payload(
         "protocol_required_refs": [
             dict(ref) for ref in snapshot.protocol_required_refs
         ],
+        "parent_snapshot_id": getattr(snapshot, "parent_snapshot_id", None),
+        "parent_tree_revision": getattr(snapshot, "parent_tree_revision", None),
         "metadata": dict(snapshot.metadata),
         "created_at": snapshot.created_at.isoformat(),
         "truncated": truncated,
@@ -1215,6 +1271,8 @@ def _render_diff_text(
     snapshot_id: str | None,
     added: tuple[str, ...],
     removed: tuple[str, ...],
+    added_tool_schema_names: tuple[str, ...],
+    removed_tool_schema_names: tuple[str, ...],
     changed_revision: bool,
 ) -> str:
     baseline = (
@@ -1230,6 +1288,8 @@ def _render_diff_text(
         f"- revision_changed: {str(changed_revision).lower()}",
         f"- added_rendered_nodes: {len(added)}",
         f"- removed_rendered_nodes: {len(removed)}",
+        f"- added_tool_schemas: {len(added_tool_schema_names)}",
+        f"- removed_tool_schemas: {len(removed_tool_schema_names)}",
     ]
     if added:
         lines.append("Added rendered node ids:")
@@ -1241,8 +1301,19 @@ def _render_diff_text(
         lines.extend(f"- {node_id}" for node_id in removed[:20])
         if len(removed) > 20:
             lines.append(f"- ... and {len(removed) - 20} more")
+    if added_tool_schema_names:
+        lines.append("Added provider tool schemas:")
+        lines.extend(f"- {name}" for name in added_tool_schema_names[:20])
+        if len(added_tool_schema_names) > 20:
+            lines.append(f"- ... and {len(added_tool_schema_names) - 20} more")
+    if removed_tool_schema_names:
+        lines.append("Removed provider tool schemas:")
+        lines.extend(f"- {name}" for name in removed_tool_schema_names[:20])
+        if len(removed_tool_schema_names) > 20:
+            lines.append(f"- ... and {len(removed_tool_schema_names) - 20} more")
     lines.append(
-        "This diff reports rendered node membership and revision movement; "
+        "This diff reports rendered node membership, provider tool schema "
+        "membership, and revision movement; "
         "call context_tree.render_current for the full current render."
     )
     return "\n".join(lines)

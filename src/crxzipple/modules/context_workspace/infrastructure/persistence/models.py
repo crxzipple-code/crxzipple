@@ -147,6 +147,15 @@ class ContextRenderSnapshotModel(Base):
         nullable=False,
         default=list,
     )
+    parent_snapshot_id: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+        index=True,
+    )
+    parent_tree_revision: Mapped[int | None] = mapped_column(
+        Integer(),
+        nullable=True,
+    )
     metadata_: Mapped[dict[str, object]] = mapped_column(
         "metadata",
         JSON(),

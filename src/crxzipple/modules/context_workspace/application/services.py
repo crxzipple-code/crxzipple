@@ -11,6 +11,8 @@ from crxzipple.modules.context_workspace.application.models import (
     ContextTreeView,
     EnsureContextWorkspaceInput,
     RecordContextRenderSnapshotInput,
+    RenderContextDeltaInput,
+    RenderContextDeltaResult,
     RenderContextPromptInput,
     RenderContextPromptResult,
 )
@@ -315,6 +317,26 @@ class ContextRenderService:
             metadata=data.metadata,
         )
 
+    def render_delta(
+        self,
+        data: RenderContextDeltaInput,
+    ) -> RenderContextDeltaResult:
+        baseline = self.get_snapshot(data.baseline_snapshot_id)
+        current = self.render_prompt_body(
+            RenderContextPromptInput(
+                session_key=data.session_key,
+                run_id=data.run_id,
+                provider_attachments=data.provider_attachments,
+                metadata=data.metadata,
+            ),
+        )
+        return self._pipeline.render_delta(
+            workspace=current.workspace,
+            baseline=baseline,
+            current=current,
+            metadata=data.metadata,
+        )
+
     def record_render_snapshot(
         self,
         data: RecordContextRenderSnapshotInput,
@@ -339,6 +361,8 @@ class ContextRenderService:
             collapsed_refs=data.collapsed_refs,
             protocol_required_refs=data.protocol_required_refs,
             metadata=metadata,
+            parent_snapshot_id=data.parent_snapshot_id,
+            parent_tree_revision=data.parent_tree_revision,
         )
         self._snapshots.add(snapshot)
         return snapshot

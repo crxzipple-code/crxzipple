@@ -174,6 +174,8 @@ class ContextRenderSnapshotRecord:
     tool_schemas: tuple["ToolSchema", ...] | None = None
     tool_schema_mirror_available: bool = False
     artifact_content_blocks: tuple[dict[str, object], ...] = ()
+    parent_snapshot_id: str | None = None
+    parent_tree_revision: int | None = None
 
 
 class ContextRenderSnapshotPort(Protocol):

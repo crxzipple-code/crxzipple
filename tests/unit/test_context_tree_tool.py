@@ -211,6 +211,40 @@ def test_context_tree_replay_tools_render_read_snapshot_and_diff() -> None:
     assert read_result.details["prompt_body"] == rendered.prompt_body
     assert "<context_tree" in read_result.blocks[0]["text"]
 
+    asyncio.run(
+        context_tree_expand(deps.tool_deps)(
+            {"node_id": "tools.available"},
+            execution_context,
+        ),
+    )
+    asyncio.run(
+        context_tree_expand(deps.tool_deps)(
+            {"node_id": "tools.bundle.bundled.openapi.weather"},
+            execution_context,
+        ),
+    )
+    rendered_before_schema = deps.render_service.render_prompt_body(
+        RenderContextPromptInput(session_key="session:replay"),
+    )
+    schema_snapshot = deps.render_service.record_render_snapshot(
+        RecordContextRenderSnapshotInput(
+            session_key="session:replay",
+            run_id="run-replay",
+            prompt_body=rendered_before_schema.prompt_body,
+            estimate=rendered_before_schema.estimate,
+            included_node_ids=rendered_before_schema.included_node_ids,
+            mirrored_node_ids=rendered_before_schema.mirrored_node_ids,
+            provider_attachments=rendered_before_schema.provider_attachments,
+            snapshot_id="ctxsnap_replay_before_schema",
+        ),
+    )
+    asyncio.run(
+        context_tree_enable_tool_schema(deps.tool_deps)(
+            {"node_id": "tools.tool.fetch_weather"},
+            execution_context,
+        ),
+    )
+
     deps.tree_service.upsert_nodes(
         ContextNodeUpsertInput(
             session_key="session:replay",
@@ -241,6 +275,19 @@ def test_context_tree_replay_tools_render_read_snapshot_and_diff() -> None:
     assert diff_result.details["changed_revision"] is True
     assert "custom.replay" in diff_result.details["added_node_ids"]
     assert "Added rendered node ids:" in diff_result.blocks[0]["text"]
+
+    schema_diff_result = asyncio.run(
+        context_tree_diff_since(deps.tool_deps)(
+            {"snapshot_id": schema_snapshot.id},
+            execution_context,
+        ),
+    )
+    assert schema_diff_result.details["baseline_snapshot_id"] == (
+        "ctxsnap_replay_before_schema"
+    )
+    assert schema_diff_result.details["added_tool_schema_names"] == ["fetch_weather"]
+    assert schema_diff_result.metadata["added_tool_schema_count"] == 1
+    assert "Added provider tool schemas:" in schema_diff_result.blocks[0]["text"]
 
 
 def test_context_tree_expand_skill_exposes_skill_read_handle() -> None:

@@ -959,6 +959,39 @@ def test_context_workspace_adapter_returns_recorded_run_snapshot_when_available(
     assert loaded.provider_attachments["prompt_input"]["session_item_count"] == 1
 
 
+def test_context_workspace_adapter_records_parent_snapshot_reference() -> None:
+    workspaces = InMemoryContextWorkspaceRepository()
+    nodes = InMemoryContextNodeRepository()
+    snapshots = InMemoryContextRenderSnapshotRepository()
+    adapter = ContextWorkspacePromptSnapshotAdapter(
+        workspace_service=ContextWorkspaceService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+        ),
+        render_service=ContextRenderService(
+            workspace_repository=workspaces,
+            node_repository=nodes,
+            snapshot_repository=snapshots,
+        ),
+    )
+    first = adapter.record_run_prompt_snapshot(run=_run(), prompt=_prompt())
+    assert first is not None
+    first_stored = snapshots.get(first.snapshot_id)
+    assert first_stored is not None
+    run = _run()
+    run.metadata["context_render_snapshot_id"] = first.snapshot_id
+
+    second = adapter.record_run_prompt_snapshot(run=run, prompt=_prompt())
+
+    assert second is not None
+    assert second.parent_snapshot_id == first.snapshot_id
+    assert second.parent_tree_revision == first_stored.tree_revision
+    stored = snapshots.get(second.snapshot_id)
+    assert stored is not None
+    assert stored.parent_snapshot_id == first.snapshot_id
+    assert stored.parent_tree_revision == first_stored.tree_revision
+
+
 def test_context_workspace_adapter_records_agent_and_runtime_blocks_as_tree_content() -> None:
     workspaces = InMemoryContextWorkspaceRepository()
     nodes = InMemoryContextNodeRepository()

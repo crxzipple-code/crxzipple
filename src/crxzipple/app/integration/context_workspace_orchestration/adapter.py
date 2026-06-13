@@ -176,6 +176,10 @@ class ContextWorkspacePromptSnapshotAdapter:
         estimate_payload = rendered.estimate.to_payload()
         if rendered.estimate_breakdown:
             estimate_payload["breakdown"] = dict(rendered.estimate_breakdown)
+        parent_snapshot_id, parent_tree_revision = _parent_snapshot_ref(
+            run=run,
+            render_service=self._render_service,
+        )
         snapshot_id = f"ctxpreview_{run.id}"
         if persist:
             snapshot = self._render_service.record_render_snapshot(
@@ -191,6 +195,8 @@ class ContextWorkspacePromptSnapshotAdapter:
                     collapsed_refs=collapsed_refs,
                     protocol_required_refs=protocol_required_refs,
                     metadata=snapshot_metadata,
+                    parent_snapshot_id=parent_snapshot_id,
+                    parent_tree_revision=parent_tree_revision,
                 ),
             )
             snapshot_id = snapshot.id
@@ -211,6 +217,8 @@ class ContextWorkspacePromptSnapshotAdapter:
             ),
             tool_schema_mirror_available=rendered.tool_schema_mirror_available,
             artifact_content_blocks=artifact_content_blocks,
+            parent_snapshot_id=parent_snapshot_id,
+            parent_tree_revision=parent_tree_revision,
         )
 
     def _record_from_snapshot(
@@ -246,6 +254,8 @@ class ContextWorkspacePromptSnapshotAdapter:
                 artifact_service=self._artifact_service,
                 allow_vision=LlmCapability.VISION_INPUT in prompt.llm_capabilities,
             ),
+            parent_snapshot_id=snapshot.parent_snapshot_id,
+            parent_tree_revision=snapshot.parent_tree_revision,
         )
 
 
@@ -260,6 +270,22 @@ def _snapshot_budget_dict(metadata: dict[str, object]) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
     return dict(value)
+
+
+def _parent_snapshot_ref(
+    *,
+    run: OrchestrationRun,
+    render_service: ContextRenderService,
+) -> tuple[str | None, int | None]:
+    value = run.metadata.get("context_render_snapshot_id")
+    if not isinstance(value, str) or not value.strip():
+        return None, None
+    snapshot_id = value.strip()
+    try:
+        snapshot = render_service.get_snapshot(snapshot_id)
+    except ContextRenderSnapshotNotFoundError:
+        return None, None
+    return snapshot.id, snapshot.tree_revision
 
 
 __all__ = ["ContextWorkspacePromptSnapshotAdapter"]
