@@ -10,6 +10,10 @@ from crxzipple.modules.context_workspace.application import (
     RecordContextRenderSnapshotInput,
     RenderContextPromptInput,
 )
+from crxzipple.modules.context_workspace.application.rendering import (
+    render_context_delta_body,
+    tool_schema_names,
+)
 from crxzipple.modules.context_workspace.domain import (
     ContextRenderSnapshot,
     ContextRenderSnapshotNotFoundError,
@@ -176,10 +180,23 @@ class ContextWorkspacePromptSnapshotAdapter:
         estimate_payload = rendered.estimate.to_payload()
         if rendered.estimate_breakdown:
             estimate_payload["breakdown"] = dict(rendered.estimate_breakdown)
-        parent_snapshot_id, parent_tree_revision = _parent_snapshot_ref(
+        parent_snapshot = _parent_snapshot_ref(
             run=run,
             render_service=self._render_service,
         )
+        parent_snapshot_id = parent_snapshot.id if parent_snapshot is not None else None
+        parent_tree_revision = (
+            parent_snapshot.tree_revision if parent_snapshot is not None else None
+        )
+        context_delta = _context_delta_metadata(
+            parent_snapshot=parent_snapshot,
+            current_revision=rendered.workspace.active_revision,
+            session_key=session_key,
+            current_included_node_ids=rendered.included_node_ids,
+            current_provider_attachments=provider_attachments,
+        )
+        if context_delta is not None:
+            snapshot_metadata["context_delta"] = context_delta
         snapshot_id = f"ctxpreview_{run.id}"
         if persist:
             snapshot = self._render_service.record_render_snapshot(
@@ -276,16 +293,83 @@ def _parent_snapshot_ref(
     *,
     run: OrchestrationRun,
     render_service: ContextRenderService,
-) -> tuple[str | None, int | None]:
+) -> ContextRenderSnapshot | None:
     value = run.metadata.get("context_render_snapshot_id")
     if not isinstance(value, str) or not value.strip():
-        return None, None
+        return None
     snapshot_id = value.strip()
     try:
-        snapshot = render_service.get_snapshot(snapshot_id)
+        return render_service.get_snapshot(snapshot_id)
     except ContextRenderSnapshotNotFoundError:
-        return None, None
-    return snapshot.id, snapshot.tree_revision
+        return None
+
+
+def _context_delta_metadata(
+    *,
+    parent_snapshot: ContextRenderSnapshot | None,
+    current_revision: int,
+    session_key: str,
+    current_included_node_ids: tuple[str, ...],
+    current_provider_attachments: dict[str, object],
+) -> dict[str, object] | None:
+    if parent_snapshot is None:
+        return None
+    baseline_node_ids = tuple(parent_snapshot.included_node_ids)
+    added_node_ids = tuple(
+        node_id
+        for node_id in current_included_node_ids
+        if node_id not in baseline_node_ids
+    )
+    removed_node_ids = tuple(
+        node_id
+        for node_id in baseline_node_ids
+        if node_id not in current_included_node_ids
+    )
+    baseline_tool_schema_names = tool_schema_names(parent_snapshot.provider_attachments)
+    current_tool_schema_names = tool_schema_names(current_provider_attachments)
+    added_tool_schema_names = tuple(
+        name for name in current_tool_schema_names if name not in baseline_tool_schema_names
+    )
+    removed_tool_schema_names = tuple(
+        name for name in baseline_tool_schema_names if name not in current_tool_schema_names
+    )
+    changed_revision = current_revision != parent_snapshot.tree_revision
+    if (
+        not changed_revision
+        and not added_node_ids
+        and not removed_node_ids
+        and not added_tool_schema_names
+        and not removed_tool_schema_names
+    ):
+        return None
+    prompt_body = render_context_delta_body(
+        workspace=_DeltaWorkspace(
+            session_key=session_key,
+            active_revision=current_revision,
+        ),
+        baseline=parent_snapshot,
+        added_node_ids=added_node_ids,
+        removed_node_ids=removed_node_ids,
+        added_tool_schema_names=added_tool_schema_names,
+        removed_tool_schema_names=removed_tool_schema_names,
+    )
+    return {
+        "baseline_snapshot_id": parent_snapshot.id,
+        "baseline_revision": parent_snapshot.tree_revision,
+        "current_revision": current_revision,
+        "changed_revision": changed_revision,
+        "added_node_ids": list(added_node_ids),
+        "removed_node_ids": list(removed_node_ids),
+        "added_tool_schema_names": list(added_tool_schema_names),
+        "removed_tool_schema_names": list(removed_tool_schema_names),
+        "prompt_body": prompt_body,
+    }
+
+
+class _DeltaWorkspace:
+    def __init__(self, *, session_key: str, active_revision: int) -> None:
+        self.session_key = session_key
+        self.active_revision = active_revision
 
 
 __all__ = ["ContextWorkspacePromptSnapshotAdapter"]

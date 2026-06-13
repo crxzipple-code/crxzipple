@@ -114,6 +114,63 @@ def test_request_envelope_can_use_snapshot_without_replaying_context_messages() 
     assert envelope.metadata["context_render_snapshot_id"] == "ctxsnap_delta"
 
 
+def test_request_envelope_injects_context_delta_without_full_tree_replay() -> None:
+    builder = ProviderPromptRequestBuilder()
+    prompt = _prompt(
+        messages=(
+            LlmMessage(role=LlmMessageRole.SYSTEM, content="system"),
+            LlmMessage(role=LlmMessageRole.USER, content="hello"),
+        ),
+        tool_schemas=(ToolSchema(name="old.tool"),),
+    )
+    snapshot = ContextRenderSnapshotRecord(
+        snapshot_id="ctxsnap_delta",
+        prompt_body="<context_tree>full tree must not replay</context_tree>",
+        metadata={
+            "context_delta": {
+                "baseline_snapshot_id": "ctxsnap_parent",
+                "baseline_revision": 10,
+                "current_revision": 12,
+                "added_node_ids": ["tools.tool.echo"],
+                "removed_node_ids": [],
+                "added_tool_schema_names": ["echo"],
+                "removed_tool_schema_names": [],
+                "prompt_body": (
+                    "<context_tree_delta><added_tool_schemas>"
+                    "<item>echo</item></added_tool_schemas></context_tree_delta>"
+                ),
+            },
+        },
+        tool_schemas=(ToolSchema(name="echo"),),
+    )
+
+    envelope = builder.request_envelope(
+        prompt=prompt,
+        context_render_snapshot=snapshot,
+        resolved_tools=ResolvedToolSet(
+            tools=(_resolved_tool("tool.echo", schema_name="echo"),),
+        ),
+        snapshot_metadata=snapshot.metadata,
+        include_context_messages=False,
+    )
+
+    assert tuple(message.role for message in envelope.messages) == (
+        LlmMessageRole.SYSTEM,
+        LlmMessageRole.SYSTEM,
+        LlmMessageRole.USER,
+    )
+    delta_message = envelope.messages[1]
+    assert delta_message.metadata["prompt_block_kind"] == "context_workspace_delta"
+    assert delta_message.metadata["baseline_snapshot_id"] == "ctxsnap_parent"
+    assert delta_message.metadata["added_tool_schema_count"] == 1
+    assert "added_tool_schemas" in str(delta_message.content)
+    assert "full tree must not replay" not in str(delta_message.content)
+    assert all(
+        message.metadata.get("prompt_block_kind") != "context_workspace"
+        for message in envelope.messages
+    )
+
+
 def test_resolved_tools_for_prompt_filters_to_mirrored_interactive_schemas() -> None:
     builder = ProviderPromptRequestBuilder()
     weather = _resolved_tool("tool.weather", schema_name="weather.lookup")

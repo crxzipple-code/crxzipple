@@ -50,7 +50,10 @@ class ProviderPromptRequestBuilder:
             context_render_snapshot,
         )
         if not include_context_messages:
-            return prompt
+            return self._prompt_with_context_delta(
+                prompt,
+                context_render_snapshot,
+            )
         prompt = self._prompt_with_context_workspace_body(
             prompt,
             context_render_snapshot,
@@ -268,6 +271,42 @@ class ProviderPromptRequestBuilder:
             metadata={
                 "prompt_block_kind": "context_workspace",
                 "context_render_snapshot_id": context_render_snapshot.snapshot_id,
+            },
+        )
+        return replace(
+            prompt,
+            messages=_insert_after_system_prefix(prompt.messages, context_message),
+        )
+
+    @staticmethod
+    def _prompt_with_context_delta(
+        prompt: RunPromptInput,
+        context_render_snapshot: ContextRenderSnapshotRecord | None,
+    ) -> RunPromptInput:
+        delta = _context_delta_payload(context_render_snapshot)
+        if delta is None:
+            return prompt
+        context_message = LlmMessage(
+            role=LlmMessageRole.SYSTEM,
+            content=str(delta["prompt_body"]),
+            metadata={
+                "prompt_block_kind": "context_workspace_delta",
+                "context_render_snapshot_id": (
+                    context_render_snapshot.snapshot_id
+                    if context_render_snapshot is not None
+                    else None
+                ),
+                "baseline_snapshot_id": delta.get("baseline_snapshot_id"),
+                "baseline_revision": delta.get("baseline_revision"),
+                "current_revision": delta.get("current_revision"),
+                "added_node_count": len(_list_value(delta.get("added_node_ids"))),
+                "removed_node_count": len(_list_value(delta.get("removed_node_ids"))),
+                "added_tool_schema_count": len(
+                    _list_value(delta.get("added_tool_schema_names")),
+                ),
+                "removed_tool_schema_count": len(
+                    _list_value(delta.get("removed_tool_schema_names")),
+                ),
             },
         )
         return replace(
@@ -517,6 +556,28 @@ def _request_time_tool_surface(tool_surface: "ToolSurface") -> "ToolSurface":
             "request_time_unique": True,
         },
     )
+
+
+def _context_delta_payload(
+    context_render_snapshot: ContextRenderSnapshotRecord | None,
+) -> dict[str, object] | None:
+    if context_render_snapshot is None:
+        return None
+    raw_delta = context_render_snapshot.metadata.get("context_delta")
+    if not isinstance(raw_delta, dict):
+        return None
+    prompt_body = raw_delta.get("prompt_body")
+    if not isinstance(prompt_body, str) or not prompt_body.strip():
+        return None
+    return {**raw_delta, "prompt_body": prompt_body.strip()}
+
+
+def _list_value(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
 
 
 @dataclass(frozen=True, slots=True)

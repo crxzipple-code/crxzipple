@@ -2161,8 +2161,18 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
         )
         self.assertEqual(
             [message.role for message in second_request.messages],
-            [LlmMessageRole.USER, LlmMessageRole.ASSISTANT, LlmMessageRole.TOOL],
+            [
+                LlmMessageRole.SYSTEM,
+                LlmMessageRole.USER,
+                LlmMessageRole.ASSISTANT,
+                LlmMessageRole.TOOL,
+            ],
         )
+        self.assertEqual(
+            second_request.messages[0].metadata["prompt_block_kind"],
+            "context_workspace_delta",
+        )
+        self.assertNotIn("<context_tree>", str(second_request.messages[0].content))
         tool_messages = [
             message
             for message in second_request.messages
@@ -2347,6 +2357,17 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             if message.metadata.get("prompt_block_kind") == "context_workspace"
         ]
         self.assertEqual(context_messages, [])
+        delta_messages = [
+            message
+            for message in fourth_request.messages
+            if message.metadata.get("prompt_block_kind") == "context_workspace_delta"
+        ]
+        self.assertEqual(len(delta_messages), 1)
+        self.assertEqual(
+            delta_messages[0].metadata["added_tool_schema_count"],
+            1,
+        )
+        self.assertIn("echo", str(delta_messages[0].content))
         third_request = adapter.requests[2]
         third_schema_names = [schema.name for schema in third_request.tool_schemas]
         self.assertIsNotNone(third_request.continuation)

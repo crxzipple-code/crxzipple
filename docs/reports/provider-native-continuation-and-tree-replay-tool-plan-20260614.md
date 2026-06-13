@@ -288,7 +288,7 @@ Loop 结束判断继续使用：
 - [x] `LlmRequestEnvelope` 支持 continuation 场景跳过自动 context message replay。
 - [x] 首轮完整 Context Tree render。
 - [x] 后续 provider-native continuation 不再重放完整 tree/transcript。
-- [ ] context tree revision 变化时生成 context delta。
+- [x] context tree revision 变化时生成 context delta。
 - [x] tool surface 变化时更新 provider tools。
 - [x] execution chain summary 展示 continuation state。
 - [x] 单测覆盖 orchestration invoker -> LLM input continuation 透传。
