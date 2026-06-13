@@ -95,6 +95,7 @@ class LlmInvocation(AggregateRoot[str]):
     continuation: LlmContinuationSignal | None = None
     error: LlmErrorPayload | None = None
     provider_request_id: str | None = None
+    provider_request_payload_preview: dict[str, object] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -109,8 +110,17 @@ class LlmInvocation(AggregateRoot[str]):
         self.response_items = tuple(self.response_items)
         self.request_overrides = dict(self.request_overrides)
         self.request_metadata = dict(self.request_metadata)
+        self.provider_request_payload_preview = dict(
+            self.provider_request_payload_preview,
+        )
         if self.response_format is not None:
             self.response_format = dict(self.response_format)
+
+    def record_provider_request_payload_preview(
+        self,
+        preview: dict[str, object],
+    ) -> None:
+        self.provider_request_payload_preview = dict(preview)
 
     def start(self) -> None:
         self.status = LlmInvocationStatus.RUNNING

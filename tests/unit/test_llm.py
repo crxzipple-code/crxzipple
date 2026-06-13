@@ -42,6 +42,17 @@ from tests.unit.support import SqliteTestHarness, published_event_bus_events
 
 
 class _FakeLlmAdapter:
+    def preview_request(self, profile, request: LlmAdapterRequest) -> dict[str, object]:  # noqa: ANN001
+        return {
+            "preview_source": "fake_adapter",
+            "provider": profile.provider.value,
+            "api_family": profile.api_family.value,
+            "model": profile.model_name,
+            "message_count": len(request.messages),
+            "tool_count": len(request.tool_schemas),
+            "override_keys": sorted(request.overrides),
+        }
+
     def invoke(self, profile, request: LlmAdapterRequest) -> LlmAdapterResponse:  # noqa: ANN001
         self.last_profile = profile
         self.last_request = request
@@ -575,6 +586,18 @@ class LlmServiceTestCase(unittest.TestCase):
                 "mirrored_tool_schema_count": 1,
             },
         )
+        self.assertEqual(
+            fetched_invocation.provider_request_payload_preview,
+            {
+                "preview_source": "fake_adapter",
+                "provider": "openai",
+                "api_family": "openai_responses",
+                "model": "gpt-5",
+                "message_count": 2,
+                "tool_count": 1,
+                "override_keys": ["reasoning_effort"],
+            },
+        )
         self.assertEqual(fetched_invocation.result.usage.total_tokens, 20)
         self.assertEqual(
             fetched_invocation.response_items[0].kind,
@@ -627,6 +650,10 @@ class LlmServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["tool_call_count"], 1)
         self.assertEqual(payload["tool_call_names"], ["search_docs"])
         self.assertEqual(payload["usage"]["total_tokens"], 20)
+        self.assertEqual(
+            payload["provider_request_payload_preview"]["preview_source"],
+            "fake_adapter",
+        )
 
     def test_profile_update_enable_disable_and_delete_use_llm_repository(self) -> None:
         self.service.register_profile(

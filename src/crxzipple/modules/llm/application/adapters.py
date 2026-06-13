@@ -9,6 +9,7 @@ from crxzipple.modules.llm.domain.value_objects import (
     LlmApiFamily,
     LlmContinuationSignal,
     LlmMessage,
+    LlmProviderContinuation,
     LlmResponseItem,
     LlmResult,
     ToolSchema,
@@ -24,6 +25,7 @@ class LlmAdapterRequest:
     response_format: dict[str, Any] | None = None
     overrides: dict[str, Any] = field(default_factory=dict)
     resolved_credential: str | None = None
+    continuation: LlmProviderContinuation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,15 @@ class AsyncLlmStreamingAdapter(Protocol):
         profile: LlmProfile,
         request: LlmAdapterRequest,
     ) -> AsyncIterator[LlmStreamEvent]:
+        ...
+
+
+class LlmRequestPreviewAdapter(Protocol):
+    def preview_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> dict[str, Any]:
         ...
 
 

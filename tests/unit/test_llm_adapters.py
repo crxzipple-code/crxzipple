@@ -18,6 +18,7 @@ from crxzipple.modules.llm.domain import (
     LlmMessagePhase,
     LlmMessageRole,
     LlmModelFamily,
+    LlmProviderContinuation,
     LlmProfile,
     LlmProviderKind,
     LlmResponseItemKind,
@@ -2027,6 +2028,78 @@ class LlmAdapterTestCase(unittest.TestCase):
             ],
         )
         self.assertTrue(kwargs["json"]["stream"])
+
+    def test_openai_codex_responses_adapter_previews_provider_request(self) -> None:
+        profile = LlmProfile(
+            id="codex-agent",
+            provider=LlmProviderKind.OPENAI_CODEX,
+            api_family=LlmApiFamily.OPENAI_CODEX_RESPONSES,
+            model_name="gpt-5.5",
+            model_family=LlmModelFamily.CODEX,
+            default_params=LlmDefaults(reasoning_effort="medium"),
+        )
+        request = _adapter_request(
+            messages=(
+                LlmMessage(
+                    role=LlmMessageRole.SYSTEM,
+                    content="System instructions.",
+                ),
+                LlmMessage(
+                    role=LlmMessageRole.USER,
+                    content="Use the command tool.",
+                ),
+            ),
+            tool_schemas=(
+                ToolSchema(
+                    name="exec",
+                    description="Run a command",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                    },
+                ),
+            ),
+            overrides={
+                "parallel_tool_calls": True,
+                "prompt_cache_key": "session-stable-key",
+                "text": {"verbosity": "low"},
+                "include": ["reasoning.encrypted_content"],
+            },
+            continuation=LlmProviderContinuation(
+                mode="provider_native",
+                previous_response_id="resp_previous",
+                previous_invocation_id="inv_previous",
+                provider_family="openai_codex_responses",
+            ),
+        )
+
+        preview = OpenAICodexResponsesAdapter().preview_request(profile, request)
+
+        self.assertEqual(preview["preview_source"], "provider_adapter")
+        self.assertEqual(
+            preview["endpoint"],
+            "https://chatgpt.com/backend-api/codex/responses",
+        )
+        self.assertEqual(preview["input_item_count"], 1)
+        self.assertEqual(preview["tool_count"], 1)
+        self.assertTrue(preview["has_previous_response_id"])
+        self.assertEqual(preview["previous_response_id"], "resp_previous")
+        self.assertIn("instructions", preview["payload_keys"])
+        self.assertIn("previous_response_id", preview["payload_keys"])
+        self.assertIn("type", preview["payload_keys"])
+        self.assertIn("tools", preview["payload_keys"])
+        self.assertEqual(
+            preview["option_summary"]["parallel_tool_calls"],
+            True,
+        )
+        self.assertEqual(
+            preview["option_summary"]["prompt_cache_key"],
+            "session-stable-key",
+        )
+        self.assertEqual(
+            preview["option_summary"]["text"],
+            {"verbosity": "low"},
+        )
 
     def test_openai_codex_responses_adapter_sanitizes_tool_names_and_restores_tool_calls(self) -> None:
         profile = LlmProfile(

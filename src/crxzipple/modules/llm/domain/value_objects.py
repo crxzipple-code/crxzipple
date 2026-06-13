@@ -622,6 +622,78 @@ class LlmContinuationSignal(ValueObject):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class LlmProviderContinuation(ValueObject):
+    mode: str
+    previous_response_id: str | None = None
+    previous_invocation_id: str | None = None
+    provider_family: str | None = None
+
+    def __post_init__(self) -> None:
+        mode = self.mode.strip()
+        if not mode:
+            raise LlmValidationError("LLM provider continuation mode cannot be empty.")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(
+            self,
+            "previous_response_id",
+            _optional_stripped_text(self.previous_response_id),
+        )
+        object.__setattr__(
+            self,
+            "previous_invocation_id",
+            _optional_stripped_text(self.previous_invocation_id),
+        )
+        object.__setattr__(
+            self,
+            "provider_family",
+            _optional_stripped_text(self.provider_family),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"mode": self.mode}
+        if self.previous_response_id is not None:
+            payload["previous_response_id"] = self.previous_response_id
+        if self.previous_invocation_id is not None:
+            payload["previous_invocation_id"] = self.previous_invocation_id
+        if self.provider_family is not None:
+            payload["provider_family"] = self.provider_family
+        return payload
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any] | None,
+    ) -> "LlmProviderContinuation | None":
+        if not payload:
+            return None
+        return cls(
+            mode=str(payload.get("mode") or ""),
+            previous_response_id=(
+                str(payload["previous_response_id"])
+                if payload.get("previous_response_id") is not None
+                else None
+            ),
+            previous_invocation_id=(
+                str(payload["previous_invocation_id"])
+                if payload.get("previous_invocation_id") is not None
+                else None
+            ),
+            provider_family=(
+                str(payload["provider_family"])
+                if payload.get("provider_family") is not None
+                else None
+            ),
+        )
+
+
+def _optional_stripped_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _datetime_from_payload(value: Any) -> datetime | None:
     if value is None:
         return None

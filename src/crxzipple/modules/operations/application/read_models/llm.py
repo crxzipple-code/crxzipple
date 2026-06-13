@@ -3158,6 +3158,9 @@ def _request_payload(invocation: LlmInvocation) -> dict[str, Any]:
             "response_format": invocation.response_format,
             "overrides": invocation.request_overrides,
             "request_metadata": invocation.request_metadata,
+            "provider_request_payload_preview": dict(
+                invocation.provider_request_payload_preview,
+            ),
         },
     )
 

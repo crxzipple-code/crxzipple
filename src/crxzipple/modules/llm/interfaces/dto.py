@@ -189,6 +189,7 @@ class LlmInvocationDTO:
     response_format: dict[str, object] | None
     request_overrides: dict[str, object]
     request_metadata: dict[str, object]
+    provider_request_payload_preview: dict[str, object]
     status: str
     result: LlmResultDTO | None
     response_items: tuple[dict[str, object], ...]
@@ -216,6 +217,9 @@ class LlmInvocationDTO:
             ),
             request_overrides=dict(invocation.request_overrides),
             request_metadata=dict(invocation.request_metadata),
+            provider_request_payload_preview=dict(
+                invocation.provider_request_payload_preview,
+            ),
             status=invocation.status.value,
             result=(
                 LlmResultDTO.from_value(invocation.result)

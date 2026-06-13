@@ -466,6 +466,10 @@ class LlmApplicationService:
 
         try:
             request = self._build_adapter_request(profile, invocation)
+            self._record_provider_request_payload_preview(
+                invocation.id,
+                self._provider_request_payload_preview(adapter, profile, request),
+            )
             with self.concurrency_limiter.limit(profile):
                 response = adapter.invoke(profile, request)
         except Exception as exc:
@@ -529,6 +533,9 @@ class LlmApplicationService:
 
         try:
             request = self._build_adapter_request(profile, invocation)
+            invocation.record_provider_request_payload_preview(
+                self._provider_request_payload_preview(adapter, profile, request),
+            )
             with self.concurrency_limiter.limit(profile):
                 response = adapter.invoke(profile, request)
         except Exception as exc:
@@ -582,6 +589,11 @@ class LlmApplicationService:
 
         try:
             request = self._build_adapter_request(profile, invocation)
+            await asyncio.to_thread(
+                self._record_provider_request_payload_preview,
+                invocation.id,
+                self._provider_request_payload_preview(adapter, profile, request),
+            )
             async with self.concurrency_limiter.limit_async(profile):
                 response = await self._invoke_adapter_async(adapter, profile, request)
         except Exception as exc:
@@ -677,6 +689,14 @@ class LlmApplicationService:
 
                 try:
                     request = self._build_adapter_request(profile, invocation)
+                    self._record_provider_request_payload_preview(
+                        invocation.id,
+                        self._provider_request_payload_preview(
+                            adapter,
+                            profile,
+                            request,
+                        ),
+                    )
                     for event in stream_invoke(profile, request):
                         normalized_event = LlmStreamEvent(
                             type=event.type,
@@ -844,6 +864,11 @@ class LlmApplicationService:
 
             try:
                 request = self._build_adapter_request(profile, invocation)
+                await asyncio.to_thread(
+                    self._record_provider_request_payload_preview,
+                    invocation.id,
+                    self._provider_request_payload_preview(adapter, profile, request),
+                )
                 async for event in stream(request):
                     normalized_event = LlmStreamEvent(
                         type=event.type,
@@ -1219,6 +1244,53 @@ class LlmApplicationService:
             overrides=invocation.request_overrides,
             resolved_credential=self._resolve_profile_credential(profile),
         )
+
+    def _provider_request_payload_preview(
+        self,
+        adapter: object,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> dict[str, object]:
+        preview_request = getattr(adapter, "preview_request", None)
+        if callable(preview_request):
+            try:
+                preview = preview_request(profile, request)
+                if isinstance(preview, dict):
+                    return dict(preview)
+            except Exception as exc:
+                return {
+                    "preview_source": "provider_adapter",
+                    "preview_error": str(exc) or type(exc).__name__,
+                    "provider": profile.provider.value,
+                    "api_family": profile.api_family.value,
+                    "model": profile.model_name,
+                }
+        return {
+            "preview_source": "normalized_fallback",
+            "provider": profile.provider.value,
+            "api_family": profile.api_family.value,
+            "model": profile.model_name,
+            "message_count": len(request.messages),
+            "message_roles": [message.role.value for message in request.messages],
+            "tool_count": len(request.tool_schemas),
+            "response_format_configured": request.response_format is not None,
+            "override_keys": sorted(str(key) for key in request.overrides),
+        }
+
+    def _record_provider_request_payload_preview(
+        self,
+        invocation_id: str,
+        preview: dict[str, object],
+    ) -> None:
+        with self.uow_factory() as uow:
+            stored = uow.llm_invocations.get(invocation_id)
+            if stored is None:
+                raise LlmInvocationNotFoundError(
+                    f"LLM invocation '{invocation_id}' was not found.",
+                )
+            stored.record_provider_request_payload_preview(preview)
+            uow.llm_invocations.add(stored)
+            uow.commit()
 
     def _resolve_profile_credential(self, profile: LlmProfile) -> str | None:
         if self.credential_provider is None:
@@ -1617,6 +1689,9 @@ def _invocation_terminal_base_payload(
         "duration_seconds": _invocation_duration_seconds(invocation),
         "streaming": streaming,
         "request_metadata": dict(invocation.request_metadata),
+        "provider_request_payload_preview": dict(
+            invocation.provider_request_payload_preview,
+        ),
     }
     if profile is not None:
         payload.update(

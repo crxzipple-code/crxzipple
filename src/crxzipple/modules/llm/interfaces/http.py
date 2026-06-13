@@ -151,6 +151,7 @@ class LlmInvocationResponse(BaseModel):
     response_format: dict[str, Any] | None = None
     request_overrides: dict[str, Any]
     request_metadata: dict[str, Any] = Field(default_factory=dict)
+    provider_request_payload_preview: dict[str, Any] = Field(default_factory=dict)
     status: str
     result: LlmResultResponse | None = None
     response_items: list[dict[str, Any]] = Field(default_factory=list)
@@ -567,6 +568,9 @@ def _to_invocation_response(invocation: Any) -> LlmInvocationResponse:
         ),
         request_overrides=dict(invocation.request_overrides),
         request_metadata=dict(invocation.request_metadata),
+        provider_request_payload_preview=dict(
+            invocation.provider_request_payload_preview,
+        ),
         status=invocation.status.value,
         result=(
             LlmResultResponse(

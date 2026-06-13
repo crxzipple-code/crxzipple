@@ -65,6 +65,11 @@ class LlmInvocationModel(Base):
         nullable=False,
         default=dict,
     )
+    provider_request_payload_preview: Mapped[dict[str, object]] = mapped_column(
+        JSON(),
+        nullable=False,
+        default=dict,
+    )
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     result_payload: Mapped[dict[str, object] | None] = mapped_column(JSON(), nullable=True)
     continuation_payload: Mapped[dict[str, object] | None] = mapped_column(

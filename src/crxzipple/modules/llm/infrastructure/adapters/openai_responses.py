@@ -29,6 +29,7 @@ from crxzipple.modules.llm.infrastructure.adapters.common import (
     httpx_response_text,
     is_retryable_openai_stream_exception,
     join_url,
+    openai_provider_request_preview,
     openai_response_stream_event,
     openai_response_input_items,
     openai_tool_schema,
@@ -43,6 +44,24 @@ from crxzipple.shared.infrastructure.http import get_async_http_client
 
 class OpenAIResponsesAdapter:
     DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+    def preview_request(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+    ) -> dict[str, Any]:
+        tool_name_aliases = build_openai_tool_name_aliases(request.tool_schemas)
+        endpoint = join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses")
+        payload = self._build_payload(
+            profile,
+            request,
+            tool_name_aliases=tool_name_aliases,
+        )
+        return openai_provider_request_preview(
+            profile=profile,
+            endpoint=endpoint,
+            payload=payload,
+        )
 
     def invoke(
         self,
@@ -249,6 +268,25 @@ class OpenAIResponsesAdapter:
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
 
+        payload = self._build_payload(
+            profile,
+            request,
+            tool_name_aliases=tool_name_aliases,
+        )
+
+        return (
+            join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses"),
+            headers,
+            payload,
+        )
+
+    def _build_payload(
+        self,
+        profile: LlmProfile,
+        request: LlmAdapterRequest,
+        *,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": profile.model_name,
             "input": openai_response_input_items(
@@ -256,6 +294,7 @@ class OpenAIResponsesAdapter:
                 tool_name_aliases=tool_name_aliases,
             ),
         }
+        _apply_provider_continuation(payload, request)
         if request.tool_schemas:
             payload["tools"] = [
                 openai_tool_schema(tool, tool_name_aliases=tool_name_aliases)
@@ -283,12 +322,7 @@ class OpenAIResponsesAdapter:
                 payload[key] = value
 
         payload["stream"] = True
-
-        return (
-            join_url(default_base_url(profile, self.DEFAULT_BASE_URL), "/responses"),
-            headers,
-            payload,
-        )
+        return payload
 
     @classmethod
     def _stream_sse_response(
@@ -658,3 +692,18 @@ def _merged_reasoning_payload(
     if isinstance(override_reasoning, dict):
         reasoning.update(override_reasoning)
     return reasoning
+
+
+def _apply_provider_continuation(
+    payload: dict[str, Any],
+    request: LlmAdapterRequest,
+) -> None:
+    continuation = request.continuation
+    if continuation is None:
+        return
+    if continuation.mode != "provider_native":
+        return
+    if continuation.previous_response_id is None:
+        return
+    payload["type"] = "response.create"
+    payload["previous_response_id"] = continuation.previous_response_id

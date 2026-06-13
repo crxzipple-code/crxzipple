@@ -58,6 +58,83 @@ def is_retryable_openai_stream_exception(exc: BaseException) -> bool:
     )
 
 
+def openai_provider_request_preview(
+    *,
+    profile: LlmProfile,
+    endpoint: str,
+    payload: dict[str, Any],
+) -> dict[str, object]:
+    input_items = payload.get("input") if isinstance(payload.get("input"), list) else []
+    tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+    return {
+        "preview_source": "provider_adapter",
+        "provider": profile.provider.value,
+        "api_family": profile.api_family.value,
+        "model": payload.get("model") or profile.model_name,
+        "endpoint": endpoint,
+        "payload_keys": sorted(str(key) for key in payload),
+        "input_item_count": len(input_items),
+        "input_item_types": tuple(
+            _payload_item_type(item) for item in input_items[:40]
+        ),
+        "tool_count": len(tools),
+        "tool_types": tuple(_payload_item_type(item) for item in tools[:80]),
+        "has_previous_response_id": bool(payload.get("previous_response_id")),
+        "previous_response_id": (
+            str(payload.get("previous_response_id"))
+            if payload.get("previous_response_id") is not None
+            else None
+        ),
+        "option_summary": {
+            "tool_choice": payload.get("tool_choice"),
+            "parallel_tool_calls": payload.get("parallel_tool_calls"),
+            "service_tier": payload.get("service_tier"),
+            "prompt_cache_key": payload.get("prompt_cache_key"),
+            "stream": payload.get("stream"),
+            "store": payload.get("store"),
+            "reasoning": _safe_preview_value(payload.get("reasoning")),
+            "text": _safe_preview_value(payload.get("text")),
+            "include": _safe_preview_value(payload.get("include")),
+        },
+        "payload_preview": _safe_preview_value(payload),
+    }
+
+
+def _payload_item_type(item: object) -> str:
+    if isinstance(item, dict):
+        item_type = item.get("type")
+        if item_type is not None:
+            return str(item_type)
+        role = item.get("role")
+        if role is not None:
+            return str(role)
+    return type(item).__name__
+
+
+def _safe_preview_value(value: object, *, depth: int = 0) -> object:
+    if depth >= 5:
+        return _truncate_preview(value, 240)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_preview(value, 512)
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_preview_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:60]
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_preview_value(item, depth=depth + 1) for item in value[:80]]
+    return _truncate_preview(value, 240)
+
+
+def _truncate_preview(value: object, limit: int) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 3, 0)] + "..."
+
+
 def openai_stream_backoff_seconds(attempt_number: int) -> float:
     if attempt_number <= 1:
         return OPENAI_TRANSIENT_STREAM_INITIAL_BACKOFF_SECONDS
