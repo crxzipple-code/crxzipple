@@ -388,11 +388,21 @@ CRXZipple 的 `exec/process` 结果应明确返回：
 
 - [x] ToolRun 记录 provider call id。
 - [x] ToolRun result envelope 支持 provider-native output mapping。
-- [ ] Exec result 返回环境事实。
-- [ ] Process result 返回可恢复 session/ref。
-- [ ] stderr/stdout 裁剪保留完整 payload ref。
+- [x] Exec result 返回环境事实。
+- [x] Process result 返回可恢复 session/ref。
+- [x] stderr/stdout 裁剪保留完整 payload ref。
 - [x] 单测覆盖 function_call_output mapping。
-- [ ] 单测覆盖 exec failure 结果可用于下一步推理。
+- [x] 单测覆盖 exec failure 结果可用于下一步推理。
+
+### 2026-06-14 施工记录
+
+- `tools/command` 的 `exec` 同步结果新增 `tool_result_envelope`，模型可见 payload 包含 workspace、cwd、absolute cwd、shell、command、exit code、timeout、stdout/stderr 和 truncation 状态。
+- `exec background=true`、`exec yield_time_ms`、`process poll` 新增 process read handle，指向后续 `process(action="poll")` 的可恢复参数。
+- 截断 stdout/stderr 继续通过 `TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY` 外部化；worker externalize 时改为合并 artifact envelope，保留原 exec envelope 中的环境事实和失败事实。
+- configured CLI source 的 `cli_execute` / `cli_read_output` 新增 `runtime_facts`、`continuation` 和 `read_handles`，失败进程 envelope 明确标记 `status="error"`、`exit_code` 和 stderr。
+- 验证：
+  - `PYTHONPATH=src pytest -q tests/unit/test_command_tools.py tests/unit/test_tool_execution.py tests/unit/test_tool_source_service.py`
+  - `PYTHONPATH=src pytest -q tests/unit/test_orchestration_tools.py`
 
 ## 5. Model / Agent Policy
 

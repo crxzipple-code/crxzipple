@@ -396,6 +396,30 @@ class ToolSourceServiceTestCase(unittest.TestCase):
             output_payload = execute_run.output_payload
             self.assertIsInstance(output_payload, dict)
             process_id = str(output_payload["process_id"])  # type: ignore[index]
+            self.assertIn("runtime_facts", output_payload)
+            self.assertEqual(
+                Path(output_payload["runtime_facts"]["working_directory"]).resolve(),
+                Path(temp_dir).resolve(),
+            )
+            self.assertIn("continuation", output_payload)
+            self.assertEqual(
+                output_payload["continuation"]["next_read_arguments"]["process_id"],
+                process_id,
+            )
+            self.assertIsNotNone(execute_run.result_envelope_payload)
+            assert execute_run.result_envelope_payload is not None
+            self.assertEqual(
+                execute_run.result_envelope_payload["read_handles"][0]["process_id"],
+                process_id,
+            )
+            self.assertEqual(
+                Path(
+                    execute_run.result_envelope_payload["model_visible_payload"][
+                        "runtime_facts"
+                    ]["working_directory"],
+                ).resolve(),
+                Path(temp_dir).resolve(),
+            )
             self._wait_for_process_stdout(
                 runtime_container.require(AppKey.PROCESS_SERVICE),
                 process_id,
@@ -420,6 +444,92 @@ class ToolSourceServiceTestCase(unittest.TestCase):
         self.assertEqual(read_run.status.value, "succeeded")
         self.assertIsInstance(read_run.output_payload, dict)
         self.assertIn("cli source ok", read_run.output_payload["stdout"])
+        self.assertIsNotNone(read_run.result_envelope_payload)
+        assert read_run.result_envelope_payload is not None
+        self.assertEqual(read_run.result_envelope_payload["status"], "ok")
+        self.assertEqual(
+            read_run.result_envelope_payload["read_handles"][0]["arguments"][
+                "process_id"
+            ],
+            process_id,
+        )
+
+    def test_cli_source_failed_process_result_guides_next_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = _configured_cli_source(root=Path(temp_dir))
+            self.command_service.create_source(source)
+            self.command_service.sync_source(
+                source,
+                discovery_service=self.container.require(
+                    AppKey.TOOL_SOURCE_DISCOVERY_SERVICE,
+                ),
+            )
+
+            runtime_container = self.harness.build_runtime_container(
+                target=AssemblyTarget.TEST,
+            )
+            activator = runtime_container.require(
+                AppKey.TOOL_CONFIGURED_RUNTIME_ACTIVATOR,
+            )
+            activator.activate_source(source.source_id)
+            tool_service = runtime_container.require(AppKey.TOOL_SERVICE)
+            functions = runtime_container.require(
+                AppKey.TOOL_SOURCE_QUERY_SERVICE,
+            ).list_functions(source_id=source.source_id)
+            function_ids = {
+                str(function.metadata.get("cli_action")): function.function_id
+                for function in functions
+            }
+
+            execute_run = asyncio.run(
+                tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id=function_ids["cli_execute"],
+                        arguments={
+                            "subcommand": "-c",
+                            "args": [
+                                "import sys; print('bad path', file=sys.stderr); sys.exit(7)",
+                            ],
+                        },
+                        environment=ToolEnvironment.REMOTE,
+                    ),
+                ),
+            )
+
+            self.assertEqual(execute_run.status.value, "succeeded")
+            self.assertIsInstance(execute_run.output_payload, dict)
+            process_id = str(execute_run.output_payload["process_id"])
+            self._wait_for_process_stderr(
+                runtime_container.require(AppKey.PROCESS_SERVICE),
+                process_id,
+                "bad path",
+            )
+
+            read_run = asyncio.run(
+                tool_service.execute(
+                    ExecuteToolInput(
+                        tool_id=function_ids["cli_read_output"],
+                        arguments={"process_id": process_id},
+                        environment=ToolEnvironment.REMOTE,
+                    ),
+                ),
+            )
+
+        self.assertEqual(read_run.status.value, "succeeded")
+        self.assertIsInstance(read_run.output_payload, dict)
+        self.assertEqual(read_run.output_payload["exit_code"], 7)
+        self.assertIn("bad path", read_run.output_payload["stderr"])
+        self.assertIsNotNone(read_run.result_envelope_payload)
+        assert read_run.result_envelope_payload is not None
+        self.assertEqual(read_run.result_envelope_payload["status"], "error")
+        self.assertEqual(
+            read_run.result_envelope_payload["key_facts"]["exit_code"],
+            7,
+        )
+        self.assertIn(
+            "bad path",
+            read_run.result_envelope_payload["model_visible_payload"]["stderr"],
+        )
 
     def test_cli_source_guided_execute_injects_access_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -670,6 +780,19 @@ class ToolSourceServiceTestCase(unittest.TestCase):
                 return
             time.sleep(0.02)
         self.fail(f"Process {process_id} did not produce expected output.")
+
+    def _wait_for_process_stderr(
+        self,
+        process_service,
+        process_id: str,
+        expected: str,
+    ) -> None:
+        for _ in range(50):
+            output = process_service.read_output(process_id=process_id)
+            if expected in output.stderr:
+                return
+            time.sleep(0.02)
+        self.fail(f"Process {process_id} did not produce expected stderr.")
 
     def test_disabled_source_is_not_rediscovered(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

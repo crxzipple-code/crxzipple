@@ -11,7 +11,9 @@ from crxzipple.modules.process import (
     ProcessSession,
 )
 from crxzipple.modules.tool.application.result_envelope import (
+    TOOL_RESULT_ENVELOPE_METADATA_KEY,
     TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY,
+    ToolResultEnvelope,
 )
 from crxzipple.modules.tool.domain import ToolExecutionContext, ToolRunResult
 from tools.command.command_exec import (
@@ -153,13 +155,19 @@ def exec(deps: CommandToolDeps | Any):
                 session_key=session_key,
             )
             rendered = render_process_started(process_session)
+            metadata = _process_metadata(
+                process_session,
+                tool_id=WORKSPACE_EXEC_TOOL_ID,
+                background=True,
+            )
+            metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = _process_session_envelope(
+                process_session,
+                tool_id=WORKSPACE_EXEC_TOOL_ID,
+                summary="Background process started.",
+            ).to_payload()
             return ToolRunResult.text(
                 rendered.content,
-                metadata=_process_metadata(
-                    process_session,
-                    tool_id=WORKSPACE_EXEC_TOOL_ID,
-                    background=True,
-                ),
+                metadata=metadata,
             )
         if yield_time_ms is not None:
             return await _execute_with_yield(
@@ -196,6 +204,10 @@ def exec(deps: CommandToolDeps | Any):
         raw_blocks = _raw_output_blocks_for_exec_result(exec_result)
         if raw_blocks:
             metadata[TOOL_RESULT_RAW_OUTPUT_BLOCKS_METADATA_KEY] = raw_blocks
+        metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = _workspace_exec_result_envelope(
+            exec_result,
+            raw_blocks=raw_blocks,
+        ).to_payload()
         return ToolRunResult.text(
             rendered.content,
             metadata=metadata,
@@ -285,18 +297,25 @@ def process(deps: CommandToolDeps | Any):
                 stderr_offset=stderr_offset,
                 limit=limit,
             )
+            metadata = {
+                **_process_metadata(session, tool_id=PROCESS_TOOL_ID),
+                "action": action,
+                "stdout": output.stdout,
+                "stderr": output.stderr,
+                "stdout_offset": output.stdout_offset,
+                "stderr_offset": output.stderr_offset,
+                "next_stdout_offset": output.next_stdout_offset,
+                "next_stderr_offset": output.next_stderr_offset,
+            }
+            metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = _process_output_envelope(
+                session,
+                output,
+                action=action,
+                tool_id=PROCESS_TOOL_ID,
+            ).to_payload()
             return ToolRunResult.text(
                 render_process_poll(session, output),
-                metadata={
-                    **_process_metadata(session, tool_id=PROCESS_TOOL_ID),
-                    "action": action,
-                    "stdout": output.stdout,
-                    "stderr": output.stderr,
-                    "stdout_offset": output.stdout_offset,
-                    "stderr_offset": output.stderr_offset,
-                    "next_stdout_offset": output.next_stdout_offset,
-                    "next_stderr_offset": output.next_stderr_offset,
-                },
+                metadata=metadata,
             )
         if action == "log":
             stdout_offset = _coerce_nonnegative_int(
@@ -453,6 +472,261 @@ def _raw_output_blocks_for_exec_result(
     return blocks
 
 
+def _workspace_exec_result_envelope(
+    result: WorkspaceCommandExecution,
+    *,
+    raw_blocks: list[dict[str, Any]],
+) -> ToolResultEnvelope:
+    status = "error" if result.timed_out or result.exit_code not in (None, 0) else "ok"
+    raw_block_names = tuple(
+        str(block.get("name") or "").strip()
+        for block in raw_blocks
+        if str(block.get("name") or "").strip()
+    )
+    warnings: list[str] = []
+    if result.output_truncated:
+        warnings.append("stdout/stderr was truncated; full raw output was externalized.")
+    if result.timed_out:
+        warnings.append("command timed out")
+    read_handles = tuple(
+        {
+            "kind": "raw_output_block",
+            "name": name,
+            "tool": WORKSPACE_EXEC_TOOL_ID,
+        }
+        for name in raw_block_names
+    )
+    key_facts = {
+        "workspace_dir": result.workspace_root,
+        "cwd": result.working_directory_relative or ".",
+        "absolute_cwd": result.working_directory,
+        "shell": result.shell,
+        "command": result.command,
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "wall_time_seconds": result.wall_time_seconds,
+        "stdout_chars": len(result.stdout),
+        "stderr_chars": len(result.stderr),
+        "stdout_original_chars": result.stdout_original_chars,
+        "stderr_original_chars": result.stderr_original_chars,
+        "output_truncated": result.output_truncated,
+        "output_budget_chars": result.output_budget_chars,
+        "output_budget_tokens": result.output_budget_tokens,
+        "output_estimated_tokens": result.output_estimated_tokens,
+        "timeout_seconds": result.timeout_seconds,
+    }
+    return ToolResultEnvelope(
+        status=status,
+        summary=_workspace_exec_result_summary(result),
+        output_payload={
+            **key_facts,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "stdout_truncated": result.stdout_truncated,
+            "stderr_truncated": result.stderr_truncated,
+            "raw_output_blocks": list(raw_block_names),
+        },
+        key_facts=key_facts,
+        warnings=tuple(warnings),
+        read_handles=read_handles,
+        model_visible_payload={
+            "summary": _workspace_exec_result_summary(result),
+            "tool": WORKSPACE_EXEC_TOOL_ID,
+            "workspace_dir": result.workspace_root,
+            "cwd": result.working_directory_relative or ".",
+            "absolute_cwd": result.working_directory,
+            "shell": result.shell,
+            "command": result.command,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "stdout_truncated": result.stdout_truncated,
+            "stderr_truncated": result.stderr_truncated,
+            "read_handles": list(read_handles),
+        },
+        user_visible_payload={
+            "summary": _workspace_exec_result_summary(result),
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+        },
+        trace_payload={
+            "tool": WORKSPACE_EXEC_TOOL_ID,
+            "workspace_dir": result.workspace_root,
+            "cwd": result.working_directory_relative or ".",
+            "absolute_cwd": result.working_directory,
+            "command": result.command,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "raw_output_blocks": list(raw_block_names),
+        },
+        omitted_count=len(raw_block_names),
+        omitted_chars=sum(
+            result.stdout_original_chars if name == "stdout" else result.stderr_original_chars
+            for name in raw_block_names
+        ),
+        truncated=result.output_truncated,
+    )
+
+
+def _workspace_exec_result_summary(result: WorkspaceCommandExecution) -> str:
+    if result.timed_out:
+        return (
+            f"exec timed out after {result.timeout_seconds}s: "
+            f"{_short_preview(result.stderr or result.stdout)}"
+        ).strip()
+    if result.exit_code not in (None, 0):
+        preview = _short_preview(result.stderr or result.stdout)
+        if preview:
+            return f"exec exited with code {result.exit_code}: {preview}"
+        return f"exec exited with code {result.exit_code}."
+    preview = _short_preview(result.stdout or result.stderr)
+    if preview:
+        return f"exec completed with code {result.exit_code}: {preview}"
+    return f"exec completed with code {result.exit_code}."
+
+
+def _process_session_envelope(
+    session: ProcessSession,
+    *,
+    tool_id: str,
+    summary: str,
+) -> ToolResultEnvelope:
+    metadata = _process_metadata(session, tool_id=tool_id)
+    read_handle = _process_read_handle(
+        session,
+        stdout_offset=0,
+        stderr_offset=0,
+        limit=4000,
+    )
+    return ToolResultEnvelope(
+        status="running" if session.is_running else _process_status_for_envelope(session),
+        summary=summary,
+        output_payload=dict(metadata),
+        key_facts=dict(metadata),
+        read_handles=(read_handle,),
+        model_visible_payload={
+            "summary": summary,
+            **metadata,
+            "read_handles": [read_handle],
+        },
+        user_visible_payload={
+            "summary": summary,
+            "process_id": session.id,
+            "status": session.status.value,
+            "exit_code": session.exit_code,
+        },
+        trace_payload=dict(metadata),
+    )
+
+
+def _process_output_envelope(
+    session: ProcessSession,
+    output: Any,
+    *,
+    action: str,
+    tool_id: str,
+) -> ToolResultEnvelope:
+    metadata = {
+        **_process_metadata(session, tool_id=tool_id),
+        "action": action,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "stdout_offset": output.stdout_offset,
+        "stderr_offset": output.stderr_offset,
+        "next_stdout_offset": output.next_stdout_offset,
+        "next_stderr_offset": output.next_stderr_offset,
+    }
+    read_handle = _process_read_handle(
+        session,
+        stdout_offset=output.next_stdout_offset,
+        stderr_offset=output.next_stderr_offset,
+        limit=4000,
+    )
+    return ToolResultEnvelope(
+        status=_process_status_for_envelope(session),
+        summary=_process_output_summary(session, output, action=action),
+        output_payload=metadata,
+        key_facts={
+            key: value
+            for key, value in metadata.items()
+            if key not in {"stdout", "stderr"}
+        },
+        read_handles=(read_handle,),
+        model_visible_payload={
+            "summary": _process_output_summary(session, output, action=action),
+            **metadata,
+            "read_handles": [read_handle],
+        },
+        user_visible_payload={
+            "summary": _process_output_summary(session, output, action=action),
+            "process_id": session.id,
+            "status": session.status.value,
+            "exit_code": session.exit_code,
+        },
+        trace_payload={
+            key: value
+            for key, value in metadata.items()
+            if key not in {"stdout", "stderr"}
+        },
+    )
+
+
+def _process_read_handle(
+    session: ProcessSession,
+    *,
+    stdout_offset: int,
+    stderr_offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    return {
+        "kind": "tool_call",
+        "tool": PROCESS_TOOL_ID,
+        "action": "poll",
+        "process_id": session.id,
+        "status": session.status.value,
+        "exit_code": session.exit_code,
+        "arguments": {
+            "action": "poll",
+            "process_id": session.id,
+            "stdout_offset": stdout_offset,
+            "stderr_offset": stderr_offset,
+            "limit": limit,
+        },
+    }
+
+
+def _process_status_for_envelope(session: ProcessSession) -> str:
+    if session.is_running:
+        return "running"
+    if session.exit_code not in (None, 0):
+        return "error"
+    if session.status.value in {"failed", "killed"}:
+        return "error"
+    return "ok"
+
+
+def _process_output_summary(session: ProcessSession, output: Any, *, action: str) -> str:
+    if session.is_running:
+        return f"process {session.id} is running; call process poll to continue."
+    if session.exit_code not in (None, 0):
+        preview = _short_preview(str(output.stderr or output.stdout or ""))
+        if preview:
+            return f"process {session.id} exited with code {session.exit_code}: {preview}"
+        return f"process {session.id} exited with code {session.exit_code}."
+    preview = _short_preview(str(output.stdout or output.stderr or ""))
+    if preview:
+        return f"process {session.id} {action} returned: {preview}"
+    return f"process {session.id} is {session.status.value}."
+
+
+def _short_preview(text: str, *, limit: int = 160) -> str:
+    preview = text.strip().replace("\n", " ")
+    if len(preview) <= limit:
+        return preview
+    return f"{preview[: max(limit - 3, 0)]}..."
+
+
 async def _execute_with_yield(
     *,
     process_service: ProcessApplicationService,
@@ -480,40 +754,13 @@ async def _execute_with_yield(
     )
     if session.is_running:
         rendered = render_process_yielded(session, output, yield_time_ms=yield_time_ms)
-        return ToolRunResult.text(
-            rendered.content,
-            metadata={
-                **_process_metadata(
-                    session,
-                    tool_id=WORKSPACE_EXEC_TOOL_ID,
-                    background=True,
-                ),
-                "yielded": True,
-                "yield_time_ms": yield_time_ms,
-                "stdout": output.stdout,
-                "stderr": output.stderr,
-                "stdout_offset": output.stdout_offset,
-                "stderr_offset": output.stderr_offset,
-                "next_stdout_offset": output.next_stdout_offset,
-                "next_stderr_offset": output.next_stderr_offset,
-                "output_budget_chars": prepared_command.max_output_chars,
-                "output_budget_tokens": prepared_command.max_output_tokens,
-            },
-        )
-    rendered = render_process_completed_after_yield(
-        session,
-        output,
-        yield_time_ms=yield_time_ms,
-    )
-    return ToolRunResult.text(
-        rendered.content,
-        metadata={
+        metadata = {
             **_process_metadata(
                 session,
                 tool_id=WORKSPACE_EXEC_TOOL_ID,
-                background=False,
+                background=True,
             ),
-            "yielded": False,
+            "yielded": True,
             "yield_time_ms": yield_time_ms,
             "stdout": output.stdout,
             "stderr": output.stderr,
@@ -523,7 +770,48 @@ async def _execute_with_yield(
             "next_stderr_offset": output.next_stderr_offset,
             "output_budget_chars": prepared_command.max_output_chars,
             "output_budget_tokens": prepared_command.max_output_tokens,
-        },
+        }
+        metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = _process_output_envelope(
+            session,
+            output,
+            action="yield",
+            tool_id=WORKSPACE_EXEC_TOOL_ID,
+        ).to_payload()
+        return ToolRunResult.text(
+            rendered.content,
+            metadata=metadata,
+        )
+    rendered = render_process_completed_after_yield(
+        session,
+        output,
+        yield_time_ms=yield_time_ms,
+    )
+    metadata = {
+        **_process_metadata(
+            session,
+            tool_id=WORKSPACE_EXEC_TOOL_ID,
+            background=False,
+        ),
+        "yielded": False,
+        "yield_time_ms": yield_time_ms,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "stdout_offset": output.stdout_offset,
+        "stderr_offset": output.stderr_offset,
+        "next_stdout_offset": output.next_stdout_offset,
+        "next_stderr_offset": output.next_stderr_offset,
+        "output_budget_chars": prepared_command.max_output_chars,
+        "output_budget_tokens": prepared_command.max_output_tokens,
+    }
+    metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = _process_output_envelope(
+        session,
+        output,
+        action="yield",
+        tool_id=WORKSPACE_EXEC_TOOL_ID,
+    ).to_payload()
+    return ToolRunResult.text(
+        rendered.content,
+        metadata=metadata,
     )
 
 

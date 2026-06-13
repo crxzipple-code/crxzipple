@@ -977,10 +977,16 @@ class ToolWorkerService(ToolServiceBase):
             ]
             metadata["externalized_raw_output_blocks"] = raw_output_artifacts
         if large_text_artifacts or raw_output_artifacts:
-            metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = _artifact_result_envelope(
+            artifact_envelope = _artifact_result_envelope(
                 large_text_artifacts=large_text_artifacts,
                 raw_output_artifacts=raw_output_artifacts,
             ).to_payload()
+            metadata[TOOL_RESULT_ENVELOPE_METADATA_KEY] = (
+                _merge_tool_result_envelopes(
+                    metadata.get(TOOL_RESULT_ENVELOPE_METADATA_KEY),
+                    artifact_envelope,
+                )
+            )
         return ToolRunResult(
             content=transformed_blocks,
             details=result.details,
@@ -1538,6 +1544,106 @@ def _artifact_result_envelope(
             "externalized_raw_output_artifacts": raw_output_artifacts,
         },
     )
+
+
+def _merge_tool_result_envelopes(
+    existing: Any,
+    artifact_envelope: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(existing, Mapping) or not existing:
+        return dict(artifact_envelope)
+    merged = dict(existing)
+    artifact_payload = dict(artifact_envelope)
+    for key in (
+        "artifact_refs",
+        "evidence_refs",
+        "read_handles",
+        "warnings",
+    ):
+        merged[key] = _merged_json_list(merged.get(key), artifact_payload.get(key))
+    for key in ("output_payload", "key_facts", "trace_payload"):
+        merged[key] = _merged_json_mapping(
+            merged.get(key),
+            artifact_payload.get(key),
+        )
+    merged["model_visible_payload"] = _merged_model_visible_payload(
+        merged.get("model_visible_payload"),
+        artifact_payload.get("model_visible_payload"),
+    )
+    merged["user_visible_payload"] = _merged_json_mapping(
+        merged.get("user_visible_payload"),
+        artifact_payload.get("user_visible_payload"),
+    )
+    merged["omitted_count"] = int(merged.get("omitted_count") or 0) + int(
+        artifact_payload.get("omitted_count") or 0,
+    )
+    merged["omitted_chars"] = int(merged.get("omitted_chars") or 0) + int(
+        artifact_payload.get("omitted_chars") or 0,
+    )
+    merged["truncated"] = bool(merged.get("truncated")) or bool(
+        artifact_payload.get("truncated"),
+    )
+    artifact_summary = artifact_payload.get("summary")
+    if isinstance(artifact_summary, str) and artifact_summary.strip():
+        warnings = _merged_json_list(
+            merged.get("warnings"),
+            [artifact_summary.strip()],
+        )
+        if warnings:
+            merged["warnings"] = warnings
+    return {
+        key: value
+        for key, value in merged.items()
+        if value not in (None, {}, [], ())
+    }
+
+
+def _merged_json_mapping(first: Any, second: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    if isinstance(first, Mapping):
+        merged.update(dict(first))
+    if isinstance(second, Mapping):
+        merged.update(dict(second))
+    return merged
+
+
+def _merged_model_visible_payload(first: Any, second: Any) -> dict[str, Any]:
+    merged = _merged_json_mapping(first, second)
+    if isinstance(first, Mapping) and "summary" in first:
+        merged["summary"] = first["summary"]
+    read_handles = _merged_json_list(
+        first.get("read_handles") if isinstance(first, Mapping) else None,
+        second.get("read_handles") if isinstance(second, Mapping) else None,
+    )
+    if read_handles:
+        merged["read_handles"] = read_handles
+    artifact_refs = _merged_json_list(
+        first.get("artifact_refs") if isinstance(first, Mapping) else None,
+        second.get("artifact_refs") if isinstance(second, Mapping) else None,
+    )
+    if artifact_refs:
+        merged["artifact_refs"] = artifact_refs
+    return merged
+
+
+def _merged_json_list(first: Any, second: Any) -> list[Any]:
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for value in (*_json_list(first), *_json_list(second)):
+        marker = json.dumps(value, ensure_ascii=True, sort_keys=True)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        merged.append(value)
+    return merged
+
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return []
 
 
 def _artifact_result_summary(
