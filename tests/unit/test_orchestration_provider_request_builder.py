@@ -466,6 +466,7 @@ def test_effective_llm_request_policy_applies_codex_style_provider_options() -> 
     )
     prompt = _prompt(
         llm_capabilities=(LlmCapability.REASONING,),
+        llm_api_family="openai_codex_responses",
         runtime_llm_defaults={
             "service_tier": "priority",
         },
@@ -500,6 +501,51 @@ def test_effective_llm_request_policy_applies_codex_style_provider_options() -> 
         "provider_options.include",
         "provider_options.prompt_cache_key",
     }
+
+
+def test_effective_llm_request_policy_filters_responses_only_options_for_non_responses_provider() -> None:
+    run = OrchestrationRun(
+        id="run-effective-non-responses-options",
+        inbound_instruction=InboundInstruction(source="web", content="hello"),
+        agent_id="assistant",
+        metadata={"session_key": "session:anthropic"},
+    )
+    prompt = _prompt(
+        llm_capabilities=(LlmCapability.REASONING,),
+        llm_api_family="anthropic_messages",
+        runtime_llm_defaults={
+            "service_tier": "default",
+            "parallel_tool_calls": True,
+            "prompt_cache_enabled": True,
+            "response_verbosity": "low",
+            "include_reasoning_encrypted_content": True,
+        },
+        llm_defaults={"max_output_tokens": 1000},
+    )
+
+    options = _llm_request_options_from_run(run, prompt=prompt)
+
+    assert options["provider_options"] == {
+        "service_tier": "default",
+        "max_output_tokens": 1000,
+    }
+    trace = options["policy"].to_payload()["resolution_trace"]
+    downgraded = [
+        item
+        for item in trace
+        if item["source"] == "provider_capability_filter"
+    ]
+    assert {
+        item["field"]
+        for item in downgraded
+    } == {
+        "provider_options.parallel_tool_calls",
+        "provider_options.prompt_cache_enabled",
+        "provider_options.prompt_cache_key",
+        "provider_options.text",
+        "provider_options.include",
+    }
+    assert all(item["status"] == "downgraded" for item in downgraded)
 
 
 def test_effective_llm_request_policy_applies_agent_llm_policy() -> None:
@@ -779,6 +825,7 @@ def _prompt(
     tool_schemas: tuple[ToolSchema, ...] = (),
     surface_policy: RunSurfacePolicy | None = None,
     llm_capabilities: tuple[LlmCapability, ...] = (),
+    llm_api_family: str | None = None,
     runtime_llm_defaults: dict[str, object] | None = None,
     llm_defaults: dict[str, object] | None = None,
     llm_policy: dict[str, object] | None = None,
@@ -801,6 +848,7 @@ def _prompt(
         ),
         mode=PromptMode.NORMAL_TURN,
         llm_capabilities=llm_capabilities,
+        llm_api_family=llm_api_family,
         runtime_llm_defaults=dict(runtime_llm_defaults or {}),
         llm_defaults=dict(llm_defaults or {}),
         llm_policy=dict(llm_policy or {}),

@@ -910,6 +910,7 @@ def _llm_request_options_from_run(
     policy = resolve_effective_llm_request_policy(
         run,
         llm_capabilities=prompt.llm_capabilities,
+        llm_api_family=prompt.llm_api_family,
         runtime_defaults=prompt.runtime_llm_defaults,
         llm_defaults=prompt.llm_defaults,
         agent_llm_policy=prompt.llm_policy,

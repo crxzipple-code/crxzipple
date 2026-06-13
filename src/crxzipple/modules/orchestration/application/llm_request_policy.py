@@ -27,6 +27,7 @@ def resolve_effective_llm_request_policy(
     run: OrchestrationRun,
     *,
     llm_capabilities: tuple[LlmCapability, ...] = (),
+    llm_api_family: str | None = None,
     runtime_defaults: dict[str, object] | None = None,
     llm_defaults: dict[str, object] | None = None,
     agent_llm_policy: dict[str, object] | None = None,
@@ -112,6 +113,11 @@ def resolve_effective_llm_request_policy(
         run=run,
         provider_options=provider_options,
         trace=trace,
+    )
+    _filter_provider_options_for_api_family(
+        provider_options=provider_options,
+        trace=trace,
+        llm_api_family=llm_api_family,
     )
 
     return EffectiveLlmRequestPolicy(
@@ -406,6 +412,48 @@ def _prompt_cache_key_for_run(run: OrchestrationRun) -> str | None:
         return None
     agent_id = _optional_text(run.agent_id) or "agent"
     return f"crxzipple:{agent_id}:{stable}"
+
+
+_RESPONSES_API_FAMILIES = frozenset(
+    {
+        "openai_responses",
+        "openai_codex_responses",
+    },
+)
+
+_RESPONSES_ONLY_PROVIDER_OPTIONS = frozenset(
+    {
+        "include",
+        "parallel_tool_calls",
+        "prompt_cache_enabled",
+        "prompt_cache_key",
+        "text",
+    },
+)
+
+
+def _filter_provider_options_for_api_family(
+    *,
+    provider_options: dict[str, object],
+    trace: list[dict[str, object]],
+    llm_api_family: str | None,
+) -> None:
+    api_family = _optional_text(llm_api_family)
+    if api_family is None or api_family in _RESPONSES_API_FAMILIES:
+        return
+    for key in tuple(provider_options):
+        if key not in _RESPONSES_ONLY_PROVIDER_OPTIONS:
+            continue
+        provider_options.pop(key, None)
+        trace.append(
+            _trace(
+                field=f"provider_options.{key}",
+                source="provider_capability_filter",
+                value="removed",
+                status="downgraded",
+                reason=f"unsupported_api_family:{api_family}",
+            ),
+        )
 
 
 def _merge_reasoning_config(

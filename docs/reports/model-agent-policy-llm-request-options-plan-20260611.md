@@ -195,6 +195,11 @@ Operations/Trace 应展示：
   `include_reasoning_encrypted_content`；当 `prompt_cache_enabled=true`
   且未显式提供 `prompt_cache_key` 时，resolver 会从 run 的 session/agent
   上下文生成稳定 `prompt_cache_key`。
+- 2026-06-14 已补充 provider capability filter：当 `RunPromptInput`
+  携带的 `llm_api_family` 不是 OpenAI Responses / Codex Responses 时，
+  resolver 会移除 `include`、`parallel_tool_calls`、`prompt_cache_key`、
+  `prompt_cache_enabled`、`text` 等 Responses-only provider options，并在
+  resolution trace 中记录 downgraded 原因。
 - request metadata 已写入 `llm_request_policy` payload，包含 resolution trace。
 - LLM Operations invocation detail 已新增 `policy_trace` 表格，展示
   `field`、`source`、`status`、`value`、`reason`，前端 LLM Operations 抽屉

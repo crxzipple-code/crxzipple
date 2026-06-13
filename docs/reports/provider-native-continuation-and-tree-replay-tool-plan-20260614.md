@@ -292,7 +292,7 @@ Loop 结束判断继续使用：
 - [ ] tool surface 变化时更新 provider tools。
 - [x] execution chain summary 展示 continuation state。
 - [x] 单测覆盖 orchestration invoker -> LLM input continuation 透传。
-- [ ] 单测覆盖首轮 -> tool call -> tool result continuation。
+- [x] 单测覆盖首轮 -> tool call -> tool result continuation。
 - [ ] 单测覆盖 `context_tree.enable_tool_schema` 后工具面更新。
 - [ ] 单测覆盖 final answer 完成 run。
 
@@ -426,7 +426,7 @@ CRXZipple 的 `exec/process` 结果应明确返回：
 - [x] Policy resolver 生成 prompt cache key。
 - [x] Policy trace 展示每个字段来源。
 - [x] 单测覆盖 Codex/OpenAI Responses policy。
-- [ ] 单测覆盖非 Responses provider 字段过滤。
+- [x] 单测覆盖非 Responses provider 字段过滤。
 
 ## 6. Operations / Workbench
 

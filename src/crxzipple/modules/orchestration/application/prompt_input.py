@@ -102,6 +102,7 @@ class RunPromptInput:
     active_session_id: str
     messages: tuple[LlmMessage, ...]
     llm_capabilities: tuple[LlmCapability, ...] = ()
+    llm_api_family: str | None = None
     runtime_llm_defaults: dict[str, object] = field(default_factory=dict)
     llm_defaults: dict[str, object] = field(default_factory=dict)
     llm_policy: dict[str, object] = field(default_factory=dict)
@@ -361,6 +362,7 @@ class RunPromptInputCollector:
         return RunPromptInput(
             llm_id=llm_selection.resolved_llm_id,
             llm_capabilities=tuple(llm_profile.capabilities),
+            llm_api_family=llm_profile.api_family.value,
             runtime_llm_defaults=dict(self.runtime_llm_defaults),
             llm_defaults=llm_profile.default_params.to_payload(),
             llm_policy=profile.llm_policy.to_payload(),

@@ -158,6 +158,80 @@ class _ContinuationFollowupAdapter:
         )
 
 
+class _ProviderNativeToolContinuationAdapter:
+    def __init__(self) -> None:
+        self.requests: list[LlmAdapterRequest] = []
+
+    def preview_request(self, _profile: object, request: LlmAdapterRequest) -> dict[str, object]:
+        self.requests.append(request)
+        continuation = request.continuation
+        tool_messages = [
+            message for message in request.messages if message.role == LlmMessageRole.TOOL
+        ]
+        input_types = (
+            ("function_call_output",)
+            if continuation is not None and tool_messages
+            else ("message",)
+        )
+        return {
+            "preview_source": "test_adapter",
+            "api_family": "openai_responses",
+            "has_previous_response_id": continuation is not None,
+            "previous_response_id": (
+                continuation.previous_response_id
+                if continuation is not None
+                else None
+            ),
+            "input_item_count": len(input_types),
+            "input_item_types": input_types,
+            "payload_preview": {
+                "previous_response_id": (
+                    continuation.previous_response_id
+                    if continuation is not None
+                    else None
+                ),
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_messages[-1].tool_call_id,
+                    },
+                ]
+                if continuation is not None and tool_messages
+                else [{"type": "message"}],
+            },
+        }
+
+    def invoke(self, _profile: object, request: LlmAdapterRequest) -> LlmAdapterResponse:
+        if len(self.requests) == 1:
+            return LlmAdapterResponse(
+                result=LlmResult(text=""),
+                response_items=(
+                    _tool_call_response_item(
+                        request,
+                        sequence_no=1,
+                        call_id="call-provider-native-list",
+                        name="context_tree.list",
+                        arguments={},
+                    ),
+                ),
+                provider_request_id="resp_first",
+                continuation=LlmContinuationSignal(
+                    end_turn=False,
+                    needs_follow_up=True,
+                    reason=LlmContinuationReason.TOOL_CALL,
+                ),
+            )
+        return LlmAdapterResponse(
+            result=LlmResult(text="provider native final"),
+            provider_request_id="resp_second",
+            continuation=LlmContinuationSignal(
+                end_turn=True,
+                needs_follow_up=False,
+                reason=LlmContinuationReason.NONE,
+            ),
+        )
+
+
 class _ProviderExternalOnlyAdapter:
     def __init__(self) -> None:
         self.requests: list[LlmAdapterRequest] = []
@@ -1925,6 +1999,84 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             LlmContinuationReason.PROVIDER_END_TURN_FALSE,
         )
         self.assertTrue(continuation_invocation.continuation.needs_follow_up)
+
+    def test_provider_native_tool_result_continuation_uses_previous_response_delta(
+        self,
+    ) -> None:
+        adapter = _ProviderNativeToolContinuationAdapter()
+        self.llm_adapter_registry.register(
+            LlmApiFamily.OPENAI_RESPONSES,
+            adapter,
+        )
+        self._register_agent_and_llm()
+
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-provider-native-tool-delta",
+                inbound_instruction=InboundInstruction(source="cli", content="echo"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        self.orchestration_intake_service.enqueue(
+            EnqueueOrchestrationRunInput(run_id=run.id),
+        )
+
+        processed = process_next_orchestration_assignment(
+            self.container,
+            worker_id="worker-1",
+        )
+
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed.status, OrchestrationRunStatus.COMPLETED)
+        self.assertGreaterEqual(len(adapter.requests), 2)
+        first_request = adapter.requests[0]
+        second_request = adapter.requests[1]
+        self.assertIsNone(first_request.continuation)
+        self.assertIsNotNone(second_request.continuation)
+        assert second_request.continuation is not None
+        self.assertEqual(
+            second_request.continuation.previous_response_id,
+            "resp_first",
+        )
+        self.assertEqual(
+            [message.role for message in second_request.messages],
+            [LlmMessageRole.USER, LlmMessageRole.ASSISTANT, LlmMessageRole.TOOL],
+        )
+        tool_messages = [
+            message
+            for message in second_request.messages
+            if message.role == LlmMessageRole.TOOL
+        ]
+        self.assertEqual(tool_messages[0].tool_call_id, "call-provider-native-list")
+
+        invocations = self.llm_service.list_invocations(
+            llm_id="openai.gpt-5.4-mini",
+            limit=10,
+        )
+        continuation_invocation = next(
+            invocation
+            for invocation in invocations
+            if invocation.provider_request_id == "resp_second"
+        )
+        preview = continuation_invocation.provider_request_payload_preview
+        assert isinstance(preview, dict)
+        self.assertTrue(preview["has_previous_response_id"])
+        self.assertEqual(preview["previous_response_id"], "resp_first")
+        self.assertEqual(preview["input_item_types"], ["function_call_output"])
+        self.assertEqual(
+            preview["payload_preview"]["input"][0]["call_id"],
+            "call-provider-native-list",
+        )
 
     def test_text_with_tool_calls_records_assistant_progress_for_next_prompt(self) -> None:
         adapter = _SequentialResultAdapter(
