@@ -1716,7 +1716,18 @@ def _continuation_decision_label(item: ExecutionStepItem | None) -> str:
         else "end_turn=-"
     )
     follow_up = _summary_bool(summary, "needs_follow_up")
-    return f"{reason}; {end_turn_label}; follow_up={str(follow_up).lower()}"
+    parts = [reason, end_turn_label, f"follow_up={str(follow_up).lower()}"]
+    provider_state = summary.get("provider_continuation_state")
+    provider_state = dict(provider_state) if isinstance(provider_state, dict) else {}
+    provider_mode = _optional_metadata_text(provider_state.get("mode"))
+    previous_response_id = _optional_metadata_text(
+        provider_state.get("previous_response_id"),
+    )
+    if provider_mode is not None:
+        parts.append(f"provider={provider_mode}")
+    if previous_response_id is not None:
+        parts.append(f"previous_response_id={previous_response_id}")
+    return "; ".join(parts)
 
 
 def _execution_item_summary(item: ExecutionStepItem) -> dict[str, object]:

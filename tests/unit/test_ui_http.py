@@ -1354,6 +1354,10 @@ class UiHttpTestCase(HttpModuleTestCase):
                 "reason": "provider_end_turn_false",
                 "end_turn": False,
                 "needs_follow_up": True,
+                "provider_continuation_state": {
+                    "mode": "provider_native",
+                    "previous_response_id": "resp_ui_1",
+                },
             },
         )
         final_step = ExecutionStep.create(
@@ -1487,7 +1491,10 @@ class UiHttpTestCase(HttpModuleTestCase):
         ]
         self.assertEqual(
             continuation_timeline_items[0]["content"]["text"],
-            "provider_end_turn_false; end_turn=false; follow_up=true",
+            (
+                "provider_end_turn_false; end_turn=false; follow_up=true; "
+                "provider=provider_native; previous_response_id=resp_ui_1"
+            ),
         )
         self.assertEqual(
             continuation_timeline_items[0]["source_refs"]["llm_invocation_id"],
@@ -1588,7 +1595,14 @@ class UiHttpTestCase(HttpModuleTestCase):
         self.assertEqual(continuation_steps[0]["title"], "Continuation Decision")
         self.assertEqual(
             continuation_steps[0]["summary"],
-            "provider_end_turn_false; end_turn=false; follow_up=true",
+            (
+                "provider_end_turn_false; end_turn=false; follow_up=true; "
+                "provider=provider_native; previous_response_id=resp_ui_1"
+            ),
+        )
+        self.assertIn(
+            "provider_native",
+            {badge["label"] for badge in continuation_steps[0]["badges"]},
         )
         self.assertEqual(
             continuation_steps[0]["trace"]["llm_invocation_id"],

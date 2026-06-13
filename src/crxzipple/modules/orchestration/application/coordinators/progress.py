@@ -398,7 +398,13 @@ def _continuation_payload(payload: dict[str, object]) -> dict[str, object] | Non
         "continuation_end_turn",
     )
     follow_up = payload.get("llm_continuation_follow_up")
-    if reason is None and end_turn is None and follow_up is None:
+    provider_continuation_state = payload.get("provider_continuation_state")
+    if (
+        reason is None
+        and end_turn is None
+        and follow_up is None
+        and not isinstance(provider_continuation_state, dict)
+    ):
         return None
     result: dict[str, object] = {}
     if reason is not None:
@@ -407,6 +413,8 @@ def _continuation_payload(payload: dict[str, object]) -> dict[str, object] | Non
         result["end_turn"] = end_turn
     if follow_up is not None:
         result["needs_follow_up"] = bool(follow_up)
+    if isinstance(provider_continuation_state, dict):
+        result["provider_continuation_state"] = dict(provider_continuation_state)
     return result
 
 

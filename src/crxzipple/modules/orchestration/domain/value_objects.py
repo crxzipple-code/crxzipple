@@ -224,6 +224,7 @@ class ContinuationDecision(ValueObject):
     reason: str | None = None
     end_turn: bool | None = None
     needs_follow_up: bool | None = None
+    provider_continuation_state: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         llm_invocation_id = self.llm_invocation_id.strip()
@@ -240,6 +241,16 @@ class ContinuationDecision(ValueObject):
         object.__setattr__(self, "llm_invocation_id", llm_invocation_id)
         object.__setattr__(self, "continuation_id", continuation_id)
         object.__setattr__(self, "reason", reason or None)
+        provider_state = (
+            dict(self.provider_continuation_state)
+            if isinstance(self.provider_continuation_state, dict)
+            else None
+        )
+        object.__setattr__(
+            self,
+            "provider_continuation_state",
+            provider_state or None,
+        )
 
     @classmethod
     def from_payload(
@@ -251,6 +262,7 @@ class ContinuationDecision(ValueObject):
     ) -> "ContinuationDecision":
         reason_value = payload.get("reason")
         end_turn_value = payload.get("end_turn")
+        provider_state = payload.get("provider_continuation_state")
         return cls(
             llm_invocation_id=llm_invocation_id,
             continuation_id=continuation_id,
@@ -260,6 +272,9 @@ class ContinuationDecision(ValueObject):
                 bool(payload["needs_follow_up"])
                 if "needs_follow_up" in payload
                 else None
+            ),
+            provider_continuation_state=(
+                dict(provider_state) if isinstance(provider_state, dict) else None
             ),
         )
 
@@ -274,6 +289,10 @@ class ContinuationDecision(ValueObject):
             payload["end_turn"] = self.end_turn
         if self.needs_follow_up is not None:
             payload["needs_follow_up"] = self.needs_follow_up
+        if self.provider_continuation_state:
+            payload["provider_continuation_state"] = dict(
+                self.provider_continuation_state,
+            )
         return payload
 
 

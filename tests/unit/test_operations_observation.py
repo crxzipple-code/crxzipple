@@ -866,6 +866,10 @@ class OperationsObservationTestCase(unittest.TestCase):
                 "reason": "provider_end_turn_false",
                 "end_turn": False,
                 "needs_follow_up": True,
+                "provider_continuation_state": {
+                    "mode": "provider_native",
+                    "previous_response_id": "resp_operations_1",
+                },
             },
         )
         provider = OrchestrationOperationsReadModelProvider(
@@ -885,7 +889,10 @@ class OperationsObservationTestCase(unittest.TestCase):
         self.assertEqual(row.cells["continuation"], "1 decisions / 1 follow-up")
         self.assertEqual(
             row.cells["latest_decision"],
-            "provider_end_turn_false; end_turn=false; follow_up=true",
+            (
+                "provider_end_turn_false; end_turn=false; follow_up=true; "
+                "provider=provider_native; previous_response_id=resp_operations_1"
+            ),
         )
 
     def test_materializer_stores_paginated_tables_outside_page_projection(

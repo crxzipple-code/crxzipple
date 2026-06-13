@@ -893,6 +893,12 @@ def test_progress_coordinator_records_llm_continuation_decision_item() -> None:
                 "llm_continuation_reason": "provider_end_turn_false",
                 "llm_continuation_end_turn": False,
                 "llm_continuation_follow_up": True,
+                "provider_continuation_state": {
+                    "mode": "provider_native",
+                    "provider_family": "openai_codex_responses",
+                    "previous_response_id": "resp_continuation_1",
+                    "previous_invocation_id": "invocation-continuation-1",
+                },
             },
         ),
     )
@@ -913,6 +919,12 @@ def test_progress_coordinator_records_llm_continuation_decision_item() -> None:
         "reason": "provider_end_turn_false",
         "end_turn": False,
         "needs_follow_up": True,
+        "provider_continuation_state": {
+            "mode": "provider_native",
+            "provider_family": "openai_codex_responses",
+            "previous_response_id": "resp_continuation_1",
+            "previous_invocation_id": "invocation-continuation-1",
+        },
     }
 
 

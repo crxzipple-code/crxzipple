@@ -1944,12 +1944,30 @@ def _continuation_decision_step_views(
         reason = _summary_text(summary, "reason") or "unknown"
         needs_follow_up = _summary_bool(summary, "needs_follow_up")
         end_turn = summary.get("end_turn")
+        provider_state = summary.get("provider_continuation_state")
+        provider_state = dict(provider_state) if isinstance(provider_state, dict) else {}
+        provider_mode = _optional_text(provider_state.get("mode"))
+        previous_response_id = _optional_text(provider_state.get("previous_response_id"))
         end_turn_label = (
             f"end_turn={str(end_turn).lower()}"
             if isinstance(end_turn, bool)
             else "end_turn=-"
         )
         follow_up_label = f"follow_up={str(needs_follow_up).lower()}"
+        summary_parts = [reason, end_turn_label, follow_up_label]
+        if provider_mode is not None:
+            summary_parts.append(f"provider={provider_mode}")
+        if previous_response_id is not None:
+            summary_parts.append(f"previous_response_id={previous_response_id}")
+        badges = [
+            StatusBadgeModel(
+                label="Follow-up" if needs_follow_up else "End turn",
+                tone="info" if needs_follow_up else "success",
+            ),
+            StatusBadgeModel(label=reason, tone="neutral"),
+        ]
+        if provider_mode is not None:
+            badges.append(StatusBadgeModel(label=provider_mode, tone="info"))
         views.append(
             _step(
                 run=run,
@@ -1958,16 +1976,10 @@ def _continuation_decision_step_views(
                 step_type="continuation_decision",
                 status="running" if needs_follow_up else "success",
                 title="Continuation Decision",
-                summary=f"{reason}; {end_turn_label}; {follow_up_label}",
+                summary="; ".join(summary_parts),
                 started_at=item.created_at,
                 completed_at=item.completed_at or bundle.step.completed_at,
-                badges=(
-                    StatusBadgeModel(
-                        label="Follow-up" if needs_follow_up else "End turn",
-                        tone="info" if needs_follow_up else "success",
-                    ),
-                    StatusBadgeModel(label=reason, tone="neutral"),
-                ),
+                badges=tuple(badges),
                 llm_invocation_id=_summary_text(summary, "llm_invocation_id"),
                 context_render_snapshot_id=context_render_snapshot_id,
                 trace_step_id=bundle.step.id,
