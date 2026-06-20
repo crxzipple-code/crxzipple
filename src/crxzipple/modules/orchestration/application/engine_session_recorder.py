@@ -451,7 +451,14 @@ class OrchestrationSessionRecorder:
                 payload["metadata"] = result_metadata
         if tool_run.error is not None:
             payload["error"] = tool_run.error.to_storage()
-            payload["content"] = [text_content_block(tool_run.error.message)]
+            payload["content"] = [
+                text_content_block(
+                    _tool_error_message_for_model(
+                        tool_name=tool_call.name,
+                        error=tool_run.error,
+                    ),
+                ),
+            ]
         elif tool_run.status in {ToolRunStatus.CANCELLED, ToolRunStatus.TIMED_OUT}:
             payload["content"] = [
                 text_content_block(_terminal_tool_run_status_message(tool_run)),
@@ -687,6 +694,46 @@ def _session_tool_result_metadata(metadata: dict[str, Any]) -> dict[str, object]
         if normalized_value is not None:
             result[normalized_key] = normalized_value
     return result
+
+
+def _tool_error_message_for_model(*, tool_name: str, error: Any) -> str:
+    message = str(getattr(error, "message", "") or "").strip()
+    if not message:
+        message = "Tool run failed without an error message."
+    guidance = _tool_error_recovery_guidance(tool_name=tool_name, error=error)
+    if guidance is None:
+        return message
+    return f"{message}\n\nNext step: {guidance}"
+
+
+def _tool_error_recovery_guidance(*, tool_name: str, error: Any) -> str | None:
+    code = str(getattr(error, "code", "") or "").strip()
+    details = getattr(error, "details", None)
+    details = details if isinstance(details, dict) else {}
+    recovery = details.get("browser_recovery")
+    if isinstance(recovery, dict):
+        reason = str(recovery.get("reason") or "").strip()
+        recommended_tools = recovery.get("recommended_tools")
+        tools = (
+            ", ".join(str(item) for item in recommended_tools[:4])
+            if isinstance(recommended_tools, list)
+            else ""
+        )
+        if reason and tools:
+            return f"{reason} Try {tools} before retrying {tool_name}."
+        if reason:
+            return reason
+    message = str(getattr(error, "message", "") or "").lower()
+    if "required" in message or code in {
+        "browser_execution_failed",
+        "browser_unsupported_action",
+        "execution_failed",
+    }:
+        return (
+            "Do not repeat the same failing tool call unchanged. Re-read the visible "
+            "tool schema, correct the arguments, or choose another available tool."
+        )
+    return None
 
 
 def _keeps_session_tool_result_metadata_key(key: str) -> bool:

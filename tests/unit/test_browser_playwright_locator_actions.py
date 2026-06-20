@@ -666,6 +666,25 @@ class BrowserPlaywrightLocatorActionsTestCase(BrowserPlaywrightActionEngineTestC
             page.operations,
         )
 
+    def test_evaluate_supports_script_alias(self) -> None:
+        page = self.session_pool.resolve_page(profile=self.profile, target_id="tab-1")
+
+        evaluate_command = BrowserPageActionCommand(
+            profile_name="crxzipple",
+            kind="evaluate",
+            target=BrowserActionTarget(target_id="tab-1"),
+            payload={"script": "() => document.title"},
+        )
+        evaluate_result = self.engine.execute(
+            plan=self._plan(evaluate_command),
+            runtime_state=self.runtime_state,
+            tab=self.tab,
+            command=evaluate_command,
+        )
+
+        self.assertEqual(evaluate_result.value["result"]["expression"], "() => document.title")
+        self.assertIn(("evaluate", "() => document.title", None), page.operations)
+
     def test_wait_can_target_text_without_selector(self) -> None:
         wait_command = BrowserPageActionCommand(
             profile_name="crxzipple",

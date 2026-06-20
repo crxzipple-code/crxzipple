@@ -555,6 +555,48 @@ class BrowserToolHttpAdvancedTestCase(HttpModuleTestCase):
         self.assertEqual(captured_request.payload["fn"], "(el) => el.textContent")
         self.assertEqual(result.details, {"ok": True})
 
+    def test_browser_action_handler_promotes_evaluate_script_alias(self) -> None:
+        captured_request = None
+
+        class _Store:
+            def load(self):  # noqa: ANN201
+                return SimpleNamespace(default_profile="crxzipple")
+
+        class _Facade:
+            def execute(self, request):  # noqa: ANN001, ANN201
+                nonlocal captured_request
+                captured_request = request
+                return {"ok": True}
+
+        class _Serializer:
+            @staticmethod
+            def serialize(result):  # noqa: ANN001, ANN201
+                return result
+
+        container = SimpleNamespace(
+            browser_facade=_Facade(),
+            browser_result_serializer=_Serializer(),
+            browser_system_config_store=_Store(),
+            settings=SimpleNamespace(browser_enabled=True),
+        )
+        handler = page_action_handler(container)
+        self.assertIsNotNone(handler)
+        assert handler is not None
+
+        result = asyncio.run(
+            handler(
+                {
+                    "kind": "evaluate",
+                    "script": "() => document.body.innerText",
+                },
+            ),
+        )
+
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.kind, "evaluate")
+        self.assertEqual(captured_request.payload["expression"], "() => document.body.innerText")
+        self.assertEqual(result.details, {"ok": True})
+
     def test_browser_action_handler_surfaces_evaluate_result_in_content(self) -> None:
         class _Store:
             def load(self):  # noqa: ANN201

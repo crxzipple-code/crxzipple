@@ -100,11 +100,14 @@ def _step_budget_lines(
     ]
     if normalized_status in {"finalize_now", "critical"}:
         lines.append(
-            "- Step budget guidance: finish with the best supported answer now; "
-            "avoid opening new exploratory branches unless they are required for the final answer."
+            "- Step budget guidance: finish with the best supported answer now when "
+            "available evidence can support an answer. Avoid opening new exploratory "
+            "branches unless a specific missing fact is required for the final answer."
         )
     elif normalized_status == "constrained":
         lines.append(
-            "- Step budget guidance: prefer direct verification and convergence over broad exploration."
+            "- Step budget guidance: prefer direct verification and convergence over "
+            "broad exploration. Before any new probe, identify the specific missing "
+            "fact it will add; otherwise summarize the current evidence and answer."
         )
     return lines

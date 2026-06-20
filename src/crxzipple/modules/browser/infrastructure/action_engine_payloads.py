@@ -350,7 +350,7 @@ def _normalize_batch_action(
         ("key", ("key",)),
         ("button", ("button",)),
         ("value", ("value",)),
-        ("expression", ("expression",)),
+        ("expression", ("expression", "script")),
         ("fn", ("fn",)),
         ("url", ("url",)),
         ("state", ("state",)),

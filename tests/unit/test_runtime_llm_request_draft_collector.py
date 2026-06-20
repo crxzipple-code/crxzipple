@@ -330,6 +330,19 @@ def test_build_memory_flush_uses_maintenance_surface() -> None:
     assert tuple(schema.name for schema in result.tool_schemas) == ("weather.lookup",)
 
 
+def test_build_normal_turn_omits_tool_schemas_on_final_step_budget() -> None:
+    collector = _collector()
+    run = _run()
+    run.current_step = 23
+    run.max_steps = 24
+
+    result = collector.build(run, resolved_tools=_resolved_tools())
+
+    assert result.runtime_context["remaining_steps"] == 1
+    assert result.runtime_context["step_budget_status"] == "finalize_now"
+    assert result.tool_schemas == ()
+
+
 def test_build_memory_flush_prefers_session_fact_items_without_message_read() -> None:
     session_service = _FakeSessionService()
     session_service.items = (

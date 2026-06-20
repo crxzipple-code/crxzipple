@@ -414,6 +414,11 @@ class RuntimeLlmRequestDraftCollector:
             return False
         if not surface_policy.include_tool_schemas:
             return False
+        if (
+            resolved_mode is RuntimeRequestMode.NORMAL_TURN
+            and max(run.max_steps - run.current_step, 0) <= 1
+        ):
+            return False
         return True
 
     def resolve_mode(

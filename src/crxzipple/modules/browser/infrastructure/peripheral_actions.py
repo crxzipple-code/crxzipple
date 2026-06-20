@@ -153,9 +153,11 @@ class BrowserPeripheralActionService:
         locator: Any,
         payload: Mapping[str, Any],
     ) -> Any:
-        expression = _payload_text_any(payload, "expression", "fn")
+        expression = _payload_text_any(payload, "expression", "fn", "script")
         if expression is None:
-            raise BrowserValidationError("payload.expression or payload.fn is required.")
+            raise BrowserValidationError(
+                "payload.expression, payload.fn, or payload.script is required.",
+            )
         if locator is not None:
             if "arg" in payload:
                 return locator.evaluate(expression, payload.get("arg"))

@@ -3173,6 +3173,93 @@ class OrchestrationToolsTestCase(OrchestrationTestCaseBase):
             "enveloped.result",
         )
 
+    def test_failed_tool_result_session_item_includes_model_recovery_guidance(self) -> None:
+        self._register_agent_and_llm()
+        tool = self.seed_tool(
+            tool_id="failing_arg_tool",
+            name="Failing Arg Tool",
+            description="Fails on invalid arguments.",
+            supported_modes=(ToolMode.INLINE,),
+            runtime_key="failing_arg_tool",
+        )
+
+        async def failing_result(_arguments: dict[str, object]) -> ToolRunResult:
+            raise RuntimeError("payload.expression is required.")
+
+        self.local_runtime_registry.register(tool, failing_result)
+        run = self.orchestration_intake_service.accept(
+            AcceptOrchestrationRunInput(
+                run_id="run-failed-tool-result-guidance",
+                inbound_instruction=InboundInstruction(source="cli", content="inspect"),
+            ),
+        )
+        self.orchestration_intake_service.prepare_session_run(
+            PrepareSessionRunInput(
+                run_id=run.id,
+                context=SessionRouteContext(
+                    agent_id="assistant",
+                    channel="webchat",
+                    direct_scope=DirectSessionScope.MAIN,
+                ),
+            ),
+        )
+        bound_run = self.orchestration_run_query_service.get_run(run.id)
+        resolved_tools = ResolvedToolSet(
+            tools=(
+                ResolvedTool(
+                    tool=tool,
+                    schema=ToolSchema(name="failing.arg"),
+                    target=ToolExecutionTarget(mode=ToolMode.INLINE),
+                ),
+            ),
+        )
+
+        outcome = asyncio.run(
+            self.orchestration_inspection_service.engine.tool_executor.execute_tool_calls_async(
+                bound_run,
+                session_key="agent:assistant:main",
+                active_session_id=bound_run.active_session_id or "",
+                resolved_tools=resolved_tools,
+                tool_calls=(
+                    ToolCallIntent(
+                        id="call-failing-arg-1",
+                        name="failing.arg",
+                        arguments={"script": "() => document.title"},
+                    ),
+                ),
+                append_tool_call_messages=False,
+                append_tool_result_messages=True,
+                require_running_run=False,
+                extra_context_attrs={
+                    "tool_surface_id": "tool_surface:failing-arg",
+                    "tool_surface_functions": [
+                        {
+                            "tool_id": "failing_arg_tool",
+                            "name": "failing.arg",
+                        },
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(len(outcome.inline_runs), 1)
+        self.assertEqual(outcome.inline_runs[0].status.value, "failed")
+        session_items = self.session_service.list_items(
+            ListSessionItemsInput(
+                session_key="agent:assistant:main",
+                active_session_only=True,
+            ),
+        )
+        tool_result_items = [
+            item
+            for item in session_items
+            if item.kind.value == "tool_result"
+        ]
+        self.assertEqual(len(tool_result_items), 1)
+        text = tool_result_items[0].content_payload["content"][0]["text"]
+        self.assertIn("payload.expression is required.", text)
+        self.assertIn("Do not repeat the same failing tool call unchanged", text)
+
     def test_process_next_orchestration_assignment_waits_when_tool_is_background(self) -> None:
         custom_harness = SqliteTestHarness()
         settings = replace(

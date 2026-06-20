@@ -6254,6 +6254,8 @@ def _normalize_advanced_action_arguments(
     if print_background is not None and kind == "pdf":
         payload.setdefault("print_background", print_background)
     expression = _normalize_text(arguments.get("expression"))
+    if expression is None:
+        expression = _normalize_text(arguments.get("script"))
     if expression is not None and kind == "evaluate":
         payload.setdefault("expression", expression)
     fn = _normalize_text(arguments.get("fn"))
